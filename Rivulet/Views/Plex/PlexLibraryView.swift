@@ -710,7 +710,7 @@ struct PlexLibraryView: View {
                 onSelectionChanged: { newOption in
                     librarySettings.setSortOption(newOption, for: libraryKey)
                     Task {
-                        await reloadWithNewSort()
+                        await reloadWithNewSort(sortOption: newOption)
                     }
                 }
             )
@@ -721,7 +721,7 @@ struct PlexLibraryView: View {
         dataStore.libraries.first(where: { $0.key == libraryKey })?.type
     }
 
-    private func reloadWithNewSort() async {
+    private func reloadWithNewSort(sortOption: LibrarySortOption) async {
         guard let serverURL = authManager.selectedServerURL,
               let token = authManager.selectedServerToken else { return }
 
@@ -744,7 +744,7 @@ struct PlexLibraryView: View {
                 sectionId: libraryKey,
                 start: 0,
                 size: pageSize,
-                sort: currentSortOption.apiParameter
+                sort: sortOption.apiParameter
             )
 
             // Update total count
