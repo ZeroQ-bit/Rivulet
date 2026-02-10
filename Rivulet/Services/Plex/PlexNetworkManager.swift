@@ -367,22 +367,37 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
     }
 
     /// Get library items with total count for pagination
+    /// - Parameters:
+    ///   - serverURL: The Plex server URL
+    ///   - authToken: The authentication token
+    ///   - sectionId: The library section ID
+    ///   - start: Starting index for pagination
+    ///   - size: Number of items to fetch
+    ///   - sort: Sort parameter (e.g., "-addedAt", "titleSort", "-rating")
     /// - Returns: Tuple of (items, totalSize) where totalSize indicates total items in the library
     func getLibraryItemsWithTotal(
         serverURL: String,
         authToken: String,
         sectionId: String,
         start: Int = 0,
-        size: Int = 100
+        size: Int = 100,
+        sort: String? = nil
     ) async throws -> (items: [PlexMetadata], totalSize: Int?) {
         guard var components = URLComponents(string: "\(serverURL)/library/sections/\(sectionId)/all") else {
             throw PlexAPIError.invalidURL
         }
 
-        components.queryItems = [
+        var queryItems = [
             URLQueryItem(name: "X-Plex-Container-Start", value: "\(start)"),
             URLQueryItem(name: "X-Plex-Container-Size", value: "\(size)")
         ]
+
+        // Add sort parameter if specified
+        if let sort = sort, !sort.isEmpty {
+            queryItems.append(URLQueryItem(name: "sort", value: sort))
+        }
+
+        components.queryItems = queryItems
 
         guard let url = components.url else {
             throw PlexAPIError.invalidURL
@@ -1508,6 +1523,52 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
         }
     }
 
+    /// Warm up a direct-play URL so MPV's first real request sees lower startup latency.
+    /// This is best-effort and intentionally silent on failures.
+    func warmDirectPlayStream(url: URL, headers: [String: String]) async {
+        var headRequest = URLRequest(url: url)
+        headRequest.httpMethod = "HEAD"
+        headRequest.timeoutInterval = 4
+        headRequest.cachePolicy = .reloadIgnoringLocalCacheData
+        for (key, value) in headers {
+            headRequest.addValue(value, forHTTPHeaderField: key)
+        }
+
+        do {
+            let (_, response) = try await session.data(for: headRequest)
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            if (200...399).contains(status) {
+                print("[Plex] Direct-play warmup (HEAD) ready: HTTP \(status)")
+                return
+            }
+            if status != 405 && status != 501 {
+                print("[Plex] Direct-play warmup (HEAD) status: HTTP \(status)")
+                return
+            }
+        } catch {
+            // Fall through to range probe.
+        }
+
+        var rangeRequest = URLRequest(url: url)
+        rangeRequest.httpMethod = "GET"
+        rangeRequest.timeoutInterval = 4
+        rangeRequest.cachePolicy = .reloadIgnoringLocalCacheData
+        rangeRequest.addValue("bytes=0-1", forHTTPHeaderField: "Range")
+        for (key, value) in headers {
+            rangeRequest.addValue(value, forHTTPHeaderField: key)
+        }
+
+        do {
+            let (_, response) = try await session.data(for: rangeRequest)
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            if (200...399).contains(status) {
+                print("[Plex] Direct-play warmup (range) ready: HTTP \(status)")
+            }
+        } catch {
+            // Best effort only.
+        }
+    }
+
     /// Stop a Plex transcode session. Call this when stopping playback to free server resources
     /// and prevent timeouts when immediately starting a new session.
     func stopTranscodeSession(serverURL: String, authToken: String, sessionId: String) async {
@@ -1672,13 +1733,37 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
                 headers: plexHeaders(authToken: authToken)
             )
 
-            let hasDVRs = !(container.MediaContainer.Dvr?.isEmpty ?? true)
+            let dvrs = container.MediaContainer.Dvr ?? []
+            let hasDVRs = !dvrs.isEmpty
+
+            // Log capabilities check result (GitHub #64 - DVB diagnostics)
+            let breadcrumb = Breadcrumb(level: .info, category: "plex_livetv")
+            breadcrumb.message = "Live TV capabilities check completed"
+            breadcrumb.data = [
+                "allow_tuners": hasDVRs,
+                "live_tv_enabled": hasDVRs,
+                "has_dvr": hasDVRs,
+                "dvr_count": dvrs.count,
+                "dvr_types": dvrs.compactMap { $0.make ?? $0.model }.joined(separator: ", "),
+                "server_host": URL(string: serverURL)?.host ?? "unknown"
+            ]
+            SentrySDK.addBreadcrumb(breadcrumb)
+
             return PlexLiveTVCapabilities(
                 allowTuners: hasDVRs,
                 liveTVEnabled: hasDVRs,
                 hasDVR: hasDVRs
             )
         } catch {
+            // Log capability check failure (GitHub #64 - DVB diagnostics)
+            let breadcrumb = Breadcrumb(level: .warning, category: "plex_livetv")
+            breadcrumb.message = "Live TV capabilities check failed"
+            breadcrumb.data = [
+                "error": error.localizedDescription,
+                "server_host": URL(string: serverURL)?.host ?? "unknown"
+            ]
+            SentrySDK.addBreadcrumb(breadcrumb)
+
             // If the endpoint fails, Live TV is not available
             return PlexLiveTVCapabilities()
         }
@@ -1712,14 +1797,46 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
               let lineup = dvr.lineup,
               let dvrKey = dvr.key else {
             print("🌐 PlexNetwork: No DVR or lineup found for Live TV")
+            // Log missing DVR/lineup (GitHub #64 - DVB diagnostics)
+            let breadcrumb = Breadcrumb(level: .warning, category: "plex_livetv")
+            breadcrumb.message = "No DVR or lineup found for Live TV channels"
+            breadcrumb.data = [
+                "server_host": URL(string: serverURL)?.host ?? "unknown",
+                "has_dvr_array": dvrContainer.MediaContainer.Dvr != nil,
+                "dvr_count": dvrContainer.MediaContainer.Dvr?.count ?? 0
+            ]
+            SentrySDK.addBreadcrumb(breadcrumb)
             return []
         }
 
         // Get HDHomeRun device URI for stream URLs
         var hdhrStreamURLs: [String: String] = [:]
+        let hasHDHomeRunDevice = dvr.Device?.first?.uri != nil
         if let device = dvr.Device?.first, let deviceURI = device.uri {
+            // Log HDHomeRun device discovery (GitHub #64 - DVB diagnostics)
+            let hdhrBreadcrumb = Breadcrumb(level: .info, category: "plex_livetv")
+            hdhrBreadcrumb.message = "Fetching HDHomeRun stream URLs"
+            hdhrBreadcrumb.data = [
+                "device_uri_host": URL(string: deviceURI)?.host ?? "unknown",
+                "dvr_make": dvr.make ?? "unknown",
+                "dvr_model": dvr.model ?? "unknown"
+            ]
+            SentrySDK.addBreadcrumb(hdhrBreadcrumb)
+
             hdhrStreamURLs = await fetchHDHomeRunLineup(deviceURI: deviceURI)
             print("🌐 PlexNetwork: Fetched \(hdhrStreamURLs.count) stream URLs from HDHomeRun")
+        } else {
+            // No HDHomeRun device - likely a DVB tuner (GitHub #64)
+            let dvbBreadcrumb = Breadcrumb(level: .info, category: "plex_livetv")
+            dvbBreadcrumb.message = "No HDHomeRun device found - will use Plex transcode URLs"
+            dvbBreadcrumb.data = [
+                "dvr_make": dvr.make ?? "unknown",
+                "dvr_model": dvr.model ?? "unknown",
+                "dvr_friendly_name": dvr.friendlyName ?? "unknown",
+                "has_device_array": dvr.Device != nil,
+                "device_count": dvr.Device?.count ?? 0
+            ]
+            SentrySDK.addBreadcrumb(dvbBreadcrumb)
         }
 
         // Extract provider path using DVR key (e.g., tv.plex.providers.epg.xmltv:28)
@@ -1816,6 +1933,21 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
         }
 
         print("🌐 PlexNetwork: Found \(channels.count) unique channels from grid")
+
+        // Log channel breakdown for DVB debugging (GitHub #64)
+        let channelsWithStreamURL = channels.filter { $0.streamURL != nil }.count
+        let channelsNeedingTranscode = channels.count - channelsWithStreamURL
+        let summaryBreadcrumb = Breadcrumb(level: .info, category: "plex_livetv")
+        summaryBreadcrumb.message = "Live TV channel fetch completed"
+        summaryBreadcrumb.data = [
+            "total_channels": channels.count,
+            "channels_with_hdhr_url": channelsWithStreamURL,
+            "channels_needing_transcode": channelsNeedingTranscode,
+            "has_hdhr_device": hasHDHomeRunDevice,
+            "server_host": URL(string: serverURL)?.host ?? "unknown"
+        ]
+        SentrySDK.addBreadcrumb(summaryBreadcrumb)
+
         return channels
     }
 
@@ -1846,9 +1978,36 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
                 }
             }
 
+            // Log HDHomeRun lineup success (GitHub #64 - DVB diagnostics)
+            let breadcrumb = Breadcrumb(level: .info, category: "plex_livetv")
+            breadcrumb.message = "HDHomeRun lineup fetched successfully"
+            breadcrumb.data = [
+                "device_host": lineupURL.host ?? "unknown",
+                "total_channels": channels.count,
+                "channels_with_urls": urlMap.count
+            ]
+            SentrySDK.addBreadcrumb(breadcrumb)
+
             return urlMap
         } catch {
             print("🌐 PlexNetwork: Failed to fetch HDHomeRun lineup: \(error)")
+
+            // Log HDHomeRun lineup failure (GitHub #64 - DVB diagnostics)
+            let breadcrumb = Breadcrumb(level: .error, category: "plex_livetv")
+            breadcrumb.message = "HDHomeRun lineup fetch failed"
+            breadcrumb.data = [
+                "device_host": lineupURL.host ?? "unknown",
+                "error": error.localizedDescription
+            ]
+            SentrySDK.addBreadcrumb(breadcrumb)
+
+            // Capture error event for HDHomeRun failures
+            SentrySDK.capture(error: error) { scope in
+                scope.setTag(value: "plex_livetv", key: "component")
+                scope.setTag(value: "hdhr_lineup_fetch", key: "operation")
+                scope.setExtra(value: lineupURL.host ?? "unknown", key: "device_host")
+            }
+
             return [:]
         }
     }

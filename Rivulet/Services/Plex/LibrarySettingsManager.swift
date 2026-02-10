@@ -45,6 +45,13 @@ class LibrarySettingsManager: ObservableObject {
         }
     }
 
+    /// Per-library sort options (libraryKey -> sort option)
+    @Published var librarySortOptions: [String: LibrarySortOption] = [:] {
+        didSet {
+            saveSortOptions()
+        }
+    }
+
     // MARK: - UserDefaults Keys (base keys - user ID is appended)
 
     private let userDefaults = UserDefaults.standard
@@ -52,6 +59,7 @@ class LibrarySettingsManager: ObservableObject {
     private let libraryOrderBaseKey = "libraryOrder"
     private let homeLibrariesBaseKey = "librariesShownOnHome"
     private let homeVisibilityConfiguredBaseKey = "homeVisibilityConfigured"
+    private let sortOptionsBaseKey = "librarySortOptions"
 
     /// Current user ID for per-user settings (nil = default/no profile)
     private var currentUserId: Int?
@@ -64,6 +72,7 @@ class LibrarySettingsManager: ObservableObject {
         self.libraryOrder = []
         self.librariesShownOnHome = []
         self.homeVisibilityConfigured = false
+        self.librarySortOptions = [:]
 
         // Load settings for current user (if any)
         loadSettingsForCurrentUser()
@@ -104,6 +113,14 @@ class LibrarySettingsManager: ObservableObject {
 
         // Load whether Home visibility has been configured
         self.homeVisibilityConfigured = userDefaults.bool(forKey: currentKey(homeVisibilityConfiguredBaseKey))
+
+        // Load per-library sort options
+        if let sortData = userDefaults.data(forKey: currentKey(sortOptionsBaseKey)),
+           let sortOptions = try? JSONDecoder().decode([String: LibrarySortOption].self, from: sortData) {
+            self.librarySortOptions = sortOptions
+        } else {
+            self.librarySortOptions = [:]
+        }
 
         print("📚 LibrarySettings: Loaded settings for user \(currentUserId?.description ?? "default")")
     }
@@ -310,6 +327,24 @@ class LibrarySettingsManager: ObservableObject {
         libraryOrder = []
         librariesShownOnHome = []
         homeVisibilityConfigured = false
+        librarySortOptions = [:]
+    }
+
+    // MARK: - Sort Options
+
+    /// Get the sort option for a specific library
+    /// - Parameter libraryKey: The library key
+    /// - Returns: The configured sort option, or `.addedAtDesc` as default
+    func getSortOption(for libraryKey: String) -> LibrarySortOption {
+        librarySortOptions[libraryKey] ?? .addedAtDesc
+    }
+
+    /// Set the sort option for a specific library
+    /// - Parameters:
+    ///   - option: The sort option to use
+    ///   - libraryKey: The library key
+    func setSortOption(_ option: LibrarySortOption, for libraryKey: String) {
+        librarySortOptions[libraryKey] = option
     }
 
     // MARK: - Private Methods
@@ -324,5 +359,11 @@ class LibrarySettingsManager: ObservableObject {
 
     private func saveHomeLibraries() {
         userDefaults.set(Array(librariesShownOnHome), forKey: currentKey(homeLibrariesBaseKey))
+    }
+
+    private func saveSortOptions() {
+        if let data = try? JSONEncoder().encode(librarySortOptions) {
+            userDefaults.set(data, forKey: currentKey(sortOptionsBaseKey))
+        }
     }
 }

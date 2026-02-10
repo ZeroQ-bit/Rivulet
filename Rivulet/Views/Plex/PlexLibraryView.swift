@@ -16,11 +16,14 @@ struct PlexLibraryView: View {
     @Environment(\.nestedNavigationState) private var nestedNavState
     @Environment(\.focusScopeManager) private var focusScopeManager
     @Environment(\.isSidebarVisible) private var isSidebarVisible
+    @Environment(\.uiScale) private var scale
 
     @StateObject private var authManager = PlexAuthManager.shared
+    @ObservedObject private var librarySettings = LibrarySettingsManager.shared
     private let dataStore = PlexDataStore.shared
     @AppStorage("showLibraryHero") private var showLibraryHero = false
     @AppStorage("showLibraryRecommendations") private var showLibraryRecommendations = true
+    @State private var currentSortOption: LibrarySortOption = .addedAtDesc
     @State private var items: [PlexMetadata] = []
     @State private var hubs: [PlexHub] = []  // Library-specific hubs from Plex API
     @State private var isLoading = false
@@ -66,9 +69,11 @@ struct PlexLibraryView: View {
     }
 
     #if os(tvOS)
-    private let columns = [
-        GridItem(.adaptive(minimum: 220, maximum: 260), spacing: 32)
-    ]
+    private var columns: [GridItem] {
+        let minWidth = ScaledDimensions.gridMinWidth * scale
+        let maxWidth = ScaledDimensions.gridMaxWidth * scale
+        return [GridItem(.adaptive(minimum: minWidth, maximum: maxWidth), spacing: ScaledDimensions.gridSpacing)]
+    }
     #else
     private let columns = [
         GridItem(.adaptive(minimum: 180, maximum: 200), spacing: 20)
@@ -224,6 +229,10 @@ struct PlexLibraryView: View {
                         // visibleItemCount = 0
                         // visibleItemExpandTask?.cancel()
                         lastLoadedLibraryKey = libraryKey
+
+                        // Load sort preference for this library
+                        currentSortOption = librarySettings.getSortOption(for: libraryKey)
+
                         #if os(tvOS)
                         // Ensure we start in content scope with no stale focus when switching libraries
                         focusScopeManager.switchTo(.content, savingCurrent: false)
@@ -620,19 +629,27 @@ struct PlexLibraryView: View {
     // MARK: - Library Section Header
 
     private var librarySectionHeader: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text(libraryTitle)
-                .font(.system(size: 32, weight: .bold))
-                .foregroundStyle(.white)
-                .id("library-title-\(libraryKey)")  // Force instant update when library changes
-                .transaction { transaction in
-                    // Disable animation for instant title update
-                    transaction.animation = nil
-                }
+        HStack(alignment: .top) {
+            VStack(alignment: .leading, spacing: 10) {
+                Text(libraryTitle)
+                    .font(.system(size: 32, weight: .bold))
+                    .foregroundStyle(.white)
+                    .id("library-title-\(libraryKey)")  // Force instant update when library changes
+                    .transaction { transaction in
+                        // Disable animation for instant title update
+                        transaction.animation = nil
+                    }
 
-            Text("\(items.count) items")
-                .font(.system(size: 17, weight: .medium))
-                .foregroundStyle(.white.opacity(0.5))
+                Text("\(totalItemCount > 0 ? totalItemCount : items.count) items")
+                    .font(.system(size: 17, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.5))
+            }
+
+            Spacer()
+
+            #if os(tvOS)
+            sortButton
+            #endif
         }
         #if os(tvOS)
         .padding(.horizontal, 80)
@@ -644,6 +661,80 @@ struct PlexLibraryView: View {
         .padding(.bottom, 24)
         #endif
     }
+
+    #if os(tvOS)
+    // MARK: - Sort Button
+
+    @FocusState private var isSortButtonFocused: Bool
+
+    private var sortButton: some View {
+        Button {
+            cycleSortOption()
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "arrow.up.arrow.down")
+                    .font(.system(size: 18, weight: .medium))
+
+                Text(currentSortOption.displayName)
+                    .font(.system(size: 18, weight: .medium))
+            }
+            .foregroundStyle(.white.opacity(isSortButtonFocused ? 1.0 : 0.7))
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            .background(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(isSortButtonFocused ? .white.opacity(0.18) : .white.opacity(0.08))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .strokeBorder(
+                                isSortButtonFocused ? .white.opacity(0.25) : .white.opacity(0.08),
+                                lineWidth: 1
+                            )
+                    )
+            )
+        }
+        .buttonStyle(.plain)
+        .focused($isSortButtonFocused)
+        .scaleEffect(isSortButtonFocused ? 1.02 : 1.0)
+        .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isSortButtonFocused)
+    }
+
+    private var currentLibraryType: String? {
+        dataStore.libraries.first(where: { $0.key == libraryKey })?.type
+    }
+
+    private func cycleSortOption() {
+        let newOption = currentSortOption.next(for: currentLibraryType)
+        currentSortOption = newOption
+        librarySettings.setSortOption(newOption, for: libraryKey)
+
+        // Clear items and reload with new sort
+        Task {
+            await reloadWithNewSort()
+        }
+    }
+
+    private func reloadWithNewSort() async {
+        guard let serverURL = authManager.selectedServerURL,
+              let token = authManager.selectedServerToken else { return }
+
+        // Clear cache for this library since sort changed
+        if let firstItem = items.first {
+            if firstItem.type == "movie" {
+                await cacheManager.clearMoviesCache(forLibrary: libraryKey)
+            } else if firstItem.type == "show" {
+                await cacheManager.clearShowsCache(forLibrary: libraryKey)
+            }
+        }
+
+        // Reset and reload
+        items = []
+        hasMoreItems = true
+        isLoading = true
+
+        await fetchFromServer(serverURL: serverURL, token: token, updateLoading: true)
+    }
+    #endif
 
     // MARK: - Library Grid View
 
@@ -1012,7 +1103,8 @@ struct PlexLibraryView: View {
                 authToken: token,
                 sectionId: libraryKey,
                 start: 0,
-                size: pageSize
+                size: pageSize,
+                sort: currentSortOption.apiParameter
             )
 
             // Update total count for pagination
@@ -1083,7 +1175,8 @@ struct PlexLibraryView: View {
                 authToken: token,
                 sectionId: libraryKey,
                 start: items.count,
-                size: pageSize
+                size: pageSize,
+                sort: currentSortOption.apiParameter
             )
 
             // Update total count
