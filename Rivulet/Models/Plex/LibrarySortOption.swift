@@ -9,7 +9,8 @@ import Foundation
 
 /// Available sort options for Plex libraries
 /// Raw value is the Plex API sort parameter (prefix `-` means descending)
-enum LibrarySortOption: String, CaseIterable, Codable {
+enum LibrarySortOption: String, CaseIterable, Codable, CustomStringConvertible {
+    var description: String { displayName }
     // Date Added
     case addedAtDesc = "-addedAt"        // Recently Added (default)
     case addedAtAsc = "addedAt"          // Oldest Added

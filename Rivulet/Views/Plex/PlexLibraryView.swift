@@ -666,26 +666,31 @@ struct PlexLibraryView: View {
     // MARK: - Sort Button
 
     @FocusState private var isSortButtonFocused: Bool
+    @State private var showSortPicker = false
 
     private var sortButton: some View {
         Button {
-            cycleSortOption()
+            showSortPicker = true
         } label: {
-            HStack(spacing: 8) {
+            HStack(spacing: 10) {
                 Image(systemName: "arrow.up.arrow.down")
-                    .font(.system(size: 18, weight: .medium))
+                    .font(.system(size: 20, weight: .semibold))
 
                 Text(currentSortOption.displayName)
-                    .font(.system(size: 18, weight: .medium))
+                    .font(.system(size: 20, weight: .medium))
+
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(isSortButtonFocused ? .white.opacity(0.8) : .white.opacity(0.4))
             }
-            .foregroundStyle(.white.opacity(isSortButtonFocused ? 1.0 : 0.7))
-            .padding(.horizontal, 16)
-            .padding(.vertical, 10)
+            .foregroundStyle(.white)
+            .padding(.horizontal, 20)
+            .padding(.vertical, 12)
             .background(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
                     .fill(isSortButtonFocused ? .white.opacity(0.18) : .white.opacity(0.08))
                     .overlay(
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
                             .strokeBorder(
                                 isSortButtonFocused ? .white.opacity(0.25) : .white.opacity(0.08),
                                 lineWidth: 1
@@ -693,25 +698,27 @@ struct PlexLibraryView: View {
                     )
             )
         }
-        .buttonStyle(.plain)
+        .buttonStyle(SettingsButtonStyle())
         .focused($isSortButtonFocused)
         .scaleEffect(isSortButtonFocused ? 1.02 : 1.0)
         .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isSortButtonFocused)
+        .sheet(isPresented: $showSortPicker) {
+            SortPickerSheet(
+                selection: $currentSortOption,
+                options: LibrarySortOption.options(for: currentLibraryType),
+                isPresented: $showSortPicker,
+                onSelectionChanged: { newOption in
+                    librarySettings.setSortOption(newOption, for: libraryKey)
+                    Task {
+                        await reloadWithNewSort()
+                    }
+                }
+            )
+        }
     }
 
     private var currentLibraryType: String? {
         dataStore.libraries.first(where: { $0.key == libraryKey })?.type
-    }
-
-    private func cycleSortOption() {
-        let newOption = currentSortOption.next(for: currentLibraryType)
-        currentSortOption = newOption
-        librarySettings.setSortOption(newOption, for: libraryKey)
-
-        // Clear items and reload with new sort
-        Task {
-            await reloadWithNewSort()
-        }
     }
 
     private func reloadWithNewSort() async {
@@ -719,20 +726,47 @@ struct PlexLibraryView: View {
               let token = authManager.selectedServerToken else { return }
 
         // Clear cache for this library since sort changed
-        if let firstItem = items.first {
-            if firstItem.type == "movie" {
-                await cacheManager.clearMoviesCache(forLibrary: libraryKey)
-            } else if firstItem.type == "show" {
-                await cacheManager.clearShowsCache(forLibrary: libraryKey)
-            }
+        let itemType = items.first?.type
+        if itemType == "movie" {
+            await cacheManager.clearMoviesCache(forLibrary: libraryKey)
+        } else if itemType == "show" {
+            await cacheManager.clearShowsCache(forLibrary: libraryKey)
         }
 
-        // Reset and reload
-        items = []
+        // Fetch new sorted items without clearing existing display
+        // This keeps the hubs visible and only updates the grid
         hasMoreItems = true
-        isLoading = true
 
-        await fetchFromServer(serverURL: serverURL, token: token, updateLoading: true)
+        do {
+            let result = try await networkManager.getLibraryItemsWithTotal(
+                serverURL: serverURL,
+                authToken: token,
+                sectionId: libraryKey,
+                start: 0,
+                size: pageSize,
+                sort: currentSortOption.apiParameter
+            )
+
+            // Update total count
+            if let total = result.totalSize {
+                totalItemCount = total
+                hasMoreItems = result.items.count < total
+            } else {
+                hasMoreItems = result.items.count >= pageSize
+            }
+
+            // Replace items with new sorted results
+            items = result.items
+
+            // Cache the new results
+            if itemType == "movie" {
+                await cacheManager.cacheMovies(result.items, forLibrary: libraryKey)
+            } else if itemType == "show" {
+                await cacheManager.cacheShows(result.items, forLibrary: libraryKey)
+            }
+        } catch {
+            print("Failed to reload with new sort: \(error)")
+        }
     }
     #endif
 
@@ -1430,3 +1464,110 @@ struct PlexLibraryView: View {
         PlexLibraryView(libraryKey: "1", libraryTitle: "Movies")
     }
 }
+
+// MARK: - Sort Picker Sheet
+
+#if os(tvOS)
+struct SortPickerSheet: View {
+    @Binding var selection: LibrarySortOption
+    let options: [LibrarySortOption]
+    @Binding var isPresented: Bool
+    var onSelectionChanged: ((LibrarySortOption) -> Void)?
+
+    @FocusState private var focusedOption: LibrarySortOption?
+
+    var body: some View {
+        VStack(spacing: 24) {
+            // Header
+            Text("Sort By")
+                .font(.system(size: 36, weight: .bold))
+                .foregroundStyle(.white)
+                .padding(.top, 40)
+
+            // Options list
+            ScrollView(.vertical, showsIndicators: false) {
+                VStack(spacing: 8) {
+                    ForEach(options, id: \.self) { option in
+                        SortOptionRow(
+                            option: option,
+                            isSelected: selection == option,
+                            isFocused: focusedOption == option,
+                            onSelect: {
+                                let changed = selection != option
+                                selection = option
+                                isPresented = false
+                                if changed {
+                                    onSelectionChanged?(option)
+                                }
+                            }
+                        )
+                        .focused($focusedOption, equals: option)
+                    }
+                }
+                .padding(.horizontal, 32)
+                .padding(.vertical, 8)
+            }
+            .frame(maxHeight: 600)
+
+            Spacer(minLength: 0)
+        }
+        .padding(.bottom, 40)
+        .frame(width: 500)
+        .background(
+            RoundedRectangle(cornerRadius: 32, style: .continuous)
+                .fill(.black.opacity(0.3))
+        )
+        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 32, style: .continuous))
+        .onAppear {
+            // Focus the currently selected option
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                focusedOption = selection
+            }
+        }
+        .onExitCommand {
+            isPresented = false
+        }
+    }
+}
+
+struct SortOptionRow: View {
+    let option: LibrarySortOption
+    let isSelected: Bool
+    let isFocused: Bool
+    let onSelect: () -> Void
+
+    var body: some View {
+        Button(action: onSelect) {
+            HStack {
+                Text(option.displayName)
+                    .font(.system(size: 26, weight: isSelected ? .semibold : .regular))
+                    .foregroundStyle(.white)
+
+                Spacer()
+
+                if isSelected {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 22, weight: .semibold))
+                        .foregroundStyle(.blue)
+                }
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 16)
+            .background(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(isFocused ? .white.opacity(0.18) : .white.opacity(0.08))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .strokeBorder(
+                                isFocused ? .white.opacity(0.25) : .white.opacity(0.08),
+                                lineWidth: 1
+                            )
+                    )
+            )
+        }
+        .buttonStyle(SettingsButtonStyle())
+        .scaleEffect(isFocused ? 1.02 : 1.0)
+        .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isFocused)
+    }
+}
+#endif
