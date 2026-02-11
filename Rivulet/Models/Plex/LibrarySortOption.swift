@@ -8,30 +8,30 @@
 import Foundation
 
 /// Available sort options for Plex libraries
-/// Raw value is the Plex API sort parameter (prefix `-` means descending)
+/// Raw value is the Plex API sort parameter (format: field:direction)
 enum LibrarySortOption: String, CaseIterable, Codable, CustomStringConvertible {
     var description: String { displayName }
     // Date Added
-    case addedAtDesc = "-addedAt"        // Recently Added (default)
-    case addedAtAsc = "addedAt"          // Oldest Added
+    case addedAtDesc = "addedAt:desc"        // Recently Added (default)
+    case addedAtAsc = "addedAt:asc"          // Oldest Added
 
     // Title
-    case titleAsc = "titleSort"          // Title A-Z
-    case titleDesc = "-titleSort"        // Title Z-A
+    case titleAsc = "titleSort:asc"          // Title A-Z
+    case titleDesc = "titleSort:desc"        // Title Z-A
 
     // Release Date
-    case releaseDateDesc = "-originallyAvailableAt"  // Newest Releases
-    case releaseDateAsc = "originallyAvailableAt"    // Oldest Releases
+    case releaseDateDesc = "originallyAvailableAt:desc"  // Newest Releases
+    case releaseDateAsc = "originallyAvailableAt:asc"    // Oldest Releases
 
     // Rating
-    case ratingDesc = "-rating"          // Highest Rated
+    case ratingDesc = "rating:desc"          // Highest Rated
 
     // Resolution (video quality)
-    case resolutionDesc = "-mediaHeight" // Best Quality (4K first)
-    case resolutionAsc = "mediaHeight"   // Lowest Quality (SD first)
+    case resolutionDesc = "mediaHeight:desc" // Best Quality (4K first)
+    case resolutionAsc = "mediaHeight:asc"   // Lowest Quality (SD first)
 
     // TV Shows only
-    case lastEpisodeAddedDesc = "-lastEpisodeAddedAt" // New Episodes
+    case lastEpisodeAddedDesc = "lastEpisodeAddedAt:desc" // New Episodes
 
     /// User-friendly display name
     var displayName: String {
