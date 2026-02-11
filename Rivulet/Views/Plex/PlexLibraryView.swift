@@ -665,6 +665,8 @@ struct PlexLibraryView: View {
     #if os(tvOS)
     // MARK: - Sort Button
 
+    @FocusState private var isSortButtonFocused: Bool
+
     private var sortButton: some View {
         Menu {
             ForEach(LibrarySortOption.options(for: currentLibraryType), id: \.self) { option in
@@ -698,10 +700,20 @@ struct PlexLibraryView: View {
             .padding(.vertical, 14)
             .background(
                 RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .fill(.white.opacity(0.08))
+                    .fill(isSortButtonFocused ? .white.opacity(0.18) : .white.opacity(0.08))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            .strokeBorder(
+                                isSortButtonFocused ? .white.opacity(0.25) : .white.opacity(0.08),
+                                lineWidth: 1
+                            )
+                    )
             )
-            .hoverEffect(.highlight)
+            .scaleEffect(isSortButtonFocused ? 1.02 : 1.0)
         }
+        .focusEffectDisabled()
+        .focused($isSortButtonFocused)
+        .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isSortButtonFocused)
     }
 
     private var currentLibraryType: String? {
