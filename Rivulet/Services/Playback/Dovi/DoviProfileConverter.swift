@@ -107,7 +107,6 @@ final class DoviProfileConverter {
                 // Profile 7 needs conversion to Profile 8.1
                 needsConversion = true
                 let elTypeStr = info.elType ?? "unknown"
-                print("🎬 [DoviConverter] Detected Profile 7 (\(elTypeStr)) - will convert to Profile 8.1")
 
                 // Warn about FEL quality limitation
                 if info.isFEL {
@@ -118,16 +117,13 @@ final class DoviProfileConverter {
                 // Profile 8 conversion is enabled at a higher level based on BL CompatID
                 // If we reach here, conversion was requested for this P8 stream
                 needsConversion = true
-                print("🎬 [DoviConverter] Detected Profile 8 - will convert to Profile 8.1")
 
             case 5:
                 // Profile 5 is natively compatible, no conversion needed
                 needsConversion = false
-                print("🎬 [DoviConverter] Detected Profile 5 - no conversion needed")
 
             default:
                 needsConversion = false
-                print("🎬 [DoviConverter] Detected Profile \(info.profile) - unknown, no conversion")
             }
 
         } catch {

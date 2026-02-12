@@ -192,7 +192,6 @@ actor ImageCacheManager: NSObject {
         try? FileManager.default.removeItem(at: dir)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         saveMetadata()
-        print("💾 ImageCacheManager: Cleared all cached images")
     }
 
     /// Get total disk cache size in bytes
@@ -274,7 +273,6 @@ actor ImageCacheManager: NSObject {
 
         // Refresh if older than TTL
         if age > defaultTTL {
-            print("💾 ImageCacheManager: Refreshing stale image (age: \(Int(age / 86400)) days)")
             _ = await download(url: url, key: key)
         }
     }
@@ -440,8 +438,6 @@ actor ImageCacheManager: NSObject {
         let currentSize = getCacheSize()
         guard currentSize > maxDiskCacheSize else { return }
 
-        print("💾 ImageCacheManager: Cache size \(ByteCountFormatter.string(fromByteCount: currentSize, countStyle: .file)) exceeds limit, evicting...")
-
         // Sort by last accessed time (oldest first)
         let sortedEntries = cacheMetadata.sorted { $0.value.lastAccessedAt < $1.value.lastAccessedAt }
 
@@ -465,7 +461,6 @@ actor ImageCacheManager: NSObject {
         }
 
         saveMetadata()
-        print("💾 ImageCacheManager: Evicted \(ByteCountFormatter.string(fromByteCount: freedSpace, countStyle: .file))")
     }
 
     // MARK: - Metadata Persistence
@@ -488,7 +483,6 @@ actor ImageCacheManager: NSObject {
 
         cacheMetadata = decoded
         metadataLoaded = true
-        print("💾 ImageCacheManager: Loaded metadata for \(cacheMetadata.count) cached images")
     }
 
     private func saveMetadata() {

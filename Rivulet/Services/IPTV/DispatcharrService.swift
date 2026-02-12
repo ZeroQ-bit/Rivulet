@@ -65,13 +65,11 @@ actor DispatcharrService {
     /// - Returns: Raw M3U data
     func fetchM3U() async throws -> Data {
         let url = baseURL.appendingPathComponent("output/m3u")
-        print("📡 DispatcharrService: Fetching M3U from \(url)")
 
         let (data, response) = try await session.data(from: url)
 
         try validateResponse(response)
 
-        print("📡 DispatcharrService: ✅ Fetched M3U (\(data.count) bytes)")
         return data
     }
 
@@ -79,13 +77,11 @@ actor DispatcharrService {
     /// - Returns: Raw XMLTV data
     func fetchEPG() async throws -> Data {
         let url = baseURL.appendingPathComponent("output/epg")
-        print("📡 DispatcharrService: Fetching EPG from \(url)")
 
         let (data, response) = try await session.data(from: url)
 
         try validateResponse(response)
 
-        print("📡 DispatcharrService: ✅ Fetched EPG (\(data.count) bytes)")
         return data
     }
 

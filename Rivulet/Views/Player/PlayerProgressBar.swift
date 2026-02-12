@@ -141,7 +141,6 @@ struct PlayerProgressBar: View {
             currentTime: 1234,
             duration: 7200,
             onSeek: { time in
-                print("Seek to: \(time)")
             }
         )
         .padding(40)

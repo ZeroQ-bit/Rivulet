@@ -110,7 +110,6 @@ class LiveTVDataStore: ObservableObject {
     private init() {
         loadFavorites()
         loadSavedSources()
-        print("📺 LiveTVDataStore: Initialized")
     }
 
     // MARK: - Source Management
@@ -126,7 +125,6 @@ class LiveTVDataStore: ObservableObject {
         providers[sourceId] = provider
         saveSources()
         await updateSourceInfo()
-        print("📺 LiveTVDataStore: Added Dispatcharr source '\(name)'")
     }
 
     /// Add a generic M3U source
@@ -141,7 +139,6 @@ class LiveTVDataStore: ObservableObject {
         providers[sourceId] = provider
         saveSources()
         await updateSourceInfo()
-        print("📺 LiveTVDataStore: Added M3U source '\(name)'")
     }
 
     /// Add a Plex Live TV source
@@ -149,7 +146,6 @@ class LiveTVDataStore: ObservableObject {
         providers[provider.sourceId] = provider
         saveSources()
         await updateSourceInfo()
-        print("📺 LiveTVDataStore: Added Plex Live TV source")
     }
 
     /// Remove a source by ID
@@ -167,7 +163,6 @@ class LiveTVDataStore: ObservableObject {
             epg.removeValue(forKey: channelId)
         }
 
-        print("📺 LiveTVDataStore: Removed source '\(id)'")
     }
 
     // MARK: - Source Persistence
@@ -180,8 +175,6 @@ class LiveTVDataStore: ObservableObject {
             return
         }
 
-        print("📺 LiveTVDataStore: Loading \(configs.count) saved sources")
-
         for config in configs {
             switch config.type {
             case "dispatcharr":
@@ -192,7 +185,6 @@ class LiveTVDataStore: ObservableObject {
                         displayName: config.name
                     )
                     providers[config.id] = provider
-                    print("📺 LiveTVDataStore: Restored Dispatcharr source '\(config.name)'")
                 }
 
             case "m3u":
@@ -205,7 +197,6 @@ class LiveTVDataStore: ObservableObject {
                         displayName: config.name
                     )
                     providers[config.id] = provider
-                    print("📺 LiveTVDataStore: Restored M3U source '\(config.name)'")
                 }
 
             case "plex":
@@ -220,9 +211,7 @@ class LiveTVDataStore: ObservableObject {
                             serverName: serverName
                         )
                         providers[config.id] = provider
-                        print("📺 LiveTVDataStore: Restored Plex Live TV source '\(config.name)'")
                     } else {
-                        print("📺 LiveTVDataStore: Skipping Plex source - not authenticated")
                     }
                 }
 
@@ -283,7 +272,6 @@ class LiveTVDataStore: ObservableObject {
 
         if let data = try? JSONEncoder().encode(configs) {
             userDefaults.set(data, forKey: sourcesKey)
-            print("📺 LiveTVDataStore: Saved \(configs.count) source configurations")
         }
     }
 
@@ -313,7 +301,6 @@ class LiveTVDataStore: ObservableObject {
     /// Load channels from all sources
     func loadChannels() async {
         guard !providers.isEmpty else {
-            print("📺 LiveTVDataStore: No sources configured")
             return
         }
 
@@ -344,7 +331,6 @@ class LiveTVDataStore: ObservableObject {
                     switch result {
                     case .success(let channels):
                         allChannels.append(contentsOf: channels)
-                        print("📺 LiveTVDataStore: Loaded \(channels.count) channels from \(sourceId)")
                     case .failure(let error):
                         errors.append("\(sourceId): \(error.localizedDescription)")
                         print("📺 LiveTVDataStore: ❌ Failed to load from \(sourceId): \(error)")
@@ -439,7 +425,6 @@ class LiveTVDataStore: ObservableObject {
     /// Load EPG for the specified time range
     func loadEPG(startDate: Date = Date(), hours: Int = 24) async {
         guard !providers.isEmpty, !channels.isEmpty else {
-            print("📺 LiveTVDataStore: No sources or channels for EPG")
             return
         }
 
@@ -456,9 +441,6 @@ class LiveTVDataStore: ObservableObject {
 
             // Group channels by source
             let channelsBySource = Dictionary(grouping: channels, by: { $0.sourceId })
-
-            print("📺 LiveTVDataStore: EPG fetch - channel sourceIds: \(Array(channelsBySource.keys))")
-            print("📺 LiveTVDataStore: EPG fetch - provider keys: \(Array(providers.keys))")
 
             // Fetch EPG from each provider
             await withTaskGroup(of: (String, Result<[String: [UnifiedProgram]], Error>).self) { group in
@@ -488,7 +470,6 @@ class LiveTVDataStore: ObservableObject {
                         for (channelId, programs) in epg {
                             allEPG[channelId] = programs
                         }
-                        print("📺 LiveTVDataStore: Loaded EPG for \(epg.count) channels from \(sourceId)")
                     case .failure(let error):
                         // EPG errors are not critical, just log them
                         errors.append("\(sourceId): \(error.localizedDescription)")
@@ -518,7 +499,6 @@ class LiveTVDataStore: ObservableObject {
         backgroundPreloadTask?.cancel()
 
         backgroundPreloadTask = Task(priority: .background) {
-            print("📺 LiveTVDataStore: Starting background preload...")
 
             // Wait a short delay to let critical startup tasks complete
             try? await Task.sleep(nanoseconds: 2_000_000_000)  // 2 seconds
@@ -527,13 +507,11 @@ class LiveTVDataStore: ObservableObject {
 
             // Only preload if we have sources configured
             guard hasConfiguredSources else {
-                print("📺 LiveTVDataStore: No sources configured, skipping preload")
                 return
             }
 
             // Load channels first (if not already loaded)
             if channels.isEmpty && !isLoadingChannels {
-                print("📺 LiveTVDataStore: Background loading channels...")
                 await loadChannels()
             }
 
@@ -541,12 +519,10 @@ class LiveTVDataStore: ObservableObject {
 
             // Then load EPG (if not already loaded)
             if epg.isEmpty && !isLoadingEPG && !channels.isEmpty {
-                print("📺 LiveTVDataStore: Background loading EPG...")
                 await loadEPG(startDate: Date(), hours: 6)
                 await MainActor.run {
                     self.isEPGPreloaded = true
                 }
-                print("📺 LiveTVDataStore: Background preload complete ✅")
             }
         }
     }
@@ -557,15 +533,12 @@ class LiveTVDataStore: ObservableObject {
     func elevatePreloadPriority() async {
         // If already loaded, nothing to do
         guard epg.isEmpty else {
-            print("📺 LiveTVDataStore: EPG already loaded, no priority elevation needed")
             return
         }
 
         // Cancel background task
         backgroundPreloadTask?.cancel()
         backgroundPreloadTask = nil
-
-        print("📺 LiveTVDataStore: Elevating to high priority load")
 
         // Load with default (high) priority
         if channels.isEmpty && !isLoadingChannels {
@@ -688,6 +661,5 @@ class LiveTVDataStore: ObservableObject {
         epgError = nil
         isLoadingChannels = false
         isLoadingEPG = false
-        print("📺 LiveTVDataStore: Reset all data")
     }
 }

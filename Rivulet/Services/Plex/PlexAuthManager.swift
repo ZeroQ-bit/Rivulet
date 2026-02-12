@@ -98,13 +98,6 @@ class PlexAuthManager: ObservableObject {
         let savedServerToken = KeychainHelper.get(keychainServerTokenKey)
         selectedServerToken = savedServerToken ?? authToken
 
-        print("🔐 PlexAuthManager: Initialized")
-        print("🔐 PlexAuthManager: Token present: \(authToken != nil)")
-        print("🔐 PlexAuthManager: Server token present: \(selectedServerToken != nil)")
-        print("🔐 PlexAuthManager: Username: \(username ?? "nil")")
-        print("🔐 PlexAuthManager: Server URL: \(selectedServerURL ?? "nil")")
-        print("🔐 PlexAuthManager: isAuthenticated: \(authToken != nil && selectedServerURL != nil)")
-
         if authToken != nil {
             state = .authenticated
 
@@ -125,7 +118,6 @@ class PlexAuthManager: ObservableObject {
         // Check if auth token exists in UserDefaults but not in Keychain
         if let legacyToken = userDefaults.string(forKey: legacyTokenKey),
            KeychainHelper.get(keychainTokenKey) == nil {
-            print("🔐 PlexAuthManager: Migrating auth token to Keychain")
             KeychainHelper.set(legacyToken, forKey: keychainTokenKey)
             userDefaults.removeObject(forKey: legacyTokenKey)
         }
@@ -133,7 +125,6 @@ class PlexAuthManager: ObservableObject {
         // Check if server token exists in UserDefaults but not in Keychain
         if let legacyServerToken = userDefaults.string(forKey: legacyServerTokenKey),
            KeychainHelper.get(keychainServerTokenKey) == nil {
-            print("🔐 PlexAuthManager: Migrating server token to Keychain")
             KeychainHelper.set(legacyServerToken, forKey: keychainServerTokenKey)
             userDefaults.removeObject(forKey: legacyServerTokenKey)
         }
@@ -193,7 +184,6 @@ class PlexAuthManager: ObservableObject {
                 }
 
                 let isShared = server.owned == false
-                print("🔐 PlexAuthManager: Selected connection: \(workingURL) (shared: \(isShared))")
 
                 isConnected = true
                 connectionError = nil
@@ -233,9 +223,6 @@ class PlexAuthManager: ObservableObject {
         let isShared = server.owned == false
         let httpsRequired = server.httpsRequired == true
 
-        print("🔐 PlexAuthManager: Testing \(sortedConnections.count) connections for \(server.name)\(isShared ? " (shared)" : "")")
-        print("🔐 PlexAuthManager: httpsRequired=\(httpsRequired), machineIdentifier=\(server.machineIdentifier ?? "nil")")
-
         // If server requires HTTPS and we have a machineIdentifier, try plex.direct FIRST
         // for local connections. This ensures AVPlayer gets a valid SSL certificate.
         if httpsRequired, let machineId = server.machineIdentifier {
@@ -246,9 +233,7 @@ class PlexAuthManager: ObservableObject {
                     port: localConnection.port,
                     machineIdentifier: machineId
                 )
-                print("🔐 PlexAuthManager: Server requires HTTPS, trying plex.direct first: \(plexDirectURI)")
                 if await testConnection(plexDirectURI, serverToken: tokenToUse) {
-                    print("🔐 PlexAuthManager: ✅ plex.direct works (AVPlayer-compatible): \(plexDirectURI)")
                     return plexDirectURI
                 } else {
                     print("🔐 PlexAuthManager: ❌ plex.direct failed, will try other connections")
@@ -257,9 +242,7 @@ class PlexAuthManager: ObservableObject {
         }
 
         for connection in sortedConnections {
-            print("🔐 PlexAuthManager: Testing \(connection.uri)...")
             if await testConnection(connection.uri, serverToken: tokenToUse) {
-                print("🔐 PlexAuthManager: ✅ Connection works: \(connection.uri)")
                 return connection.uri
             } else {
                 print("🔐 PlexAuthManager: ❌ Connection failed: \(connection.uri)")
@@ -275,9 +258,7 @@ class PlexAuthManager: ObservableObject {
                             port: connection.port,
                             machineIdentifier: machineId
                         )
-                        print("🔐 PlexAuthManager: Trying plex.direct (has valid SSL): \(plexDirectURI)...")
                         if await testConnection(plexDirectURI, serverToken: tokenToUse) {
-                            print("🔐 PlexAuthManager: ✅ plex.direct works: \(plexDirectURI)")
                             return plexDirectURI
                         } else {
                             print("🔐 PlexAuthManager: ❌ plex.direct failed: \(plexDirectURI)")
@@ -297,9 +278,7 @@ class PlexAuthManager: ObservableObject {
                                 port: connection.port,
                                 machineIdentifier: hash
                             )
-                            print("🔐 PlexAuthManager: HTTPS works but trying plex.direct for AVPlayer: \(plexDirectURI)...")
                             if await testConnection(plexDirectURI, serverToken: tokenToUse) {
-                                print("🔐 PlexAuthManager: ✅ plex.direct works: \(plexDirectURI)")
                                 return plexDirectURI
                             }
                         }
@@ -316,9 +295,7 @@ class PlexAuthManager: ObservableObject {
                                 port: connection.port,
                                 machineIdentifier: hash
                             )
-                            print("🔐 PlexAuthManager: Trying plex.direct (from cert): \(plexDirectURI)...")
                             if await testConnection(plexDirectURI, serverToken: tokenToUse) {
-                                print("🔐 PlexAuthManager: ✅ plex.direct works: \(plexDirectURI)")
                                 return plexDirectURI
                             } else {
                                 print("🔐 PlexAuthManager: ❌ plex.direct failed: \(plexDirectURI)")
@@ -389,13 +366,11 @@ class PlexAuthManager: ObservableObject {
 
         for prefix in dockerPrefixes {
             if address.hasPrefix(prefix) {
-                print("🔐 PlexAuthManager: Skipping Docker/internal address: \(address)")
                 return true
             }
         }
 
         if localhostAddresses.contains(address) {
-            print("🔐 PlexAuthManager: Skipping localhost address: \(address)")
             return true
         }
 
@@ -474,7 +449,6 @@ class PlexAuthManager: ObservableObject {
             let nsError = error as NSError
             if nsError.code == -1200 || nsError.code == -9802 { // SSL errors
                 if let certHash = extractPlexDirectHash(from: nsError) {
-                    print("🔐 PlexAuthManager: Extracted plex.direct hash from cert: \(certHash)")
                     return (false, certHash)
                 }
             }
@@ -548,7 +522,6 @@ class PlexAuthManager: ObservableObject {
         selectedServerToken = token
         // Note: We don't persist this to UserDefaults since it's session-specific
         // On next app launch, we'll fetch users again and switch if needed
-        print("🔐 PlexAuthManager: Updated server token for user profile switch")
     }
 
     /// Check if currently authenticated (has valid credentials)
@@ -573,7 +546,6 @@ class PlexAuthManager: ObservableObject {
 
         // If we have no server URL, fetch servers and select one
         if selectedServerURL == nil {
-            print("🔐 PlexAuthManager: No server URL saved, fetching servers...")
             do {
                 let servers = try await networkManager.getServers(authToken: token)
                 if servers.count == 1 {
@@ -598,10 +570,8 @@ class PlexAuthManager: ObservableObject {
 
         // Test current connection using the saved server token
         guard let currentURL = selectedServerURL else { return }
-        print("🔐 PlexAuthManager: Verifying current connection: \(currentURL)")
 
         if await testConnection(currentURL, serverToken: selectedServerToken) {
-            print("🔐 PlexAuthManager: ✅ Current connection is working")
             isConnected = true
             connectionError = nil
 
@@ -637,7 +607,6 @@ class PlexAuthManager: ObservableObject {
                         isConnected = true
                         connectionError = nil
                         state = .authenticated
-                        print("🔐 PlexAuthManager: ✅ Found alternative connection: \(workingURL)")
                     }
                 }
             } catch {

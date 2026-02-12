@@ -129,7 +129,6 @@ actor DepthLayerCache {
         try? FileManager.default.removeItem(at: dir)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         saveMetadata()
-        print("🎨 DepthLayerCache: Cleared all cached depth layers")
     }
 
     /// Get total disk cache size
@@ -201,8 +200,6 @@ actor DepthLayerCache {
         let currentSize = getCacheSize()
         guard currentSize > maxDiskCacheSize else { return }
 
-        print("🎨 DepthLayerCache: Cache size \(ByteCountFormatter.string(fromByteCount: currentSize, countStyle: .file)) exceeds limit, evicting...")
-
         // Sort by processing time (oldest first)
         let sortedEntries = diskMetadata
             .filter { !$0.value.unsuitable }
@@ -230,7 +227,6 @@ actor DepthLayerCache {
         }
 
         saveMetadata()
-        print("🎨 DepthLayerCache: Evicted \(ByteCountFormatter.string(fromByteCount: freedSpace, countStyle: .file))")
     }
 
     // MARK: - Metadata Persistence
@@ -247,7 +243,6 @@ actor DepthLayerCache {
 
         diskMetadata = decoded
         metadataLoaded = true
-        print("🎨 DepthLayerCache: Loaded metadata for \(diskMetadata.count) cached depth layers")
     }
 
     private func saveMetadata() {

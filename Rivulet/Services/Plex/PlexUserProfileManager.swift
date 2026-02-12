@@ -77,13 +77,7 @@ class PlexUserProfileManager: ObservableObject {
         // Load saved preference for profile picker
         showProfilePickerOnLaunch = userDefaults.bool(forKey: showProfilePickerOnLaunchKey)
 
-        print("👤 PlexUserProfileManager: Initialized")
-        print("👤 PlexUserProfileManager: Show picker on launch: \(showProfilePickerOnLaunch)")
-
         // Load saved user info (will be validated when fetchHomeUsers is called)
-        if let savedId = userDefaults.object(forKey: selectedUserIdKey) as? Int {
-            print("👤 PlexUserProfileManager: Saved user ID: \(savedId)")
-        }
     }
 
     // MARK: - Public Methods
@@ -92,7 +86,6 @@ class PlexUserProfileManager: ObservableObject {
     /// Call this after authentication and on app launch
     func fetchHomeUsers() async {
         guard let authToken = PlexAuthManager.shared.authToken else {
-            print("👤 PlexUserProfileManager: No auth token, skipping user fetch")
             return
         }
 
@@ -102,11 +95,6 @@ class PlexUserProfileManager: ObservableObject {
         do {
             let users = try await networkManager.getHomeUsers(authToken: authToken)
             homeUsers = users
-
-            print("👤 PlexUserProfileManager: Loaded \(users.count) home users")
-            for user in users {
-                print("👤   - \(user.displayName) (id: \(user.id), admin: \(user.admin), protected: \(user.protected))")
-            }
 
             // Update remembered PINs state for UI
             updateRememberedPinsState()
@@ -134,11 +122,9 @@ class PlexUserProfileManager: ObservableObject {
     /// - Returns: True if selection succeeded
     @discardableResult
     func selectUser(_ user: PlexHomeUser, pin: String? = nil) async -> Bool {
-        print("👤 PlexUserProfileManager: selectUser called for \(user.displayName) (uuid: \(user.uuid))")
 
         // PIN required but not provided
         if user.requiresPin && (pin == nil || pin?.isEmpty == true) {
-            print("👤 PlexUserProfileManager: PIN required but not provided")
             return false
         }
 
@@ -147,8 +133,6 @@ class PlexUserProfileManager: ObservableObject {
             print("👤 PlexUserProfileManager: No auth token available")
             return false
         }
-
-        print("👤 PlexUserProfileManager: Calling switch endpoint...")
 
         do {
             let userPlexToken = try await networkManager.switchToHomeUser(
@@ -162,15 +146,11 @@ class PlexUserProfileManager: ObservableObject {
                 return false
             }
 
-            print("👤 PlexUserProfileManager: Got plex.tv token, fetching server access token...")
-
             // Now get the server-specific access token using the user's plex.tv token
             guard let serverURL = PlexAuthManager.shared.selectedServerURL else {
                 print("👤 PlexUserProfileManager: No server URL available")
                 return false
             }
-
-            print("👤 PlexUserProfileManager: Server URL: \(serverURL)")
 
             let serverAccessToken = await networkManager.getServerAccessToken(
                 authToken: userPlexToken,
@@ -182,8 +162,6 @@ class PlexUserProfileManager: ObservableObject {
                 return false
             }
 
-            print("👤 PlexUserProfileManager: Got server access token, updating auth manager...")
-
             // Update the server token with the user's server-specific token
             PlexAuthManager.shared.updateServerToken(serverAccessToken)
 
@@ -192,11 +170,8 @@ class PlexUserProfileManager: ObservableObject {
             selectedUser = user
             saveSelectedUser(user)
 
-            print("👤 PlexUserProfileManager: ✅ Switched to \(user.displayName) (id: \(user.id))")
-
             // Notify data store to reload if user actually changed
             if previousUser?.id != user.id {
-                print("👤 PlexUserProfileManager: User changed, triggering data reload...")
                 await PlexDataStore.shared.onProfileSwitched()
             }
 
@@ -223,7 +198,6 @@ class PlexUserProfileManager: ObservableObject {
         userDefaults.removeObject(forKey: selectedUserUUIDKey)
         userDefaults.removeObject(forKey: selectedUserNameKey)
 
-        print("👤 PlexUserProfileManager: Reset - cleared all profile data and remembered PINs")
     }
 
     // MARK: - Remember PIN Methods
@@ -237,14 +211,12 @@ class PlexUserProfileManager: ObservableObject {
     func rememberPin(_ pin: String, for user: PlexHomeUser) {
         KeychainHelper.setPin(pin, forUserUUID: user.uuid)
         usersWithRememberedPins.insert(user.uuid)
-        print("👤 PlexUserProfileManager: Remembered PIN for \(user.displayName)")
     }
 
     /// Delete a stored PIN for a user
     func forgetPin(for user: PlexHomeUser) {
         KeychainHelper.deletePin(forUserUUID: user.uuid)
         usersWithRememberedPins.remove(user.uuid)
-        print("👤 PlexUserProfileManager: Forgot PIN for \(user.displayName)")
     }
 
     /// Attempt to select a user with their remembered PIN
@@ -275,7 +247,6 @@ class PlexUserProfileManager: ObservableObject {
                 .filter { KeychainHelper.hasSavedPin(forUserUUID: $0.uuid) }
                 .map { $0.uuid }
         )
-        print("👤 PlexUserProfileManager: \(usersWithRememberedPins.count) users have remembered PINs")
     }
 
     // MARK: - Private Methods
@@ -290,14 +261,12 @@ class PlexUserProfileManager: ObservableObject {
             if !savedUser.requiresPin {
                 let success = await selectUser(savedUser, pin: nil)
                 if success {
-                    print("👤 PlexUserProfileManager: Restored previous user: \(savedUser.displayName)")
                     return
                 }
             } else if hasRememberedPin(for: savedUser) {
                 // Try remembered PIN for protected users
                 let (success, pinWasInvalid) = await selectUserWithRememberedPin(savedUser)
                 if success {
-                    print("👤 PlexUserProfileManager: Restored protected user with remembered PIN: \(savedUser.displayName)")
                     return
                 } else if pinWasInvalid {
                     print("👤 PlexUserProfileManager: Remembered PIN was invalid for \(savedUser.displayName)")
@@ -307,7 +276,6 @@ class PlexUserProfileManager: ObservableObject {
             // For protected users without remembered PIN or if switch failed, just set locally
             // They'll need to re-enter PIN if they want their specific content
             selectedUser = savedUser
-            print("👤 PlexUserProfileManager: Restored previous user (PIN required): \(savedUser.displayName)")
             return
         }
 
@@ -319,7 +287,6 @@ class PlexUserProfileManager: ObservableObject {
                 selectedUser = adminUser
                 saveSelectedUser(adminUser)
             }
-            print("👤 PlexUserProfileManager: Defaulted to admin user: \(adminUser.displayName)")
         } else if let firstUser = homeUsers.first, !firstUser.requiresPin {
             // Fallback to first non-protected user
             let success = await selectUser(firstUser, pin: nil)
@@ -327,7 +294,6 @@ class PlexUserProfileManager: ObservableObject {
                 selectedUser = firstUser
                 saveSelectedUser(firstUser)
             }
-            print("👤 PlexUserProfileManager: Defaulted to first user: \(firstUser.displayName)")
         }
     }
 

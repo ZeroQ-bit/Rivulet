@@ -377,18 +377,15 @@ final class UniversalPlayerViewModel: ObservableObject {
         case 0:  // Subtitles
             if focusedRowIndex == 0 {
                 selectSubtitleTrack(id: nil)
-                print("🎬 [SETTINGS] Selected subtitles: Off")
             } else {
                 let trackIndex = focusedRowIndex - 1
                 if trackIndex < subtitleTracks.count {
                     selectSubtitleTrack(id: subtitleTracks[trackIndex].id)
-                    print("🎬 [SETTINGS] Selected subtitle: \(subtitleTracks[trackIndex].name)")
                 }
             }
         case 1:  // Audio
             if focusedRowIndex < audioTracks.count {
                 selectAudioTrack(id: audioTracks[focusedRowIndex].id)
-                print("🎬 [SETTINGS] Selected audio: \(audioTracks[focusedRowIndex].name)")
             }
         default:
             break
@@ -552,16 +549,12 @@ final class UniversalPlayerViewModel: ObservableObject {
             return false
         }()
 
-        print("[Player Selection] useAVPlayerForAll=\(useAVPlayerForAll), useAVPlayerForDV=\(useAVPlayerForDV), airPlayRoute=\(isAirPlayRoute), hasDolbyVision=\(hasDolbyVision), dvProfile=\(dvProfile ?? -1), blCompatID=\(doviBLCompatID ?? -1), isCompatible=\(isCompatibleDVProfile), canUseDVSB=\(canUseDVSampleBuffer), container=\(container)")
-
         // Use AVPlayer if:
         // 1. "Use AVPlayer for All Videos" is enabled, OR
         // 2. "Use AVPlayer for DV" is enabled AND content has compatible DV profile
         if useAVPlayerForAll || (useAVPlayerForDV && canUseAVPlayerForDV) {
             if useAVPlayerForAll {
-                print("[Player Selection] → Using AVPlayer (all videos mode)")
             } else {
-                print("[Player Selection] → Using AVPlayer for Dolby Vision Profile \(dvProfile ?? 0)")
             }
             self.playerType = .avplayer
             self.avPlayerWrapper = AVPlayerWrapper()
@@ -570,7 +563,6 @@ final class UniversalPlayerViewModel: ObservableObject {
             // Use DVSampleBufferPlayer for DV profiles that AVPlayer rejects
             // This bypasses AVPlayer's HLS parser and feeds dvh1-tagged sample buffers
             // directly to AVSampleBufferDisplayLayer / VideoToolbox
-            print("[Player Selection] → Using DVSampleBuffer for DV Profile \(dvProfile ?? 0) (CompatID \(doviBLCompatID ?? -1))")
             self.playerType = .dvSampleBuffer
             self.dvSampleBufferPlayer = DVSampleBufferPlayer()
             self.mpvPlayerWrapper = nil
@@ -580,7 +572,6 @@ final class UniversalPlayerViewModel: ObservableObject {
             // These profiles need on-the-fly RPU conversion to P8.1 for Apple TV compatibility
             self.requiresProfileConversion = (dvProfile == 7) || (dvProfile == 8 && doviBLCompatID == 6)
         } else {
-            print("[Player Selection] → Using MPV")
             self.playerType = .mpv
             self.mpvPlayerWrapper = MPVPlayerWrapper()
             self.avPlayerWrapper = nil
@@ -617,7 +608,6 @@ final class UniversalPlayerViewModel: ObservableObject {
             queue: .main
         ) { [weak self] _ in
             guard let self else { return }
-            print("🎬 [Lifecycle] App entered background - pausing")
             if self.playbackState == .playing {
                 self.pausedDueToAppInactive = true
                 Task { @MainActor in
@@ -634,7 +624,6 @@ final class UniversalPlayerViewModel: ObservableObject {
         ) { [weak self] _ in
             guard let self else { return }
             if self.pausedDueToAppInactive {
-                print("🎬 [Lifecycle] Returning from background - keeping paused")
                 self.pausedDueToAppInactive = false
             }
         }
@@ -648,7 +637,6 @@ final class UniversalPlayerViewModel: ObservableObject {
         // Check if we have a pre-warmed URL in the cache (from PlexDetailView)
         // This saves 100-500ms by avoiding URL construction at startup
         if playerType == .mpv, let cached = StreamURLCache.shared.get(ratingKey: ratingKey) {
-            print("🎬 [Cache] Using pre-warmed stream URL for \(metadata.title ?? ratingKey)")
             streamURL = cached.url
             streamHeaders = cached.headers
             StreamURLCache.shared.remove(ratingKey: ratingKey)  // One-time use
@@ -661,7 +649,6 @@ final class UniversalPlayerViewModel: ObservableObject {
         // Fetch full metadata if Media array is missing (needed for info overlay display)
         // This happens when starting playback from Continue Watching or other hubs with minimal metadata
         if metadata.Media == nil || metadata.Media?.isEmpty == true {
-            print("🎬 [Metadata] Media array missing, fetching full metadata for info overlay...")
             await fetchFullMetadataIfNeeded()
         }
 
@@ -676,7 +663,6 @@ final class UniversalPlayerViewModel: ObservableObject {
             // Check if the source file is already AVPlayer-compatible
             if isAVPlayerDirectPlayCompatible(metadata), let partKey = metadata.Media?.first?.Part?.first?.key {
                 // True direct play - no server processing needed
-                print("[AVPlayer] Direct play compatible (\(container.uppercased())) - using raw file stream")
                 if let url = networkManager.buildVLCDirectPlayURL(
                     serverURL: serverURL,
                     authToken: authToken,
@@ -690,7 +676,6 @@ final class UniversalPlayerViewModel: ObservableObject {
                         "X-Plex-Device": PlexAPI.deviceName,
                         "X-Plex-Product": PlexAPI.productName
                     ]
-                    print("[AVPlayer] Direct play URL: \(url.absoluteString)")
                     return
                 }
             }
@@ -699,15 +684,10 @@ final class UniversalPlayerViewModel: ObservableObject {
             // This handles: MKV containers, incompatible codecs, DTS/TrueHD audio, bad codec tags (dvhe/hev1)
             // Note: For MKV + DV, player selection should have routed to MPV (more reliable)
             // This path is hit when "Use AVPlayer for All" is enabled
-            print("[AVPlayer] Not direct-play compatible (\(container.uppercased())) - using HLS remux")
 
             // For DV content via HLS remux, Plex handles container conversion
             let useDV = metadata.hasDolbyVision
             isUsingDolbyVisionHLS = useDV
-
-            if metadata.hasDolbyVision {
-                print("[AVPlayer] Using DV HLS (container: \(container.uppercased()))")
-            }
 
             if let result = networkManager.buildHLSDirectPlayURL(
                 serverURL: serverURL,
@@ -723,7 +703,6 @@ final class UniversalPlayerViewModel: ObservableObject {
                 streamHeaders = result.headers
                 plexSessionId = URLComponents(url: result.url, resolvingAgainstBaseURL: false)?
                     .queryItems?.first(where: { $0.name == "session" })?.value
-                print("[AVPlayer] HLS URL: \(result.url.absoluteString)")
             }
 
             return
@@ -731,7 +710,6 @@ final class UniversalPlayerViewModel: ObservableObject {
 
         // DVSampleBuffer: Use HLS remux URL (same as AVPlayer DV path) but feed segments manually
         if playerType == .dvSampleBuffer {
-            print("[DVSampleBuffer] Preparing HLS URL for sample buffer pipeline")
             isUsingDolbyVisionHLS = true
 
             if let result = networkManager.buildHLSDirectPlayURL(
@@ -749,7 +727,6 @@ final class UniversalPlayerViewModel: ObservableObject {
                 // Extract session ID from URL for cleanup on stop
                 plexSessionId = URLComponents(url: result.url, resolvingAgainstBaseURL: false)?
                     .queryItems?.first(where: { $0.name == "session" })?.value
-                print("[DVSampleBuffer] HLS URL: \(result.url.absoluteString)")
             }
             return
         }
@@ -866,7 +843,6 @@ final class UniversalPlayerViewModel: ObservableObject {
         let channelCount = audioStream.channels ?? 2
         if audioCodec == "aac" && channelCount > 2 {
             if isAirPlayOutput() {
-                print("🎬 [Audio] Multichannel AAC (\(channelCount)ch) with AirPlay output - forcing transcode to EAC3")
                 return false
             }
         }
@@ -883,9 +859,7 @@ final class UniversalPlayerViewModel: ObservableObject {
 
         let session = AVAudioSession.sharedInstance()
         if let output = session.currentRoute.outputs.first(where: { $0.portType == .airPlay }) {
-            print("🎬 [Audio] Detected AirPlay output: \(output.portName)")
         } else {
-            print("🎬 [Audio] Detected AirPlay output")
         }
         return true
     }
@@ -998,7 +972,6 @@ final class UniversalPlayerViewModel: ObservableObject {
                             do {
                                 try await self.fallbackToHDR10()
                                 self.errorMessage = nil
-                                print("🎬 [Fallback] HDR10 fallback successful!")
                                 return
                             } catch {
                                 print("🎬 [Fallback] HDR10 fallback failed: \(error.localizedDescription)")
@@ -1008,11 +981,9 @@ final class UniversalPlayerViewModel: ObservableObject {
 
                         // For AVPlayer: try restarting the HLS session first before falling back to MPV
                         if self.playerType == .avplayer && self.hasPlaybackEverStarted && !self.hasAttemptedHLSRestart && !isCodecError {
-                            print("🎬 [Restart] Playback was working before - attempting HLS session restart...")
                             do {
                                 try await self.restartHLSSession()
                                 self.errorMessage = nil
-                                print("🎬 [Restart] HLS session restart successful!")
                                 return
                             } catch {
                                 print("🎬 [Restart] HLS restart failed: \(error.localizedDescription)")
@@ -1123,19 +1094,7 @@ final class UniversalPlayerViewModel: ObservableObject {
 
         // Fetch detailed metadata with markers if not already present
         if metadata.Marker == nil || metadata.Marker?.isEmpty == true {
-            print("⏭️ [Skip] No markers in initial metadata, fetching detailed metadata...")
             await fetchMarkersIfNeeded()
-        }
-
-        // Log marker info at playback start
-        if let intro = metadata.introMarker {
-            print("⏭️ [Skip] Intro marker found: \(intro.startTimeSeconds)s - \(intro.endTimeSeconds)s")
-        }
-        for (index, credits) in metadata.creditsMarkers.enumerated() {
-            print("⏭️ [Skip] Credits marker \(index + 1) found: \(credits.startTimeSeconds)s - \(credits.endTimeSeconds)s")
-        }
-        if metadata.Marker == nil || metadata.Marker?.isEmpty == true {
-            print("⏭️ [Skip] No markers found in metadata (even after fetch)")
         }
 
         do {
@@ -1156,12 +1115,10 @@ final class UniversalPlayerViewModel: ObservableObject {
                 // Without this, MPV may try to load the manifest before Plex starts transcoding
                 let isHLSStream = url.absoluteString.contains(".m3u8")
                 if isHLSStream {
-                    print("🎬 [MPV] Waiting for HLS transcode session...")
                     let transcodeReady = await waitForHLSTranscodeReady(url: url, headers: streamHeaders)
                     if !transcodeReady {
                         throw PlayerError.loadFailed("HLS transcode session failed to start")
                     }
-                    print("🎬 [MPV] Transcode ready, loading stream...")
                 }
 
                 try await mpv.load(url: url, headers: streamHeaders, startTime: startOffset)
@@ -1191,14 +1148,11 @@ final class UniversalPlayerViewModel: ObservableObject {
                 if isHLSStream {
                     // Wait for HLS transcode to be ready before loading
                     // Plex needs time to start the transcode session and generate segments
-                    print("🎬 [AVPlayer] Waiting for HLS transcode session...")
                     let transcodeReady = await waitForHLSTranscodeReady(url: url, headers: streamHeaders)
                     if !transcodeReady {
                         throw PlayerError.loadFailed("HLS transcode session failed to start")
                     }
-                    print("🎬 [AVPlayer] Transcode ready, loading stream...")
                 } else {
-                    print("🎬 [AVPlayer] Direct play URL detected, skipping HLS preflight")
                 }
 
                 // For AVPlayer, seek to start offset after loading if needed
@@ -1223,12 +1177,10 @@ final class UniversalPlayerViewModel: ObservableObject {
                 // Wait for HLS transcode to be ready
                 let isHLSStream = url.absoluteString.contains(".m3u8")
                 if isHLSStream {
-                    print("🎬 [DVSampleBuffer] Waiting for HLS transcode session...")
                     let transcodeReady = await waitForHLSTranscodeReady(url: url, headers: streamHeaders)
                     if !transcodeReady {
                         throw PlayerError.loadFailed("HLS transcode session failed to start")
                     }
-                    print("🎬 [DVSampleBuffer] Transcode ready, loading stream...")
                 }
 
                 // Load via sample buffer pipeline, with one full retry on a fresh Plex session.
@@ -1265,7 +1217,6 @@ final class UniversalPlayerViewModel: ObservableObject {
                         forceVideoTranscode: false,
                         allowAudioDirectStream: allowAudioDirectStream
                     ) {
-                        print("🎬 [DVSampleBuffer] Sending decision ping to wake server...")
                         await PlexNetworkManager.shared.startTranscodeDecision(
                             hlsURL: decisionURL.url, headers: decisionURL.headers
                         )
@@ -1296,7 +1247,6 @@ final class UniversalPlayerViewModel: ObservableObject {
                     streamHeaders = result.headers
                     plexSessionId = URLComponents(url: result.url, resolvingAgainstBaseURL: false)?
                         .queryItems?.first(where: { $0.name == "session" })?.value
-                    print("🎬 [DVSampleBuffer] Retry with new session: \(plexSessionId ?? "?")")
 
                     let retryReady = await waitForHLSTranscodeReady(url: result.url, headers: result.headers)
                     if !retryReady {
@@ -1386,12 +1336,10 @@ final class UniversalPlayerViewModel: ObservableObject {
         // Try up to 8 times with delays to give Plex time to start the transcode
         for attempt in 1...8 {
             do {
-                print("🎬 [AVPlayer] Preflight attempt \(attempt)/8: Checking HLS manifest...")
 
                 let (data, response) = try await URLSession.shared.data(for: request)
 
                 if let httpResponse = response as? HTTPURLResponse {
-                    print("🎬 [AVPlayer] Preflight response: \(httpResponse.statusCode) (\(data.count) bytes)")
 
                     if httpResponse.statusCode == 200 && data.count > 0 {
                         if let content = String(data: data, encoding: .utf8) {
@@ -1402,27 +1350,21 @@ final class UniversalPlayerViewModel: ObservableObject {
 
                             if hasHeader && hasVariants {
                                 // This is a master playlist - follow a variant to check for segments
-                                print("🎬 [AVPlayer] Preflight: Master playlist found, checking variant...")
                                 if let variantReady = await checkVariantPlaylist(masterContent: content, baseURL: url, headers: headers), variantReady {
-                                    print("🎬 [AVPlayer] Preflight: Variant playlist has segments, transcode ready!")
                                     return true
                                 } else {
-                                    print("🎬 [AVPlayer] Preflight: Variant not ready yet...")
                                 }
                             } else if hasHeader && hasSegments {
                                 // This is already a media playlist with segments
-                                print("🎬 [AVPlayer] Preflight: Media playlist with segments found")
                                 return true
                             } else if hasHeader {
                                 // Has header but no content yet
-                                print("🎬 [AVPlayer] Preflight: Manifest exists but no content yet, waiting...")
                             } else {
                                 print("🎬 [AVPlayer] Preflight: Invalid manifest content")
                             }
                         }
                     } else if httpResponse.statusCode == 404 || httpResponse.statusCode == 503 {
                         // Transcode not started yet
-                        print("🎬 [AVPlayer] Preflight: Transcode not ready (\(httpResponse.statusCode))")
                     } else {
                         print("🎬 [AVPlayer] Preflight: Unexpected status \(httpResponse.statusCode)")
                     }
@@ -1434,7 +1376,6 @@ final class UniversalPlayerViewModel: ObservableObject {
             // Wait before retrying (increasing delay: 0.5s, 1s, 1.5s, 2s, 2.5s, 3s, 3.5s, 4s)
             if attempt < 8 {
                 let delay = Double(attempt) * 0.5
-                print("🎬 [AVPlayer] Preflight: Waiting \(delay)s before retry...")
                 try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
             }
         }
@@ -1465,8 +1406,6 @@ final class UniversalPlayerViewModel: ObservableObject {
             return nil
         }
 
-        print("🎬 [AVPlayer] Preflight: Checking variant at \(variant.lastPathComponent)")
-
         var request = URLRequest(url: variant)
         request.httpMethod = "GET"
         request.timeoutInterval = 5
@@ -1487,14 +1426,11 @@ final class UniversalPlayerViewModel: ObservableObject {
                 let hasMediaContent = content.contains(".mp4") || content.contains(".ts") || content.contains(".m4s")
 
                 if hasSegments && hasMediaContent {
-                    print("🎬 [AVPlayer] Preflight: Variant has \(content.components(separatedBy: "#EXTINF").count - 1) segments")
                     return true
                 } else {
-                    print("🎬 [AVPlayer] Preflight: Variant exists but has no segments yet")
                     return false
                 }
             } else {
-                print("🎬 [AVPlayer] Preflight: Variant not accessible")
                 return false
             }
         } catch {
@@ -1531,7 +1467,6 @@ final class UniversalPlayerViewModel: ObservableObject {
 
         // Save current position to restore after restart
         let savedPosition = currentTime
-        print("🎬 [Restart] Saving position: \(savedPosition)s")
 
         // Stop current AVPlayer
         avPlayerWrapper?.stop()
@@ -1571,13 +1506,10 @@ final class UniversalPlayerViewModel: ObservableObject {
             throw PlayerError.loadFailed("No stream URL available")
         }
 
-        print("🎬 [Restart] Loading new HLS session: \(url.absoluteString.prefix(100))...")
-
         // Load the new stream (offset is already baked into the HLS URL)
         // Warm up the transcode session to avoid 404s on initial segments
         let isHLS = url.absoluteString.contains(".m3u8")
         if isHLS {
-            print("🎬 [Restart] Waiting for HLS transcode session...")
             let ready = await waitForHLSTranscodeReady(url: url, headers: streamHeaders)
             if !ready {
                 throw PlayerError.loadFailed("HLS transcode session failed to start on restart")
@@ -1595,7 +1527,6 @@ final class UniversalPlayerViewModel: ObservableObject {
         updateTrackLists()
         startControlsHideTimer()
 
-        print("🎬 [Restart] HLS session restart complete, resuming from \(savedPosition)s")
     }
 
     /// Fall back from Dolby Vision HLS to HDR10 base layer when DV remux fails
@@ -1610,7 +1541,6 @@ final class UniversalPlayerViewModel: ObservableObject {
 
         // Save current position to restore after restart
         let savedPosition = currentTime
-        print("🎬 [HDR10 Fallback] Saving position: \(savedPosition)s")
 
         // Stop current AVPlayer
         avPlayerWrapper?.stop()
@@ -1636,8 +1566,6 @@ final class UniversalPlayerViewModel: ObservableObject {
             throw PlayerError.loadFailed("Missing rating key")
         }
 
-        print("🎬 [HDR10 Fallback] Requesting HLS without DV codecs (HDR10 base layer)...")
-
         if let result = networkManager.buildHLSDirectPlayURL(
             serverURL: serverURL,
             authToken: authToken,
@@ -1658,11 +1586,8 @@ final class UniversalPlayerViewModel: ObservableObject {
             throw PlayerError.loadFailed("No stream URL available")
         }
 
-        print("🎬 [HDR10 Fallback] Loading HDR10 stream: \(url.absoluteString.prefix(100))...")
-
         // Warm up the HLS transcode (HDR10) before loading to avoid 404s
         if url.absoluteString.contains(".m3u8") {
-            print("🎬 [HDR10 Fallback] Waiting for HLS transcode session...")
             let ready = await waitForHLSTranscodeReady(url: url, headers: streamHeaders)
             if !ready {
                 throw PlayerError.loadFailed("HLS transcode session failed to start for HDR10 fallback")
@@ -1684,7 +1609,6 @@ final class UniversalPlayerViewModel: ObservableObject {
         // Show notice explaining the fallback (this is a Plex issue, not our bug)
         showCompatibilityNotice("Playing HDR10 (Plex can't remux DV from MKV)")
 
-        print("🎬 [HDR10 Fallback] Complete, resuming from \(savedPosition)s")
     }
 
     /// Fall back from AVPlayer to MPV when AVPlayer fails to load
@@ -1751,8 +1675,6 @@ final class UniversalPlayerViewModel: ObservableObject {
             throw PlayerError.loadFailed("Could not build MPV stream URL")
         }
 
-        print("🎬 [Fallback] Retrying with MPV using URL: \(url.absoluteString)")
-
         // Show notice to user about the fallback
         // Use appropriate message based on which setting was enabled
         let useAVPlayerForAll = UserDefaults.standard.bool(forKey: "useAVPlayerForAllVideos")
@@ -1784,7 +1706,6 @@ final class UniversalPlayerViewModel: ObservableObject {
         preloadThumbnails()
         startControlsHideTimer()
 
-        print("🎬 [Fallback] MPV fallback successful!")
     }
 
     /// Called when the MPV view controller is created
@@ -2191,7 +2112,6 @@ final class UniversalPlayerViewModel: ObservableObject {
         // Save preference
         if let track = audioTracks.first(where: { $0.id == id }) {
             AudioPreferenceManager.current = AudioPreference(from: track)
-            print("[AUDIO PREF] Saved: \(track.languageCode ?? "?")")
         }
     }
 
@@ -2223,10 +2143,8 @@ final class UniversalPlayerViewModel: ObservableObject {
         // Save preference
         if let id = id, let track = subtitleTracks.first(where: { $0.id == id }) {
             SubtitlePreferenceManager.current = SubtitlePreference(from: track)
-            print("🎬 [SUBTITLE PREF] Saved: \(track.languageCode ?? "?") / \(track.codec ?? "?")")
         } else {
             SubtitlePreferenceManager.current = .off
-            print("🎬 [SUBTITLE PREF] Saved: Off")
         }
     }
 
@@ -2410,9 +2328,7 @@ final class UniversalPlayerViewModel: ObservableObject {
         if let match = AudioPreferenceManager.findBestMatch(in: audioTracks, preference: preference) {
             if match.id != currentAudioTrackId {
                 selectAudioTrackWithoutSaving(id: match.id)
-                print("[AUDIO PREF] Applied: \(match.audioFormatString) (\(match.languageCode ?? "?"))")
             } else {
-                print("[AUDIO PREF] Already on best track: \(match.audioFormatString)")
             }
         }
     }
@@ -2424,18 +2340,15 @@ final class UniversalPlayerViewModel: ObservableObject {
         if !preference.enabled {
             // User prefers subtitles off
             selectSubtitleTrackWithoutSaving(id: nil)
-            print("🎬 [SUBTITLE PREF] Applied: Off (user preference)")
             return
         }
 
         // Find best matching track
         if let match = SubtitlePreferenceManager.findBestMatch(in: subtitleTracks, preference: preference) {
             selectSubtitleTrackWithoutSaving(id: match.id)
-            print("🎬 [SUBTITLE PREF] Applied: \(match.name) (matched \(preference.languageCode ?? "?"))")
         } else {
             // No matching language found - keep subtitles off
             selectSubtitleTrackWithoutSaving(id: nil)
-            print("🎬 [SUBTITLE PREF] Applied: Off (no \(preference.languageCode ?? "?") tracks found)")
         }
     }
 
@@ -2611,7 +2524,6 @@ final class UniversalPlayerViewModel: ObservableObject {
                    credits.id == firstCredits.id,
                    time >= credits.startTimeSeconds && !hasTriggeredPostVideo {
                     hasTriggeredPostVideo = true
-                    print("🎬 [PostVideo] Credits marker started at \(credits.startTimeSeconds)s, triggering summary")
                     Task { await handlePlaybackEnded() }
                 }
                 return
@@ -2657,7 +2569,6 @@ final class UniversalPlayerViewModel: ObservableObject {
             // Only trigger if we're both near the end AND have watched most of the content
             if time >= triggerTime && time >= minCompletionTime && !hasTriggeredPostVideo {
                 hasTriggeredPostVideo = true
-                print("🎬 [PostVideo] 45s before end (no credits marker), triggering summary at \(time)s (duration: \(duration)s)")
                 Task { await handlePlaybackEnded() }
                 return
             }
@@ -2692,7 +2603,6 @@ final class UniversalPlayerViewModel: ObservableObject {
             if showSkipButtonSetting && activeMarker == nil {
                 activeMarker = marker
                 showSkipButton = true
-                print("⏭️ [Skip] Showing skip button with countdown for intro marker: \(marker.startTimeSeconds)s - \(marker.endTimeSeconds)s")
             }
             return
         }
@@ -2702,7 +2612,6 @@ final class UniversalPlayerViewModel: ObservableObject {
             if !hasSkippedIntro && activeMarker == nil {
                 activeMarker = marker
                 showSkipButton = true
-                print("⏭️ [Skip] Showing skip button for intro marker: \(marker.startTimeSeconds)s - \(marker.endTimeSeconds)s")
             }
         }
     }
@@ -2710,7 +2619,6 @@ final class UniversalPlayerViewModel: ObservableObject {
     /// Start countdown timer for auto-skip intro
     private func startIntroSkipCountdown(for marker: PlexMarker) {
         introSkipCountdownSeconds = introSkipDelaySeconds
-        print("⏭️ [Skip] Starting intro skip countdown: \(introSkipDelaySeconds) seconds")
 
         introSkipCountdownTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] timer in
             Task { @MainActor in
@@ -2720,7 +2628,6 @@ final class UniversalPlayerViewModel: ObservableObject {
                 }
 
                 self.introSkipCountdownSeconds -= 1
-                print("⏭️ [Skip] Countdown: \(self.introSkipCountdownSeconds)")
 
                 if self.introSkipCountdownSeconds <= 0 {
                     timer.invalidate()
@@ -2736,7 +2643,6 @@ final class UniversalPlayerViewModel: ObservableObject {
     func cancelIntroSkipCountdown() {
         guard introSkipCountdownTimer != nil || introSkipCountdownSeconds > 0 else { return }
 
-        print("⏭️ [Skip] User cancelled intro skip countdown")
         introSkipCountdownTimer?.invalidate()
         introSkipCountdownTimer = nil
         introSkipCountdownSeconds = 0
@@ -2766,7 +2672,6 @@ final class UniversalPlayerViewModel: ObservableObject {
             if !skippedCreditsIds.contains(creditsId) && activeMarker == nil {
                 activeMarker = marker
                 showSkipButton = true
-                print("⏭️ [Skip] Showing skip button for credits marker: \(marker.startTimeSeconds)s - \(marker.endTimeSeconds)s")
             }
         }
     }
@@ -2794,7 +2699,6 @@ final class UniversalPlayerViewModel: ObservableObject {
             if !skippedCommercialIds.contains(commercialId) && activeMarker == nil {
                 activeMarker = marker
                 showSkipButton = true
-                print("⏭️ [Skip] Showing skip button for commercial marker: \(marker.startTimeSeconds)s - \(marker.endTimeSeconds)s")
             }
         }
     }
@@ -2844,7 +2748,6 @@ final class UniversalPlayerViewModel: ObservableObject {
     /// Fetch detailed metadata with markers if not already present
     private func fetchMarkersIfNeeded() async {
         guard let ratingKey = metadata.ratingKey else {
-            print("⏭️ [Skip] No rating key for metadata fetch")
             return
         }
 
@@ -2859,9 +2762,7 @@ final class UniversalPlayerViewModel: ObservableObject {
             // Update metadata with markers from detailed fetch
             if let markers = detailedMetadata.Marker, !markers.isEmpty {
                 metadata.Marker = markers
-                print("⏭️ [Skip] Fetched \(markers.count) markers from detailed metadata")
             } else {
-                print("⏭️ [Skip] Detailed metadata also has no markers")
             }
         } catch {
             print("⏭️ [Skip] Failed to fetch detailed metadata: \(error)")
@@ -2878,20 +2779,12 @@ final class UniversalPlayerViewModel: ObservableObject {
         // Mark as watched immediately when playback ends/reaches credits
         await markCurrentAsWatched()
 
-        print("🎬 [PostVideo] Playback ended, preparing summary...")
-        print("🎬 [PostVideo] Content type: \(metadata.type ?? "nil")")
-        print("🎬 [PostVideo] Title: \(metadata.title ?? "nil")")
-        print("🎬 [PostVideo] parentRatingKey (season): \(metadata.parentRatingKey ?? "nil")")
-        print("🎬 [PostVideo] grandparentRatingKey (show): \(metadata.grandparentRatingKey ?? "nil")")
-        print("🎬 [PostVideo] Current episode index: \(metadata.index ?? -1)")
-
         postVideoState = .loading
 
         let isEpisode = metadata.type == "episode"
 
         // Movies: No PostVideo - just let the video play through to the end
         guard isEpisode else {
-            print("🎬 [PostVideo] Movie content - skipping PostVideo, letting playback continue")
             postVideoState = .hidden
             return
         }
@@ -2900,18 +2793,14 @@ final class UniversalPlayerViewModel: ObservableObject {
 
         // If parent metadata is missing (e.g., from Continue Watching), fetch full metadata first
         if metadata.parentRatingKey == nil || metadata.index == nil {
-            print("🎬 [PostVideo] Missing parent metadata, fetching full metadata...")
             await fetchFullMetadataIfNeeded()
-            print("🎬 [PostVideo] After fetch - parentRatingKey: \(metadata.parentRatingKey ?? "nil"), index: \(metadata.index ?? -1)")
         }
 
         // Fetch next episode
         nextEpisode = await fetchNextEpisode()
-        print("🎬 [PostVideo] Next episode result: \(nextEpisode?.title ?? "nil")")
 
         // No next episode: Skip PostVideo - just let the video play through
         guard nextEpisode != nil else {
-            print("🎬 [PostVideo] No next episode available - skipping PostVideo, letting playback continue")
             postVideoState = .hidden
             return
         }
@@ -2920,15 +2809,12 @@ final class UniversalPlayerViewModel: ObservableObject {
         withAnimation(.spring(response: 0.5, dampingFraction: 0.85)) {
             videoFrameState = .shrunk
         }
-        print("🎬 [PostVideo] Video frame set to shrunk")
 
         // Show episode summary after brief delay
         try? await Task.sleep(nanoseconds: 200_000_000)  // 0.2s
         postVideoState = .showingEpisodeSummary
-        print("🎬 [PostVideo] State set to showingEpisodeSummary")
 
         // Start countdown and preload
-        print("🎬 [PostVideo] Starting autoplay countdown")
         startAutoplayCountdown()
         // Preload next episode in background for instant playback
         Task {
@@ -2939,7 +2825,6 @@ final class UniversalPlayerViewModel: ObservableObject {
     /// Fetch full metadata if parent keys or Media info are missing (e.g., from Continue Watching)
     private func fetchFullMetadataIfNeeded() async {
         guard let ratingKey = metadata.ratingKey else {
-            print("🎬 [Metadata] No rating key for full metadata fetch")
             return
         }
 
@@ -2972,14 +2857,8 @@ final class UniversalPlayerViewModel: ObservableObject {
             // Update Media array if missing (needed for info overlay display)
             if metadata.Media == nil || metadata.Media?.isEmpty == true {
                 metadata.Media = fullMetadata.Media
-                print("🎬 [Metadata] Updated Media array from full fetch (streams: \(fullMetadata.Media?.first?.Part?.first?.Stream?.count ?? 0))")
             }
 
-            print("🎬 [Metadata] Updated metadata from full fetch:")
-            print("🎬 [Metadata]   parentRatingKey: \(metadata.parentRatingKey ?? "nil")")
-            print("🎬 [Metadata]   grandparentRatingKey: \(metadata.grandparentRatingKey ?? "nil")")
-            print("🎬 [Metadata]   parentIndex (season): \(metadata.parentIndex ?? -1)")
-            print("🎬 [Metadata]   index (episode): \(metadata.index ?? -1)")
         } catch {
             print("🎬 [Metadata] Failed to fetch full metadata: \(error)")
         }
@@ -2994,14 +2873,9 @@ final class UniversalPlayerViewModel: ObservableObject {
             return shuffledQueue[shuffledQueueIndex]
         }
 
-        print("🎬 [PostVideo] fetchNextEpisode called")
-        print("🎬 [PostVideo] seasonKey (parentRatingKey): \(metadata.parentRatingKey ?? "nil")")
-        print("🎬 [PostVideo] currentIndex: \(metadata.index ?? -1)")
-
         // Check if next episode was prefetched
         if let ratingKey = metadata.ratingKey,
            let cached = await PlexDataStore.shared.getCachedNextEpisode(for: ratingKey) {
-            print("🎬 [PostVideo] Using prefetched next episode: \(cached.episodeString ?? "?") - \(cached.title ?? "?")")
             return cached
         }
 
@@ -3015,13 +2889,11 @@ final class UniversalPlayerViewModel: ObservableObject {
 
         do {
             // Get all episodes in current season
-            print("🎬 [PostVideo] Fetching episodes for season: \(seasonKey)")
             let episodes = try await networkManager.getChildren(
                 serverURL: serverURL,
                 authToken: authToken,
                 ratingKey: seasonKey
             )
-            print("🎬 [PostVideo] Got \(episodes.count) episodes in season")
 
             // Sort episodes by index and find the next one after current
             let sortedEpisodes = episodes
@@ -3030,18 +2902,15 @@ final class UniversalPlayerViewModel: ObservableObject {
 
             // Find episodes with index greater than current, take the first one
             if let nextEp = sortedEpisodes.first(where: { ($0.index ?? 0) > currentIndex }) {
-                print("🎬 [PostVideo] Found next episode: S\(nextEp.parentIndex ?? 0)E\(nextEp.index ?? 0) - \(nextEp.title ?? "?")")
                 return nextEp
             }
 
             // Debug: show what episodes and indexes we have
             let episodeInfo = sortedEpisodes.map { "E\($0.index ?? -1): \($0.title ?? "?")" }
-            print("🎬 [PostVideo] No episode after index \(currentIndex) found. Episodes in season: \(episodeInfo). Trying next season...")
 
             // End of season - try next season
             guard let showKey = metadata.grandparentRatingKey,
                   let seasonIndex = metadata.parentIndex else {
-                print("🎬 [PostVideo] End of season, no show key for next season lookup")
                 return nil
             }
 
@@ -3059,7 +2928,6 @@ final class UniversalPlayerViewModel: ObservableObject {
             guard let nextSeason = sortedSeasons.first(where: { ($0.index ?? 0) > seasonIndex }),
                   let nextSeasonKey = nextSeason.ratingKey else {
                 let seasonIndexes = sortedSeasons.compactMap { $0.index }
-                print("🎬 [PostVideo] End of series - no season after \(seasonIndex). Available seasons: \(seasonIndexes)")
                 return nil
             }
 
@@ -3075,7 +2943,6 @@ final class UniversalPlayerViewModel: ObservableObject {
                 .sorted { ($0.index ?? 0) < ($1.index ?? 0) }
 
             if let firstEp = sortedNextSeasonEps.first {
-                print("🎬 [PostVideo] Found first episode of next season: S\(firstEp.parentIndex ?? 0)E\(firstEp.index ?? 0)")
                 return firstEp
             }
 
@@ -3099,7 +2966,6 @@ final class UniversalPlayerViewModel: ObservableObject {
                 ratingKey: ratingKey,
                 limit: 10
             )
-            print("🎬 [PostVideo] Fetched \(related.count) recommendations")
             return related
         } catch {
             print("🎬 [PostVideo] Failed to fetch recommendations: \(error)")
@@ -3120,7 +2986,6 @@ final class UniversalPlayerViewModel: ObservableObject {
 
         // 0 means disabled
         guard countdownSetting > 0 else {
-            print("🎬 [PostVideo] Autoplay countdown disabled")
             return
         }
 
@@ -3147,8 +3012,6 @@ final class UniversalPlayerViewModel: ObservableObject {
     private func preloadNextEpisode() async {
         guard let next = nextEpisode, let ratingKey = next.ratingKey else { return }
 
-        print("🎬 [Preload] Starting preload for: \(next.title ?? "Unknown")")
-
         let networkManager = PlexNetworkManager.shared
 
         // Fetch full metadata with markers
@@ -3159,7 +3022,6 @@ final class UniversalPlayerViewModel: ObservableObject {
                 ratingKey: ratingKey
             )
             preloadedNextMetadata = fullMetadata
-            print("🎬 [Preload] Fetched metadata with \(fullMetadata.Marker?.count ?? 0) markers")
         } catch {
             print("🎬 [Preload] Failed to fetch metadata: \(error)")
             preloadedNextMetadata = next
@@ -3186,7 +3048,6 @@ final class UniversalPlayerViewModel: ObservableObject {
                     await networkManager.warmDirectPlayStream(url: preloadedURL, headers: headers)
                 }
             }
-            print("🎬 [Preload] Stream URL ready: \(preloadedNextStreamURL?.absoluteString ?? "nil")")
         }
     }
 
@@ -3202,7 +3063,6 @@ final class UniversalPlayerViewModel: ObservableObject {
         countdownTimer?.invalidate()
         countdownTimer = nil
         isCountdownPaused = true
-        print("🎬 [PostVideo] Countdown cancelled")
     }
 
     /// Play the next episode
@@ -3211,8 +3071,6 @@ final class UniversalPlayerViewModel: ObservableObject {
 
         // Mark current episode as watched BEFORE switching to next
         await markCurrentAsWatched()
-
-        print("🎬 [PostVideo] Playing next episode: \(next.title ?? "Unknown")")
 
         // Stop countdown and reset all countdown state
         countdownTimer?.invalidate()
@@ -3225,7 +3083,6 @@ final class UniversalPlayerViewModel: ObservableObject {
             postVideoState = .hidden
             videoFrameState = .fullscreen
         }
-        print("🎬 [PostVideo] Reset state: postVideoState=\(postVideoState), videoFrameState=\(videoFrameState)")
 
         // Use preloaded metadata if available (has markers), otherwise use fetched next episode
         metadata = preloadedNextMetadata ?? next
@@ -3248,17 +3105,14 @@ final class UniversalPlayerViewModel: ObservableObject {
 
         // Ensure next episode has required metadata for subsequent next-up detection
         if metadata.parentRatingKey == nil || metadata.index == nil {
-            print("🎬 [PostVideo] Next episode missing parent metadata, fetching full details...")
             await fetchFullMetadataIfNeeded()
         }
 
         // Use preloaded stream URL if available, otherwise prepare fresh
         if let preloadedURL = preloadedNextStreamURL {
-            print("🎬 [PostVideo] Using preloaded stream URL")
             streamURL = preloadedURL
             streamHeaders = preloadedNextStreamHeaders
         } else {
-            print("🎬 [PostVideo] No preloaded URL, preparing fresh...")
             await prepareStreamURL()
         }
 
@@ -3327,7 +3181,6 @@ final class UniversalPlayerViewModel: ObservableObject {
 
         // Mark as watched (episode reached post-video, so it's effectively complete)
         await PlexProgressReporter.shared.markAsWatched(ratingKey: ratingKey)
-        print("📊 [Progress] Marked \(ratingKey) as watched")
     }
 
     // MARK: - Cleanup

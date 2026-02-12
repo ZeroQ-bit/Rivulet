@@ -26,7 +26,6 @@ struct AVPlayerView: UIViewRepresentable {
         // Attach player immediately if available
         if let player = playerWrapper.player {
             view.player = player
-            print("🎬 AVPlayerView: Attached player on creation")
         }
         return view
     }
@@ -40,7 +39,6 @@ struct AVPlayerView: UIViewRepresentable {
         // Attach the player when it becomes available
         if let player = playerWrapper.player, uiView.player !== player {
             uiView.player = player
-            print("🎬 AVPlayerView: Attached player on update")
         }
     }
 }
@@ -86,11 +84,9 @@ final class AVPlayerUIView: UIView {
                 Task {
                     do {
                         let videoTracks = try await asset.loadTracks(withMediaType: .video)
-                        print("🎬 AVPlayerUIView: Player attached - video tracks: \(videoTracks.count)")
                         for (i, track) in videoTracks.enumerated() {
                             let naturalSize = try await track.load(.naturalSize)
                             let isEnabled = try await track.load(.isEnabled)
-                            print("🎬 AVPlayerUIView: Track \(i): naturalSize=\(naturalSize), enabled=\(isEnabled)")
                         }
                     } catch {
                         print("🎬 AVPlayerUIView: Failed to load track info: \(error)")
@@ -110,7 +106,6 @@ final class AVPlayerUIView: UIView {
                     guard let self else { return }
                     let isReady = layer.isReadyForDisplay
                     let videoRect = layer.videoRect
-                    print("🎬 AVPlayerUIView: isReadyForDisplay changed to \(isReady), videoRect=\(videoRect)")
                     // Track reported rect to avoid duplicates from layoutSubviews
                     if videoRect.width > 10 && videoRect.height > 10 {
                         self.lastReportedVideoRect = videoRect
@@ -146,8 +141,6 @@ final class AVPlayerUIView: UIView {
         // AVPlayerLayer automatically resizes with the view
         let videoRect = playerLayer.videoRect
         let isReady = playerLayer.isReadyForDisplay
-        print("🎬 AVPlayerUIView: layoutSubviews - bounds=\(bounds), layer.frame=\(playerLayer.frame)")
-        print("🎬 AVPlayerUIView: videoRect=\(videoRect), isReadyForDisplay=\(isReady)")
 
         // If we have a valid videoRect that differs from last reported, call the callback
         // This catches the case where videoRect becomes valid AFTER isReadyForDisplay fires
@@ -156,7 +149,6 @@ final class AVPlayerUIView: UIView {
             let rectChanged = abs(videoRect.width - lastReportedVideoRect.width) > 1 ||
                               abs(videoRect.height - lastReportedVideoRect.height) > 1
             if rectChanged {
-                print("🎬 AVPlayerUIView: Reporting valid videoRect from layoutSubviews")
                 lastReportedVideoRect = videoRect
                 onRenderingStatusChanged?(isReady, videoRect)
             }

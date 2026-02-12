@@ -124,11 +124,9 @@ struct ParallaxPosterImage: View {
             // Cache the result (actor call, non-blocking)
             await DepthLayerCache.shared.cacheLayers(result, for: url)
             await MainActor.run { depthResult = result }
-            print("🎨 ParallaxPosterImage: Foreground cutout created for \(url.lastPathComponent), quality: \(result.qualityScore)")
         } else {
             // Mark as unsuitable to avoid reprocessing
             await DepthLayerCache.shared.markUnsuitable(for: url)
-            print("🎨 ParallaxPosterImage: Marked unsuitable - \(url.lastPathComponent)")
         }
     }
 }

@@ -66,7 +66,6 @@ actor PlexLiveTVProvider: LiveTVProvider {
         if let lastFetch = lastChannelFetch,
            Date().timeIntervalSince(lastFetch) < channelCacheDuration,
            !cachedChannels.isEmpty {
-            print("📺 PlexLiveTVProvider: Returning \(cachedChannels.count) cached channels")
 
             // Log cache hit (GitHub #64 - DVB diagnostics)
             let breadcrumb = Breadcrumb(level: .info, category: "plex_livetv")
@@ -85,7 +84,6 @@ actor PlexLiveTVProvider: LiveTVProvider {
     }
 
     func refreshChannels() async throws -> [UnifiedChannel] {
-        print("📺 PlexLiveTVProvider: Fetching channels from Plex Live TV")
 
         // Log refresh start (GitHub #64 - DVB diagnostics)
         let startBreadcrumb = Breadcrumb(level: .info, category: "plex_livetv")
@@ -148,8 +146,6 @@ actor PlexLiveTVProvider: LiveTVProvider {
             throw error
         }
 
-        print("📺 PlexLiveTVProvider: ✅ Fetched \(plexChannels.count) channels")
-
         // Convert to UnifiedChannel
         let channels = plexChannels.map { plexChannel in
             plexChannel.toUnifiedChannel(
@@ -188,11 +184,8 @@ actor PlexLiveTVProvider: LiveTVProvider {
         if let lastFetch = lastEPGFetch,
            Date().timeIntervalSince(lastFetch) < epgCacheDuration,
            !cachedEPG.isEmpty {
-            print("📺 PlexLiveTVProvider: Returning cached EPG")
             return filterEPG(cachedEPG, channels: channels, startDate: startDate, endDate: endDate)
         }
-
-        print("📺 PlexLiveTVProvider: Fetching EPG from Plex")
 
         // Build channel ID list for filtering
         let channelRatingKeys = channels.compactMap { channel -> String? in
@@ -224,8 +217,6 @@ actor PlexLiveTVProvider: LiveTVProvider {
             throw error
         }
 
-        print("📺 PlexLiveTVProvider: ✅ Fetched EPG for \(guideChannels.count) channels")
-
         // Build unified channel ID lookup
         // Use uniquingKeysWith to handle duplicate ratingKeys (keep first occurrence)
         let ratingKeyToUnifiedId = Dictionary(
@@ -236,8 +227,6 @@ actor PlexLiveTVProvider: LiveTVProvider {
             },
             uniquingKeysWith: { first, _ in first }
         )
-
-        print("📺 PlexLiveTVProvider: Channel lookup keys: \(Array(ratingKeyToUnifiedId.keys))")
 
         // Convert to UnifiedProgram
         var unifiedEPG: [String: [UnifiedProgram]] = [:]
@@ -269,15 +258,10 @@ actor PlexLiveTVProvider: LiveTVProvider {
                 return result
             }
 
-            print("📺 PlexLiveTVProvider: Channel \(ratingKey) - \(programs.count) programs, \(unifiedPrograms.count) converted")
-
             if !unifiedPrograms.isEmpty {
                 unifiedEPG[unifiedChannelId] = unifiedPrograms
             }
         }
-
-        print("📺 PlexLiveTVProvider: EPG matching complete - matched \(matchedChannels) channels, unmatched: \(unmatchedChannels)")
-        print("📺 PlexLiveTVProvider: Returning EPG for \(unifiedEPG.count) channels with \(unifiedEPG.values.reduce(0) { $0 + $1.count }) total programs")
 
         // Update cache
         cachedEPG = unifiedEPG
@@ -299,7 +283,6 @@ actor PlexLiveTVProvider: LiveTVProvider {
 
     nonisolated func buildStreamURL(for channel: UnifiedChannel) -> URL? {
         guard let originalURL = channel.streamURL else {
-            print("📺 PlexLiveTVProvider.buildStreamURL: No stream URL for channel '\(channel.name)'")
 
             // Log missing stream URL (GitHub #64 - DVB diagnostics)
             let breadcrumb = Breadcrumb(level: .warning, category: "plex_livetv")
@@ -319,7 +302,6 @@ actor PlexLiveTVProvider: LiveTVProvider {
         // may reject reused session IDs for subsequent playback attempts
         guard originalURL.path.contains("/transcode/") else {
             // HDHomeRun or other direct URLs - use as-is
-            print("📺 PlexLiveTVProvider.buildStreamURL: Using direct URL for '\(channel.name)' (HDHomeRun)")
 
             // Log direct URL passthrough (GitHub #64 - DVB diagnostics)
             let breadcrumb = Breadcrumb(level: .info, category: "plex_livetv")
@@ -368,7 +350,6 @@ actor PlexLiveTVProvider: LiveTVProvider {
 
         components.queryItems = queryItems
         let newURL = components.url ?? originalURL
-        print("📺 PlexLiveTVProvider.buildStreamURL: Generated fresh session '\(newSessionId.prefix(8))...' for '\(channel.name)' (Plex transcode)")
 
         // Log session ID regeneration (GitHub #64 - DVB diagnostics)
         let breadcrumb = Breadcrumb(level: .info, category: "plex_livetv")

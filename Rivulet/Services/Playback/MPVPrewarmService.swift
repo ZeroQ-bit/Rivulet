@@ -71,13 +71,11 @@ final class MPVPrewarmService {
     func prewarmIfNeeded(forLiveStream: Bool = false) {
         // Don't pre-warm if already ready or in use
         guard state == .cold else {
-            print("🔥 [MPVPrewarm] Skipping pre-warm, state=\(state)")
             return
         }
 
         state = .warming
         prewarmedForLiveStream = forLiveStream
-        print("🔥 [MPVPrewarm] Starting pre-warm for \(forLiveStream ? "live" : "VOD") mode")
 
         // Create controller on main thread (UIKit requirement)
         let controller = MPVMetalViewController()
@@ -102,7 +100,6 @@ final class MPVPrewarmService {
             self.prewarmedController = controller
             self.state = .ready
             self.startReleaseTimer()
-            print("🔥 [MPVPrewarm] Pre-warm complete, controller ready")
         }
     }
 
@@ -130,7 +127,6 @@ final class MPVPrewarmService {
         releaseTimer = nil
         prewarmedController = nil
         state = .inUse
-        print("🔥 [MPVPrewarm] Controller claimed for \(isLiveStream ? "live" : "VOD") playback")
 
         return controller
     }
@@ -140,7 +136,6 @@ final class MPVPrewarmService {
     func releaseController() {
         guard state == .inUse else { return }
         state = .cold
-        print("🔥 [MPVPrewarm] Controller released, state=cold")
     }
 
     /// Force release any pre-warmed controller (e.g., on memory warning)
@@ -151,7 +146,6 @@ final class MPVPrewarmService {
         if let controller = prewarmedController {
             // The controller will clean up MPV resources in its deinit
             prewarmedController = nil
-            print("🔥 [MPVPrewarm] Force-released pre-warmed controller")
 
             // Ensure controller is fully released by removing any strong references
             _ = controller

@@ -41,14 +41,12 @@ final class SubtitleManager: ObservableObject {
                 // Try to auto-detect from content
                 let track = try parseWithAutoDetect(content)
                 currentTrack = track
-                print("🎬 [Subtitles] Loaded \(track.cues.count) cues from \(url.lastPathComponent) (auto-detected)")
                 isLoading = false
                 return
             }
 
             let track = try parser.parse(content)
             currentTrack = track
-            print("🎬 [Subtitles] Loaded \(track.cues.count) cues from \(url.lastPathComponent)")
         } catch {
             self.error = error
             print("🎬 [Subtitles] ❌ Failed to load: \(error.localizedDescription)")
@@ -71,7 +69,6 @@ final class SubtitleManager: ObservableObject {
         do {
             let track = try parser.parse(content)
             currentTrack = track
-            print("🎬 [Subtitles] Loaded \(track.cues.count) cues from content")
         } catch {
             self.error = error
             print("🎬 [Subtitles] ❌ Parse error: \(error.localizedDescription)")

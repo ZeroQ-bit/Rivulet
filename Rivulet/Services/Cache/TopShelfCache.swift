@@ -40,10 +40,8 @@ final class TopShelfCache: Sendable {
     /// Write Top Shelf items to the shared container
     /// Called by PlexDataStore when Continue Watching data is refreshed
     func writeItems(_ items: [TopShelfItem]) {
-        print("TopShelfCache: Attempting to write \(items.count) items")
 
         guard let defaults = sharedDefaults else {
-            print("TopShelfCache: Unable to access App Group UserDefaults - is the entitlement configured?")
             return
         }
 
@@ -53,14 +51,9 @@ final class TopShelfCache: Sendable {
             let data = try encoder.encode(items)
             defaults.set(data, forKey: userDefaultsKey)
             defaults.synchronize()
-            print("TopShelfCache: Successfully wrote \(items.count) items to UserDefaults")
 
             // Debug: print first item
-            if let first = items.first {
-                print("TopShelfCache: First item - \(first.title) (ratingKey: \(first.ratingKey))")
-            }
         } catch {
-            print("TopShelfCache: Failed to encode items: \(error)")
         }
     }
 
@@ -70,12 +63,10 @@ final class TopShelfCache: Sendable {
     /// Called by TV Services Extension to display items
     func readItems() -> [TopShelfItem] {
         guard let defaults = sharedDefaults else {
-            print("TopShelfCache: Unable to access App Group UserDefaults")
             return []
         }
 
         guard let data = defaults.data(forKey: userDefaultsKey) else {
-            print("TopShelfCache: No cached items found")
             return []
         }
 
@@ -83,10 +74,8 @@ final class TopShelfCache: Sendable {
             let decoder = JSONDecoder()
             decoder.dateDecodingStrategy = .iso8601
             let items = try decoder.decode([TopShelfItem].self, from: data)
-            print("TopShelfCache: Successfully read \(items.count) items")
             return items
         } catch {
-            print("TopShelfCache: Failed to decode items: \(error)")
             return []
         }
     }

@@ -169,7 +169,6 @@ private struct TrackRow: View {
         ],
         selectedTrackId: 1,
         onSelect: { id in
-            print("Selected: \(String(describing: id))")
         }
     )
     .preferredColorScheme(.dark)

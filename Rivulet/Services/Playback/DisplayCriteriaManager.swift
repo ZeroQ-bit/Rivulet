@@ -37,7 +37,6 @@ final class DisplayCriteriaManager {
     ///   - url: The video stream URL
     ///   - headers: HTTP headers for authentication
     func configureFromURL(_ url: URL, headers: [String: String]? = nil) async {
-        print("🖥️ DisplayCriteria: Fetching criteria from URL...")
 
         // Create asset with headers
         var options: [String: Any] = [:]
@@ -51,7 +50,6 @@ final class DisplayCriteriaManager {
         do {
             // Load the display criteria from the asset (tvOS 16+ API)
             let criteria = try await asset.load(.preferredDisplayCriteria)
-            print("🖥️ DisplayCriteria: Successfully obtained criteria from asset")
             setDisplayCriteria(criteria)
         } catch {
             print("🖥️ DisplayCriteria: Failed to load display criteria: \(error.localizedDescription)")
@@ -64,7 +62,6 @@ final class DisplayCriteriaManager {
     func configureFromAsset(_ asset: AVAsset) async {
         do {
             let criteria = try await asset.load(.preferredDisplayCriteria)
-            print("🖥️ DisplayCriteria: Using criteria from provided asset")
             setDisplayCriteria(criteria)
         } catch {
             print("🖥️ DisplayCriteria: Failed to load criteria from asset: \(error.localizedDescription)")
@@ -119,18 +116,14 @@ final class DisplayCriteriaManager {
                 extensions[kCMFormatDescriptionExtension_TransferFunction] = kCMFormatDescriptionTransferFunction_SMPTE_ST_2084_PQ
                 // Add Dolby Vision configuration (Profile 5 is most common for streaming)
                 // Note: This is a simplified representation
-                print("🖥️ DisplayCriteria: Creating format description for Dolby Vision")
             } else if isHLG {
                 // HLG transfer function
                 extensions[kCMFormatDescriptionExtension_TransferFunction] = kCMFormatDescriptionTransferFunction_ITU_R_2100_HLG
-                print("🖥️ DisplayCriteria: Creating format description for HLG")
             } else if isHDR10 {
                 // HDR10 uses PQ (SMPTE ST 2084)
                 extensions[kCMFormatDescriptionExtension_TransferFunction] = kCMFormatDescriptionTransferFunction_SMPTE_ST_2084_PQ
-                print("🖥️ DisplayCriteria: Creating format description for HDR10/PQ")
             }
         } else {
-            print("🖥️ DisplayCriteria: Creating format description for SDR")
         }
 
         // Create the format description
@@ -157,8 +150,6 @@ final class DisplayCriteriaManager {
     /// Call this when playback ends
     func reset() {
         guard hasSetCriteria else { return }
-
-        print("🖥️ DisplayCriteria: Resetting to default")
 
         guard let displayManager = getDisplayManager() else {
             print("🖥️ DisplayCriteria: No display manager available for reset")
@@ -248,13 +239,11 @@ final class DisplayCriteriaManager {
             return
         }
 
-        print("🖥️ DisplayCriteria: Setting display criteria")
         displayManager.preferredDisplayCriteria = criteria
         hasSetCriteria = true
 
         // Log the display manager state
         if displayManager.isDisplayCriteriaMatchingEnabled {
-            print("🖥️ DisplayCriteria: Display criteria matching is ENABLED in system settings")
         } else {
             print("🖥️ DisplayCriteria: ⚠️ Display criteria matching is DISABLED in system settings")
             print("🖥️ DisplayCriteria: User should enable 'Match Content' in Settings > Video and Audio")

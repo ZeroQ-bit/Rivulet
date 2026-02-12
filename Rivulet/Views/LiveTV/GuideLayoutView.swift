@@ -76,28 +76,23 @@ struct GuideLayoutView: View {
         }
         // Animation disabled for instant PIP transitions
         .onChange(of: displayMode) { oldMode, newMode in
-            print("📺 [GuideLayout \(debugId)] displayMode \(oldMode) -> \(newMode), activeChannel=\(activeChannel?.id ?? "nil"), session=\(playerSessionId.uuidString)")
             if oldMode == .fullscreen && newMode == .pip {
                 // Transitioning to PIP - focus guide immediately (no animation delay)
                 DispatchQueue.main.async {
                     hasFocus = true
-                    print("📺 [GuideLayout \(debugId)] focus restored after entering PIP")
                 }
             } else if oldMode == .pip && newMode == .fullscreen {
                 // Returning to fullscreen - clear guide focus
                 hasFocus = false
-                print("📺 [GuideLayout \(debugId)] focus cleared for fullscreen")
             } else if newMode == .hidden {
                 // Player dismissed - focus guide
                 focusScopeManager.activate(.guide, savingCurrent: true, pushToStack: false)
                 hasFocus = true
-                print("📺 [GuideLayout \(debugId)] player hidden, focus restored immediately")
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                     focusScopeManager.activate(.guide, savingCurrent: true, pushToStack: false)
                     hasFocus = false
                     DispatchQueue.main.async {
                         hasFocus = true
-                        print("📺 [GuideLayout \(debugId)] player hidden, focus restored after delay")
                     }
                 }
             }
@@ -128,7 +123,6 @@ struct GuideLayoutView: View {
         LiveTVPlayerView(
             channel: channel,
             onDismiss: {
-                print("📺 [GuideLayout \(debugId)] onDismiss from player, clearing activeChannel=\(activeChannel?.id ?? "nil"), session=\(playerSessionId.uuidString)")
                 displayMode = .hidden
                 activeChannel = nil
                 playerSessionId = UUID()
@@ -137,10 +131,8 @@ struct GuideLayoutView: View {
                 DispatchQueue.main.async {
                     hasFocus = true
                 }
-                print("📺 [GuideLayout \(debugId)] new session after dismiss=\(playerSessionId.uuidString)")
             },
             onEnterPIP: {
-                print("📺 [GuideLayout \(debugId)] onEnterPIP for channel=\(channel.id)")
                 // Instant transition to PIP - no animation
                 var transaction = Transaction()
                 transaction.animation = nil
@@ -255,9 +247,7 @@ struct GuideLayoutView: View {
         .onChange(of: channels.count) { _, count in
             if count > 0, focusedRow >= count {
                 focusedRow = max(0, count - 1)
-                print("📺 [GuideLayout \(debugId)] clamped focusedRow to \(focusedRow) for channelCount=\(count)")
             } else {
-                print("📺 [GuideLayout \(debugId)] channels.count changed to \(count), focusedRow=\(focusedRow)")
             }
         }
         .onMoveCommand { dir in
@@ -277,14 +267,11 @@ struct GuideLayoutView: View {
     // MARK: - Channel Selection
 
     private func selectFocusedChannel(trigger: String) {
-        print("📺 [GuideLayout \(debugId)] guide select trigger=\(trigger) focusedRow=\(focusedRow), focusedColumn=\(focusedColumn), channels=\(channels.count), hasFocus=\(hasFocus), mode=\(displayMode)")
         if displayMode == .fullscreen {
-            print("📺 [GuideLayout \(debugId)] guide select ignored: already fullscreen")
             return
         }
 
         guard focusedRow < channels.count else {
-            print("📺 [GuideLayout \(debugId)] guide select ignored: focusedRow out of bounds")
             return
         }
 
@@ -293,12 +280,10 @@ struct GuideLayoutView: View {
     }
 
     private func selectChannel(_ channel: UnifiedChannel) {
-        print("📺 [GuideLayout \(debugId)] selectChannel id=\(channel.id), name=\(channel.name), currentActive=\(activeChannel?.id ?? "nil"), mode=\(displayMode)")
         if displayMode == .pip {
             // Already playing - switch channel if different, then go fullscreen
             if activeChannel?.id != channel.id {
                 playerSessionId = UUID()
-                print("📺 [GuideLayout \(debugId)] switching channel in PIP, new session=\(playerSessionId.uuidString)")
                 activeChannel = channel
             }
             // Instant transition to fullscreen - no animation
@@ -310,7 +295,6 @@ struct GuideLayoutView: View {
         } else {
             // Start fresh - no animation needed
             playerSessionId = UUID()
-            print("📺 [GuideLayout \(debugId)] starting fullscreen playback, new session=\(playerSessionId.uuidString)")
             activeChannel = channel
             displayMode = .fullscreen
         }

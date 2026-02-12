@@ -49,7 +49,6 @@ final class DVSampleBufferUIView: UIView {
         layer.addSublayer(displayLayer)
         sampleBufferLayer = displayLayer
 
-        print("🎬 DVSampleBufferUIView: Attached display layer")
     }
 
     override func layoutSubviews() {

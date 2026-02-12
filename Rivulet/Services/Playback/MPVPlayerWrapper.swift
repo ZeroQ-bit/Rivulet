@@ -94,13 +94,11 @@ final class MPVPlayerWrapper: NSObject, PlayerProtocol, MPVPlayerDelegate {
 
     override init() {
         super.init()
-        print("🎬 [MPVWrapper \(debugId)] init")
     }
 
     // MARK: - Playback Controls
 
     func load(url: URL, headers: [String: String]?, startTime: TimeInterval?) async throws {
-        print("🎬 [MPVWrapper \(debugId)] load url=\(url.absoluteString), hasController=\(playerController != nil), startTime=\(startTime ?? 0)")
         playbackStateSubject.send(.loading)
 
         // Log load attempt (GitHub #64 - DVB diagnostics)
@@ -136,7 +134,6 @@ final class MPVPlayerWrapper: NSObject, PlayerProtocol, MPVPlayerDelegate {
 
     /// Called when the view creates the player controller
     func setPlayerController(_ controller: MPVMetalViewController) {
-        print("🎬 [MPVWrapper \(debugId)] setPlayerController controller=\(ObjectIdentifier(controller)) pendingURL=\(pendingURL?.absoluteString ?? "nil")")
         self.playerController = controller
         controller.delegate = self
 
@@ -171,7 +168,6 @@ final class MPVPlayerWrapper: NSObject, PlayerProtocol, MPVPlayerDelegate {
     }
 
     func stop() {
-        print("🎬 [MPVWrapper \(debugId)] stop hasController=\(playerController != nil), loadedURL=\(loadedURL?.absoluteString ?? "nil")")
         // Clear delegate first to prevent callbacks during shutdown
         playerController?.delegate = nil
         playerController?.stop()
@@ -236,7 +232,6 @@ final class MPVPlayerWrapper: NSObject, PlayerProtocol, MPVPlayerDelegate {
     }
 
     deinit {
-        print("🎬 [MPVWrapper \(debugId)] deinit")
     }
 
     // MARK: - MPVPlayerDelegate

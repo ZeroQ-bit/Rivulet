@@ -31,7 +31,6 @@ final class DeepLinkHandler: ObservableObject {
         case "play":
             await handlePlayURL(url)
         default:
-            print("DeepLinkHandler: Unknown URL host: \(url.host ?? "nil")")
         }
     }
 
@@ -64,7 +63,6 @@ final class DeepLinkHandler: ObservableObject {
 
             // Set pending playback - TVSidebarView will observe and present player
             pendingPlayback = metadata
-            print("DeepLinkHandler: Ready to play \(metadata.title ?? "unknown")")
         } catch {
             print("DeepLinkHandler: Failed to fetch metadata for ratingKey \(ratingKey): \(error)")
         }

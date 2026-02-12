@@ -265,9 +265,6 @@ struct PlexDetailView: View {
         }
         #endif
         .task(id: currentItem.ratingKey) {
-            // Debug: log what item we're loading
-            print("📋 PlexDetailView loading: \(currentItem.title ?? "?") (type: \(currentItem.type ?? "nil"), ratingKey: \(currentItem.ratingKey ?? "nil"))")
-
             // Reset state for new item
             seasons = []
             episodes = []
@@ -1673,18 +1670,11 @@ struct PlexDetailView: View {
         }
 
         guard let tmdbId else {
-            print("🎨 [Logo] No TMDB ID found for \(currentItem.title ?? "?") (type: \(currentItem.type ?? "nil"))")
             return
         }
 
-        print("🎨 [Logo] Fetching logo for TMDB \(mediaType.rawValue)/\(tmdbId) (\(currentItem.title ?? "?"))")
         let url = await TMDBClient.shared.fetchLogoURL(tmdbId: tmdbId, type: mediaType)
         showLogoURL = url
-        if let url {
-            print("🎨 [Logo] Found: \(url.lastPathComponent)")
-        } else {
-            print("🎨 [Logo] No logo available")
-        }
     }
 
     /// Resolve the TMDB ID for the parent show of an episode.
@@ -1709,8 +1699,6 @@ struct PlexDetailView: View {
                 authToken: token,
                 ratingKey: showRatingKey
             )
-            print("🎨 [Logo] Fetched show metadata for \(showMetadata.title ?? "?"), guid: \(showMetadata.guid ?? "nil")")
-
             // Direct TMDB ID from guid or Guid array
             if let tmdbId = showMetadata.tmdbId {
                 return tmdbId
@@ -1718,7 +1706,6 @@ struct PlexDetailView: View {
 
             // Legacy agent: convert TVDB ID → TMDB ID
             if let tvdbId = showMetadata.tvdbId {
-                print("🎨 [Logo] Converting TVDB \(tvdbId) → TMDB")
                 return await TMDBClient.shared.findTmdbId(tvdbId: tvdbId, type: .tv)
             }
 
@@ -1732,7 +1719,6 @@ struct PlexDetailView: View {
     /// Convert a TVDB ID to TMDB ID for items using legacy Plex agents
     private func resolveTmdbIdViaTvdb(metadata: PlexMetadata, type: TMDBMediaType) async -> Int? {
         guard let tvdbId = metadata.tvdbId else { return nil }
-        print("🎨 [Logo] Converting TVDB \(tvdbId) → TMDB for \(metadata.title ?? "?")")
         return await TMDBClient.shared.findTmdbId(tvdbId: tvdbId, type: type)
     }
 
@@ -1758,7 +1744,6 @@ struct PlexDetailView: View {
             Task(priority: .utility) {
                 await networkManager.warmDirectPlayStream(url: url, headers: headers)
             }
-            print("🎬 [PreWarm] Cached stream URL for \(metadata.title ?? ratingKey)")
         }
     }
 
@@ -2244,13 +2229,11 @@ struct PlexDetailView: View {
         guard let serverURL = authManager.selectedServerURL,
               let token = authManager.selectedServerToken,
               let ratingKey = currentItem.ratingKey else {
-            print("🎵 Missing required data for loading albums")
             return
         }
 
         // Get librarySectionID from fullMetadata (fetched first) or item
         guard let librarySectionId = fullMetadata?.librarySectionID ?? currentItem.librarySectionID else {
-            print("🎵 Missing librarySectionID for artist - item: \(currentItem.librarySectionID ?? -1), fullMetadata: \(fullMetadata?.librarySectionID ?? -1)")
             return
         }
 
@@ -2268,16 +2251,8 @@ struct PlexDetailView: View {
 
             // Sort by year (newest first)
             albums = fetchedAlbums.sorted { ($0.year ?? 0) > ($1.year ?? 0) }
-
-            print("🎵 Found \(albums.count) albums for \(currentItem.title ?? "?")")
-            for album in albums.prefix(5) {
-                print("  - \(album.title ?? "?") (type: \(album.type ?? "nil"), ratingKey: \(album.ratingKey ?? "nil"), parentKey: \(album.parentRatingKey ?? "nil"))")
-            }
-            if albums.count > 5 {
-                print("  ... and \(albums.count - 5) more")
-            }
         } catch {
-            print("🎵 Failed to load albums: \(error)")
+            print("Failed to load albums: \(error)")
         }
 
         isLoadingAlbums = false

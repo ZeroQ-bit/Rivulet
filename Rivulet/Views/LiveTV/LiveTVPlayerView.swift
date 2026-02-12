@@ -397,7 +397,6 @@ struct LiveTVPlayerView: View {
             }
         }
         .onAppear {
-            print("📺 [LiveTVPlayer \(debugId)] onAppear interactive=\(isInteractive), streams=\(viewModel.streamCount), focusedIndex=\(viewModel.focusedSlotIndex)")
             #if os(tvOS)
             if isInteractive {
                 let target = LiveTVPlaybackInputTarget(viewModel: viewModel)
@@ -448,7 +447,6 @@ struct LiveTVPlayerView: View {
             showFocusBorderTemporarily()
         }
         .onDisappear {
-            print("📺 [LiveTVPlayer \(debugId)] onDisappear showExitConfirmation=\(showExitConfirmation), hasStoppedStreams=\(hasStoppedStreams), streams=\(viewModel.streamCount)")
             #if os(tvOS)
             remoteInput.stopMonitoring()
             remoteInput.reset()
@@ -460,12 +458,10 @@ struct LiveTVPlayerView: View {
             // Only stop streams if we're actually exiting (not showing confirmation)
             if !showExitConfirmation && !hasStoppedStreams {
                 hasStoppedStreams = true
-                print("📺 [LiveTVPlayer \(debugId)] onDisappear -> stopAllStreams()")
                 viewModel.stopAllStreams()
             }
         }
         .onChange(of: showExitConfirmation) { _, show in
-            print("📺 [LiveTVPlayer \(debugId)] showExitConfirmation=\(show)")
             if show {
                 // Focus the Cancel button (index 0) when confirmation appears
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
@@ -1182,7 +1178,6 @@ struct LiveTVPlayerView: View {
 
     #if os(tvOS)
     private func handleExitCommand() {
-        print("📺 [LiveTVPlayer \(debugId)] handleExitCommand controls=\(viewModel.showControls), picker=\(viewModel.showChannelPicker), confirmation=\(showExitConfirmation), streamCount=\(viewModel.streamCount), hasPIPCallback=\(onEnterPIP != nil)")
         // Show focus border on any remote input
         showFocusBorderTemporarily()
 
@@ -1193,25 +1188,21 @@ struct LiveTVPlayerView: View {
 
         if showExitConfirmation {
             // Cancel the confirmation and return to streams
-            print("📺 [LiveTVPlayer \(debugId)] exit: cancelling confirmation")
             showExitConfirmation = false
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                 focusArea = .streamGrid
             }
         } else if viewModel.showChannelPicker {
-            print("📺 [LiveTVPlayer \(debugId)] exit: closing channel picker")
             viewModel.showChannelPicker = false
         } else if viewModel.showControls && !classicTVMode {
             // Hide controls and return focus to stream grid (not in classic mode)
             // UNLESS we can enter PIP mode - then go directly to PIP
             if viewModel.streamCount == 1, let onEnterPIP {
                 // Single stream with PIP available - go to PIP, hide controls
-                print("📺 [LiveTVPlayer \(debugId)] exit: controls visible -> enter PIP")
                 viewModel.showControls = false
                 onEnterPIP()
             } else {
                 // Multi-stream or no PIP - just hide controls
-                print("📺 [LiveTVPlayer \(debugId)] exit: controls visible -> hide controls")
                 withAnimation(.easeOut(duration: 0.2)) {
                     viewModel.showControls = false
                 }
@@ -1223,11 +1214,9 @@ struct LiveTVPlayerView: View {
             // Controls hidden
             // For single stream, try to enter PIP mode if callback is provided
             if viewModel.streamCount == 1, let onEnterPIP {
-                print("📺 [LiveTVPlayer \(debugId)] exit: controls hidden -> enter PIP")
                 onEnterPIP()
             } else {
                 // Multi-stream or no PIP callback - exit directly
-                print("📺 [LiveTVPlayer \(debugId)] exit: controls hidden -> dismiss player")
                 dismissPlayer()
             }
         }
@@ -1235,7 +1224,6 @@ struct LiveTVPlayerView: View {
     #endif
 
     private func dismissPlayer() {
-        print("📺 [LiveTVPlayer \(debugId)] dismissPlayer confirmExitMultiview=\(confirmExitMultiview), streamCount=\(viewModel.streamCount)")
         // Check if we should show confirmation for multiview
         if confirmExitMultiview && viewModel.streamCount > 1 {
             showExitConfirmation = true
@@ -1245,15 +1233,12 @@ struct LiveTVPlayerView: View {
     }
 
     private func forceExitPlayer() {
-        print("📺 [LiveTVPlayer \(debugId)] forceExitPlayer hasStoppedStreams=\(hasStoppedStreams), streamCount=\(viewModel.streamCount)")
         if !hasStoppedStreams {
             hasStoppedStreams = true
             // Stop streams - MPV cleanup now runs on background thread
-            print("📺 [LiveTVPlayer \(debugId)] forceExitPlayer -> stopAllStreams()")
             viewModel.stopAllStreams()
         }
         // Dismiss UI after cleanup request is issued
-        print("📺 [LiveTVPlayer \(debugId)] forceExitPlayer -> onDismiss()")
         onDismiss()
     }
 }

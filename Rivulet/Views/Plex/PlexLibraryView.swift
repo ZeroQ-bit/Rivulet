@@ -352,7 +352,6 @@ struct PlexLibraryView: View {
                 // Deferred slightly so the NavigationStack pop animation completes
                 // and the grid items are focusable again.
                 let saved = focusScopeManager.focusedItem
-                print("🎯 [LIBRARY] Detail dismissed — saved focus: \(saved?.description ?? "nil"), current focusedItemId: \(focusedItemId ?? "nil")")
                 if let savedItem = saved {
                     let targetId: String
                     if let context = savedItem.context {
@@ -360,10 +359,8 @@ struct PlexLibraryView: View {
                     } else {
                         targetId = savedItem.itemId
                     }
-                    print("🎯 [LIBRARY] Will restore focus to: \(targetId)")
                     Task { @MainActor in
                         try? await Task.sleep(nanoseconds: 150_000_000) // 150ms
-                        print("🎯 [LIBRARY] Restoring focusedItemId = \(targetId)")
                         focusedItemId = targetId
                     }
                 }
@@ -1292,12 +1289,6 @@ struct PlexLibraryView: View {
                 authToken: token,
                 sectionId: libraryKey
             )
-
-            // Debug: log hub info for troubleshooting
-            print("📚 Library \(libraryKey) hubs: \(fetchedHubs.count)")
-            for hub in fetchedHubs {
-                print("  - \(hub.hubIdentifier ?? "nil"): \(hub.title ?? "nil") (\(hub.Metadata?.count ?? 0) items)")
-            }
 
             // Only update hubs if they're actually different
             if !hubsAreEqual(hubs, fetchedHubs) {

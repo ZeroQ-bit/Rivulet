@@ -165,7 +165,6 @@ class PlexDataStore: ObservableObject {
     private var isInForeground = true
 
     private init() {
-        print("📦 PlexDataStore: Initialized")
         setupPollingObservers()
     }
 
@@ -224,7 +223,6 @@ class PlexDataStore: ObservableObject {
               authManager.selectedServerURL != nil,
               pollingTimer == nil else { return }
 
-        print("📦 PlexDataStore: Starting hub polling (every 3 min)")
         pollingTimer = Timer.scheduledTimer(withTimeInterval: pollingInterval, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 await self?.pollHubs()
@@ -235,7 +233,6 @@ class PlexDataStore: ObservableObject {
     /// Stop polling
     private func stopPolling() {
         guard pollingTimer != nil else { return }
-        print("📦 PlexDataStore: Stopping hub polling")
         pollingTimer?.invalidate()
         pollingTimer = nil
     }
@@ -245,7 +242,6 @@ class PlexDataStore: ObservableObject {
         guard let serverURL = authManager.selectedServerURL,
               let token = authManager.selectedServerToken else { return }
 
-        print("📦 PlexDataStore: Polling hubs...")
         await fetchHubsFromServer(serverURL: serverURL, token: token, updateLoading: false)
     }
 
@@ -283,17 +279,14 @@ class PlexDataStore: ObservableObject {
     /// Returns true if recovery was attempted and connection is now working
     private func attemptConnectionRecovery() async -> Bool {
         guard !hasAttemptedConnectionRecovery else {
-            print("📦 PlexDataStore: Connection recovery already attempted this session")
             return false
         }
 
         hasAttemptedConnectionRecovery = true
-        print("📦 PlexDataStore: Attempting connection recovery...")
 
         await authManager.verifyAndFixConnection()
 
         if authManager.isConnected {
-            print("📦 PlexDataStore: ✅ Connection recovered")
             return true
         } else {
             print("📦 PlexDataStore: ❌ Connection recovery failed")
@@ -306,7 +299,6 @@ class PlexDataStore: ObservableObject {
     /// Called when the user switches Plex Home profiles
     /// Clears all user-specific cached data and reloads content
     func onProfileSwitched() async {
-        print("📦 PlexDataStore: Profile switched - clearing user-specific data...")
 
         // Switch library settings to the new user's preferences
         LibrarySettingsManager.shared.onProfileSwitched()
@@ -333,15 +325,12 @@ class PlexDataStore: ObservableObject {
         // Reset connection recovery flag (new profile may have different access)
         hasAttemptedConnectionRecovery = false
 
-        print("📦 PlexDataStore: Reloading content for new profile...")
-
         // Reload content for new profile (libraries + hubs in parallel, then library hubs)
         async let libs: () = refreshLibraries()
         async let hubsRefresh: () = refreshHubs()
         _ = await (libs, hubsRefresh)
         await refreshLibraryHubs()
 
-        print("📦 PlexDataStore: ✅ Profile switch complete")
     }
 
     // MARK: - Hubs (Home View)
@@ -349,27 +338,20 @@ class PlexDataStore: ObservableObject {
     func loadHubsIfNeeded() async {
         // If we already have data, skip
         if !hubs.isEmpty {
-            print("📦 PlexDataStore: Hubs already loaded (\(hubs.count) items), skipping")
             return
         }
 
         // If already loading, wait for that task
         if let existingTask = hubsLoadTask {
-            print("📦 PlexDataStore: Hubs load already in progress, waiting...")
             await existingTask.value
             return
         }
 
-        print("📦 PlexDataStore: Starting hubs load...")
-
         guard let serverURL = authManager.selectedServerURL,
               let token = authManager.selectedServerToken else {
-            print("📦 PlexDataStore: Not authenticated - serverURL: \(authManager.selectedServerURL ?? "nil"), token: \(authManager.selectedServerToken != nil ? "present" : "nil")")
             hubsError = "Not authenticated"
             return
         }
-
-        print("📦 PlexDataStore: Auth OK - serverURL: \(serverURL)")
 
         isLoadingHubs = true
         hubsError = nil
@@ -377,9 +359,7 @@ class PlexDataStore: ObservableObject {
         // Create a non-cancellable task for the network request
         hubsLoadTask = Task {
             // Try cache first
-            print("📦 PlexDataStore: Checking cache for hubs...")
             if let cached = await cacheManager.getCachedHubs(), !cached.isEmpty {
-                print("📦 PlexDataStore: Found \(cached.count) cached hubs")
                 await MainActor.run {
                     self.hubs = cached
                     self.hubsVersion = UUID()
@@ -388,7 +368,6 @@ class PlexDataStore: ObservableObject {
                 // Background refresh
                 await fetchHubsFromServer(serverURL: serverURL, token: token, updateLoading: false)
             } else {
-                print("📦 PlexDataStore: No cache, fetching from server...")
                 await fetchHubsFromServer(serverURL: serverURL, token: token, updateLoading: true)
             }
         }
@@ -399,11 +378,9 @@ class PlexDataStore: ObservableObject {
 
     private func fetchHubsFromServer(serverURL: String, token: String, updateLoading: Bool) async {
         let userId = profileManager.selectedUserId
-        print("📦 PlexDataStore: Fetching hubs from \(serverURL)/hubs (userId: \(userId.map(String.init) ?? "none"))")
 
         do {
             let fetchedHubs = try await fetchHubsOffMain(serverURL: serverURL, token: token, userId: userId)
-            print("📦 PlexDataStore: ✅ Fetched \(fetchedHubs.count) hubs")
 
             // Reset recovery flag on success
             hasAttemptedConnectionRecovery = false
@@ -412,9 +389,7 @@ class PlexDataStore: ObservableObject {
             if !hubsAreEqual(self.hubs, fetchedHubs) {
                 self.hubs = fetchedHubs
                 self.hubsVersion = UUID()  // Signal that content changed
-                print("📦 PlexDataStore: Hubs updated (changed)")
             } else {
-                print("📦 PlexDataStore: Hubs unchanged, skipping update")
             }
 
             // Always update Top Shelf cache after fetching (lightweight, idempotent)
@@ -431,7 +406,6 @@ class PlexDataStore: ObservableObject {
 
             // Ignore cancellation errors
             if nsError.code == NSURLErrorCancelled {
-                print("📦 PlexDataStore: Request was cancelled")
                 return
             }
 
@@ -460,7 +434,6 @@ class PlexDataStore: ObservableObject {
         guard let serverURL = authManager.selectedServerURL,
               let token = authManager.selectedServerToken else { return }
 
-        print("📦 PlexDataStore: Refreshing hubs...")
         isLoadingHubs = true
         await cacheManager.clearOnDeckCache()
         await cacheManager.clearHubsCache()
@@ -476,20 +449,17 @@ class PlexDataStore: ObservableObject {
 
         // Skip if no libraries configured for Home
         guard !librariesToLoad.isEmpty else {
-            print("📦 PlexDataStore: No libraries configured for Home screen")
             return
         }
 
         // Skip if we already have hubs for all libraries
         let missingLibraries = librariesToLoad.filter { libraryHubs[$0.key] == nil }
         guard !missingLibraries.isEmpty else {
-            print("📦 PlexDataStore: Library hubs already loaded for all \(librariesToLoad.count) libraries")
             return
         }
 
         guard let serverURL = authManager.selectedServerURL,
               let token = authManager.selectedServerToken else {
-            print("📦 PlexDataStore: Not authenticated for library hubs")
             return
         }
 
@@ -502,7 +472,6 @@ class PlexDataStore: ObservableObject {
         for library in missingLibraries {
             if let cached = await cacheManager.getCachedLibraryHubs(forLibrary: library.key), !cached.isEmpty {
                 libraryHubs[library.key] = cached
-                print("📦 PlexDataStore: Found \(cached.count) cached hubs for \(library.title)")
             } else {
                 librariesNeedingFetch.append(library)
             }
@@ -540,7 +509,6 @@ class PlexDataStore: ObservableObject {
                     if let hubs {
                         libraryHubs[key] = hubs
                         recordFetch(for: "libraryHubs:\(key)")
-                        print("📦 PlexDataStore: ✅ Loaded \(hubs.count) hubs for \(title)")
                     }
                 }
             }
@@ -573,7 +541,6 @@ class PlexDataStore: ObservableObject {
                     if let hubs {
                         libraryHubs[key] = hubs
                         recordFetch(for: "libraryHubs:\(key)")
-                        print("📦 PlexDataStore: ✅ Refreshed \(hubs.count) hubs for \(title)")
                     }
                 }
             }
@@ -581,7 +548,6 @@ class PlexDataStore: ObservableObject {
 
         libraryHubsVersion = UUID()
         isLoadingLibraryHubs = false
-        print("📦 PlexDataStore: Library hubs loading complete")
     }
 
     /// Refresh hubs for all libraries on Home screen
@@ -596,27 +562,20 @@ class PlexDataStore: ObservableObject {
     func loadLibrariesIfNeeded() async {
         // If we already have data, skip
         if !libraries.isEmpty {
-            print("📦 PlexDataStore: Libraries already loaded (\(libraries.count) items), skipping")
             return
         }
 
         // If already loading, wait for that task
         if let existingTask = librariesLoadTask {
-            print("📦 PlexDataStore: Libraries load already in progress, waiting...")
             await existingTask.value
             return
         }
 
-        print("📦 PlexDataStore: Starting libraries load...")
-
         guard let serverURL = authManager.selectedServerURL,
               let token = authManager.selectedServerToken else {
-            print("📦 PlexDataStore: Not authenticated for libraries")
             librariesError = "Not authenticated"
             return
         }
-
-        print("📦 PlexDataStore: Auth OK for libraries - serverURL: \(serverURL)")
 
         isLoadingLibraries = true
         librariesError = nil
@@ -624,9 +583,7 @@ class PlexDataStore: ObservableObject {
         // Create a non-cancellable task for the network request
         librariesLoadTask = Task {
             // Try cache first
-            print("📦 PlexDataStore: Checking cache for libraries...")
             if let cached = await cacheManager.getCachedLibraries(), !cached.isEmpty {
-                print("📦 PlexDataStore: Found \(cached.count) cached libraries")
                 await MainActor.run {
                     self.libraries = cached
                     self.isLoadingLibraries = false
@@ -634,7 +591,6 @@ class PlexDataStore: ObservableObject {
                 // Background refresh
                 await fetchLibrariesFromServer(serverURL: serverURL, token: token, updateLoading: false)
             } else {
-                print("📦 PlexDataStore: No cache, fetching libraries from server...")
                 await fetchLibrariesFromServer(serverURL: serverURL, token: token, updateLoading: true)
             }
         }
@@ -645,11 +601,9 @@ class PlexDataStore: ObservableObject {
 
     private func fetchLibrariesFromServer(serverURL: String, token: String, updateLoading: Bool) async {
         let userId = profileManager.selectedUserId
-        print("📦 PlexDataStore: Fetching libraries from \(serverURL)/library/sections (userId: \(userId.map(String.init) ?? "none"))")
 
         do {
             let fetched = try await fetchLibrariesOffMain(serverURL: serverURL, token: token, userId: userId)
-            print("📦 PlexDataStore: ✅ Fetched \(fetched.count) libraries")
 
             // Reset recovery flag on success
             hasAttemptedConnectionRecovery = false
@@ -657,9 +611,7 @@ class PlexDataStore: ObservableObject {
             // Only update if libraries actually changed (prevents unnecessary re-renders)
             if !librariesAreEqual(self.libraries, fetched) {
                 self.libraries = fetched
-                print("📦 PlexDataStore: Libraries updated (changed)")
             } else {
-                print("📦 PlexDataStore: Libraries unchanged, skipping update")
             }
             self.librariesError = nil
             if updateLoading {
@@ -675,7 +627,6 @@ class PlexDataStore: ObservableObject {
 
             // Ignore cancellation errors
             if nsError.code == NSURLErrorCancelled {
-                print("📦 PlexDataStore: Request was cancelled")
                 return
             }
 
@@ -720,7 +671,6 @@ class PlexDataStore: ObservableObject {
         guard let serverURL = authManager.selectedServerURL,
               let token = authManager.selectedServerToken else { return }
 
-        print("📦 PlexDataStore: Refreshing libraries...")
         isLoadingLibraries = true
         await fetchLibrariesFromServer(serverURL: serverURL, token: token, updateLoading: true)
     }
@@ -745,7 +695,6 @@ class PlexDataStore: ObservableObject {
                         }
                         hubs[hubIndex].Metadata = metadata
                         didUpdate = true
-                        print("📦 PlexDataStore: Optimistically updated \(ratingKey) watched=\(watched) in hub \(hubs[hubIndex].title ?? "unknown")")
                     }
                 }
             }
@@ -778,7 +727,6 @@ class PlexDataStore: ObservableObject {
         // Run heavy prefetch work off the main actor; only hop back when touching UI state.
         prefetchTask = Task.detached(priority: .utility) { [weak self] in
             guard let self else { return }
-            print("📦 PlexDataStore: Starting background prefetch...")
 
             // Prefetch content for each visible/pinned video library only
             for library in videoLibraries {
@@ -792,11 +740,9 @@ class PlexDataStore: ObservableObject {
                 let hasHubsCache = await self.cacheManager.getCachedLibraryHubs(forLibrary: libraryKey) != nil
 
                 if hasMoviesCache || hasShowsCache {
-                    print("📦 PlexDataStore: Library \(library.title) already cached, skipping items")
                 } else {
                     // Fetch and cache library items
                     do {
-                        print("📦 PlexDataStore: Prefetching items for \(library.title)...")
                         let result = try await self.networkManager.getLibraryItemsWithTotal(
                             serverURL: serverURL,
                             authToken: token,
@@ -813,7 +759,6 @@ class PlexDataStore: ObservableObject {
                                 await self.cacheManager.cacheShows(result.items, forLibrary: libraryKey)
                             }
                         }
-                        print("📦 PlexDataStore: ✅ Prefetched \(result.items.count) items for \(library.title)")
                         await MainActor.run {
                             self.recordFetch(for: "libraryItems:\(libraryKey)")
                         }
@@ -827,10 +772,8 @@ class PlexDataStore: ObservableObject {
 
                 // Prefetch library hubs
                 if hasHubsCache {
-                    print("📦 PlexDataStore: Library \(library.title) hubs already cached, skipping")
                 } else {
                     do {
-                        print("📦 PlexDataStore: Prefetching hubs for \(library.title)...")
                         let hubs = try await self.networkManager.getLibraryHubs(
                             serverURL: serverURL,
                             authToken: token,
@@ -840,7 +783,6 @@ class PlexDataStore: ObservableObject {
                         await MainActor.run {
                             self.recordFetch(for: "libraryHubs:\(libraryKey)")
                         }
-                        print("📦 PlexDataStore: ✅ Prefetched \(hubs.count) hubs for \(library.title)")
                     } catch {
                         print("📦 PlexDataStore: ⚠️ Failed to prefetch hubs for \(library.title): \(error.localizedDescription)")
                     }
@@ -854,7 +796,6 @@ class PlexDataStore: ObservableObject {
             // Prefetch home hub images and next episodes for Continue Watching
             await self.prefetchHubContent(serverURL: serverURL, token: token)
 
-            print("📦 PlexDataStore: Background prefetch complete")
         }
     }
 
@@ -884,7 +825,6 @@ class PlexDataStore: ObservableObject {
         let imageURLs = items.compactMap { buildImageURL(for: $0, serverURL: serverURL, token: token) }
         guard !imageURLs.isEmpty else { return }
 
-        print("📦 PlexDataStore: Prefetching \(imageURLs.count) poster images...")
         Task.detached(priority: .utility) {
             await ImageCacheManager.shared.prefetch(urls: imageURLs)
         }
@@ -893,8 +833,6 @@ class PlexDataStore: ObservableObject {
     /// Prefetch hub content including images and next episodes for Continue Watching
     private func prefetchHubContent(serverURL: String, token: String) async {
         guard !hubs.isEmpty else { return }
-
-        print("📦 PlexDataStore: Prefetching hub content...")
 
         // Collect all hub items for image prefetching
         var allHubItems: [PlexMetadata] = []
@@ -935,7 +873,6 @@ class PlexDataStore: ObservableObject {
     private func prefetchNextEpisodes(for episodes: [PlexMetadata], serverURL: String, token: String) async {
         // Limit to first 5 episodes to avoid too many requests
         let episodesToProcess = Array(episodes.prefix(5))
-        print("📦 PlexDataStore: Prefetching next episodes for \(episodesToProcess.count) items...")
 
         for episode in episodesToProcess {
             guard !Task.isCancelled else { break }
@@ -973,7 +910,6 @@ class PlexDataStore: ObservableObject {
                 // Find next episode
                 if let nextEp = seasonEpisodes.first(where: { $0.index == currentIndex + 1 }) {
                     nextEpisodeCache[ratingKey] = nextEp
-                    print("📦 PlexDataStore: ✅ Cached next episode for \(episode.title ?? "?"): \(nextEp.episodeString ?? "?")")
 
                     // Prefetch the next episode's thumbnail
                     if let imageURL = buildImageURL(for: nextEp, serverURL: serverURL, token: token) {
@@ -1007,7 +943,6 @@ class PlexDataStore: ObservableObject {
     /// Update the Top Shelf cache with Continue Watching items
     /// Called after hubs are fetched to keep Top Shelf in sync
     private func updateTopShelfCache() {
-        print("TopShelf: updateTopShelfCache called")
 
         guard let serverURL = authManager.selectedServerURL,
               let token = authManager.selectedServerToken else {
@@ -1017,13 +952,10 @@ class PlexDataStore: ObservableObject {
 
         // Use server URL as identifier (unique per server)
         let serverIdentifier = serverURL
-        print("TopShelf: Server identifier = \(serverIdentifier)")
 
         // Collect Continue Watching items from hubs
         var continueWatchingItems: [PlexMetadata] = []
 
-        print("TopShelf: Scanning \(hubs.count) hubs for Continue Watching content")
-        print("TopShelf: All hub identifiers: \(hubs.compactMap { $0.hubIdentifier })")
         for hub in hubs {
             let identifier = hub.hubIdentifier?.lowercased() ?? ""
             let isContinueWatching = identifier.contains("continuewatching") ||
@@ -1031,12 +963,9 @@ class PlexDataStore: ObservableObject {
                                      identifier.contains("inprogress")
 
             if isContinueWatching, let items = hub.Metadata {
-                print("TopShelf: Found hub '\(hub.title ?? "")' with \(items.count) items (identifier: \(identifier))")
                 continueWatchingItems.append(contentsOf: items)
             }
         }
-
-        print("TopShelf: Total Continue Watching items found: \(continueWatchingItems.count)")
 
         // Deduplicate by ratingKey and sort by lastViewedAt (Unix timestamp)
         var seen = Set<String>()
@@ -1099,14 +1028,12 @@ class PlexDataStore: ObservableObject {
             )
         }
 
-        print("TopShelf: Writing \(topShelfItems.count) items to cache")
         TopShelfCache.shared.writeItems(Array(topShelfItems))
     }
 
     // MARK: - Reset (on sign out)
 
     func reset() {
-        print("📦 PlexDataStore: Resetting all data")
         stopPolling()
         hubsLoadTask?.cancel()
         librariesLoadTask?.cancel()

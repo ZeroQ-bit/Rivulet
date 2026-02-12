@@ -99,7 +99,6 @@ class PlayerContainerViewController: UIViewController {
             }
             .store(in: &cancellables)
 
-        print("🎮 [SETUP] PlayerContainerViewController ready")
     }
 
     override func viewDidAppear(_ animated: Bool) {
@@ -117,7 +116,6 @@ class PlayerContainerViewController: UIViewController {
     override func dismiss(animated flag: Bool, completion: (() -> Void)? = nil) {
         // If we just handled a menu action that closed something, block this dismiss
         if blockNextDismiss {
-            print("🎮 [DISMISS INTERCEPT] Blocked - menu action already handled this press")
             blockNextDismiss = false
             return
         }
@@ -126,7 +124,6 @@ class PlayerContainerViewController: UIViewController {
         if let vm = viewModel {
             // Cancel intro skip countdown if active
             if vm.introSkipCountdownSeconds > 0 {
-                print("🎮 [DISMISS INTERCEPT] Intro skip countdown active - cancelling")
                 vm.cancelIntroSkipCountdown()
                 return
             }
@@ -137,19 +134,16 @@ class PlayerContainerViewController: UIViewController {
                 return
             }
             if vm.isScrubbing {
-                print("🎮 [DISMISS INTERCEPT] Scrubbing active - cancelling scrub instead")
                 vm.cancelScrub()
                 return
             }
             if vm.showInfoPanel {
-                print("🎮 [DISMISS INTERCEPT] Info panel open - closing it instead")
                 withAnimation(.easeOut(duration: 0.3)) {
                     vm.showInfoPanel = false
                 }
                 return
             }
             if vm.showControls {
-                print("🎮 [DISMISS INTERCEPT] Controls visible - hiding them instead")
                 withAnimation(.easeOut(duration: 0.25)) {
                     vm.showControls = false
                 }
@@ -157,7 +151,6 @@ class PlayerContainerViewController: UIViewController {
             }
         }
         // Nothing to close, allow normal dismiss
-        print("🎮 [DISMISS INTERCEPT] Nothing to close - allowing dismiss")
         super.dismiss(animated: flag, completion: completion)
     }
 
@@ -254,7 +247,6 @@ class PlayerContainerViewController: UIViewController {
 
         // Cancel intro skip countdown if active (highest priority)
         if vm.introSkipCountdownSeconds > 0 {
-            print("🎮 [MENU] Cancelling intro skip countdown")
             vm.cancelIntroSkipCountdown()
             blockDismissTemporarily()
             return
@@ -303,7 +295,6 @@ class PlayerContainerViewController: UIViewController {
         panRecognizer.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.indirect.rawValue)]
         view.addGestureRecognizer(panRecognizer)
         panGestureRecognizer = panRecognizer
-        print("🎮 [SETUP] Pan gesture recognizer added for swipe-to-scrub")
     }
 
     // MARK: - Directional Gestures (IR Remote Support)
@@ -340,14 +331,12 @@ class PlayerContainerViewController: UIViewController {
         leftTap.require(toFail: leftLong)
         rightTap.require(toFail: rightLong)
 
-        print("🎮 [SETUP] Directional gesture recognizers added for IR remote support")
     }
 
     @objc private func handleDPadLeftTap() {
         guard let vm = viewModel else { return }
         guard !vm.showInfoPanel && vm.postVideoState == .hidden else { return }
 
-        print("🎮 [UIPress] Left tap - skip backward 10s")
         inputCoordinator.handle(action: .stepSeek(forward: false), source: .irPress)
     }
 
@@ -355,7 +344,6 @@ class PlayerContainerViewController: UIViewController {
         guard let vm = viewModel else { return }
         guard !vm.showInfoPanel && vm.postVideoState == .hidden else { return }
 
-        print("🎮 [UIPress] Right tap - skip forward 10s")
         inputCoordinator.handle(action: .stepSeek(forward: true), source: .irPress)
     }
 
@@ -365,7 +353,6 @@ class PlayerContainerViewController: UIViewController {
 
         switch gesture.state {
         case .began:
-            print("🎮 [UIPress] Left long press began - start rewind scrub")
             inputCoordinator.handle(action: .scrubNudge(forward: false), source: .irPress)
 
         case .changed:
@@ -373,7 +360,6 @@ class PlayerContainerViewController: UIViewController {
             break
 
         case .ended, .cancelled:
-            print("🎮 [UIPress] Left long press ended")
 
         default:
             break
@@ -386,7 +372,6 @@ class PlayerContainerViewController: UIViewController {
 
         switch gesture.state {
         case .began:
-            print("🎮 [UIPress] Right long press began - start fast forward scrub")
             inputCoordinator.handle(action: .scrubNudge(forward: true), source: .irPress)
 
         case .changed:
@@ -394,7 +379,6 @@ class PlayerContainerViewController: UIViewController {
             break
 
         case .ended, .cancelled:
-            print("🎮 [UIPress] Right long press ended")
 
         default:
             break
@@ -417,7 +401,6 @@ class PlayerContainerViewController: UIViewController {
 
         switch gesture.state {
         case .began:
-            print("🎮 [PAN] Began - starting swipe scrub (paused)")
             inputCoordinator.handle(action: .scrubRelative(seconds: 0), source: .irPress)
 
         case .changed:
@@ -429,7 +412,6 @@ class PlayerContainerViewController: UIViewController {
             gesture.setTranslation(.zero, in: view)
 
         case .ended, .cancelled:
-            print("🎮 [PAN] Ended - velocity: \(velocity.x), waiting for play/select to commit")
             // If significant horizontal velocity, apply a final "flick" adjustment
             if abs(velocity.x) > 500 {
                 let flickSeekDelta = velocity.x * 0.02  // Small multiplier for flick

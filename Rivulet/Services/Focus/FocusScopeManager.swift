@@ -146,7 +146,6 @@ class FocusScopeManager: ObservableObject {
     ///   - pushToStack: Whether to push this scope onto the stack (for nested navigation)
     func activate(_ scope: FocusScope, savingCurrent: Bool = true, pushToStack: Bool = true) {
         #if DEBUG
-        print("🎯 [FOCUS] Activating scope: \(scope), from: \(activeScope)")
         #endif
 
         // Save current focus if requested
@@ -333,11 +332,6 @@ class FocusScopeManager: ObservableObject {
 
     /// Print current focus state for debugging.
     func debugPrint() {
-        print("🎯 [FOCUS DEBUG]")
-        print("  Active scope: \(activeScope)")
-        print("  Focused item: \(focusedItem?.description ?? "none")")
-        print("  Scope stack: \(scopeStack.map { $0.rawValue })")
-        print("  Saved focus: \(savedFocus.mapValues { $0.uniqueId })")
     }
 }
 

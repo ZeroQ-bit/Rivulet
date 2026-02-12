@@ -189,7 +189,6 @@ final class RemoteInputHandler: ObservableObject {
 
                 // Track left/right direction for tap/hold detection
                 if self.currentDpadDirection != dir {
-                    print("🎮 [Remote] Dpad: \(dir.map { $0 ? "RIGHT" : "LEFT" } ?? "CENTER") (x=\(xValue))")
                 }
                 self.currentDpadDirection = dir
 
@@ -367,12 +366,10 @@ final class RemoteInputHandler: ObservableObject {
     }
 
     private func handleClickDown(direction: Bool?) {
-        print("🎮 [Remote] Click DOWN, direction: \(direction.map { $0 ? "RIGHT" : "LEFT" } ?? "CENTER")")
 
         guard let forward = direction else {
             // Center click - handled by SwiftUI (play/pause) or confirm scrub
             if isScrubbing {
-                print("🎮 [Remote] Center click confirms scrub")
                 endDirectionalInput(key: .microClick, source: .siriMicroGamepad)
                 emit(.scrubCommit, source: .siriMicroGamepad)
             }
@@ -384,7 +381,6 @@ final class RemoteInputHandler: ObservableObject {
     }
 
     private func handleClickUp(source: PlaybackInputSource) {
-        print("🎮 [Remote] Click UP, clickedDirection: \(clickedDirection.map { $0 ? "RIGHT" : "LEFT" } ?? "nil")")
         if let forward = clickedDirection {
             let action: PlaybackInputAction = .stepSeek(forward: forward)
             endDirectionalInput(key: .microClick, source: source, tapAction: action)
@@ -878,7 +874,6 @@ struct UniversalPlayerView: View {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                     // Re-check conditions before focusing (state may have changed)
                     if viewModel.showSkipButton && !viewModel.showInfoPanel && viewModel.postVideoState == .hidden {
-                        print("⏭️ [Skip] Auto-focusing skip button")
                         isSkipButtonFocused = true
                     }
                 }

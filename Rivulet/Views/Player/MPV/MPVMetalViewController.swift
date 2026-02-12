@@ -33,8 +33,6 @@ final class MPVMetalViewController: UIViewController {
     private var previousDrawableSize: CGSize = .zero
     private var lastLoadedURL: URL?
     private var audioRouteObserver: NSObjectProtocol?
-    private let debugId = String(UUID().uuidString.prefix(8))
-
     /// Tracks whether track enumeration has been performed (lazy loading optimization)
     private var tracksEnumerated = false
 
@@ -70,8 +68,6 @@ final class MPVMetalViewController: UIViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        print("🎬 [MPVController \(debugId)] viewDidLoad threadMain=\(Thread.isMainThread)")
-
         // Ensure the view clips its contents to bounds
         view.clipsToBounds = true
         view.layer.masksToBounds = true
@@ -129,8 +125,6 @@ final class MPVMetalViewController: UIViewController {
     /// Set explicit target size hint from parent (for multi-stream layout)
     /// Pass .zero to exit multiview mode and use normal frame-based sizing
     func setExplicitSize(_ size: CGSize) {
-        print("🎬 [MPVController \(debugId)] setExplicitSize size=\(Int(size.width))x\(Int(size.height)), viewBounds=\(Int(view.bounds.width))x\(Int(view.bounds.height)), hasSetupMpv=\(hasSetupMpv)")
-
         if size == .zero {
             // Exiting multiview mode - reset to normal frame-based sizing
             let wasSet = explicitTargetSize != nil
@@ -178,8 +172,6 @@ final class MPVMetalViewController: UIViewController {
     /// This avoids swapchain recreation by keeping the drawable size fixed
     private func updateLayerTransform(for targetSize: CGSize) {
         guard targetSize.width > 0 && targetSize.height > 0 else { return }
-
-        print("🎬 [MPVController \(debugId)] updateLayerTransform: target=\(Int(targetSize.width))x\(Int(targetSize.height)), viewBounds=\(Int(view.bounds.width))x\(Int(view.bounds.height))")
 
         // If MPV isn't set up yet (shouldn't happen now that we init in viewDidLoad),
         // initialize at current size and save as original
@@ -245,7 +237,6 @@ final class MPVMetalViewController: UIViewController {
     }
 
     deinit {
-        print("🎬 [MPVController \(debugId)] deinit threadMain=\(Thread.isMainThread)")
         shutdownMpv()
     }
 
@@ -254,7 +245,6 @@ final class MPVMetalViewController: UIViewController {
     /// Prepare controller for presentation after being claimed from pre-warm pool.
     /// Resets transient state while preserving the initialized MPV context.
     func prepareForPresentation() {
-        print("🎬 [MPVController \(debugId)] prepareForPresentation")
         // Reset transient playback state
         currentState = .idle
         isShuttingDown = false
@@ -269,7 +259,6 @@ final class MPVMetalViewController: UIViewController {
     /// Clean up controller before returning to pre-warm pool (if reuse were implemented).
     /// Currently not used since we create fresh controllers, but provided for completeness.
     func prepareForReuse() {
-        print("🎬 [MPVController \(debugId)] prepareForReuse")
         // Stop any active playback
         if mpv != nil && !isShuttingDown {
             command("stop")
@@ -289,8 +278,6 @@ final class MPVMetalViewController: UIViewController {
     private func shutdownMpv() {
         guard let mpvHandle = mpv, !isShuttingDown else { return }
         isShuttingDown = true
-        print("🎬 [MPVController \(debugId)] shutdownMpv begin threadMain=\(Thread.isMainThread)")
-
         // Clear delegate to prevent callbacks during shutdown
         delegate = nil
 
@@ -314,7 +301,6 @@ final class MPVMetalViewController: UIViewController {
 
         // Capture metal layer reference for cleanup after MPV destruction
         let layerToRemove = metalLayer
-        let logId = debugId
 
         // Do the heavy Vulkan/GPU cleanup on background thread
         // This prevents blocking the UI during mpv_terminate_destroy
@@ -332,12 +318,10 @@ final class MPVMetalViewController: UIViewController {
 
             // Now safe to destroy - this does the heavy Vulkan cleanup
             mpv_terminate_destroy(mpvHandle)
-            print("🎬 [MPVController \(logId)] shutdownMpv mpv_terminate_destroy complete")
 
             // Only remove metal layer AFTER MPV has fully released all GPU resources
             // This ensures no command buffers reference the layer's textures
             DispatchQueue.main.async {
-                print("🎬 [MPVController \(logId)] shutdownMpv removing metal layer on main thread")
                 layerToRemove.removeFromSuperlayer()
             }
         }
@@ -380,20 +364,14 @@ final class MPVMetalViewController: UIViewController {
             return
         }
 
-        let session = AVAudioSession.sharedInstance()
-        let newRoute = session.currentRoute.outputs.first?.portType.rawValue ?? "unknown"
-
         switch reason {
         case .newDeviceAvailable:
-            print("🎬 MPV: New audio device available, switching to: \(newRoute)")
             reinitializeMpvAudio()
 
         case .oldDeviceUnavailable:
-            print("🎬 MPV: Audio device unavailable, switching to: \(newRoute)")
             reinitializeMpvAudio()
 
         case .routeConfigurationChange:
-            print("🎬 MPV: Audio route changed to: \(newRoute)")
             reinitializeMpvAudio()
 
         default:
@@ -408,7 +386,6 @@ final class MPVMetalViewController: UIViewController {
 
         // Trigger MPV audio reinitialization by resetting audio-device to default
         setString("audio-device", "auto")
-        print("🎬 MPV: Audio device reset to auto for route change")
     }
 
     // MARK: - MPV Setup
@@ -449,7 +426,6 @@ final class MPVMetalViewController: UIViewController {
             checkError(mpv_set_option_string(mpv, "gpu-api", "vulkan"))
             checkError(mpv_set_option_string(mpv, "hwdec", "no"))  // No hardware decode in simulator
             checkError(mpv_set_option_string(mpv, "vulkan-swap-mode", "fifo"))  // Sync mode for stability
-            print("🎬 MPV: Using simulator-safe settings (gpu + software decode)")
         } else if isLiveStreamMode {
             // Live TV: Use 'gpu' with Vulkan (via MoltenVK) - tvOS doesn't have OpenGL
             // Use simpler 'gpu' instead of 'gpu-next' for lower resource usage (no HDR needed)
@@ -458,8 +434,6 @@ final class MPVMetalViewController: UIViewController {
             checkError(mpv_set_option_string(mpv, "hwdec", "videotoolbox"))  // Hardware decode
             checkError(mpv_set_option_string(mpv, "gpu-hwdec-interop", "videotoolbox"))
             checkError(mpv_set_option_string(mpv, "vulkan-swap-mode", "fifo"))  // VSync for smooth playback
-
-            print("🎬 MPV: Using live stream settings (gpu + Vulkan + VideoToolbox)")
         } else {
             // VOD: Use gpu-next with Vulkan (via MoltenVK) for HDR support
             // Note: gpu-next uses libplacebo which requires Vulkan; there's no native Metal path
@@ -484,7 +458,6 @@ final class MPVMetalViewController: UIViewController {
             checkError(mpv_set_option_string(mpv, "interpolation", "yes"))
             checkError(mpv_set_option_string(mpv, "tscale", "oversample"))  // No motion blur artifacts
 
-            print("🎬 MPV: Using VOD settings (gpu-next + Vulkan/MoltenVK + VideoToolbox + HDR + display-resample)")
         }
 
         // Audio configuration
@@ -498,7 +471,6 @@ final class MPVMetalViewController: UIViewController {
         // Whitelist 7.1, 5.1, and stereo layouts - mpv will pick the best match for the content
         // Note: 7.1 requires patched MPVKit to fix tvOS kAudioChannelLabel_Unknown bug for channels 7-8
         checkError(mpv_set_option_string(mpv, "audio-channels", "7.1,5.1,stereo"))
-        print("🎬 MPV: Audio output: audiounit with null fallback enabled")
 
         // Keep AirPlay/HomePod routes on a low-latency audio buffer so pause is more responsive.
         // Local playback can keep a larger buffer for stability on high-bitrate content.
@@ -508,8 +480,6 @@ final class MPVMetalViewController: UIViewController {
         let audioBufferResult = mpv_set_option_string(mpv, "audio-buffer", audioBufferSeconds)
         if audioBufferResult < 0 {
             print("🎬 MPV: audio-buffer option not available (error \(audioBufferResult)), using default")
-        } else {
-            print("🎬 MPV: audio-buffer set to \(audioBufferSeconds)s")
         }
 
         // Subtitles - use standard MPV options
@@ -548,7 +518,6 @@ final class MPVMetalViewController: UIViewController {
             checkError(mpv_set_option_string(mpv, "deband", "no"))  // No debanding
             checkError(mpv_set_option_string(mpv, "interpolation", "no"))  // No frame interpolation
 
-            print("🎬 MPV: Using live stream optimized settings (live edge, minimal processing)")
         } else {
             // VOD: larger buffers for smooth 4K HDR playback (100+ Mbps streams)
             // 250MiB forward buffer + 30s readahead provides ~30 seconds of 4K content
@@ -568,9 +537,6 @@ final class MPVMetalViewController: UIViewController {
                 checkError(mpv_set_option_string(mpv, "scale", "ewa_lanczossharp"))  // Best quality upscaling
                 checkError(mpv_set_option_string(mpv, "dscale", "mitchell"))         // Quality downscaling
                 checkError(mpv_set_option_string(mpv, "cscale", "ewa_lanczossharp")) // Best chroma upscaling
-                print("🎬 MPV: High quality scaling enabled (ewa_lanczossharp/mitchell)")
-            } else if isLiveStreamMode {
-                print("🎬 MPV: Live TV mode - using fast bilinear scaling")
             }
         }
 
@@ -609,7 +575,6 @@ final class MPVMetalViewController: UIViewController {
         if lastLoadedURL == url {
             switch currentState {
             case .loading, .playing, .paused, .buffering:
-                print("🎬 [MPVController \(debugId)] skipping duplicate load for \(url.lastPathComponent)")
                 return
             default:
                 break
@@ -631,7 +596,6 @@ final class MPVMetalViewController: UIViewController {
         // during file load, which is more reliable than seeking after load
         if let startTime = startTime, startTime > 0 {
             setString("start", String(format: "%.3f", startTime))
-            print("🎬 MPV: Setting start position to \(startTime)s")
         } else {
             setString("start", "0")
         }
@@ -652,7 +616,6 @@ final class MPVMetalViewController: UIViewController {
     }
 
     func stop() {
-        print("🎬 [MPVController \(debugId)] stop called threadMain=\(Thread.isMainThread)")
         command("stop")
         lastLoadedURL = nil
         updateState(.idle)
@@ -862,9 +825,6 @@ final class MPVMetalViewController: UIViewController {
         case MPV_EVENT_LOG_MESSAGE:
             #if DEBUG
             let msg = event.data.assumingMemoryBound(to: mpv_event_log_message.self).pointee
-            if let prefix = msg.prefix, let text = msg.text {
-                print("[MPV \(String(cString: prefix))] \(String(cString: text))", terminator: "")
-            }
             #endif
 
         default:
@@ -949,9 +909,6 @@ final class MPVMetalViewController: UIViewController {
 
     private func command(_ command: String, args: [String] = []) {
         guard mpv != nil else { return }
-        if command == "loadfile" || command == "stop" || command == "quit" {
-            print("🎬 [MPVController \(debugId)] command \(command) args=\(args)")
-        }
 
         let allArgs = [command] + args
         var cStrings = allArgs.map { strdup($0) }

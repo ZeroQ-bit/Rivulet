@@ -77,7 +77,6 @@ actor DepthLayerProcessor {
         }
 
         guard let result = request.results?.first else {
-            print("🎨 DepthLayerProcessor: No foreground mask result")
             return nil
         }
 
@@ -95,7 +94,6 @@ actor DepthLayerProcessor {
 
         // Reject masks that cover too much or too little
         guard coverage >= minMaskCoverage && coverage <= maxMaskCoverage else {
-            print("🎨 DepthLayerProcessor: Mask coverage \(String(format: "%.1f%%", coverage * 100)) outside valid range")
             return nil
         }
 
