@@ -477,7 +477,14 @@ final class MPVMetalViewController: UIViewController {
             // Allow recovery from hardware decode errors by seeking to keyframe
             checkError(mpv_set_option_string(mpv, "hr-seek-framedrop", "yes"))
 
-            print("🎬 MPV: Using VOD settings (gpu-next + Vulkan/MoltenVK + VideoToolbox + HDR)")
+            // Frame pacing: resample video to match display refresh rate (GitHub #73).
+            // Fixes 24fps stutter on 60Hz when Match Content is disabled in tvOS settings.
+            // When display rate matches content rate (Match Content active), this is a no-op.
+            checkError(mpv_set_option_string(mpv, "video-sync", "display-resample"))
+            checkError(mpv_set_option_string(mpv, "interpolation", "yes"))
+            checkError(mpv_set_option_string(mpv, "tscale", "oversample"))  // No motion blur artifacts
+
+            print("🎬 MPV: Using VOD settings (gpu-next + Vulkan/MoltenVK + VideoToolbox + HDR + display-resample)")
         }
 
         // Audio configuration
