@@ -159,11 +159,9 @@ final class MultiStreamViewModel: ObservableObject {
     // MARK: - Initialization
 
     init(initialChannel: UnifiedChannel) {
-        print("📺 [MultiStreamVM \(debugId)] init initialChannel id=\(initialChannel.id), name=\(initialChannel.name)")
 
         // Track active sessions and prevent screensaver
         Self.activeSessionCount += 1
-        print("📺 [MultiStreamVM \(debugId)] activeSessionCount now \(Self.activeSessionCount)")
         UIApplication.shared.isIdleTimerDisabled = true
 
         // Add the initial channel (unmuted since it's first)
@@ -175,13 +173,10 @@ final class MultiStreamViewModel: ObservableObject {
     // MARK: - Stream Management
 
     func addChannel(_ channel: UnifiedChannel) async {
-        print("📺 [MultiStreamVM \(debugId)] addChannel start id=\(channel.id), name=\(channel.name), streamsBefore=\(streams.count)")
         guard canAddStream else {
-            print("📺 [MultiStreamVM \(debugId)] addChannel blocked: max streams reached")
             return
         }
         guard !activeChannelIds.contains(channel.id) else {
-            print("📺 [MultiStreamVM \(debugId)] addChannel blocked: channel already active id=\(channel.id)")
             return
         }
 
@@ -217,7 +212,6 @@ final class MultiStreamViewModel: ObservableObject {
         // Start playback
         let loadStartTime = Date()
         if let url = LiveTVDataStore.shared.buildStreamURL(for: channel) {
-            print("📺 [MultiStreamVM \(debugId)] addChannel resolvedURL host=\(url.host ?? "unknown"), path=\(url.path), slotIndex=\(slotIndex)")
 
             // Determine stream type for logging
             let streamType: String = {
@@ -255,7 +249,6 @@ final class MultiStreamViewModel: ObservableObject {
                 stalledStateSince[slot.id] = nil
 
                 let loadDuration = Date().timeIntervalSince(loadStartTime)
-                print("📺 [MultiStreamVM \(debugId)] addChannel playback started id=\(channel.id), slotIndex=\(slotIndex)")
 
                 // Focus the newly added stream
                 setFocus(to: slotIndex)
@@ -295,7 +288,6 @@ final class MultiStreamViewModel: ObservableObject {
             }
         } else {
             print("MultiStream: No stream URL available for channel '\(channel.name)' (id: \(channel.id))")
-            print("📺 [MultiStreamVM \(debugId)] addChannel no URL id=\(channel.id), name=\(channel.name)")
 
             // Capture missing stream URL as error
             let event = Event(level: .error)
@@ -360,13 +352,11 @@ final class MultiStreamViewModel: ObservableObject {
     }
 
     func stopAllStreams() {
-        print("📺 [MultiStreamVM \(debugId)] stopAllStreams start streams=\(streams.count), focusedIndex=\(focusedSlotIndex)")
         cancelScrubFocused()
         healthMonitorTask?.cancel()
         healthMonitorTask = nil
         for slot in streams {
             markSlotAsIntentionallyStopped(slot.id)
-            print("📺 [MultiStreamVM \(debugId)] stopAllStreams stopping slotId=\(slot.id), channelId=\(slot.channel.id), channelName=\(slot.channel.name)")
             slot.stop()
             cleanupTracking(for: slot.id)
         }
@@ -379,12 +369,10 @@ final class MultiStreamViewModel: ObservableObject {
         if !didDecrementSessionCount {
             didDecrementSessionCount = true
             Self.activeSessionCount = max(0, Self.activeSessionCount - 1)
-            print("📺 [MultiStreamVM \(debugId)] stopAllStreams completed, activeSessionCount now \(Self.activeSessionCount)")
             if Self.activeSessionCount == 0 {
                 UIApplication.shared.isIdleTimerDisabled = false
             }
         } else {
-            print("📺 [MultiStreamVM \(debugId)] stopAllStreams completed (already decremented)")
         }
     }
 
@@ -455,7 +443,6 @@ final class MultiStreamViewModel: ObservableObject {
         // Only block if the channel is active in a DIFFERENT slot
         let currentChannelId = streams[index].channel.id
         if activeChannelIds.contains(channel.id) && channel.id != currentChannelId {
-            print("MultiStream: replaceStream blocked - channel '\(channel.name)' already active in another slot")
 
             let breadcrumb = Breadcrumb(level: .info, category: "livetv_playback")
             breadcrumb.message = "replaceStream blocked - channel already active in another slot"
@@ -903,8 +890,6 @@ final class MultiStreamViewModel: ObservableObject {
         let attempt = recoveryAttempts[slotId, default: 0]
         let delay = min(pow(2, Double(min(attempt, 4))), 15)  // 1s, 2s, 4s, 8s, 15s...
 
-        print("📺 [MultiStreamVM \(debugId)] scheduling auto-recovery slotId=\(slotId) channel=\(channel.name) reason=\(reason) attempt=\(attempt + 1) delay=\(delay)s")
-
         autoRecoveryTasks[slotId] = Task { [weak self] in
             if delay > 0 {
                 try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
@@ -927,7 +912,6 @@ final class MultiStreamViewModel: ObservableObject {
         defer { recoveringSlots.remove(slotId) }
 
         guard let url = LiveTVDataStore.shared.buildStreamURL(for: channel) else {
-            print("📺 [MultiStreamVM \(debugId)] auto-recovery aborted: no URL channel=\(channel.name) slotId=\(slotId)")
             scheduleAutoRecovery(for: slotId, channel: channel, reason: "no-url")
             return
         }
@@ -958,7 +942,6 @@ final class MultiStreamViewModel: ObservableObject {
                   streams.contains(where: { $0.id == slotId }) else { return }
             slot.setMuted(muted)
             slot.play()
-            print("📺 [MultiStreamVM \(debugId)] auto-recovery started channel=\(channel.name) slotId=\(slotId)")
         } catch {
             if Task.isCancelled || intentionallyStoppedSlots.contains(slotId) {
                 return
@@ -999,7 +982,6 @@ final class MultiStreamViewModel: ObservableObject {
     // MARK: - Cleanup
 
     deinit {
-        print("📺 [MultiStreamVM \(debugId)] deinit, didDecrementSessionCount=\(didDecrementSessionCount)")
         controlsTimer?.invalidate()
         scrubTimer?.invalidate()
         healthMonitorTask?.cancel()
@@ -1009,7 +991,6 @@ final class MultiStreamViewModel: ObservableObject {
         Task { @MainActor in
             if needsDecrement && Self.activeSessionCount > 0 {
                 Self.activeSessionCount -= 1
-                print("📺 [MultiStreamVM] deinit cleanup, activeSessionCount now \(Self.activeSessionCount)")
                 if Self.activeSessionCount == 0 {
                     UIApplication.shared.isIdleTimerDisabled = false
                 }

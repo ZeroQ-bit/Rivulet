@@ -76,7 +76,6 @@ class PlaybackManager: ObservableObject {
     /// Analyze media info and select the best playback strategy
     private func selectBestStrategy(for item: PlexMetadata) -> PlexNetworkManager.PlaybackStrategy {
         guard let media = item.Media?.first else {
-            print("🎯 Strategy Selection: No media info, defaulting to HLS Transcode")
             return .hlsTranscode
         }
         
@@ -114,13 +113,10 @@ class PlaybackManager: ObservableObject {
         // 3. Otherwise → Full HLS Transcode
         
         if canDirectPlayContainer && canDirectPlayVideo && canDirectPlayAudio {
-            print("   → Selected: Direct Play (everything compatible)")
             return .directPlay
         } else if canDirectPlayVideo {
-            print("   → Selected: Direct Stream (video OK, need remux/audio transcode)")
             return .directStream
         } else {
-            print("   → Selected: HLS Transcode (video needs transcoding)")
             return .hlsTranscode
         }
     }
@@ -160,20 +156,16 @@ class PlaybackManager: ObservableObject {
             return
         }
 
-        print("📺 Stream URL: \(streamURL)")
-
         self.currentStrategy = strategy
         
         // For transcode strategies, ping the URL first to start the transcode session
         if strategy == .directStream || strategy == .hlsTranscode {
-            print("⏳ Waiting for transcode session to initialize...")
             let sessionReady = await waitForTranscodeSession(url: streamURL, authToken: authToken)
             if !sessionReady {
                 print("⚠️ Transcode session failed to start, trying next strategy...")
                 await tryNextStrategy(after: strategy)
                 return
             }
-            print("✅ Transcode session ready")
         }
         
         // Create player item with custom asset options for better compatibility
@@ -449,14 +441,6 @@ class PlaybackManager: ObservableObject {
                     // The simulator has issues with hardware video decoding
                     await self.logTrackInfo(item: item)
                     
-                    print("""
-                    
-                    ✅ PLAYBACK READY
-                       Strategy: \(self.currentStrategy.rawValue)
-                       Duration: \(self.formatTime(duration))
-                       Title: \(self.currentItem?.title ?? "Unknown")
-                    
-                    """)
                 case .failed:
                     let errorDesc = item.error?.localizedDescription ?? "unknown"
                     let nsError = item.error as NSError?
@@ -559,12 +543,10 @@ class PlaybackManager: ObservableObject {
         // Try up to 5 times with longer delays to give transcoder time to start
         for attempt in 1...5 {
             do {
-                print("   Attempt \(attempt)/5: Checking transcode manifest...")
                 
                 let (data, response) = try await URLSession.shared.data(for: request)
                 
                 if let httpResponse = response as? HTTPURLResponse {
-                    print("   Response: \(httpResponse.statusCode) (\(data.count) bytes)")
                     
                     if httpResponse.statusCode == 200 && data.count > 0 {
                         if let content = String(data: data, encoding: .utf8) {
@@ -573,36 +555,24 @@ class PlaybackManager: ObservableObject {
                             let hasSegments = content.contains(".ts") || content.contains(".m4s") || content.contains("#EXTINF")
                             let hasVariant = content.contains("#EXT-X-STREAM-INF")
                             
-                            print("   Manifest analysis:")
-                            print("      Has #EXTM3U header: \(hasHeader)")
-                            print("      Has segment references: \(hasSegments)")
-                            print("      Has variant streams: \(hasVariant)")
-                            
                             if hasHeader && (hasSegments || hasVariant) {
                                 // For master playlists, we need to check the variant playlist too
                                 if hasVariant && !hasSegments {
-                                    print("   📋 Master playlist detected, checking variant...")
                                     // Extract first variant URL and check it
                                     let variantReady = await checkVariantPlaylist(masterContent: content, baseURL: url, authToken: authToken)
                                     if variantReady {
-                                        print("   ✅ Variant playlist has segments")
                                         return true
                                     } else {
-                                        print("   ⏳ Variant playlist not ready yet")
                                     }
                                 } else {
-                                    print("   ✅ Media playlist with segments ready")
                                     return true
                                 }
                             } else if hasHeader {
-                                print("   ⏳ Manifest received but no segments yet")
-                                print("   Content preview: \(content.prefix(300))")
                             } else {
                                 print("   ⚠️ Invalid manifest format")
                             }
                         }
                     } else if httpResponse.statusCode == 503 {
-                        print("   ⏳ Transcode not ready yet (503)")
                     } else {
                         print("   ⚠️ Unexpected status: \(httpResponse.statusCode)")
                     }
@@ -614,7 +584,6 @@ class PlaybackManager: ObservableObject {
             // Longer delays to give transcoder time (2s, 3s, 4s, 5s)
             if attempt < 5 {
                 let delay = UInt64(attempt + 1) * 1_000_000_000
-                print("   Waiting \(attempt + 1) seconds...")
                 try? await Task.sleep(nanoseconds: delay)
             }
         }
@@ -646,8 +615,6 @@ class PlaybackManager: ObservableObject {
                 
                 guard let url = variantURL else { continue }
                 
-                print("      Checking variant: \(url.lastPathComponent)")
-                
                 var request = URLRequest(url: url)
                 request.timeoutInterval = 10
                 request.addValue(authToken, forHTTPHeaderField: "X-Plex-Token")
@@ -658,7 +625,6 @@ class PlaybackManager: ObservableObject {
                        httpResponse.statusCode == 200,
                        let content = String(data: data, encoding: .utf8) {
                         let hasSegments = content.contains(".ts") || content.contains("#EXTINF")
-                        print("      Variant has segments: \(hasSegments) (\(data.count) bytes)")
                         return hasSegments
                     }
                 } catch {
@@ -685,20 +651,9 @@ class PlaybackManager: ObservableObject {
         let audioTracks = tracks.filter { $0.assetTrack?.mediaType == .audio }
         
         if !tracks.isEmpty {
-            print("""
-            📊 Track Info (from player item):
-               Total tracks: \(tracks.count)
-               Video: \(videoTracks.count)
-               Audio: \(audioTracks.count)
-            """)
         } else {
             // For HLS, tracks may be dynamically loaded
             // Just note that we're streaming
-            print("""
-            📊 Stream Info:
-               Type: HLS (tracks loaded dynamically)
-               Status: Ready to play
-            """)
         }
     }
     
@@ -803,7 +758,6 @@ class PlaybackManager: ObservableObject {
         
         """
         
-        print(debugOutput)
     }
 }
 

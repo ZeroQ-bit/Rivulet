@@ -65,8 +65,6 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
             request.addValue(value, forHTTPHeaderField: key)
         }
 
-        print("🌐 PlexNetwork: \(method) \(url.absoluteString)")
-
         let (data, response) = try await session.data(for: request)
 
         guard let httpResponse = response as? HTTPURLResponse else {
@@ -74,13 +72,8 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
             throw PlexAPIError.invalidResponse
         }
 
-        print("🌐 PlexNetwork: Response \(httpResponse.statusCode) (\(data.count) bytes)")
-
         guard (200...299).contains(httpResponse.statusCode) else {
             print("🌐 PlexNetwork: ❌ HTTP Error \(httpResponse.statusCode)")
-            if let responseStr = String(data: data, encoding: .utf8) {
-                print("🌐 PlexNetwork: Response body: \(responseStr.prefix(500))")
-            }
             let error = PlexAPIError.httpError(statusCode: httpResponse.statusCode, data: data)
 
             // Capture HTTP errors to Sentry (skip 401/403 auth errors and 5xx server errors)
@@ -97,11 +90,6 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
             }
 
             throw error
-        }
-
-        // Debug: print first part of response
-        if let responseStr = String(data: data, encoding: .utf8) {
-            print("🌐 PlexNetwork: Response preview: \(responseStr.prefix(300))...")
         }
 
         do {
@@ -317,7 +305,6 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
             }
         }
 
-        print("🌐 PlexNetwork: Found \(result.count) server machineIdentifiers")
         return result
     }
 
@@ -901,8 +888,6 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
             throw PlexAPIError.invalidURL
         }
 
-        print("🎬 Marking as watched: \(ratingKey) - URL: \(url)")
-
         var request = URLRequest(url: url)
         request.httpMethod = "PUT"
         for (key, value) in plexHeaders(authToken: authToken) {
@@ -918,7 +903,6 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
             throw PlexAPIError.invalidResponse
         }
 
-        print("🎬 Successfully marked as watched: \(ratingKey)")
     }
 
     /// Mark item as unwatched
@@ -940,8 +924,6 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
             throw PlexAPIError.invalidURL
         }
 
-        print("🎬 Marking as unwatched: \(ratingKey) - URL: \(url)")
-
         var request = URLRequest(url: url)
         request.httpMethod = "PUT"
         for (key, value) in plexHeaders(authToken: authToken) {
@@ -957,7 +939,6 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
             throw PlexAPIError.invalidResponse
         }
 
-        print("🎬 Successfully marked as unwatched: \(ratingKey)")
     }
 
     /// Set user rating for an item (0-10 scale, where 10 = 5 stars)
@@ -989,8 +970,6 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
             throw PlexAPIError.invalidURL
         }
 
-        print("🎵 Setting rating for \(ratingKey): \(rating ?? -1) - URL: \(url)")
-
         var request = URLRequest(url: url)
         request.httpMethod = "PUT"
         for (key, value) in plexHeaders(authToken: authToken) {
@@ -1006,7 +985,6 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
             throw PlexAPIError.invalidResponse
         }
 
-        print("🎵 Successfully set rating for \(ratingKey)")
     }
 
     /// Refresh metadata for an item (re-fetch from metadata agents)
@@ -1041,13 +1019,11 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
         ratingKey: String
     ) async throws {
         // Mark as unwatched clears all progress and removes from "Continue Watching"
-        print("🎬 Removing from Continue Watching: \(ratingKey)")
         try await markUnwatched(
             serverURL: serverURL,
             authToken: authToken,
             ratingKey: ratingKey
         )
-        print("🎬 Successfully removed from Continue Watching: \(ratingKey)")
     }
 
     // MARK: - Streaming URLs
@@ -1089,7 +1065,6 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
             let containerLower = container?.lowercased() ?? ""
 
             if !directPlayableContainers.contains(containerLower) && !containerLower.isEmpty && !isAudio {
-                print("📦 Container '\(containerLower)' not direct-playable, skipping Direct Play")
                 return nil  // Signal to try next strategy
             }
             return buildDirectPlayURL(serverURL: serverURL, authToken: authToken, partKey: partKey, ratingKey: ratingKey)
@@ -1147,10 +1122,6 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
             URLQueryItem(name: "X-Plex-Device", value: PlexAPI.deviceName),
             URLQueryItem(name: "X-Plex-Product", value: PlexAPI.productName)
         ]
-
-        if let url = components.url {
-            print("🎬 VLC Direct Play URL: \(url.absoluteString)")
-        }
 
         return components.url
     }
@@ -1219,9 +1190,6 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
                 URLQueryItem(name: "hasMDE", value: "1")
             ]
 
-            if let url = components.url {
-                print("🎵 Audio Stream URL generated: \(url.absoluteString.prefix(300))...")
-            }
         } else {
             // Video client profile (original code)
             let clientProfile = [
@@ -1288,9 +1256,6 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
                 URLQueryItem(name: "hasMDE", value: "1")
             ]
 
-            if let url = components.url {
-                print("🎬 Direct Stream URL generated: \(url.absoluteString.prefix(500))...")
-            }
         }
 
         return components.url
@@ -1517,7 +1482,6 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
         do {
             let (_, response) = try await URLSession.shared.data(for: request)
             let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-            print("[Plex] Decision response: HTTP \(status)")
         } catch {
             print("[Plex] Decision request failed: \(error.localizedDescription)")
         }
@@ -1538,11 +1502,9 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
             let (_, response) = try await session.data(for: headRequest)
             let status = (response as? HTTPURLResponse)?.statusCode ?? 0
             if (200...399).contains(status) {
-                print("[Plex] Direct-play warmup (HEAD) ready: HTTP \(status)")
                 return
             }
             if status != 405 && status != 501 {
-                print("[Plex] Direct-play warmup (HEAD) status: HTTP \(status)")
                 return
             }
         } catch {
@@ -1561,9 +1523,6 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
         do {
             let (_, response) = try await session.data(for: rangeRequest)
             let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-            if (200...399).contains(status) {
-                print("[Plex] Direct-play warmup (range) ready: HTTP \(status)")
-            }
         } catch {
             // Best effort only.
         }
@@ -1586,7 +1545,6 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
         do {
             let (_, response) = try await URLSession.shared.data(for: request)
             let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-            print("[Plex] Stopped transcode session \(sessionId) (HTTP \(status))")
         } catch {
             // Best-effort — don't block on failure
             print("[Plex] Failed to stop transcode session \(sessionId): \(error.localizedDescription)")
@@ -1824,7 +1782,6 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
             SentrySDK.addBreadcrumb(hdhrBreadcrumb)
 
             hdhrStreamURLs = await fetchHDHomeRunLineup(deviceURI: deviceURI)
-            print("🌐 PlexNetwork: Fetched \(hdhrStreamURLs.count) stream URLs from HDHomeRun")
         } else {
             // No HDHomeRun device - likely a DVB tuner (GitHub #64)
             let dvbBreadcrumb = Breadcrumb(level: .info, category: "plex_livetv")
@@ -1861,8 +1818,6 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
         guard let gridURL = components.url else {
             throw PlexAPIError.invalidURL
         }
-
-        print("🌐 PlexNetwork: Fetching channels from grid: \(gridURL.absoluteString)")
 
         // The grid returns programs with channel info in each program's Media array
         struct GridContainer: Codable {
@@ -1932,8 +1887,6 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
             }
         }
 
-        print("🌐 PlexNetwork: Found \(channels.count) unique channels from grid")
-
         // Log channel breakdown for DVB debugging (GitHub #64)
         let channelsWithStreamURL = channels.filter { $0.streamURL != nil }.count
         let channelsNeedingTranscode = channels.count - channelsWithStreamURL
@@ -1958,8 +1911,6 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
             print("🌐 PlexNetwork: Invalid HDHomeRun lineup URL")
             return [:]
         }
-
-        print("🌐 PlexNetwork: Fetching HDHomeRun lineup from \(lineupURL)")
 
         struct HDHomeRunChannel: Codable {
             let GuideNumber: String?
@@ -2086,8 +2037,6 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
             throw PlexAPIError.invalidURL
         }
 
-        print("🌐 PlexNetwork: Fetching EPG from: \(url.absoluteString)")
-
         // The grid returns flat programs with channel info in each program's Media array
         // We need to parse this and group by channel
         struct GridEPGContainer: Codable {
@@ -2128,7 +2077,6 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
         )
 
         let programs = container.MediaContainer.Metadata ?? []
-        print("🌐 PlexNetwork: EPG returned \(programs.count) programs")
 
         // Group programs by channel and convert to PlexLiveTVGuideChannel format
         // Each program can have multiple Media entries representing different time slots
@@ -2189,7 +2137,6 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
             )
         }
 
-        print("🌐 PlexNetwork: EPG grouped into \(guideChannels.count) channels")
         return guideChannels
     }
 
@@ -2245,36 +2192,26 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
         // Try the v2 JSON endpoint first
         let v2URL = URL(string: "\(PlexAPI.baseUrl)/api/v2/home/users")!
 
-        print("🌐 PlexNetwork: Fetching home users from \(v2URL)")
-
         var headers = plexHeaders(authToken: authToken)
         headers["Accept"] = "application/json"
 
         do {
             let data = try await requestData(v2URL, headers: headers)
 
-            // Debug: print the raw response
-            if let responseStr = String(data: data, encoding: .utf8) {
-                print("🌐 PlexNetwork: Home users response: \(responseStr.prefix(1500))")
-            }
-
             let decoder = JSONDecoder()
 
             // Try wrapped format: {"users": [...]} or {"home": {"users": [...]}}
             if let response = try? decoder.decode(PlexHomeUsersResponse.self, from: data) {
-                print("🌐 PlexNetwork: Found \(response.users.count) home users (users array)")
                 return response.users
             }
 
             // Try home wrapper: {"home": {..., "users": [...]}}
             if let homeWrapper = try? decoder.decode(PlexHomeWrapper.self, from: data) {
-                print("🌐 PlexNetwork: Found \(homeWrapper.users.count) home users (home wrapper)")
                 return homeWrapper.users
             }
 
             // Try direct array format: [...]
             if let users = try? decoder.decode([PlexHomeUser].self, from: data) {
-                print("🌐 PlexNetwork: Found \(users.count) home users (direct array)")
                 return users
             }
 
@@ -2290,9 +2227,7 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
         let xmlData = try await requestData(xmlURL, headers: plexHeaders(authToken: authToken))
 
         if let xmlString = String(data: xmlData, encoding: .utf8) {
-            print("🌐 PlexNetwork: XML response: \(xmlString.prefix(1500))")
             let users = parseHomeUsersXML(xmlString)
-            print("🌐 PlexNetwork: Parsed \(users.count) home users from XML")
             return users
         }
 
@@ -2312,7 +2247,6 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
         }
 
         let matches = regex.matches(in: xml, range: NSRange(xml.startIndex..., in: xml))
-        print("🌐 PlexNetwork: Found \(matches.count) <user/> elements in XML")
 
         for match in matches {
             guard let attrRange = Range(match.range(at: 1), in: xml) else { continue }
@@ -2361,9 +2295,6 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
         do {
             let servers = try await getServers(authToken: authToken)
 
-            print("🌐 PlexNetwork: Looking for server matching: \(serverURL)")
-            print("🌐 PlexNetwork: Found \(servers.count) servers in resources")
-
             // Extract the machine identifier from plex.direct URL if present
             // Format: https://IP.MACHINEID.plex.direct:PORT
             var targetMachineId: String?
@@ -2372,21 +2303,17 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
                 if components.count >= 3 {
                     // The machine ID is the second-to-last component before "plex.direct"
                     targetMachineId = components[1]
-                    print("🌐 PlexNetwork: Extracted machine ID from URL: \(targetMachineId ?? "none")")
                 }
             }
 
             // Find a server that matches
             for server in servers {
-                print("🌐 PlexNetwork: Checking server '\(server.name)' (clientId: \(server.clientIdentifier), machineId: \(server.machineIdentifier ?? "nil"), accessToken: \(server.accessToken != nil ? "present" : "nil"))")
-                print("🌐 PlexNetwork: Server '\(server.name)' connections: \((server.connections ?? []).map { $0.uri })")
 
                 // Check if machine identifier matches
                 if let targetMachineId = targetMachineId,
                    let serverMachineId = server.machineIdentifier,
                    serverMachineId == targetMachineId {
                     if let accessToken = server.accessToken {
-                        print("🌐 PlexNetwork: ✅ Found server by machine ID: \(server.name)")
                         return accessToken
                     }
                 }
@@ -2395,7 +2322,6 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
                 if let targetMachineId = targetMachineId,
                    server.clientIdentifier == targetMachineId {
                     if let accessToken = server.accessToken {
-                        print("🌐 PlexNetwork: ✅ Found server by client ID: \(server.name)")
                         return accessToken
                     }
                 }
@@ -2405,7 +2331,6 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
                     // Direct match
                     if serverURL == connection.uri {
                         if let accessToken = server.accessToken {
-                            print("🌐 PlexNetwork: ✅ Found server by exact connection URI: \(server.name)")
                             return accessToken
                         }
                     }
@@ -2414,7 +2339,6 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
                     if let targetMachineId = targetMachineId,
                        connection.uri.contains(targetMachineId) {
                         if let accessToken = server.accessToken {
-                            print("🌐 PlexNetwork: ✅ Found server by plex.direct ID in connection: \(server.name)")
                             return accessToken
                         }
                     }
@@ -2422,7 +2346,6 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
                     // Partial match for same server
                     if serverURL.contains(connection.uri) || connection.uri.contains(serverURL) {
                         if let accessToken = server.accessToken {
-                            print("🌐 PlexNetwork: ✅ Found server by connection URI match: \(server.name)")
                             return accessToken
                         }
                     }
@@ -2430,7 +2353,6 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
 
                 // If we found a server with accessToken (last resort - only 1 server in list)
                 if servers.count == 1, let accessToken = server.accessToken {
-                    print("🌐 PlexNetwork: ✅ Using only available server: \(server.name)")
                     return accessToken
                 }
             }
@@ -2466,8 +2388,6 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
             request.addValue(pin, forHTTPHeaderField: "X-Plex-Pin")
         }
 
-        print("🌐 PlexNetwork: Switching to home user \(userUUID)")
-
         let (data, response) = try await session.data(for: request)
 
         guard let httpResponse = response as? HTTPURLResponse else {
@@ -2475,9 +2395,6 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
         }
 
         // Log response for debugging
-        if let responseStr = String(data: data, encoding: .utf8) {
-            print("🌐 PlexNetwork: Switch response (\(httpResponse.statusCode)): \(responseStr.prefix(500))")
-        }
 
         // 200/201 = success, 401 = invalid PIN, 403 = PIN required
         switch httpResponse.statusCode {
@@ -2485,10 +2402,8 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
             // Parse the user's auth token from response
             if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                let userToken = json["authToken"] as? String {
-                print("🌐 PlexNetwork: ✅ User switch successful, got user token")
                 return userToken
             }
-            print("🌐 PlexNetwork: ✅ User switch successful (no token in response)")
             return authToken // Fall back to original token
         case 401:
             print("🌐 PlexNetwork: ❌ Invalid PIN")

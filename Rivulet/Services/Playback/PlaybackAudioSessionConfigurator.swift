@@ -26,9 +26,7 @@ enum PlaybackAudioSessionConfigurator {
         do {
             try session.setCategory(.playback, mode: mode, policy: preferredPolicy, options: [])
             usingLongFormPolicy = true
-            print("🎵 \(owner): Audio category set (.playback, mode: \(mode.rawValue), policy: \(preferredPolicyName))")
         } catch {
-            print("🎵 \(owner): Long-form policy unavailable, falling back (\(error.localizedDescription))")
             do {
                 try session.setCategory(.playback, mode: mode, options: [.allowAirPlay])
                 print("🎵 \(owner): Audio category fallback set (.playback, mode: \(mode.rawValue), allowAirPlay)")

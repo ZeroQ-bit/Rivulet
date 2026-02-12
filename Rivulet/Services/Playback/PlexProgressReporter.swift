@@ -76,7 +76,6 @@ actor PlexProgressReporter {
                 method: "GET",
                 headers: ["X-Plex-Token": server.token]
             )
-            print("📊 PlexProgress: Reported \(state) at \(Int(time))s/\(Int(duration))s for \(ratingKey)")
         } catch {
             print("📊 PlexProgress: Failed to report progress: \(error)")
         }
@@ -98,7 +97,6 @@ actor PlexProgressReporter {
                 method: "GET",
                 headers: ["X-Plex-Token": server.token]
             )
-            print("📊 PlexProgress: ✅ Marked \(ratingKey) as watched")
         } catch {
             print("📊 PlexProgress: Failed to mark as watched: \(error)")
         }
@@ -120,7 +118,6 @@ actor PlexProgressReporter {
                 method: "GET",
                 headers: ["X-Plex-Token": server.token]
             )
-            print("📊 PlexProgress: Marked \(ratingKey) as unwatched")
         } catch {
             print("📊 PlexProgress: Failed to mark as unwatched: \(error)")
         }

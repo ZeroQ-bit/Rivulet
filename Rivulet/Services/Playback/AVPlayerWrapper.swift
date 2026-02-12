@@ -143,7 +143,6 @@ final class AVPlayerWrapper: NSObject, ObservableObject {
     ///   - isLive: Whether this is a live stream (affects buffering behavior)
     ///   - isDolbyVision: Whether this is Dolby Vision content (enables codec tag patching for HLS)
     func load(url: URL, headers: [String: String]?, isLive: Bool = false, isDolbyVision: Bool = false) async throws {
-        print("🎬 AVPlayerWrapper: Loading URL: \(url) (isLive: \(isLive), isDolbyVision: \(isDolbyVision))")
 
         // Ensure audio session is active before loading
         ensureAudioSessionActive()
@@ -175,7 +174,6 @@ final class AVPlayerWrapper: NSObject, ObservableObject {
         // (dvh1 → hvc1 in CODECS), while all other requests pass through to Plex unmodified.
         // This avoids file:// limitations, resource loader timeouts, and custom URL scheme issues.
         if isDolbyVision {
-            print("🎬 AVPlayerWrapper: Dolby Vision HLS - starting local proxy")
 
             // Stop any previous proxy
             dvProxyServer?.stop()
@@ -185,7 +183,6 @@ final class AVPlayerWrapper: NSObject, ObservableObject {
             dvProxyServer = proxy
             let proxyURL = try proxy.start()
 
-            print("🎬 AVPlayerWrapper: Using DV proxy URL: \(proxyURL)")
             asset = AVURLAsset(url: proxyURL, options: options)
         } else {
             asset = AVURLAsset(url: url, options: options)
@@ -229,11 +226,9 @@ final class AVPlayerWrapper: NSObject, ObservableObject {
         setupObservers()
 
         if isLive {
-            print("🎬 AVPlayerWrapper: Starting live playback")
             // Start playback immediately for live streams
             player?.play()
         } else {
-            print("🎬 AVPlayerWrapper: VOD content loaded, ready to play")
             // For VOD, don't auto-play - let caller control
         }
 
@@ -358,7 +353,6 @@ final class AVPlayerWrapper: NSObject, ObservableObject {
                     // Playback started - cancel loading timeout
                     self.cancelLoadingTimeout()
                     self.playbackStateSubject.send(.playing)
-                    print("🎬 AVPlayerWrapper: Playback started (rate: \(rate))")
                     // Start video rendering verification (only on first play, not after seek)
                     if !self.hasVerifiedVideoRendering {
                         self.startVideoRenderVerification()
@@ -384,12 +378,10 @@ final class AVPlayerWrapper: NSObject, ObservableObject {
                 switch status {
                 case .waitingToPlayAtSpecifiedRate:
                     let reasonStr = reason?.rawValue ?? "unknown"
-                    print("🎬 AVPlayerWrapper: Waiting to play - reason: \(reasonStr)")
                     self.playbackStateSubject.send(.buffering)
                 case .playing:
                     // Only transition to playing if we were buffering
                     if case .buffering = self.playbackStateSubject.value {
-                        print("🎬 AVPlayerWrapper: Resumed from buffering")
                         self.playbackStateSubject.send(.playing)
                     }
                 case .paused:
@@ -411,7 +403,6 @@ final class AVPlayerWrapper: NSObject, ObservableObject {
                 guard let self else { return }
                 switch status {
                 case .readyToPlay:
-                    print("🎬 AVPlayerWrapper: Ready to play")
                     self._duration = duration.isFinite ? duration : 0
                     // Log track details for debugging (async to avoid blocking main thread on XPC)
                     let asset = item.asset
@@ -424,7 +415,6 @@ final class AVPlayerWrapper: NSObject, ObservableObject {
                                 let codecString = codecType.map { self.fourCCToString($0) } ?? "unknown"
                                 let naturalSize = try await track.load(.naturalSize)
                                 let nominalFrameRate = try await track.load(.nominalFrameRate)
-                                print("🎬 AVPlayerWrapper: Video track \(index) codec=\(codecString) size=\(Int(abs(naturalSize.width)))x\(Int(abs(naturalSize.height))) fps=\(nominalFrameRate)")
                                 // Cache video codec for error messages (avoids sync XPC call during error handling)
                                 if index == 0, let codecType {
                                     self.cachedVideoCodec = self.mapVideoCodecToReadableName(codecType)
@@ -670,7 +660,6 @@ final class AVPlayerWrapper: NSObject, ObservableObject {
         // -12938 = content not found
         // -12937 = connection failed
         if errorCode == -12939 {
-            print("🎬 AVPlayerWrapper: Server doesn't support byte-range requests")
             let message = "Stream format is incompatible with AVPlayer."
             playbackStateSubject.send(.failed(.codecUnsupported(message)))
             errorSubject.send(.codecUnsupported(message))
@@ -715,11 +704,9 @@ final class AVPlayerWrapper: NSObject, ObservableObject {
         if lastEvent.numberOfBytesTransferred > 0 {
             // Reset 404 counter on successful data transfer
             if consecutive404Count > 0 {
-                print("🎬 AVPlayerWrapper: Successful transfer, resetting 404 counter")
                 consecutive404Count = 0
                 last404Time = nil
             }
-            print("🎬 AVPlayerWrapper: Streaming - \(lastEvent.numberOfBytesTransferred) bytes, bitrate: \(Int(lastEvent.indicatedBitrate))")
         }
     }
 
@@ -734,7 +721,6 @@ final class AVPlayerWrapper: NSObject, ObservableObject {
             let hasValidVideoRect = videoRect.width > 10 && videoRect.height > 10
             if hasValidVideoRect {
                 let renderedAspectRatio = videoRect.width / videoRect.height
-                print("🎬 AVPlayerWrapper: Video rendering reported - rect=\(videoRect), aspectRatio=\(String(format: "%.2f", renderedAspectRatio))")
 
                 // Check for aspect ratio mismatch which indicates decoder failure
                 // Most modern video content (movies/TV) has aspect ratio >= 1.5 (3:2)
@@ -758,7 +744,6 @@ final class AVPlayerWrapper: NSObject, ObservableObject {
                     return
                 }
 
-                print("🎬 AVPlayerWrapper: Video rendering confirmed")
                 hasReceivedVideoFrames = true
                 hasVerifiedVideoRendering = true  // Persist - don't re-verify after seek
                 // Cancel verification timeout since video is rendering
@@ -775,7 +760,6 @@ final class AVPlayerWrapper: NSObject, ObservableObject {
     func setExpectedAspectRatio(width: Int, height: Int) {
         guard height > 0 else { return }
         expectedAspectRatio = CGFloat(width) / CGFloat(height)
-        print("🎬 AVPlayerWrapper: Expected aspect ratio set to \(String(format: "%.2f", expectedAspectRatio!)) from \(width)x\(height)")
     }
 
     /// Start verification that video is actually rendering after playback starts
@@ -908,7 +892,6 @@ final class AVPlayerWrapper: NSObject, ObservableObject {
         event.extra = diagnostics
 
         SentrySDK.capture(event: event)
-        print("🎬 AVPlayerWrapper: Logged render failure to Sentry with diagnostics: \(diagnostics)")
     }
 
     private func cancelVideoRenderVerification() {
@@ -951,29 +934,21 @@ final class AVPlayerWrapper: NSObject, ObservableObject {
             let audioGroup = try await asset.loadMediaSelectionGroup(for: .audible)
             if let audioGroup {
                 // Log raw AVMediaSelectionOption details for audio diagnostics
-                print("🔊 [Audio] Raw audio selection group: \(audioGroup.options.count) options")
-                for (i, option) in audioGroup.options.enumerated() {
-                    print("🔊 [Audio]   Option \(i): displayName=\"\(option.displayName)\", locale=\(option.locale?.identifier ?? "nil"), mediaType=\(option.mediaType.rawValue)")
-                }
 
                 // Log audio track format descriptions from AVAssetTrack (has codec details)
                 let audioAssetTracks = try await asset.loadTracks(withMediaType: .audio)
-                print("🔊 [Audio] Asset audio tracks: \(audioAssetTracks.count)")
                 for (i, track) in audioAssetTracks.enumerated() {
                     let formatDescriptions = try await track.load(.formatDescriptions) as? [CMFormatDescription] ?? []
                     for desc in formatDescriptions {
                         let mediaSubType = CMFormatDescriptionGetMediaSubType(desc)
                         let fourCC = fourCCToString(mediaSubType)
-                        print("🔊 [Audio]   Track \(i): codec=\(fourCC) (0x\(String(mediaSubType, radix: 16)))")
                         if let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(desc) {
                             let bd = asbd.pointee
-                            print("🔊 [Audio]     ASBD: sampleRate=\(bd.mSampleRate), channels=\(bd.mChannelsPerFrame), bitsPerChannel=\(bd.mBitsPerChannel), formatID=\(fourCCToString(bd.mFormatID))")
                         }
                         var layoutSize: Int = 0
                         if let layout = CMAudioFormatDescriptionGetChannelLayout(desc, sizeOut: &layoutSize) {
                             let tag = layout.pointee.mChannelLayoutTag
                             let channelCount = AudioChannelLayoutTag_GetNumberOfChannels(tag)
-                            print("🔊 [Audio]     ChannelLayout: tag=0x\(String(tag, radix: 16)), channels=\(channelCount)")
                         }
                     }
                 }
@@ -986,18 +961,11 @@ final class AVPlayerWrapper: NSObject, ObservableObject {
                 if let selectedOption = item.currentMediaSelection.selectedMediaOption(in: audioGroup),
                    let index = audioGroup.options.firstIndex(of: selectedOption) {
                     _currentAudioTrackId = index
-                    print("🔊 [Audio] Selected track: \(index) (\(selectedOption.displayName))")
                 } else if !_audioTracks.isEmpty {
                     _currentAudioTrackId = 0  // Default to first track
-                    print("🔊 [Audio] No track selected, defaulting to 0")
                 }
 
-                print("🎬 AVPlayerWrapper: Found \(_audioTracks.count) audio tracks")
-                for track in _audioTracks {
-                    print("🎬 AVPlayerWrapper:   Audio: \(track.name) (\(track.languageCode ?? "?")) - \(track.formattedCodec) [\(track.channels ?? 0)ch]")
-                }
             } else {
-                print("🔊 [Audio] No audible media selection group found")
             }
         } catch {
             print("🔊 [Audio] Failed to load audio tracks: \(error)")
@@ -1020,10 +988,6 @@ final class AVPlayerWrapper: NSObject, ObservableObject {
                     _currentSubtitleTrackId = nil  // Subtitles off by default
                 }
 
-                print("🎬 AVPlayerWrapper: Found \(_subtitleTracks.count) subtitle tracks")
-                for track in _subtitleTracks {
-                    print("🎬 AVPlayerWrapper:   Subtitle: \(track.name) (\(track.languageCode ?? "?"))")
-                }
             }
         } catch {
             print("🎬 AVPlayerWrapper: Failed to load subtitle tracks: \(error)")
@@ -1134,7 +1098,6 @@ final class AVPlayerWrapper: NSObject, ObservableObject {
                 cachedAudioCodec = "opus"
             default:
                 let fourCC = fourCCToString(mediaSubType)
-                print("🔊 [Audio] Unknown audio FourCC: \(fourCC) (0x\(String(mediaSubType, radix: 16)))")
             }
 
             // Extract channel count from ASBD
@@ -1145,9 +1108,6 @@ final class AVPlayerWrapper: NSObject, ObservableObject {
                 }
             }
 
-            if cachedAudioCodec != nil || cachedAudioChannels != nil {
-                print("🔊 [Audio] Cached format info: codec=\(cachedAudioCodec ?? "?"), channels=\(cachedAudioChannels ?? 0)")
-            }
         } catch {
             print("🔊 [Audio] Failed to cache audio format info: \(error)")
         }
@@ -1201,7 +1161,6 @@ final class AVPlayerWrapper: NSObject, ObservableObject {
         let option = audioGroup.options[id]
         playerItem.select(option, in: audioGroup)
         _currentAudioTrackId = id
-        print("🎬 AVPlayerWrapper: Selected audio track: \(option.displayName)")
     }
 
     /// Select a subtitle track by ID, or nil to disable subtitles
@@ -1216,12 +1175,10 @@ final class AVPlayerWrapper: NSObject, ObservableObject {
             let option = subtitleGroup.options[id]
             playerItem.select(option, in: subtitleGroup)
             _currentSubtitleTrackId = id
-            print("🎬 AVPlayerWrapper: Selected subtitle track: \(option.displayName)")
         } else {
             // Disable subtitles
             playerItem.select(nil, in: subtitleGroup)
             _currentSubtitleTrackId = nil
-            print("🎬 AVPlayerWrapper: Subtitles disabled")
         }
     }
 
@@ -1340,7 +1297,6 @@ final class AVPlayerWrapper: NSObject, ObservableObject {
         event.extra = extras
 
         SentrySDK.capture(event: event)
-        print("🎬 AVPlayerWrapper: Logged stream failure to Sentry (code: \(errorCode))")
     }
 
     /// Categorizes AVPlayer errors for Sentry fingerprinting

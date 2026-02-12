@@ -72,13 +72,9 @@ final class HLSSegmentFetcher {
             throw HLSFetcherError.invalidPlaylist("Master playlist is not valid UTF-8")
         }
 
-        print("🎬 [HLSFetcher] Master URL: \(masterURL.absoluteString)")
-
         // Step 2: Resolve variant playlist URL
         let resolvedVariantURL = try resolveVariantURL(from: masterContent, masterURL: masterURL)
         self.variantURL = resolvedVariantURL
-
-        print("🎬 [HLSFetcher] Resolved variant URL: \(resolvedVariantURL.absoluteString)")
 
         // Step 3: Fetch variant playlist
         let variantData = try await fetchData(from: resolvedVariantURL)
@@ -88,8 +84,6 @@ final class HLSSegmentFetcher {
 
         // Step 4: Parse variant playlist for segments and init segment
         try parseVariantPlaylist(variantContent, baseURL: resolvedVariantURL)
-
-        print("🎬 [HLSFetcher] Parsed \(segments.count) segments, total duration: \(totalDuration)s")
 
         // Step 5: Fetch init segment
         guard let initURL = initSegmentURL else {
@@ -109,13 +103,11 @@ final class HLSSegmentFetcher {
         //   - Server is under load (500 errors on other endpoints)
         //   - Large MKV files that take time to start muxing
         // Use 15s per attempt (enough for local network muxing) with exponential backoff.
-        print("🎬 [HLSFetcher] Init segment URL: \(initURL.absoluteString)")
         let maxRetries = 3
         var lastError: Error?
         for attempt in 0...maxRetries {
             do {
                 let initData = try await fetchData(from: initURL, timeout: 15)
-                print("🎬 [HLSFetcher] Init segment: \(initData.count) bytes\(attempt > 0 ? " (attempt \(attempt + 1))" : "")")
                 return initData
             } catch {
                 lastError = error
@@ -255,7 +247,6 @@ final class HLSSegmentFetcher {
 
         // Pick highest bandwidth
         let best = variants.max(by: { $0.bandwidth < $1.bandwidth })!
-        print("🎬 [HLSFetcher] Selected variant: bandwidth=\(best.bandwidth)")
         return best.url
     }
 

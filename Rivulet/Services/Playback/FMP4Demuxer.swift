@@ -66,7 +66,6 @@ final class FMP4Demuxer {
     /// Must be called before parsing any media segments.
     func parseInitSegment(_ data: Data, forceDVH1: Bool = true) throws {
         let boxes = parseBoxes(data: data, offset: 0, length: data.count)
-        print("🎬 [Demuxer] Init segment: \(data.count) bytes, boxes: \(boxes.map { $0.type }.joined(separator: ", "))")
 
         guard let moov = boxes.first(where: { $0.type == "moov" }) else {
             let error = DemuxerError.missingBox("moov")
@@ -113,7 +112,6 @@ final class FMP4Demuxer {
 
         segmentParseCount += 1
         if segmentParseCount == 1 {
-            print("🎬 [Demuxer] First media segment: \(data.count) bytes, boxes: \(boxes.map { $0.type }.joined(separator: ", "))")
         }
 
         var samples: [DemuxedSample] = []
@@ -337,8 +335,6 @@ final class FMP4Demuxer {
         let stblChildren = parseBoxes(data: data, offset: stbl.contentOffset, length: stbl.contentLength)
 
         guard let stsd = stblChildren.first(where: { $0.type == "stsd" }) else { return nil }
-
-        print("🎬 [Demuxer] Track \(tkhdData.trackID): \(isVideo ? "video" : "audio"), \(tkhdData.width)x\(tkhdData.height), timescale=\(timescale)")
 
         // Parse stsd to get format description
         let formatDescription: CMFormatDescription

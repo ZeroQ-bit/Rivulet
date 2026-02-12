@@ -62,11 +62,9 @@ final class HLSCodecPatchingResourceLoader: NSObject, AVAssetResourceLoaderDeleg
     ) -> Bool {
         // Log ALL incoming requests to debug missing init segment
         let rawURL = loadingRequest.request.url?.absoluteString ?? "nil"
-        print("[HLS Patcher] >>> RAW REQUEST: \(rawURL.suffix(80))")
 
         guard let requestURL = loadingRequest.request.url,
               let originalURL = originalURL(from: requestURL) else {
-            print("[HLS Patcher] >>> REJECTED (no valid URL)")
             return false
         }
 
@@ -78,12 +76,9 @@ final class HLSCodecPatchingResourceLoader: NSObject, AVAssetResourceLoaderDeleg
             // Show path component after /video/ for context
             if let videoRange = urlString.range(of: "/video/") {
                 let relevantPath = String(urlString[videoRange.lowerBound...].prefix(100))
-                print("[HLS Patcher] Loading playlist: \(relevantPath)...")
             } else {
-                print("[HLS Patcher] Loading playlist: \(originalURL.lastPathComponent)")
             }
         } else {
-            print("[HLS Patcher] Loading segment: \(originalURL.lastPathComponent)")
         }
 
         var request = URLRequest(url: originalURL)
@@ -138,7 +133,6 @@ final class HLSCodecPatchingResourceLoader: NSObject, AVAssetResourceLoaderDeleg
 
         // Check if request was already cancelled
         guard !loadingRequest.isCancelled else {
-            print("[HLS Patcher] Request already cancelled: \(originalURL.lastPathComponent)")
             return
         }
 
@@ -169,7 +163,6 @@ final class HLSCodecPatchingResourceLoader: NSObject, AVAssetResourceLoaderDeleg
         // Log init segment but don't patch - keep hvc1 to match master playlist declaration
         // This allows playback as HEVC; DV metadata in video stream may still be recognized by TV
         else if shouldPatchCodecTag(data) {
-            print("[HLS Patcher] Init segment found with hvc1 tag (\(data.count) bytes) - not patching to match master")
         }
         // Log segment format for debugging
         else if data.count > 4 {
@@ -177,16 +170,10 @@ final class HLSCodecPatchingResourceLoader: NSObject, AVAssetResourceLoaderDeleg
             let headerHex = header.map { String(format: "%02x", $0) }.joined(separator: " ")
 
             // Check for MPEG-TS sync byte (0x47)
-            if data[0] == 0x47 {
-                print("[HLS Patcher] Segment is MPEG-TS format (sync byte 0x47)")
-            }
             // Check for fMP4 (ftyp or moof box)
             else if let ftypMarker = "ftyp".data(using: .ascii), data.range(of: ftypMarker) != nil {
-                print("[HLS Patcher] Segment is fMP4 init (has ftyp)")
             } else if let moofMarker = "moof".data(using: .ascii), data.range(of: moofMarker) != nil {
-                print("[HLS Patcher] Segment is fMP4 media (has moof)")
             } else {
-                print("[HLS Patcher] Segment format unknown, header: \(headerHex)")
             }
         }
 
@@ -220,16 +207,10 @@ final class HLSCodecPatchingResourceLoader: NSObject, AVAssetResourceLoaderDeleg
         let lines = playlistString.components(separatedBy: .newlines)
         let isVariant = playlistString.contains("#EXTINF")
         let isMaster = playlistString.contains("#EXT-X-STREAM-INF")
-        print("[HLS Patcher] Playlist type: \(isMaster ? "master" : (isVariant ? "variant" : "unknown")), lines: \(lines.count)")
 
         // For master playlists, patch codec to hvc1 so AVPlayer accepts stream
         // AVPlayer rejects dvh1 codec declaration before downloading any content
         if isMaster {
-            print("[HLS Patcher] === MASTER PLAYLIST CONTENT (ORIGINAL) ===")
-            for line in lines where !line.isEmpty {
-                print("[HLS Patcher]   \(line)")
-            }
-            print("[HLS Patcher] === END MASTER PLAYLIST ===")
 
             // Patch CODECS from dvh1 to hvc1 so AVPlayer accepts the stream
             // The init segment already has hvc1, so they will match
@@ -247,26 +228,14 @@ final class HLSCodecPatchingResourceLoader: NSObject, AVAssetResourceLoaderDeleg
 
             // Remove I-frame stream reference so AVPlayer uses the main base variant
             modifiedLines = modifiedLines.filter { !$0.contains("I-FRAME") }
-            print("[HLS Patcher] Removed I-frame stream reference")
 
             let modifiedMaster = modifiedLines.joined(separator: "\n")
-            print("[HLS Patcher] === MODIFIED MASTER PLAYLIST ===")
-            for line in modifiedLines where !line.isEmpty {
-                print("[HLS Patcher]   \(line)")
-            }
-            print("[HLS Patcher] === END ===")
             return modifiedMaster.data(using: .utf8) ?? data
         }
 
         // Check for fMP4 init segment (EXT-X-MAP)
         if let mapLine = lines.first(where: { $0.contains("#EXT-X-MAP") }) {
-            print("[HLS Patcher] Found init segment directive: \(mapLine)")
             // Log first 15 lines of fMP4 variant playlist for debugging
-            print("[HLS Patcher] === FIRST 15 LINES OF fMP4 VARIANT ===")
-            for (i, line) in lines.prefix(15).enumerated() {
-                print("[HLS Patcher]   \(i): \(line)")
-            }
-            print("[HLS Patcher] === END ===")
         } else if isVariant {
             print("[HLS Patcher] WARNING: No #EXT-X-MAP found - using MPEG-TS format (no init segment to patch)")
         }
@@ -328,10 +297,6 @@ final class HLSCodecPatchingResourceLoader: NSObject, AVAssetResourceLoaderDeleg
         }
 
         modifiedPlaylist = modifiedLines.joined(separator: "\n")
-
-        if urlsRewritten > 0 {
-            print("[HLS Patcher] Rewrote \(urlsRewritten) URL(s) in playlist")
-        }
 
         return modifiedPlaylist.data(using: .utf8) ?? data
     }

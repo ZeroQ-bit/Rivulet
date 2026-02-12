@@ -106,7 +106,6 @@ actor IPTVProvider: LiveTVProvider {
         if let lastFetch = lastChannelFetch,
            Date().timeIntervalSince(lastFetch) < channelCacheDuration,
            !cachedChannels.isEmpty {
-            print("📺 IPTVProvider [\(displayName)]: Returning \(cachedChannels.count) cached channels")
             return cachedChannels
         }
 
@@ -117,8 +116,6 @@ actor IPTVProvider: LiveTVProvider {
         guard let url = m3uURL else {
             throw LiveTVProviderError.sourceNotConfigured
         }
-
-        print("📺 IPTVProvider [\(displayName)]: Fetching channels from \(url)")
 
         let parser = M3UParser()
         let parsedChannels: [M3UParser.ParsedChannel]
@@ -147,8 +144,6 @@ actor IPTVProvider: LiveTVProvider {
             throw error
         }
 
-        print("📺 IPTVProvider [\(displayName)]: ✅ Parsed \(parsedChannels.count) channels")
-
         // Convert to UnifiedChannel
         let channels = parsedChannels.map { parsed in
             parsed.toUnifiedChannel(sourceType: sourceType, sourceId: sourceId)
@@ -174,11 +169,8 @@ actor IPTVProvider: LiveTVProvider {
         if let lastFetch = lastEPGFetch,
            Date().timeIntervalSince(lastFetch) < epgCacheDuration,
            !cachedEPG.isEmpty {
-            print("📺 IPTVProvider [\(displayName)]: Returning cached EPG")
             return filterEPG(cachedEPG, channels: channels, startDate: startDate, endDate: endDate)
         }
-
-        print("📺 IPTVProvider [\(displayName)]: Fetching EPG from \(epgURL)")
 
         let xmltvParser = XMLTVParser()
         let parseResult: XMLTVParser.ParseResult
@@ -203,8 +195,6 @@ actor IPTVProvider: LiveTVProvider {
             }
             throw error
         }
-
-        print("📺 IPTVProvider [\(displayName)]: ✅ Parsed EPG with \(parseResult.programs.count) channel schedules")
 
         // Build unified channel ID -> tvgId mapping
         // Use uniquingKeysWith to handle duplicate tvgIds (keep first occurrence)

@@ -65,7 +65,6 @@ final class DVHLSProxyServer {
         self.upstreamBaseURL = components.url!
         self.upstreamHeaders = headers
         self.patchMode = patchMode
-        print("[DV Proxy] Patch mode: \(patchMode)")
     }
 
     /// Start the proxy server. Returns the localhost URL to pass to AVPlayer.
@@ -84,7 +83,6 @@ final class DVHLSProxyServer {
                 if let port = listener.port {
                     self?.port = port.rawValue
                     self?.isRunning = true
-                    print("[DV Proxy] Listening on port \(port.rawValue)")
                 }
             case .failed(let error):
                 print("[DV Proxy] Listener failed: \(error)")
@@ -117,7 +115,6 @@ final class DVHLSProxyServer {
 
         // Build the proxy URL that mirrors the original Plex path
         let proxyURL = URL(string: "http://127.0.0.1:\(port)\(originalMasterPath)")!
-        print("[DV Proxy] Proxy URL: \(proxyURL)")
         return proxyURL
     }
 
@@ -132,7 +129,6 @@ final class DVHLSProxyServer {
             connections.removeAll()
         }
         isRunning = false
-        print("[DV Proxy] Stopped")
     }
 
     // MARK: - Connection Handling
@@ -190,7 +186,6 @@ final class DVHLSProxyServer {
             }
 
             let path = String(parts[1])
-            print("[DV Proxy] Request: \(path.prefix(100))")
 
             // Forward to Plex
             self.proxyRequest(path: path, on: connection)
@@ -299,11 +294,6 @@ final class DVHLSProxyServer {
             return data
         }
 
-        print("[DV Proxy] === ORIGINAL MASTER PLAYLIST ===")
-        for line in playlist.components(separatedBy: "\n") where !line.isEmpty {
-            print("[DV Proxy]   \(line)")
-        }
-
         let lines = playlist.components(separatedBy: "\n")
         var patchedLines: [String] = []
         var didPatch = false
@@ -346,11 +336,6 @@ final class DVHLSProxyServer {
         }
 
         let patched = patchedLines.joined(separator: "\n")
-
-        print("[DV Proxy] === PATCHED MASTER PLAYLIST ===")
-        for line in patched.components(separatedBy: "\n") where !line.isEmpty {
-            print("[DV Proxy]   \(line)")
-        }
 
         return patched.data(using: .utf8) ?? data
     }

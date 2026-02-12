@@ -148,14 +148,12 @@ actor CacheManager {
 
     func cacheMovies(_ movies: [PlexMetadata], forLibrary libraryKey: String) {
         let fileName = "\(moviesCachePrefix)\(libraryKey).json"
-        print("💾 CacheManager: Caching \(movies.count) movies for library \(libraryKey)")
         cacheData(movies, fileName: fileName)
     }
 
     func getCachedMovies(forLibrary libraryKey: String) -> [PlexMetadata]? {
         let fileName = "\(moviesCachePrefix)\(libraryKey).json"
         let result = decodedCache(for: fileName, as: [PlexMetadata].self)
-        print("💾 CacheManager: getCachedMovies(\(libraryKey)) -> \(result?.count ?? 0) items (file: \(fileName))")
         return result
     }
 
@@ -163,14 +161,12 @@ actor CacheManager {
 
     func cacheShows(_ shows: [PlexMetadata], forLibrary libraryKey: String) {
         let fileName = "\(showsCachePrefix)\(libraryKey).json"
-        print("💾 CacheManager: Caching \(shows.count) shows for library \(libraryKey)")
         cacheData(shows, fileName: fileName)
     }
 
     func getCachedShows(forLibrary libraryKey: String) -> [PlexMetadata]? {
         let fileName = "\(showsCachePrefix)\(libraryKey).json"
         let result = decodedCache(for: fileName, as: [PlexMetadata].self)
-        print("💾 CacheManager: getCachedShows(\(libraryKey)) -> \(result?.count ?? 0) items (file: \(fileName))")
         return result
     }
 
@@ -279,7 +275,6 @@ actor CacheManager {
 
                 if shouldDelete {
                     try? FileManager.default.removeItem(at: file)
-                    print("CacheManager: Deleted cache file: \(fileName)")
                 }
             }
         }
@@ -333,7 +328,6 @@ actor CacheManager {
         try? FileManager.default.removeItem(at: fileURL)
         memoryCache.removeObject(forKey: fileName as NSString)
         removeTimestamp(for: fileName)
-        print("💾 CacheManager: Cleared movies cache for library \(libraryKey)")
     }
 
     func clearShowsCache(forLibrary libraryKey: String) {
@@ -343,7 +337,6 @@ actor CacheManager {
         try? FileManager.default.removeItem(at: fileURL)
         memoryCache.removeObject(forKey: fileName as NSString)
         removeTimestamp(for: fileName)
-        print("💾 CacheManager: Cleared shows cache for library \(libraryKey)")
     }
 
     // MARK: - Cache Size

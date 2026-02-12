@@ -84,7 +84,6 @@ final class DVSampleBufferPlayer: ObservableObject {
         // Configure display layer
         displayLayer.videoGravity = .resizeAspect
 
-        print("🎬 [DVPlayer] Initialized with AVSampleBufferDisplayLayer pipeline")
     }
 
     // MARK: - Playback Controls
@@ -126,7 +125,6 @@ final class DVSampleBufferPlayer: ObservableObject {
         // Enable DV profile conversion if requested (for P7/P8.6 content)
         if requiresProfileConversion {
             demuxer.profileConverter = DoviProfileConverter()
-            print("🎬 [DVPlayer] Profile conversion enabled for P7/P8.6 → P8.1")
         }
 
         self.demuxer = demuxer
@@ -134,7 +132,6 @@ final class DVSampleBufferPlayer: ObservableObject {
         self.duration = fetcher.totalDuration
 
         print("🎬 [DVPlayer] Loaded: \(fetcher.segments.count) segments, duration=\(duration)s, dvh1=\(demuxer.hasDVFormatDescription)")
-        print("🎬 [DVPlayer] Audio renderer: volume=\(audioRenderer.volume), isMuted=\(audioRenderer.isMuted), status=\(audioRenderer.status.rawValue)")
 
         // Populate track info using demuxer codec info (enables enrichment with Plex metadata)
         if demuxer.audioTrackID != nil {
@@ -176,7 +173,6 @@ final class DVSampleBufferPlayer: ObservableObject {
             needsInitialSync = true
             currentTime = startTime
             timeSubject.send(startTime)
-            print("🎬 [DVPlayer] Starting at \(startTime)s (segment \(currentSegmentIndex))")
         }
 
         playbackStateSubject.send(.ready)
@@ -198,7 +194,6 @@ final class DVSampleBufferPlayer: ObservableObject {
         }
 
         playbackStateSubject.send(.playing)
-        print("🎬 [DVPlayer] Play\(needsInitialSync ? " (waiting for first frame to sync)" : "")")
     }
 
     func pause() {
@@ -206,7 +201,6 @@ final class DVSampleBufferPlayer: ObservableObject {
         isPlaying = false
         renderSynchronizer.rate = 0.0
         playbackStateSubject.send(.paused)
-        print("🎬 [DVPlayer] Pause")
     }
 
     func stop() {
@@ -221,7 +215,6 @@ final class DVSampleBufferPlayer: ObservableObject {
         audioRenderer.flush()
 
         playbackStateSubject.send(.idle)
-        print("🎬 [DVPlayer] Stop")
     }
 
     /// Cancel download + enqueue tasks, safely draining the segment buffer.
@@ -243,7 +236,6 @@ final class DVSampleBufferPlayer: ObservableObject {
         isSeeking = true
         jitterStats.reset()
         playbackStateSubject.send(.buffering)
-        print("🎬 [DVPlayer] Seeking to \(time)s")
 
         // Cancel buffer first to unblock waiting continuations, then cancel tasks
         if let buffer = segmentBuffer {
@@ -343,7 +335,6 @@ final class DVSampleBufferPlayer: ObservableObject {
                         guard !Task.isCancelled else { break }
                         let accepted = await buffer.put(index: index, data: data)
                         guard accepted else { break }
-                        print("🎬 [DVPlayer] Downloaded segment \(index) (\(data.count) bytes), buffer: \(await buffer.count)/\(buffer.capacity)")
                         lastError = nil
                         break
                     } catch {
@@ -430,15 +421,7 @@ final class DVSampleBufferPlayer: ObservableObject {
                         let firstAudio = samples.first(where: { !$0.isVideo })
                         let videoCount = samples.filter { $0.isVideo }.count
                         let audioCount = samples.filter { !$0.isVideo }.count
-                        print("🎬 [DVPlayer] Segment \(segIndex): \(videoCount) video + \(audioCount) audio samples")
-                        if let fv = firstVideo {
-                            print("🎬 [DVPlayer]   First video PTS: \(CMTimeGetSeconds(fv.pts))s, keyframe: \(fv.isKeyframe)")
-                        }
-                        if let fa = firstAudio {
-                            print("🎬 [DVPlayer]   First audio PTS: \(CMTimeGetSeconds(fa.pts))s")
-                        }
                         let syncTime = CMTimeGetSeconds(self.renderSynchronizer.currentTime())
-                        print("🎬 [DVPlayer]   Synchronizer time: \(syncTime)s, rate: \(self.renderSynchronizer.rate)")
                     }
 
                     // Enqueue samples, restoring rate after the first video sample post-seek
@@ -464,15 +447,12 @@ final class DVSampleBufferPlayer: ObservableObject {
                                     let ptsSeconds = CMTimeGetSeconds(sample.pts)
                                     currentTime = ptsSeconds
                                     timeSubject.send(ptsSeconds)
-                                    print("🎬 [DVPlayer] Initial sync to first frame PTS: \(ptsSeconds)s, rate=\(isPlaying ? playbackRate : 0)")
                                 } else if needsRateRestoreAfterSeek {
                                     needsRateRestoreAfterSeek = false
                                     renderSynchronizer.setRate(playbackRate, time: sample.pts)
-                                    print("🎬 [DVPlayer] Post-seek: synced to PTS \(CMTimeGetSeconds(sample.pts))s, rate=\(playbackRate)")
                                 } else if !isPlaying && isFirstVideoSample {
                                     // Paused seek: set time so the frame displays, keep rate at 0
                                     renderSynchronizer.setRate(0, time: sample.pts)
-                                    print("🎬 [DVPlayer] Paused seek: displayed frame at PTS \(CMTimeGetSeconds(sample.pts))s")
                                 }
 
                                 await enqueueVideoSample(sampleBuffer)
@@ -566,9 +546,7 @@ final class DVSampleBufferPlayer: ObservableObject {
             playbackStateSubject.send(.ended)
             // Log conversion stats if converter was used
             if let converter = demuxer.profileConverter {
-                print("🎬 [DVPlayer] Playback ended - \(converter.getStatsSummary())")
             } else {
-                print("🎬 [DVPlayer] Playback ended")
             }
         }
     }
@@ -734,7 +712,6 @@ struct PlaybackJitterStats {
             let ptsRange = maxPTS - minPTS
             expectedFrameDuration = ptsRange / Double(totalVideoFrames - 1)
             let detectedFPS = 1.0 / expectedFrameDuration
-            print("📊 [Jitter] Detected framerate: \(String(format: "%.3f", detectedFPS))fps (frame duration: \(String(format: "%.2f", expectedFrameDuration * 1000))ms)")
         }
 
         guard lastVideoPTS >= 0 else {

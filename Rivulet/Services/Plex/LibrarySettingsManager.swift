@@ -122,7 +122,6 @@ class LibrarySettingsManager: ObservableObject {
             self.librarySortOptions = [:]
         }
 
-        print("📚 LibrarySettings: Loaded settings for user \(currentUserId?.description ?? "default")")
     }
 
     /// Switch to a different user's settings
@@ -130,7 +129,6 @@ class LibrarySettingsManager: ObservableObject {
     func switchToUser(_ userId: Int?) {
         guard currentUserId != userId else { return }
 
-        print("📚 LibrarySettings: Switching from user \(currentUserId?.description ?? "default") to \(userId?.description ?? "default")")
         currentUserId = userId
         loadSettingsForCurrentUser()
     }

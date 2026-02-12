@@ -134,7 +134,6 @@ final class PlexThumbnailService {
                     print("⚠️ Failed to parse BIF data (size: \(data.count) bytes)")
                     // Log first few bytes to debug
                     let prefix = data.prefix(16)
-                    print("   First bytes: \(prefix.map { String(format: "%02X", $0) }.joined(separator: " "))")
                 }
             } catch {
                 print("⚠️ Failed to load BIF (\(quality)): \(error.localizedDescription)")
