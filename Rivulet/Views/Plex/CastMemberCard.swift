@@ -9,7 +9,7 @@ import SwiftUI
 
 // MARK: - Person Card
 
-/// Card for cast/crew members - matches MediaPosterCard style
+/// Card for cast/crew members - matches MediaPosterCard style and scales with display size
 struct PersonCard: View {
     let name: String
     let subtitle: String?
@@ -17,18 +17,20 @@ struct PersonCard: View {
     let serverURL: String
     let authToken: String
 
+    @Environment(\.uiScale) private var scale
+
     #if os(tvOS)
-    private let cardWidth: CGFloat = 160
-    private let cardHeight: CGFloat = 240
-    private let cornerRadius: CGFloat = 16
-    private let nameFont: CGFloat = 19
-    private let subtitleFont: CGFloat = 16
+    private var cardWidth: CGFloat { ScaledDimensions.posterWidth * scale }
+    private var cardHeight: CGFloat { ScaledDimensions.posterHeight * scale }
+    private var cornerRadius: CGFloat { ScaledDimensions.posterCornerRadius }
+    private var nameFont: CGFloat { ScaledDimensions.posterTitleSize * scale }
+    private var subtitleFont: CGFloat { ScaledDimensions.posterSubtitleSize * scale }
     #else
-    private let cardWidth: CGFloat = 120
-    private let cardHeight: CGFloat = 180
-    private let cornerRadius: CGFloat = 12
-    private let nameFont: CGFloat = 15
-    private let subtitleFont: CGFloat = 13
+    private var cardWidth: CGFloat { ScaledDimensions.posterWidth }
+    private var cardHeight: CGFloat { ScaledDimensions.posterHeight }
+    private var cornerRadius: CGFloat { ScaledDimensions.posterCornerRadius }
+    private var nameFont: CGFloat { ScaledDimensions.posterTitleSize }
+    private var subtitleFont: CGFloat { ScaledDimensions.posterSubtitleSize }
     #endif
 
     var body: some View {
@@ -69,7 +71,7 @@ struct PersonCard: View {
                 }
             }
             #if os(tvOS)
-            .frame(height: 52, alignment: .top)
+            .frame(height: (nameFont + subtitleFont + 12) * 1.2, alignment: .top)
             #else
             .frame(height: 44, alignment: .top)
             #endif
@@ -133,16 +135,17 @@ struct CastCrewRow: View {
     let serverURL: String
     let authToken: String
 
+    @Environment(\.uiScale) private var scale
+
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Cast & Crew")
-                .font(.title2)
-                .fontWeight(.bold)
+                .font(.system(size: ScaledDimensions.sectionTitleSize * scale, weight: .bold))
                 .foregroundStyle(.white)
-                .padding(.horizontal, 48)
+                .padding(.horizontal, ScaledDimensions.rowHorizontalPadding)
 
             ScrollView(.horizontal, showsIndicators: false) {
-                LazyHStack(spacing: 24) {
+                LazyHStack(spacing: ScaledDimensions.rowItemSpacing * scale) {
                     // Directors first
                     ForEach(directors) { director in
                         Button { } label: {
@@ -179,8 +182,8 @@ struct CastCrewRow: View {
                         #endif
                     }
                 }
-                .padding(.horizontal, 48)
-                .padding(.vertical, 32)
+                .padding(.horizontal, ScaledDimensions.rowHorizontalPadding)
+                .padding(.vertical, ScaledDimensions.rowVerticalPadding)
             }
             .scrollClipDisabled()
         }

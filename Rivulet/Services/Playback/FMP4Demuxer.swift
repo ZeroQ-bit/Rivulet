@@ -56,6 +56,10 @@ final class FMP4Demuxer {
     private(set) var audioCodecType: String?
     private(set) var videoResolution: String?
 
+    /// Optional profile converter for P7/P8.6 → P8.1 conversion
+    /// Set this before parsing media segments to enable on-the-fly conversion
+    var profileConverter: DoviProfileConverter?
+
     // MARK: - Init Segment Parsing
 
     /// Parse an init segment (ftyp + moov) to extract track info and codec configuration.
@@ -136,6 +140,25 @@ final class FMP4Demuxer {
                 }
             } else {
                 i += 1
+            }
+        }
+
+        // Convert DV profiles if converter is enabled
+        if let converter = profileConverter {
+            samples = samples.map { sample in
+                guard sample.isVideo else { return sample }
+                let convertedData = converter.processVideoSample(sample.data)
+                // Always use converted data for video samples when converter is active
+                // (converted RPU may have same byte length as original)
+                return DemuxedSample(
+                    trackID: sample.trackID,
+                    data: convertedData,
+                    pts: sample.pts,
+                    dts: sample.dts,
+                    duration: sample.duration,
+                    isKeyframe: sample.isKeyframe,
+                    isVideo: sample.isVideo
+                )
             }
         }
 

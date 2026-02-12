@@ -215,8 +215,18 @@ final class MultiStreamViewModel: ObservableObject {
         }
 
         // Start playback
+        let loadStartTime = Date()
         if let url = LiveTVDataStore.shared.buildStreamURL(for: channel) {
             print("📺 [MultiStreamVM \(debugId)] addChannel resolvedURL host=\(url.host ?? "unknown"), path=\(url.path), slotIndex=\(slotIndex)")
+
+            // Determine stream type for logging
+            let streamType: String = {
+                if url.path.contains("/transcode/") { return "plex_transcode" }
+                if url.host?.contains("hdhomerun") == true { return "hdhr_direct" }
+                if url.path.contains("/live/") || url.path.contains("/proxy/") { return "iptv" }
+                return "other"
+            }()
+
             // Log stream playback attempt for debugging (GitHub #64)
             let breadcrumb = Breadcrumb(level: .info, category: "livetv_playback")
             breadcrumb.message = "Starting Live TV stream playback"
@@ -225,12 +235,14 @@ final class MultiStreamViewModel: ObservableObject {
                 "channel_id": channel.id,
                 "channel_number": channel.channelNumber ?? 0,
                 "source_type": String(describing: channel.sourceType),
+                "stream_type": streamType,
                 "stream_url_scheme": url.scheme ?? "unknown",
                 "stream_url_host": url.host ?? "unknown",
                 "stream_url_path": url.path,
                 "is_plex_transcode": url.path.contains("/transcode/"),
                 "is_hls": url.pathExtension == "m3u8" || url.path.contains(".m3u8"),
                 "slot_index": slotIndex,
+                "slot_id": String(slot.id.uuidString.prefix(8)),
                 "is_muted": isMuted
             ]
             SentrySDK.addBreadcrumb(breadcrumb)
@@ -241,17 +253,23 @@ final class MultiStreamViewModel: ObservableObject {
                 slot.play()
                 recoveryAttempts[slot.id] = 0
                 stalledStateSince[slot.id] = nil
+
+                let loadDuration = Date().timeIntervalSince(loadStartTime)
                 print("📺 [MultiStreamVM \(debugId)] addChannel playback started id=\(channel.id), slotIndex=\(slotIndex)")
 
                 // Focus the newly added stream
                 setFocus(to: slotIndex)
 
-                // Log successful playback start
+                // Log successful playback start with timing (GitHub #64 - DVB diagnostics)
                 let successBreadcrumb = Breadcrumb(level: .info, category: "livetv_playback")
-                successBreadcrumb.message = "Live TV stream loaded successfully"
+                successBreadcrumb.message = "Live TV stream loaded and play() called"
                 successBreadcrumb.data = [
                     "channel_name": channel.name,
-                    "channel_id": channel.id
+                    "channel_id": channel.id,
+                    "stream_type": streamType,
+                    "slot_id": String(slot.id.uuidString.prefix(8)),
+                    "slot_index": slotIndex,
+                    "load_duration_ms": Int(loadDuration * 1000)
                 ]
                 SentrySDK.addBreadcrumb(successBreadcrumb)
             } catch {

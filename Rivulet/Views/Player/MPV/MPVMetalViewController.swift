@@ -31,8 +31,12 @@ final class MPVMetalViewController: UIViewController {
     private var isShuttingDown = false
     private var lastKnownSize: CGSize = .zero
     private var previousDrawableSize: CGSize = .zero
+    private var lastLoadedURL: URL?
     private var audioRouteObserver: NSObjectProtocol?
     private let debugId = String(UUID().uuidString.prefix(8))
+
+    /// Tracks whether track enumeration has been performed (lazy loading optimization)
+    private var tracksEnumerated = false
 
     /// Explicit target size set by parent - when set, enables transform-based scaling
     /// to avoid swapchain recreation during multiview layout changes
@@ -61,6 +65,8 @@ final class MPVMetalViewController: UIViewController {
     // MARK: - Lifecycle
 
     private var hasSetupMpv = false
+    /// Whether a load request came in before MPV finished setup.
+    private var pendingFileLoad = false
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -77,7 +83,17 @@ final class MPVMetalViewController: UIViewController {
 
         view.layer.addSublayer(metalLayer)
 
-        // Don't setup MPV here - wait for viewDidLayoutSubviews when we have proper bounds
+        // Initialize MPV early (even with zero bounds) to reduce startup latency.
+        // MPV will resize rendering when the drawable size becomes valid.
+        // The Metal layer pointer is valid even before layout.
+        if !hasSetupMpv {
+            hasSetupMpv = true
+            setupMpv()
+            if pendingFileLoad, let url = playUrl {
+                pendingFileLoad = false
+                loadFile(url)
+            }
+        }
     }
 
     override func viewDidLayoutSubviews() {
@@ -101,18 +117,13 @@ final class MPVMetalViewController: UIViewController {
         metalLayer.frame = view.bounds
         CATransaction.commit()
 
-        // Setup MPV after we have proper bounds (not .zero)
-        if !hasSetupMpv {
-            hasSetupMpv = true
+        // Track the size for later use
+        if lastKnownSize == .zero {
             lastKnownSize = newSize
-            originalRenderSize = newSize  // Capture for later transform scaling if entering multiview
+            originalRenderSize = newSize
             previousDrawableSize = metalLayer.drawableSize
-            setupMpv()
-
-            if let url = playUrl {
-                loadFile(url)
-            }
         }
+
     }
 
     /// Set explicit target size hint from parent (for multi-stream layout)
@@ -140,22 +151,23 @@ final class MPVMetalViewController: UIViewController {
         let wasNil = explicitTargetSize == nil
         explicitTargetSize = size
 
-        // First time entering multiview mode - initialize layer at this size
-        if wasNil && !hasSetupMpv {
+        // First time entering multiview mode
+        if wasNil {
             CATransaction.begin()
             CATransaction.setDisableActions(true)
             metalLayer.frame = CGRect(origin: .zero, size: size)
             CATransaction.commit()
 
-            hasSetupMpv = true
             lastKnownSize = size
             originalRenderSize = size  // Save original size for transform scaling
             previousDrawableSize = metalLayer.drawableSize
-            setupMpv()
 
-            if let url = playUrl {
-                loadFile(url)
+            // MPV may already be set up from viewDidLoad, or we need to init it now
+            if !hasSetupMpv {
+                hasSetupMpv = true
+                setupMpv()
             }
+
         } else if hasSetupMpv {
             // MPV already running - update transform to fit new size
             updateLayerTransform(for: size)
@@ -169,7 +181,8 @@ final class MPVMetalViewController: UIViewController {
 
         print("🎬 [MPVController \(debugId)] updateLayerTransform: target=\(Int(targetSize.width))x\(Int(targetSize.height)), viewBounds=\(Int(view.bounds.width))x\(Int(view.bounds.height))")
 
-        // If MPV isn't set up yet, initialize at current size and save as original
+        // If MPV isn't set up yet (shouldn't happen now that we init in viewDidLoad),
+        // initialize at current size and save as original
         if !hasSetupMpv {
             CATransaction.begin()
             CATransaction.setDisableActions(true)
@@ -182,7 +195,8 @@ final class MPVMetalViewController: UIViewController {
             previousDrawableSize = metalLayer.drawableSize
             setupMpv()
 
-            if let url = playUrl {
+            if pendingFileLoad, let url = playUrl {
+                pendingFileLoad = false
                 loadFile(url)
             }
             return
@@ -233,6 +247,43 @@ final class MPVMetalViewController: UIViewController {
     deinit {
         print("🎬 [MPVController \(debugId)] deinit threadMain=\(Thread.isMainThread)")
         shutdownMpv()
+    }
+
+    // MARK: - Pre-warming Support
+
+    /// Prepare controller for presentation after being claimed from pre-warm pool.
+    /// Resets transient state while preserving the initialized MPV context.
+    func prepareForPresentation() {
+        print("🎬 [MPVController \(debugId)] prepareForPresentation")
+        // Reset transient playback state
+        currentState = .idle
+        isShuttingDown = false
+        lastLoadedURL = nil
+        tracksEnumerated = false
+        pendingFileLoad = false
+        playUrl = nil
+        httpHeaders = nil
+        startTime = nil
+    }
+
+    /// Clean up controller before returning to pre-warm pool (if reuse were implemented).
+    /// Currently not used since we create fresh controllers, but provided for completeness.
+    func prepareForReuse() {
+        print("🎬 [MPVController \(debugId)] prepareForReuse")
+        // Stop any active playback
+        if mpv != nil && !isShuttingDown {
+            command("stop")
+        }
+        // Clear delegate to prevent callbacks to old owner
+        delegate = nil
+        // Reset state
+        currentState = .idle
+        lastLoadedURL = nil
+        tracksEnumerated = false
+        pendingFileLoad = false
+        playUrl = nil
+        httpHeaders = nil
+        startTime = nil
     }
 
     private func shutdownMpv() {
@@ -297,26 +348,10 @@ final class MPVMetalViewController: UIViewController {
     /// Configure and activate the audio session before MPV initializes.
     /// Sets .playback category required for Now Playing integration.
     private func ensureAudioSessionActive() {
-        let session = AVAudioSession.sharedInstance()
-
-        // Try to set category - may fail if session is already active, but that's OK
-        do {
-            try session.setCategory(.playback, mode: .default, options: [.allowAirPlay])
-            print("🎬 MPV: Audio session category set to .playback")
-        } catch {
-            // Category might already be set or session already active - continue anyway
-            print("🎬 MPV: Could not set audio category (may already be configured): \(error.localizedDescription)")
-        }
-
-        // Always try to activate
-        do {
-            try session.setActive(true)
-            let routeType = session.currentRoute.outputs.first?.portType.rawValue ?? "unknown"
-            let category = session.category.rawValue
-            print("🎬 MPV: Audio session active (category: \(category), route: \(routeType), channels: \(session.outputNumberOfChannels))")
-        } catch {
-            print("🎬 MPV: Failed to activate audio session - \(error.localizedDescription)")
-        }
+        PlaybackAudioSessionConfigurator.activatePlaybackSession(
+            mode: .moviePlayback,
+            owner: "MPV"
+        )
     }
 
     // MARK: - Audio Route Change Handling
@@ -442,7 +477,14 @@ final class MPVMetalViewController: UIViewController {
             // Allow recovery from hardware decode errors by seeking to keyframe
             checkError(mpv_set_option_string(mpv, "hr-seek-framedrop", "yes"))
 
-            print("🎬 MPV: Using VOD settings (gpu-next + Vulkan/MoltenVK + VideoToolbox + HDR)")
+            // Frame pacing: resample video to match display refresh rate (GitHub #73).
+            // Fixes 24fps stutter on 60Hz when Match Content is disabled in tvOS settings.
+            // When display rate matches content rate (Match Content active), this is a no-op.
+            checkError(mpv_set_option_string(mpv, "video-sync", "display-resample"))
+            checkError(mpv_set_option_string(mpv, "interpolation", "yes"))
+            checkError(mpv_set_option_string(mpv, "tscale", "oversample"))  // No motion blur artifacts
+
+            print("🎬 MPV: Using VOD settings (gpu-next + Vulkan/MoltenVK + VideoToolbox + HDR + display-resample)")
         }
 
         // Audio configuration
@@ -458,10 +500,16 @@ final class MPVMetalViewController: UIViewController {
         checkError(mpv_set_option_string(mpv, "audio-channels", "7.1,5.1,stereo"))
         print("🎬 MPV: Audio output: audiounit with null fallback enabled")
 
-        // Audio buffer for smoother playback (default ~0.2s can cause stuttering with high-bitrate 4K content)
-        let audioBufferResult = mpv_set_option_string(mpv, "audio-buffer", "1.0")
+        // Keep AirPlay/HomePod routes on a low-latency audio buffer so pause is more responsive.
+        // Local playback can keep a larger buffer for stability on high-bitrate content.
+        // Note: This only affects MPV's internal buffer. AirPlay has its own ~2 second
+        // protocol-level buffer that cannot be controlled from third-party apps.
+        let audioBufferSeconds = PlaybackAudioSessionConfigurator.isAirPlayRouteActive() ? "0.2" : "1.0"
+        let audioBufferResult = mpv_set_option_string(mpv, "audio-buffer", audioBufferSeconds)
         if audioBufferResult < 0 {
             print("🎬 MPV: audio-buffer option not available (error \(audioBufferResult)), using default")
+        } else {
+            print("🎬 MPV: audio-buffer set to \(audioBufferSeconds)s")
         }
 
         // Subtitles - use standard MPV options
@@ -509,6 +557,9 @@ final class MPVMetalViewController: UIViewController {
             checkError(mpv_set_option_string(mpv, "demuxer-max-back-bytes", "100MiB"))
             checkError(mpv_set_option_string(mpv, "cache-secs", "30"))
             checkError(mpv_set_option_string(mpv, "demuxer-readahead-secs", "30"))
+            // Start decoding immediately instead of waiting for an initial cache fill.
+            checkError(mpv_set_option_string(mpv, "cache-pause-initial", "no"))
+            checkError(mpv_set_option_string(mpv, "cache-pause-wait", "1"))
 
             // High quality scaling for 720p/1080p content upscaled to 4K
             // Skip for Live TV - use fast bilinear to reduce GPU load for multiview
@@ -546,7 +597,25 @@ final class MPVMetalViewController: UIViewController {
     // MARK: - Playback Controls
 
     func loadFile(_ url: URL) {
-        guard mpv != nil else { return }
+        playUrl = url
+
+        guard mpv != nil else {
+            pendingFileLoad = true
+            return
+        }
+
+        pendingFileLoad = false
+
+        if lastLoadedURL == url {
+            switch currentState {
+            case .loading, .playing, .paused, .buffering:
+                print("🎬 [MPVController \(debugId)] skipping duplicate load for \(url.lastPathComponent)")
+                return
+            default:
+                break
+            }
+        }
+        lastLoadedURL = url
 
         updateState(.loading)
 
@@ -575,9 +644,6 @@ final class MPVMetalViewController: UIViewController {
     }
 
     func pause() {
-        // Flush audio output immediately to prevent AirPlay buffer from draining on HomePod
-        // ao-reload resets the audio output driver, which should flush any pending audio
-        command("ao-reload")
         setFlag(MPVProperty.pause, true)
     }
 
@@ -587,9 +653,8 @@ final class MPVMetalViewController: UIViewController {
 
     func stop() {
         print("🎬 [MPVController \(debugId)] stop called threadMain=\(Thread.isMainThread)")
-        // Flush audio buffers immediately (buffer would otherwise drain for ~1 second)
-        command("ao-reload")
         command("stop")
+        lastLoadedURL = nil
         updateState(.idle)
         // Trigger full shutdown to ensure clean state for next player instance
         shutdownMpv()
@@ -657,6 +722,18 @@ final class MPVMetalViewController: UIViewController {
     }
 
     // MARK: - Track Enumeration
+
+    /// Enumerate tracks on demand (lazy loading for faster startup).
+    /// Only performs enumeration on first call; subsequent calls return cached results.
+    func enumerateTracksIfNeeded() {
+        guard !tracksEnumerated else { return }
+        tracksEnumerated = true
+
+        let tracks = getTracks()
+        DispatchQueue.main.async { [weak self] in
+            self?.delegate?.mpvPlayerDidUpdateTracks(audio: tracks.audio, subtitles: tracks.subtitles)
+        }
+    }
 
     func getTracks() -> (audio: [MPVTrack], subtitles: [MPVTrack]) {
         guard mpv != nil else { return ([], []) }
@@ -738,9 +815,13 @@ final class MPVMetalViewController: UIViewController {
                     // viewport margins after file metadata arrives.
                     self.setString(MPVProperty.sid, "no")
                 }
-                let tracks = self.getTracks()
-                self.delegate?.mpvPlayerDidUpdateTracks(audio: tracks.audio, subtitles: tracks.subtitles)
                 self.updateState(.playing)
+
+                // Enumerate tracks after a short delay to apply user preferences
+                // without blocking initial playback (saves ~200-1000ms on startup)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                    self?.enumerateTracksIfNeeded()
+                }
             }
 
         case MPV_EVENT_PLAYBACK_RESTART:
@@ -837,8 +918,10 @@ final class MPVMetalViewController: UIViewController {
             }
 
         case MPVProperty.trackListCount:
+            // Track list changed - if we've already enumerated, re-enumerate to update
+            // Otherwise, wait for lazy enumeration when info panel is opened
             DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
+                guard let self, self.tracksEnumerated else { return }
                 let tracks = self.getTracks()
                 self.delegate?.mpvPlayerDidUpdateTracks(audio: tracks.audio, subtitles: tracks.subtitles)
             }

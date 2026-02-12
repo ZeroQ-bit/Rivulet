@@ -19,10 +19,28 @@ struct MPVPlayerView: UIViewControllerRepresentable {
     @Binding var playerController: MPVMetalViewController?
 
     func makeUIViewController(context: Context) -> MPVMetalViewController {
+        // Try to claim a pre-warmed controller for faster startup
+        if let prewarmed = MPVPrewarmService.shared.claimPrewarmedController(isLiveStream: isLiveStream) {
+            print("🔥 [MPVPlayerView] Using pre-warmed controller")
+            prewarmed.delegate = delegate
+            prewarmed.prepareForPresentation()
+
+            // Set explicit size if provided (for multi-stream layout)
+            if containerSize != .zero {
+                prewarmed.setExplicitSize(containerSize)
+            }
+
+            DispatchQueue.main.async {
+                self.playerController = prewarmed
+            }
+
+            return prewarmed
+        }
+
+        // Fallback: create new controller (cold start path)
+        print("🔥 [MPVPlayerView] Cold start - creating new controller")
         let controller = MPVMetalViewController()
-        controller.playUrl = url
-        controller.httpHeaders = headers
-        controller.startTime = startTime
+        // Playback load is owned by MPVPlayerWrapper to avoid duplicate loadfile commands.
         controller.delegate = delegate
         controller.isLiveStreamMode = isLiveStream
 

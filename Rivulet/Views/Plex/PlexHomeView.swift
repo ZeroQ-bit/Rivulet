@@ -384,12 +384,6 @@ struct PlexHomeView: View {
                                 },
                                 onRefreshNeeded: {
                                     await dataStore.refreshHubs()
-                                },
-                                onGoToSeason: { episode in
-                                    navigateToSeason(for: episode)
-                                },
-                                onGoToShow: { episode in
-                                    navigateToShow(for: episode)
                                 }
                             )
                         }
@@ -439,8 +433,7 @@ struct PlexHomeView: View {
                     }
                 }
             }
-            .buttonStyle(.borderedProminent)
-            .tint(.yellow.opacity(0.3))
+            .buttonStyle(AppStoreButtonStyle())
         }
         .padding(.horizontal, 24)
         .padding(.vertical, 16)
@@ -506,8 +499,7 @@ struct PlexHomeView: View {
                 Button("Retry") {
                     Task { await refreshRecommendations(force: true) }
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(.white.opacity(0.2))
+                .buttonStyle(AppStoreButtonStyle())
             }
             .padding(.horizontal, 80)
             .padding(.vertical, 12)
@@ -525,12 +517,6 @@ struct PlexHomeView: View {
                 },
                 onRefreshNeeded: {
                     await refreshRecommendations(force: true)
-                },
-                onGoToSeason: { episode in
-                    navigateToSeason(for: episode)
-                },
-                onGoToShow: { episode in
-                    navigateToShow(for: episode)
                 }
             )
         }
@@ -560,8 +546,7 @@ struct PlexHomeView: View {
                 Text("Try Again")
                     .fontWeight(.medium)
             }
-            .buttonStyle(.borderedProminent)
-            .tint(.white.opacity(0.2))
+            .buttonStyle(AppStoreButtonStyle())
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -588,8 +573,7 @@ struct PlexHomeView: View {
                 Text("Refresh")
                     .fontWeight(.medium)
             }
-            .buttonStyle(.borderedProminent)
-            .tint(.white.opacity(0.2))
+            .buttonStyle(AppStoreButtonStyle())
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -616,48 +600,6 @@ struct PlexHomeView: View {
     // MARK: - Navigation Helpers
 
     /// Navigate to the season containing the given episode
-    private func navigateToSeason(for episode: PlexMetadata) {
-        guard let seasonKey = episode.parentRatingKey,
-              let serverURL = authManager.selectedServerURL,
-              let token = authManager.selectedServerToken else { return }
-
-        Task {
-            do {
-                let season = try await PlexNetworkManager.shared.getMetadata(
-                    serverURL: serverURL,
-                    authToken: token,
-                    ratingKey: seasonKey
-                )
-                await MainActor.run {
-                    selectedItem = season
-                }
-            } catch {
-                print("Failed to navigate to season: \(error)")
-            }
-        }
-    }
-
-    /// Navigate to the show containing the given episode
-    private func navigateToShow(for episode: PlexMetadata) {
-        guard let showKey = episode.grandparentRatingKey,
-              let serverURL = authManager.selectedServerURL,
-              let token = authManager.selectedServerToken else { return }
-
-        Task {
-            do {
-                let show = try await PlexNetworkManager.shared.getMetadata(
-                    serverURL: serverURL,
-                    authToken: token,
-                    ratingKey: showKey
-                )
-                await MainActor.run {
-                    selectedItem = show
-                }
-            } catch {
-                print("Failed to navigate to show: \(error)")
-            }
-        }
-    }
 }
 
 // MARK: - Hero View
@@ -988,8 +930,6 @@ struct InfiniteContentRow: View {
     var contextMenuSource: MediaItemContextSource = .other
     var onItemSelected: ((PlexMetadata) -> Void)?
     var onRefreshNeeded: MediaItemRefreshCallback?
-    var onGoToSeason: ((PlexMetadata) -> Void)?
-    var onGoToShow: ((PlexMetadata) -> Void)?
 
     @Environment(\.openSidebar) private var openSidebar
     @Environment(\.focusScopeManager) private var focusScopeManager
@@ -1073,9 +1013,7 @@ struct InfiniteContentRow: View {
                             serverURL: serverURL,
                             authToken: authToken,
                             source: contextMenuSource,
-                            onRefreshNeeded: onRefreshNeeded,
-                            onGoToSeason: onGoToSeason != nil ? { onGoToSeason?(item) } : nil,
-                            onGoToShow: onGoToShow != nil ? { onGoToShow?(item) } : nil
+                            onRefreshNeeded: onRefreshNeeded
                         )
                         .onAppear {
                             // Load more when user is 5 items from the end
@@ -1110,8 +1048,21 @@ struct InfiniteContentRow: View {
         }
         .onChange(of: initialItemsHash) { _, _ in
             // Reset when initial items change (e.g., on refresh or watch status change)
+            let savedFocusId = focusedItemId
             items = initialItems
             hasReachedEnd = false
+            // Restore focus after items reset to prevent focus loss (e.g., after marking watched)
+            if let savedFocusId {
+                let parts = savedFocusId.split(separator: ":", maxSplits: 1)
+                let savedKey = parts.count == 2 ? String(parts[1]) : nil
+                if let savedKey, items.contains(where: { $0.ratingKey == savedKey }) {
+                    // Must nil first then restore async — SwiftUI ignores setting the same value
+                    focusedItemId = nil
+                    DispatchQueue.main.async {
+                        focusedItemId = savedFocusId
+                    }
+                }
+            }
         }
         .focusSection()
         #if os(tvOS)

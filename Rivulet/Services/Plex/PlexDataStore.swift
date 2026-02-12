@@ -33,6 +33,56 @@ class PlexDataStore: ObservableObject {
     /// Increments when library hubs content changes
     @Published private(set) var libraryHubsVersion: UUID = UUID()
 
+    // MARK: - Freshness Tracking
+
+    /// Timestamps of last successful network fetch, keyed by resource identifier
+    /// e.g. "libraryItems:/library/sections/1", "libraryHubs:/library/sections/1"
+    private var lastFetchTimestamps: [String: Date] = [:]
+
+    /// Record that a resource was just fetched from the network
+    func recordFetch(for key: String) {
+        lastFetchTimestamps[key] = Date()
+    }
+
+    /// Check if a resource was fetched recently enough to skip a refresh
+    func isFresh(_ key: String, within interval: TimeInterval) -> Bool {
+        guard let timestamp = lastFetchTimestamps[key] else { return false }
+        return Date().timeIntervalSince(timestamp) < interval
+    }
+
+    /// Clear all freshness timestamps (e.g. on sign out or profile switch)
+    func clearFreshnessTimestamps() {
+        lastFetchTimestamps.removeAll()
+    }
+
+    // MARK: - Full Metadata Cache (stale-while-revalidate)
+
+    /// Cached full metadata responses keyed by ratingKey, with fetch timestamp
+    private var fullMetadataCache: [String: (metadata: PlexMetadata, fetchedAt: Date)] = [:]
+    private let fullMetadataCacheLimit = 50
+
+    /// Get cached full metadata for a ratingKey (returns nil if not cached)
+    func getCachedFullMetadata(for ratingKey: String) -> PlexMetadata? {
+        return fullMetadataCache[ratingKey]?.metadata
+    }
+
+    /// Check if cached full metadata is fresh enough to skip a network request
+    func isFullMetadataFresh(for ratingKey: String, within interval: TimeInterval = 120) -> Bool {
+        guard let entry = fullMetadataCache[ratingKey] else { return false }
+        return Date().timeIntervalSince(entry.fetchedAt) < interval
+    }
+
+    /// Cache full metadata with LRU eviction at 50 entries
+    func cacheFullMetadata(_ metadata: PlexMetadata, for ratingKey: String) {
+        // LRU eviction: remove oldest entry if at capacity and this is a new key
+        if fullMetadataCache[ratingKey] == nil && fullMetadataCache.count >= fullMetadataCacheLimit {
+            if let oldestKey = fullMetadataCache.min(by: { $0.value.fetchedAt < $1.value.fetchedAt })?.key {
+                fullMetadataCache.removeValue(forKey: oldestKey)
+            }
+        }
+        fullMetadataCache[ratingKey] = (metadata: metadata, fetchedAt: Date())
+    }
+
     // MARK: - Hero Cache (per library)
 
     /// Cached hero items per library key - persists across navigation
@@ -264,6 +314,8 @@ class PlexDataStore: ObservableObject {
         // Clear user-specific caches
         clearHeroCache()
         clearNextEpisodeCache()
+        clearFreshnessTimestamps()
+        fullMetadataCache.removeAll()
 
         // Clear in-memory data (libraries may differ per user)
         hubs = []
@@ -487,6 +539,7 @@ class PlexDataStore: ObservableObject {
                 for await (key, title, hubs) in group {
                     if let hubs {
                         libraryHubs[key] = hubs
+                        recordFetch(for: "libraryHubs:\(key)")
                         print("📦 PlexDataStore: ✅ Loaded \(hubs.count) hubs for \(title)")
                     }
                 }
@@ -519,6 +572,7 @@ class PlexDataStore: ObservableObject {
                 for await (key, title, hubs) in group {
                     if let hubs {
                         libraryHubs[key] = hubs
+                        recordFetch(for: "libraryHubs:\(key)")
                         print("📦 PlexDataStore: ✅ Refreshed \(hubs.count) hubs for \(title)")
                     }
                 }
@@ -760,6 +814,9 @@ class PlexDataStore: ObservableObject {
                             }
                         }
                         print("📦 PlexDataStore: ✅ Prefetched \(result.items.count) items for \(library.title)")
+                        await MainActor.run {
+                            self.recordFetch(for: "libraryItems:\(libraryKey)")
+                        }
 
                         // Prefetch poster images for first 30 items
                         self.prefetchImages(for: result.items, serverURL: serverURL, token: token)
@@ -780,6 +837,9 @@ class PlexDataStore: ObservableObject {
                             sectionId: libraryKey
                         )
                         await self.cacheManager.cacheLibraryHubs(hubs, forLibrary: libraryKey)
+                        await MainActor.run {
+                            self.recordFetch(for: "libraryHubs:\(libraryKey)")
+                        }
                         print("📦 PlexDataStore: ✅ Prefetched \(hubs.count) hubs for \(library.title)")
                     } catch {
                         print("📦 PlexDataStore: ⚠️ Failed to prefetch hubs for \(library.title): \(error.localizedDescription)")
@@ -1062,6 +1122,8 @@ class PlexDataStore: ObservableObject {
         isLoadingLibraries = false
         nextEpisodeCache.removeAll()
         heroCache.removeAll()
+        clearFreshnessTimestamps()
+        fullMetadataCache.removeAll()
         TopShelfCache.shared.clear()
     }
 

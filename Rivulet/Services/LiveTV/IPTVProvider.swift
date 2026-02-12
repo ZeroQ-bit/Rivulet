@@ -130,14 +130,19 @@ actor IPTVProvider: LiveTVProvider {
                 parsedChannels = try await parser.parse(from: url)
             }
         } catch {
-            // Capture IPTV channel fetch failure to Sentry
-            let capturedSourceType = self.sourceType
-            let capturedDisplayName = self.displayName
-            SentrySDK.capture(error: error) { scope in
-                scope.setTag(value: "iptv", key: "component")
-                scope.setTag(value: String(describing: capturedSourceType), key: "source_type")
-                scope.setExtra(value: capturedDisplayName, key: "source_name")
-                scope.setExtra(value: url.absoluteString, key: "m3u_url")
+            // Only capture unexpected errors to Sentry — skip HTTP errors (404, etc.)
+            // which indicate user-configured M3U URLs that are no longer valid
+            let isHTTPError = error is M3UParseError && "\(error)".contains("httpError")
+            let isCancelled = (error as NSError).code == NSURLErrorCancelled
+            if !isHTTPError && !isCancelled {
+                let capturedSourceType = self.sourceType
+                let capturedDisplayName = self.displayName
+                SentrySDK.capture(error: error) { scope in
+                    scope.setTag(value: "iptv", key: "component")
+                    scope.setTag(value: String(describing: capturedSourceType), key: "source_type")
+                    scope.setExtra(value: capturedDisplayName, key: "source_name")
+                    scope.setExtra(value: url.absoluteString, key: "m3u_url")
+                }
             }
             throw error
         }
@@ -185,13 +190,16 @@ actor IPTVProvider: LiveTVProvider {
                 parseResult = try await xmltvParser.parse(from: epgURL)
             }
         } catch {
-            // Capture EPG fetch failure to Sentry
-            let capturedDisplayName = self.displayName
-            SentrySDK.capture(error: error) { scope in
-                scope.setTag(value: "iptv", key: "component")
-                scope.setTag(value: "epg_fetch", key: "operation")
-                scope.setExtra(value: capturedDisplayName, key: "source_name")
-                scope.setExtra(value: epgURL.absoluteString, key: "epg_url")
+            // Only capture unexpected EPG errors — skip cancellations
+            let isCancelled = (error as NSError).code == NSURLErrorCancelled
+            if !isCancelled {
+                let capturedDisplayName = self.displayName
+                SentrySDK.capture(error: error) { scope in
+                    scope.setTag(value: "iptv", key: "component")
+                    scope.setTag(value: "epg_fetch", key: "operation")
+                    scope.setExtra(value: capturedDisplayName, key: "source_name")
+                    scope.setExtra(value: epgURL.absoluteString, key: "epg_url")
+                }
             }
             throw error
         }

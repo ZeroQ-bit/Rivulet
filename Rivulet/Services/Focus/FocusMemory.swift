@@ -89,16 +89,28 @@ extension EnvironmentValues {
 struct FocusMemoryModifier: ViewModifier {
     let memoryKey: String
     var focusedId: FocusState<String?>.Binding
+    var restoreOnEntry: Bool = true
     @Environment(\.focusMemory) private var focusMemory
+
+    #if DEBUG
+    private func debugLog(_ event: String, extra: String = "") {
+        let suffix = extra.isEmpty ? "" : " | \(extra)"
+        print("🎯 [FocusMemory:\(memoryKey)] \(event)\(suffix)")
+    }
+    #else
+    private func debugLog(_ event: String, extra: String = "") {}
+    #endif
 
     func body(content: Content) -> some View {
         content
             .onChange(of: focusedId.wrappedValue) { oldValue, newValue in
+                debugLog("focusChanged", extra: "old=\(oldValue ?? "nil") new=\(newValue ?? "nil")")
                 // Focus is entering this section (was nil, now has value)
-                if oldValue == nil, let newValue = newValue {
+                if restoreOnEntry, oldValue == nil, let newValue = newValue {
                     // Check if we have a remembered value that's different
                     if let remembered = focusMemory.recall(for: memoryKey),
                        remembered != newValue {
+                        debugLog("redirectToRemembered", extra: "new=\(newValue) remembered=\(remembered)")
                         // Redirect to remembered item instantly (no animation)
                         var transaction = Transaction()
                         transaction.disablesAnimations = true
@@ -112,6 +124,7 @@ struct FocusMemoryModifier: ViewModifier {
                 // Remember the new focus (only if not nil)
                 if let id = newValue {
                     focusMemory.remember(id, for: memoryKey)
+                    debugLog("remembered", extra: "id=\(id)")
                 }
             }
     }
@@ -127,8 +140,14 @@ extension View {
     /// - Parameters:
     ///   - key: Unique identifier for this section (e.g., "detailSeasons")
     ///   - focusedId: Binding to the @FocusState variable tracking focus
-    func remembersFocus(key: String, focusedId: FocusState<String?>.Binding) -> some View {
-        modifier(FocusMemoryModifier(memoryKey: key, focusedId: focusedId))
+    ///   - restoreOnEntry: When false, remembers focus changes but does not auto-redirect
+    ///     when the section is entered.
+    func remembersFocus(
+        key: String,
+        focusedId: FocusState<String?>.Binding,
+        restoreOnEntry: Bool = true
+    ) -> some View {
+        modifier(FocusMemoryModifier(memoryKey: key, focusedId: focusedId, restoreOnEntry: restoreOnEntry))
     }
 }
 

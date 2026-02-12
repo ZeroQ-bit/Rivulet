@@ -218,7 +218,7 @@ class PlexAuthManager: ObservableObject {
     /// - If httpsRequired=false + local: HTTP (fastest) > plex.direct
     /// - Remote: current behavior (plex.direct URLs from API)
     private func findBestConnection(for server: PlexDevice) async -> String? {
-        let validConnections = server.connections
+        let validConnections = (server.connections ?? [])
             .filter { !isDockerOrInternalAddress($0.address) }
 
         // Sort by preference: local non-relay > remote > relay
@@ -330,7 +330,7 @@ class PlexAuthManager: ObservableObject {
         }
 
         // If all filtered connections fail, try relay as last resort
-        if let relayConnection = server.connections.first(where: { $0.relay }) {
+        if let relayConnection = server.connections?.first(where: { $0.relay }) {
             print("🔐 PlexAuthManager: Trying relay as fallback: \(relayConnection.uri)")
             if await testConnection(relayConnection.uri, serverToken: tokenToUse) {
                 return relayConnection.uri
@@ -619,7 +619,7 @@ class PlexAuthManager: ObservableObject {
             do {
                 let servers = try await networkManager.getServers(authToken: token)
                 if let currentServer = servers.first(where: { server in
-                    server.connections.contains { $0.uri == currentURL }
+                    server.connections?.contains { $0.uri == currentURL } == true
                 }) ?? servers.first {
                     // Try to find a working connection on this server
                     if let workingURL = await findBestConnection(for: currentServer) {

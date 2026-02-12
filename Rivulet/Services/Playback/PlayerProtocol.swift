@@ -69,15 +69,32 @@ enum PlayerError: Error, Equatable, Sendable {
             if message.contains("HLS transcode session failed") {
                 return "Your Plex server is taking too long to prepare the video. Please try again."
             } else if message.contains("transcode") {
-                return "Your server couldn't prepare this video for playback. Please try again."
+                return "Your server couldn't prepare this video for playback. It may be busy with other streams."
+            } else if message.contains("CoreMediaErrorDomain") || message.contains("-16172") {
+                return "The stream from your server couldn't be played. The server may still be preparing the video."
+            } else if message.contains("loading failed") {
+                return "The stream couldn't be loaded. Check that your server is running and reachable."
             }
             return "This video couldn't be loaded. Please check your connection and try again."
         case .networkError:
             return "Couldn't connect to the server. Please check your network connection."
         case .codecUnsupported:
             return "This video format isn't supported on this device."
-        case .unknown:
+        case .unknown(let message):
+            if message.contains("CoreMediaErrorDomain") || message.contains("-16172") {
+                return "The stream from your server couldn't be played. The server may still be preparing the video."
+            }
             return "Something went wrong during playback. Please try again."
+        }
+    }
+
+    /// Whether the user should be offered a retry option
+    var isRetryable: Bool {
+        switch self {
+        case .loadFailed, .networkError, .unknown:
+            return true
+        case .invalidURL, .codecUnsupported:
+            return false
         }
     }
 

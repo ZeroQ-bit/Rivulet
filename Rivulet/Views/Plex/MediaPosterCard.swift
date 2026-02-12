@@ -7,6 +7,23 @@
 
 import SwiftUI
 
+// MARK: - Conditional Clip Shape
+
+/// ViewModifier that conditionally applies a rounded rectangle clip shape.
+/// Used to avoid double-clipping when ParallaxLayerStack handles its own clipping.
+private struct ConditionalClipShape: ViewModifier {
+    let shouldClip: Bool
+    let cornerRadius: CGFloat
+
+    func body(content: Content) -> some View {
+        if shouldClip {
+            content.clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+        } else {
+            content
+        }
+    }
+}
+
 // MARK: - Card Button Style (tvOS - minimal, no focus ring)
 
 #if os(tvOS)
@@ -15,6 +32,9 @@ import SwiftUI
 struct CardButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
+            .scaleEffect(configuration.isPressed ? 0.97 : 1.0)
+            .brightness(configuration.isPressed ? -0.05 : 0)
+            .animation(.easeInOut(duration: 0.15), value: configuration.isPressed)
     }
 }
 #endif
@@ -65,6 +85,9 @@ struct MediaPosterCard: View, Equatable {
     let serverURL: String
     let authToken: String
 
+    @Environment(\.uiScale) private var scale
+    @AppStorage("posterDepthEffect") private var posterDepthEffect = true
+
     // Equatable: only re-render if the item's key data changes
     // Note: viewOffset excluded - it changes during playback and would cause excessive re-renders
     static func == (lhs: MediaPosterCard, rhs: MediaPosterCard) -> Bool {
@@ -75,13 +98,17 @@ struct MediaPosterCard: View, Equatable {
     }
 
     #if os(tvOS)
-    private let posterWidth: CGFloat = 220
-    private let defaultPosterHeight: CGFloat = 330
-    private let cornerRadius: CGFloat = 16
+    private var posterWidth: CGFloat { ScaledDimensions.posterWidth * scale }
+    private var defaultPosterHeight: CGFloat { ScaledDimensions.posterHeight * scale }
+    private var cornerRadius: CGFloat { ScaledDimensions.posterCornerRadius }
+    private var titleSize: CGFloat { ScaledDimensions.posterTitleSize * scale }
+    private var subtitleSize: CGFloat { ScaledDimensions.posterSubtitleSize * scale }
     #else
-    private let posterWidth: CGFloat = 180
-    private let defaultPosterHeight: CGFloat = 270
-    private let cornerRadius: CGFloat = 12
+    private var posterWidth: CGFloat { ScaledDimensions.posterWidth }
+    private var defaultPosterHeight: CGFloat { ScaledDimensions.posterHeight }
+    private var cornerRadius: CGFloat { ScaledDimensions.posterCornerRadius }
+    private var titleSize: CGFloat { ScaledDimensions.posterTitleSize }
+    private var subtitleSize: CGFloat { ScaledDimensions.posterSubtitleSize }
     #endif
 
     /// Music items (albums, artists) should display as square posters
@@ -101,9 +128,13 @@ struct MediaPosterCard: View, Equatable {
                 .overlay {
                     progressBarOverlay
                 }
-                .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+                // Only clip if not using depth effect (ParallaxLayerStack handles its own clipping)
+                .modifier(ConditionalClipShape(
+                    shouldClip: !posterDepthEffect,
+                    cornerRadius: cornerRadius
+                ))
                 #if os(tvOS)
-                .hoverEffect(.highlight)  // Native tvOS focus effect on poster only
+                .hoverEffect(.highlight)  // Native tvOS focus effect on poster
                 // Simple shadow using .shadow() - more efficient than blur during animations
                 .shadow(color: .black.opacity(0.35), radius: 8, x: 0, y: 6)
                 .padding(.bottom, 10)  // Space for hover scale effect
@@ -112,11 +143,7 @@ struct MediaPosterCard: View, Equatable {
             // Metadata - fixed height ensures grid alignment
             VStack(alignment: .leading, spacing: 6) {
                 Text(item.title ?? "Unknown")
-                    #if os(tvOS)
-                    .font(.system(size: 19, weight: .medium))
-                    #else
-                    .font(.system(size: 15, weight: .medium))
-                    #endif
+                    .font(.system(size: titleSize, weight: .medium))
                     .foregroundStyle(.white.opacity(0.9))
                     .lineLimit(1)
                     .truncationMode(.tail)
@@ -124,11 +151,7 @@ struct MediaPosterCard: View, Equatable {
 
                 if let subtitle = subtitleText {
                     Text(subtitle)
-                        #if os(tvOS)
-                        .font(.system(size: 16, weight: .regular))
-                        #else
-                        .font(.system(size: 13, weight: .regular))
-                        #endif
+                        .font(.system(size: subtitleSize, weight: .regular))
                         .foregroundStyle(.white.opacity(0.5))
                         .lineLimit(1)
                         .truncationMode(.tail)
@@ -136,7 +159,7 @@ struct MediaPosterCard: View, Equatable {
                 }
             }
             #if os(tvOS)
-            .frame(height: 52, alignment: .top)  // Fixed height for consistent grid alignment
+            .frame(height: 56 * scale, alignment: .top)  // Fixed height for consistent grid alignment
             #else
             .frame(height: 44, alignment: .top)
             #endif
@@ -145,7 +168,25 @@ struct MediaPosterCard: View, Equatable {
 
     // MARK: - Poster Image
 
+    @ViewBuilder
     private var posterImage: some View {
+        #if os(tvOS)
+        if posterDepthEffect {
+            ParallaxPosterImage(
+                url: posterURL,
+                width: posterWidth,
+                height: posterHeight,
+                cornerRadius: cornerRadius
+            )
+        } else {
+            standardPosterImage
+        }
+        #else
+        standardPosterImage
+        #endif
+    }
+
+    private var standardPosterImage: some View {
         CachedAsyncImage(url: posterURL) { phase in
             switch phase {
             case .empty:
@@ -346,9 +387,17 @@ struct MediaRow: View {
     var onGoToSeason: ((PlexMetadata) -> Void)?
     var onGoToShow: ((PlexMetadata) -> Void)?
 
+    @Environment(\.uiScale) private var scale
+
     #if os(tvOS)
     @Environment(\.openSidebar) private var openSidebar
     @Environment(\.isSidebarVisible) private var isSidebarVisible
+
+    private var titleSize: CGFloat { ScaledDimensions.sectionTitleSize * scale }
+    private var horizontalPadding: CGFloat { ScaledDimensions.rowHorizontalPadding }
+    private var itemSpacing: CGFloat { ScaledDimensions.rowItemSpacing * scale }
+    #else
+    private var itemSpacing: CGFloat { ScaledDimensions.rowItemSpacing }
     #endif
 
     // Track focused item for proper initial focus
@@ -357,12 +406,17 @@ struct MediaRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text(title)
+                #if os(tvOS)
+                .font(.system(size: titleSize, weight: .bold))
+                .padding(.horizontal, horizontalPadding)
+                #else
                 .font(.title2)
                 .fontWeight(.bold)
-                .padding(.horizontal, 48)
+                .padding(.horizontal, 24)
+                #endif
 
             ScrollView(.horizontal, showsIndicators: false) {
-                LazyHStack(spacing: 24) {
+                LazyHStack(spacing: itemSpacing) {
                     ForEach(Array(items.enumerated()), id: \.element.ratingKey) { index, item in
                         Button {
                             onItemSelected?(item)
@@ -396,7 +450,11 @@ struct MediaRow: View {
                         )
                     }
                 }
-                .padding(.horizontal, 48)
+                #if os(tvOS)
+                .padding(.horizontal, horizontalPadding)
+                #else
+                .padding(.horizontal, 24)
+                #endif
                 .padding(.vertical, 32)  // Room for scale effect and shadow
             }
             .scrollClipDisabled()  // Allow shadow overflow
@@ -421,16 +479,21 @@ struct MediaGrid: View {
     var onGoToSeason: ((PlexMetadata) -> Void)?
     var onGoToShow: ((PlexMetadata) -> Void)?
 
+    @Environment(\.uiScale) private var scale
+
     // Track focused item for proper initial focus
     @FocusState private var focusedItemId: String?
 
     #if os(tvOS)
-    private let columns = [
-        GridItem(.adaptive(minimum: 220, maximum: 240), spacing: 32)
-    ]
+    private var columns: [GridItem] {
+        let minWidth = ScaledDimensions.gridMinWidth * scale
+        let maxWidth = ScaledDimensions.gridMaxWidth * scale
+        let spacing = ScaledDimensions.gridSpacing
+        return [GridItem(.adaptive(minimum: minWidth, maximum: maxWidth), spacing: spacing)]
+    }
     #else
     private let columns = [
-        GridItem(.adaptive(minimum: 200, maximum: 220), spacing: 24)
+        GridItem(.adaptive(minimum: 180, maximum: 200), spacing: 24)
     ]
     #endif
 
@@ -463,7 +526,11 @@ struct MediaGrid: View {
                 )
             }
         }
-        .padding(.horizontal, 48)
+        #if os(tvOS)
+        .padding(.horizontal, ScaledDimensions.rowHorizontalPadding)
+        #else
+        .padding(.horizontal, 24)
+        #endif
         .padding(.vertical, 32)  // Room for scale effect and shadow
         .focusSection()
         #if os(tvOS)

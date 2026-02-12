@@ -43,6 +43,11 @@ struct PlexTag: Codable, Identifiable, Hashable, Sendable {
     }
 }
 
+/// External ID reference (e.g. "tmdb://12345", "tvdb://67890", "imdb://tt1234567")
+struct PlexGuid: Codable, Sendable {
+    var id: String?
+}
+
 /// Trailer/Extra content
 struct PlexExtra: Codable, Identifiable, Sendable {
     var id: String { ratingKey ?? UUID().uuidString }
@@ -62,8 +67,25 @@ struct PlexExtrasContainer: Codable, Sendable {
 }
 
 /// Container for OnDeck (next episode to watch) in Plex API response
+/// Plex may return `Metadata` as either an array or a single dictionary.
 struct PlexOnDeck: Codable, Sendable {
     var Metadata: [PlexMetadata]?
+
+    enum CodingKeys: String, CodingKey {
+        case Metadata
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        // Try array first, then fall back to single dict wrapped in an array
+        if let array = try? container.decodeIfPresent([PlexMetadata].self, forKey: .Metadata) {
+            Metadata = array
+        } else if let single = try? container.decodeIfPresent(PlexMetadata.self, forKey: .Metadata) {
+            Metadata = [single]
+        } else {
+            Metadata = nil
+        }
+    }
 }
 
 // MARK: - Marker Model
@@ -137,6 +159,7 @@ struct PlexMetadata: Codable, Identifiable, Hashable, Sendable {
     var art: String?
     var banner: String?
     var Genre: [PlexTag]?
+    var Guid: [PlexGuid]?  // External IDs (tmdb://, tvdb://, imdb://)
     var Collection: [PlexTag]?
 
     // MARK: - Timing
@@ -341,11 +364,52 @@ struct PlexMetadata: Codable, Identifiable, Hashable, Sendable {
 // MARK: - Computed Properties
 
 extension PlexMetadata {
-    /// Best-effort extraction of TMDB ID from the guid
+    /// Best-effort extraction of TMDB ID from the guid or Guid array
     var tmdbId: Int? {
-        guard let guid else { return nil }
+        // Try primary guid first
+        if let guid, let id = PlexMetadata.extractTmdbId(from: guid) {
+            return id
+        }
+        // Fall back to Guid array (legacy Plex agents store external IDs here)
+        if let guids = Guid {
+            for g in guids {
+                if let gid = g.id, let id = PlexMetadata.extractTmdbId(from: gid) {
+                    return id
+                }
+            }
+        }
+        return nil
+    }
+
+    /// TMDB ID for the parent show (extracts from grandparentGuid for episodes)
+    var showTmdbId: Int? {
+        guard let guid = grandparentGuid else { return nil }
+        return PlexMetadata.extractTmdbId(from: guid)
+    }
+
+    /// Best-effort extraction of TVDB ID from the guid (for legacy Plex agents)
+    var tvdbId: Int? {
+        if let guid, let id = PlexMetadata.extractExternalId(from: guid, prefixes: ["thetvdb://", "tvdb://"]) {
+            return id
+        }
+        if let guids = Guid {
+            for g in guids {
+                if let gid = g.id, let id = PlexMetadata.extractExternalId(from: gid, prefixes: ["tvdb://"]) {
+                    return id
+                }
+            }
+        }
+        return nil
+    }
+
+    /// Extract a TMDB ID from a Plex guid string
+    static func extractTmdbId(from guid: String) -> Int? {
+        extractExternalId(from: guid, prefixes: ["tmdb://", "themoviedb://"])
+    }
+
+    /// Extract a numeric ID from a guid string matching any of the given prefixes
+    static func extractExternalId(from guid: String, prefixes: [String]) -> Int? {
         let lower = guid.lowercased()
-        let prefixes = ["tmdb://", "themoviedb://"]
         for prefix in prefixes {
             if lower.contains(prefix) {
                 let parts = lower.components(separatedBy: prefix)

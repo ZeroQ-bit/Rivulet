@@ -124,6 +124,12 @@ class PlayerContainerViewController: UIViewController {
 
         // Check if we have something to close before allowing dismiss
         if let vm = viewModel {
+            // Cancel intro skip countdown if active
+            if vm.introSkipCountdownSeconds > 0 {
+                print("🎮 [DISMISS INTERCEPT] Intro skip countdown active - cancelling")
+                vm.cancelIntroSkipCountdown()
+                return
+            }
             if vm.postVideoState != .hidden {
                 print("🎮 [DISMISS INTERCEPT] Post-video visible - dismissing normally")
                 vm.dismissPostVideo()
@@ -233,15 +239,24 @@ class PlayerContainerViewController: UIViewController {
     }
 
     /// Handle Menu button press with priority:
-    /// 1. Dismiss post-video overlay if showing
-    /// 2. Cancel scrubbing if active
-    /// 3. Close info panel if open
-    /// 4. Hide controls if visible
-    /// 5. Dismiss player if nothing else to close
+    /// 1. Cancel intro skip countdown if active
+    /// 2. Dismiss post-video overlay if showing
+    /// 3. Cancel scrubbing if active
+    /// 4. Close info panel if open
+    /// 5. Hide controls if visible
+    /// 6. Dismiss player if nothing else to close
     private func handleMenuButton() {
         guard let vm = viewModel else {
             print("🎮 [MENU] No viewModel - dismissing player")
             dismissPlayer()
+            return
+        }
+
+        // Cancel intro skip countdown if active (highest priority)
+        if vm.introSkipCountdownSeconds > 0 {
+            print("🎮 [MENU] Cancelling intro skip countdown")
+            vm.cancelIntroSkipCountdown()
+            blockDismissTemporarily()
             return
         }
 

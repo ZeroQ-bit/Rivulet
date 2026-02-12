@@ -645,8 +645,21 @@ class LiveTVDataStore: ObservableObject {
 
         let url = provider.buildStreamURL(for: channel)
 
-        // Log if provider returned nil URL
-        if url == nil {
+        // Log stream URL build result (GitHub #64 - DVB diagnostics)
+        if let url = url {
+            let successBreadcrumb = Breadcrumb(level: .info, category: "livetv_stream")
+            successBreadcrumb.message = "Stream URL built successfully"
+            successBreadcrumb.data = [
+                "channel_name": channel.name,
+                "channel_id": channel.id,
+                "source_id": channel.sourceId,
+                "source_type": String(describing: channel.sourceType),
+                "stream_type": url.path.contains("/transcode/") ? "plex_transcode" : (url.path.contains("/live/") ? "iptv" : "direct"),
+                "url_host": url.host ?? "unknown",
+                "url_path": url.path
+            ]
+            SentrySDK.addBreadcrumb(successBreadcrumb)
+        } else {
             let breadcrumb = Breadcrumb(level: .warning, category: "livetv_stream")
             breadcrumb.message = "Provider returned nil stream URL"
             breadcrumb.data = [

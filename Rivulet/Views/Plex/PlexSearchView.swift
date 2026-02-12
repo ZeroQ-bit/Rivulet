@@ -412,8 +412,7 @@ struct PlexSearchView: View {
                 Text("Try Again")
                     .fontWeight(.medium)
             }
-            .buttonStyle(.borderedProminent)
-            .tint(.white.opacity(0.2))
+            .buttonStyle(AppStoreButtonStyle())
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }

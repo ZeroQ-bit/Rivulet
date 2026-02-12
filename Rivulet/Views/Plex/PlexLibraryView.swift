@@ -16,11 +16,15 @@ struct PlexLibraryView: View {
     @Environment(\.nestedNavigationState) private var nestedNavState
     @Environment(\.focusScopeManager) private var focusScopeManager
     @Environment(\.isSidebarVisible) private var isSidebarVisible
+    @Environment(\.uiScale) private var scale
 
     @StateObject private var authManager = PlexAuthManager.shared
+    @ObservedObject private var librarySettings = LibrarySettingsManager.shared
     private let dataStore = PlexDataStore.shared
     @AppStorage("showLibraryHero") private var showLibraryHero = false
     @AppStorage("showLibraryRecommendations") private var showLibraryRecommendations = true
+    @AppStorage("showLibraryRecentRows") private var showLibraryRecentRows = true
+    @State private var currentSortOption: LibrarySortOption = .addedAtDesc
     @State private var items: [PlexMetadata] = []
     @State private var hubs: [PlexHub] = []  // Library-specific hubs from Plex API
     @State private var isLoading = false
@@ -66,9 +70,11 @@ struct PlexLibraryView: View {
     }
 
     #if os(tvOS)
-    private let columns = [
-        GridItem(.adaptive(minimum: 220, maximum: 260), spacing: 32)
-    ]
+    private var columns: [GridItem] {
+        let minWidth = ScaledDimensions.gridMinWidth * scale
+        let maxWidth = ScaledDimensions.gridMaxWidth * scale
+        return [GridItem(.adaptive(minimum: minWidth, maximum: maxWidth), spacing: ScaledDimensions.gridSpacing)]
+    }
     #else
     private let columns = [
         GridItem(.adaptive(minimum: 180, maximum: 200), spacing: 20)
@@ -126,9 +132,18 @@ struct PlexLibraryView: View {
         return false
     }
 
+    /// Check if a hub is a "recent" type (Recently Added, Recently Released, Newest Releases)
+    private func isRecentHub(_ hub: PlexHub) -> Bool {
+        let identifier = hub.hubIdentifier?.lowercased() ?? ""
+        let title = hub.title?.lowercased() ?? ""
+        return identifier.contains("recentlyadded") || title.contains("recently added") ||
+               identifier.contains("recentlyreleased") || title.contains("recently released") ||
+               identifier.contains("newestreleases") || title.contains("newest releases")
+    }
+
     /// Essential hubs only (Continue Watching, Recently Added, Recently Released)
     private var essentialHubs: [PlexHub] {
-        cachedProcessedHubs.filter { isEssentialHub($0) }
+        cachedProcessedHubs.filter { isEssentialHub($0) && (showLibraryRecentRows || !isRecentHub($0)) }
     }
 
     /// Discovery/recommendation hubs (Rediscover, Because you watched, etc.)
@@ -224,6 +239,10 @@ struct PlexLibraryView: View {
                         // visibleItemCount = 0
                         // visibleItemExpandTask?.cancel()
                         lastLoadedLibraryKey = libraryKey
+
+                        // Load sort preference for this library
+                        currentSortOption = librarySettings.getSortOption(for: libraryKey)
+
                         #if os(tvOS)
                         // Ensure we start in content scope with no stale focus when switching libraries
                         focusScopeManager.switchTo(.content, savingCurrent: false)
@@ -238,18 +257,28 @@ struct PlexLibraryView: View {
                         hasMoreItems = true
                         totalItemCount = 0
 
+                        // Check in-memory hubs from DataStore first (instant, no disk I/O)
+                        let inMemoryHubs = dataStore.libraryHubs[libraryKey]
+
                         // Load cache in background to avoid main thread JSON decoding jank
                         let libKey = libraryKey
-                        let (cachedItems, cachedHubs) = await Task.detached(priority: .userInitiated) {
+                        let (cachedItems, cachedHubs): ([PlexMetadata], [PlexHub]?) = await Task.detached(priority: .userInitiated) {
                             async let itemsTask = self.getCachedItems()
-                            async let hubsTask = self.cacheManager.getCachedLibraryHubs(forLibrary: libKey)
-                            return await (itemsTask, hubsTask)
+                            // Only hit disk cache if DataStore doesn't have hubs in memory
+                            let hubsResult: [PlexHub]?
+                            if inMemoryHubs != nil {
+                                hubsResult = nil  // Skip disk read, we'll use in-memory
+                            } else {
+                                hubsResult = await self.cacheManager.getCachedLibraryHubs(forLibrary: libKey)
+                            }
+                            return await (itemsTask, hubsResult)
                         }.value
 
-                        // Update UI with cached data
-                        if let cachedHubs = cachedHubs, !cachedHubs.isEmpty {
-                            hubs = cachedHubs
-                            cachedProcessedHubs = computeProcessedHubs(from: cachedHubs)
+                        // Update UI with cached data — prefer in-memory hubs, fall back to disk cache
+                        let hubsToUse = inMemoryHubs ?? cachedHubs
+                        if let hubsToUse, !hubsToUse.isEmpty {
+                            hubs = hubsToUse
+                            cachedProcessedHubs = computeProcessedHubs(from: hubsToUse)
                         }
 
                         if !cachedItems.isEmpty {
@@ -261,8 +290,10 @@ struct PlexLibraryView: View {
                                 selectHeroItemFromCurrentData()
                             }
 
-                            // Refresh in background silently
-                            await loadItemsInBackground()
+                            // Refresh in background only if data isn't fresh from a recent prefetch
+                            if !dataStore.isFresh("libraryItems:\(libraryKey)", within: 60) {
+                                await loadItemsInBackground()
+                            }
                         } else {
                             // No cache - fetch from server (skeleton still showing)
                             await loadItems()
@@ -559,8 +590,7 @@ struct PlexLibraryView: View {
                 Button("Retry") {
                     Task { await refreshRecommendations(force: true) }
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(.white.opacity(0.2))
+                .buttonStyle(AppStoreButtonStyle())
             }
         } else if !recommendations.isEmpty {
             InfiniteContentRow(
@@ -620,19 +650,27 @@ struct PlexLibraryView: View {
     // MARK: - Library Section Header
 
     private var librarySectionHeader: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text(libraryTitle)
-                .font(.system(size: 32, weight: .bold))
-                .foregroundStyle(.white)
-                .id("library-title-\(libraryKey)")  // Force instant update when library changes
-                .transaction { transaction in
-                    // Disable animation for instant title update
-                    transaction.animation = nil
-                }
+        HStack(alignment: .top) {
+            VStack(alignment: .leading, spacing: 10) {
+                Text(libraryTitle)
+                    .font(.system(size: 32, weight: .bold))
+                    .foregroundStyle(.white)
+                    .id("library-title-\(libraryKey)")  // Force instant update when library changes
+                    .transaction { transaction in
+                        // Disable animation for instant title update
+                        transaction.animation = nil
+                    }
 
-            Text("\(items.count) items")
-                .font(.system(size: 17, weight: .medium))
-                .foregroundStyle(.white.opacity(0.5))
+                Text("\(totalItemCount > 0 ? totalItemCount : items.count) items")
+                    .font(.system(size: 17, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.5))
+            }
+
+            Spacer()
+
+            #if os(tvOS)
+            sortButton
+            #endif
         }
         #if os(tvOS)
         .padding(.horizontal, 80)
@@ -644,6 +682,108 @@ struct PlexLibraryView: View {
         .padding(.bottom, 24)
         #endif
     }
+
+    #if os(tvOS)
+    // MARK: - Sort Button
+
+    @FocusState private var isSortButtonFocused: Bool
+
+    private var sortButton: some View {
+        Menu {
+            ForEach(LibrarySortOption.options(for: currentLibraryType), id: \.self) { option in
+                Button {
+                    if currentSortOption != option {
+                        currentSortOption = option
+                        librarySettings.setSortOption(option, for: libraryKey)
+                        Task {
+                            await reloadWithNewSort(sortOption: option)
+                        }
+                    }
+                } label: {
+                    HStack {
+                        Text(option.displayName)
+                        if currentSortOption == option {
+                            Image(systemName: "checkmark")
+                        }
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: "arrow.up.arrow.down")
+                    .font(.system(size: 20, weight: .semibold))
+
+                Text(currentSortOption.displayName)
+                    .font(.system(size: 20, weight: .medium))
+            }
+            .foregroundStyle(isSortButtonFocused ? .black : .white)
+            .padding(.horizontal, 20)
+            .padding(.vertical, 14)
+            .background(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(isSortButtonFocused ? .white : .white.opacity(0.15))
+            )
+            .scaleEffect(isSortButtonFocused ? 1.1 : 1.0)
+        }
+        .buttonStyle(.plain)
+        .hoverEffectDisabled()
+        .focusEffectDisabled()
+        .focused($isSortButtonFocused)
+        .animation(.spring(response: 0.25, dampingFraction: 0.8), value: isSortButtonFocused)
+    }
+
+    private var currentLibraryType: String? {
+        dataStore.libraries.first(where: { $0.key == libraryKey })?.type
+    }
+
+    private func reloadWithNewSort(sortOption: LibrarySortOption) async {
+        guard let serverURL = authManager.selectedServerURL,
+              let token = authManager.selectedServerToken else { return }
+
+        // Clear cache for this library since sort changed
+        let itemType = items.first?.type
+        if itemType == "movie" {
+            await cacheManager.clearMoviesCache(forLibrary: libraryKey)
+        } else if itemType == "show" {
+            await cacheManager.clearShowsCache(forLibrary: libraryKey)
+        }
+
+        // Fetch new sorted items without clearing existing display
+        // This keeps the hubs visible and only updates the grid
+        hasMoreItems = true
+
+        do {
+            let result = try await networkManager.getLibraryItemsWithTotal(
+                serverURL: serverURL,
+                authToken: token,
+                sectionId: libraryKey,
+                start: 0,
+                size: pageSize,
+                sort: sortOption.apiParameter
+            )
+
+            // Update total count
+            if let total = result.totalSize {
+                totalItemCount = total
+                hasMoreItems = result.items.count < total
+            } else {
+                hasMoreItems = result.items.count >= pageSize
+            }
+
+            // Replace items with new sorted results
+            items = result.items
+
+            // Cache the new results
+            if itemType == "movie" {
+                await cacheManager.cacheMovies(result.items, forLibrary: libraryKey)
+            } else if itemType == "show" {
+                await cacheManager.cacheShows(result.items, forLibrary: libraryKey)
+            }
+        } catch {
+            print("Failed to reload with new sort: \(error)")
+        }
+    }
+    #endif
 
     // MARK: - Library Grid View
 
@@ -811,8 +951,7 @@ struct PlexLibraryView: View {
                 Text("Try Again")
                     .fontWeight(.medium)
             }
-            .buttonStyle(.borderedProminent)
-            .tint(.white.opacity(0.2))
+            .buttonStyle(AppStoreButtonStyle())
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -839,8 +978,7 @@ struct PlexLibraryView: View {
                 Text("Refresh")
                     .fontWeight(.medium)
             }
-            .buttonStyle(.borderedProminent)
-            .tint(.white.opacity(0.2))
+            .buttonStyle(AppStoreButtonStyle())
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -890,10 +1028,15 @@ struct PlexLibraryView: View {
         guard let serverURL = authManager.selectedServerURL,
               let token = authManager.selectedServerToken else { return }
 
-        // Fetch both items and hubs silently in background
+        // Fetch items and hubs silently in background, skipping hubs if recently fetched
+        let hubsFresh = dataStore.isFresh("libraryHubs:\(libraryKey)", within: 60)
         async let itemsFetch: () = fetchFromServer(serverURL: serverURL, token: token, updateLoading: false)
-        async let hubsFetch: () = fetchLibraryHubs(serverURL: serverURL, token: token)
-        _ = await (itemsFetch, hubsFetch)
+        if !hubsFresh {
+            async let hubsFetch: () = fetchLibraryHubs(serverURL: serverURL, token: token)
+            _ = await (itemsFetch, hubsFetch)
+        } else {
+            await itemsFetch
+        }
 
         // Only reselect hero if hubs loaded and we don't have one yet
         // or if hubs have better candidates (recently added)
@@ -1012,7 +1155,8 @@ struct PlexLibraryView: View {
                 authToken: token,
                 sectionId: libraryKey,
                 start: 0,
-                size: pageSize
+                size: pageSize,
+                sort: currentSortOption.apiParameter
             )
 
             // Update total count for pagination
@@ -1054,6 +1198,7 @@ struct PlexLibraryView: View {
                 }
             }
 
+            dataStore.recordFetch(for: "libraryItems:\(libraryKey)")
             error = nil
         } catch {
             // Ignore cancellation errors - they happen when views are recreated
@@ -1083,7 +1228,8 @@ struct PlexLibraryView: View {
                 authToken: token,
                 sectionId: libraryKey,
                 start: items.count,
-                size: pageSize
+                size: pageSize,
+                sort: currentSortOption.apiParameter
             )
 
             // Update total count
@@ -1158,6 +1304,10 @@ struct PlexLibraryView: View {
                 hubs = fetchedHubs
                 cachedProcessedHubs = computeProcessedHubs(from: fetchedHubs)
             }
+
+            // Write back to DataStore for cross-view sharing
+            dataStore.libraryHubs[libraryKey] = fetchedHubs
+            dataStore.recordFetch(for: "libraryHubs:\(libraryKey)")
 
             // Cache for instant loading next time
             await cacheManager.cacheLibraryHubs(fetchedHubs, forLibrary: libraryKey)

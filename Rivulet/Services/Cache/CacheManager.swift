@@ -326,6 +326,26 @@ actor CacheManager {
         }
     }
 
+    func clearMoviesCache(forLibrary libraryKey: String) {
+        guard let cacheDir = cacheDirectory else { return }
+        let fileName = "\(moviesCachePrefix)\(libraryKey).json"
+        let fileURL = cacheDir.appendingPathComponent(fileName)
+        try? FileManager.default.removeItem(at: fileURL)
+        memoryCache.removeObject(forKey: fileName as NSString)
+        removeTimestamp(for: fileName)
+        print("💾 CacheManager: Cleared movies cache for library \(libraryKey)")
+    }
+
+    func clearShowsCache(forLibrary libraryKey: String) {
+        guard let cacheDir = cacheDirectory else { return }
+        let fileName = "\(showsCachePrefix)\(libraryKey).json"
+        let fileURL = cacheDir.appendingPathComponent(fileName)
+        try? FileManager.default.removeItem(at: fileURL)
+        memoryCache.removeObject(forKey: fileName as NSString)
+        removeTimestamp(for: fileName)
+        print("💾 CacheManager: Cleared shows cache for library \(libraryKey)")
+    }
+
     // MARK: - Cache Size
 
     func getCacheSize() -> Int64 {

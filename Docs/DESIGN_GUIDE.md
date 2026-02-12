@@ -8,15 +8,16 @@ A comprehensive guide to the UI/UX patterns, components, and styling conventions
 
 1. [Design Philosophy](#design-philosophy)
 2. [Focus & Selection Styling](#focus--selection-styling)
-3. [Glass Row Components](#glass-row-components)
-4. [Navigation Patterns](#navigation-patterns)
-5. [Focus Management](#focus-management)
-6. [Typography](#typography)
-7. [Colors & Opacity](#colors--opacity)
-8. [Animation Timings](#animation-timings)
-9. [Layout Spacing](#layout-spacing)
-10. [Component Reference](#component-reference)
-11. [tvOS-Specific Considerations](#tvos-specific-considerations)
+3. [Button Styles](#button-styles)
+4. [Glass Row Components](#glass-row-components)
+5. [Navigation Patterns](#navigation-patterns)
+6. [Focus Management](#focus-management)
+7. [Typography](#typography)
+8. [Colors & Opacity](#colors--opacity)
+9. [Animation Timings](#animation-timings)
+10. [Layout Spacing](#layout-spacing)
+11. [Component Reference](#component-reference)
+12. [tvOS-Specific Considerations](#tvos-specific-considerations)
 
 ---
 
@@ -109,6 +110,159 @@ All focusable list rows use this consistent styling:
 ### Poster Cards (MediaPosterCard)
 
 Media poster cards use `.hoverEffect(.highlight)` on the poster image for native tvOS focus behavior, wrapped in `CardButtonStyle` which removes the default focus ring.
+
+---
+
+## Button Styles
+
+Buttons on tvOS follow the **App Store button pattern**: solid white background with black text when focused, translucent glass when unfocused. This provides clear, consistent focus feedback across the app.
+
+### Button Style Overview
+
+| Style | Use Case | Location |
+|-------|----------|----------|
+| `AppStoreButtonStyle()` | Standalone action buttons (Refresh, Retry, Cancel, Dismiss) | `GlassRowStyle.swift` |
+| `AppStoreActionButtonStyle(isFocused:)` | Inline action buttons on detail views (Play, Shuffle, etc.) | `GlassRowStyle.swift` |
+| `SettingsButtonStyle()` | Glass rows in settings and lists | `SettingsComponents.swift` |
+| `CardButtonStyle()` | Poster cards (removes focus ring) | `MediaPosterCard.swift` |
+| `GlassRowButtonStyle()` | Generic glass row buttons | `GlassRowStyle.swift` |
+
+### AppStoreButtonStyle (Standalone Buttons)
+
+For standalone action buttons like Refresh, Retry, Try Again, Cancel, Dismiss. Has built-in padding.
+
+```swift
+Button("Refresh") {
+    Task { await refresh() }
+}
+.buttonStyle(AppStoreButtonStyle())
+```
+
+**Behavior:**
+- **Unfocused**: Glass background (15% white), white text
+- **Focused**: Solid white background, black text, 1.1x scale
+- **Pressed**: 0.95x scale
+
+**Styling:**
+- Corner radius: 16pt
+- Padding: 24pt horizontal, 14pt vertical
+- Animation: spring(response: 0.25, dampingFraction: 0.8)
+
+### AppStoreActionButtonStyle (Detail View Buttons)
+
+For inline action buttons on detail views (Play, Shuffle, Restart, Watched, etc.). Requires external focus state since ButtonStyle cannot track focus internally.
+
+```swift
+// Primary action (Play, Resume)
+Button { ... } label: {
+    HStack(spacing: 8) {
+        Image(systemName: "play.fill")
+        Text("Play")
+    }
+    .font(.system(size: 20, weight: .semibold))
+    .frame(minWidth: actionButtonMinWidth, minHeight: actionButtonHeight)
+}
+#if os(tvOS)
+.buttonStyle(AppStoreActionButtonStyle(isFocused: focusedActionButton == "play"))
+.focused($focusedActionButton, equals: "play")
+#else
+.buttonStyle(.borderedProminent)
+#endif
+
+// Secondary action (Shuffle, Restart)
+.buttonStyle(AppStoreActionButtonStyle(isFocused: focusedActionButton == "shuffle", isPrimary: false))
+```
+
+**Parameters:**
+- `isFocused: Bool` - **Required**. Pass the focus state from the view.
+- `isPrimary: Bool` - Optional (default: true). Primary actions have 20% opacity unfocused, secondary have 10%.
+- `cornerRadius: CGFloat` - Optional (default: 16).
+
+**Behavior:**
+- **Unfocused**: Glass background (10-20% white), white text
+- **Focused**: Solid white background, black text, 1.08x scale
+- **Pressed**: 0.95x scale
+
+**IMPORTANT:** The `isFocused` parameter is required because `@FocusState` inside a `ButtonStyle` does not work - it's not connected to the actual button focus. You must pass the focus state from your view's `@FocusState` variable.
+
+### Detail View Action Button Constants
+
+```swift
+private let actionButtonHeight: CGFloat = 66
+private let actionButtonMinWidth: CGFloat = 180
+```
+
+| Button | Width | Notes |
+|--------|-------|-------|
+| Play, Shuffle, Restart, Show, Info, Trailer | minWidth: 180 | Standard action buttons |
+| Watched/Unwatched | 220 | Fixed width for text stability |
+| Star | 80 | Icon-only button |
+
+### Handling Custom Foreground Colors
+
+When a button has semantic colors (green for "Watched", yellow for "Starred"), you must handle the focus state manually since the button style's `foregroundStyle` is overridden by content styling:
+
+```swift
+// Watched button - black on focus, green when watched, white when unwatched
+.foregroundStyle(focusedActionButton == "watched" ? .black : (isWatched ? .green : .white))
+
+// Star button - black on focus, yellow when starred, gray when not
+.foregroundStyle(focusedActionButton == "star" ? .black : (isStarred ? .yellow : .secondary))
+```
+
+### Menu Label Styling (Sort Button)
+
+`Menu` components don't use `ButtonStyle` for their label - they require inline styling:
+
+```swift
+@FocusState private var isSortButtonFocused: Bool
+
+Menu {
+    // Menu items...
+} label: {
+    HStack(spacing: 10) {
+        Image(systemName: "arrow.up.arrow.down")
+            .font(.system(size: 20, weight: .semibold))
+        Text(currentSortOption.displayName)
+            .font(.system(size: 20, weight: .medium))
+    }
+    .foregroundStyle(isSortButtonFocused ? .black : .white)
+    .padding(.horizontal, 20)
+    .padding(.vertical, 14)
+    .background(
+        RoundedRectangle(cornerRadius: 16, style: .continuous)
+            .fill(isSortButtonFocused ? .white : .white.opacity(0.15))
+    )
+    .scaleEffect(isSortButtonFocused ? 1.1 : 1.0)
+}
+.buttonStyle(.plain)
+.hoverEffectDisabled()
+.focusEffectDisabled()
+.focused($isSortButtonFocused)
+.animation(.spring(response: 0.25, dampingFraction: 0.8), value: isSortButtonFocused)
+```
+
+### Removing Default tvOS Focus Effects
+
+To prevent the default tvOS focus halo/ring, always apply these modifiers:
+
+```swift
+.buttonStyle(.plain)       // or AppStoreButtonStyle, SettingsButtonStyle, etc.
+.hoverEffectDisabled()     // Removes hover glow
+.focusEffectDisabled()     // Removes focus ring
+```
+
+### Cross-Platform Considerations
+
+Always wrap tvOS-specific button styles:
+
+```swift
+#if os(tvOS)
+.buttonStyle(AppStoreButtonStyle())
+#else
+.buttonStyle(.borderedProminent)  // or .bordered for secondary
+#endif
+```
 
 ---
 
@@ -370,15 +524,24 @@ VStack(spacing: 24) {
 
 ### Button Styles
 
-| Style | Use Case |
-|-------|----------|
-| `SettingsButtonStyle()` | **tvOS glass rows and buttons** - removes default focus ring |
-| `CardButtonStyle()` | Poster cards (removes focus ring) |
-| `.borderedProminent` | Primary action buttons |
-| `.bordered` | Secondary action buttons |
-| `.plain` | Non-tvOS buttons only |
+| Style | Use Case | Focus Behavior |
+|-------|----------|----------------|
+| `AppStoreButtonStyle()` | Standalone buttons (Refresh, Retry, Cancel) | White bg + black text on focus |
+| `AppStoreActionButtonStyle(isFocused:)` | Detail view actions (Play, Shuffle) | White bg + black text on focus |
+| `SettingsButtonStyle()` | Glass rows in settings/lists | Glass opacity change on focus |
+| `CardButtonStyle()` | Poster cards | Removes focus ring (uses hoverEffect) |
+| `GlassRowButtonStyle()` | Generic glass row buttons | Glass opacity change on focus |
+| `.borderedProminent` | Non-tvOS primary actions | System styling |
+| `.bordered` | Non-tvOS secondary actions | System styling |
 
-**IMPORTANT:** On tvOS, always use `SettingsButtonStyle()` (from `SettingsComponents.swift`) instead of `.buttonStyle(.plain)` for custom-styled buttons. The `.plain` style still shows tvOS's default focus effects (white glow), which conflicts with our glass styling. `SettingsButtonStyle()` completely removes the default focus ring, allowing our custom `isFocused` background styling to work correctly.
+**IMPORTANT:** On tvOS:
+- Use `AppStoreButtonStyle()` for standalone action buttons (Refresh, Retry, Try Again, Cancel, Dismiss)
+- Use `AppStoreActionButtonStyle(isFocused:)` for detail view action buttons (Play, Shuffle, Restart, Watched, etc.)
+- Use `SettingsButtonStyle()` for glass rows in settings and lists
+- Never use `.buttonStyle(.plain)` alone - it still shows tvOS's default focus glow
+- Always add `.hoverEffectDisabled()` and `.focusEffectDisabled()` when using custom focus styling
+
+See [Button Styles](#button-styles) section for detailed usage.
 
 ### Inline Toggle Pattern
 
@@ -782,10 +945,12 @@ The FocusMemory pattern is simpler: let tvOS focus engine handle scrolling autom
 | Shared UI components | `Views/Components/` |
 | Settings components | `Views/Settings/SettingsComponents.swift` |
 | Glass row styling | `Views/Components/GlassRowStyle.swift` |
+| App Store button styles | `Views/Components/GlassRowStyle.swift` |
+| Card button style | `Views/Plex/MediaPosterCard.swift` |
+| Settings button style | `Views/Settings/SettingsComponents.swift` |
 | Focus memory (section focus) | `Services/Focus/FocusMemory.swift` |
 | Focus scope isolation | `Services/Focus/FocusScopeManager.swift` |
 | Image caching | `Views/Components/CachedAsyncImage.swift` |
-| Button styles | `Views/Plex/MediaPosterCard.swift` (CardButtonStyle) |
 
 ---
 
@@ -831,4 +996,4 @@ Before shipping any new UI, ask:
 
 ---
 
-*Last updated: December 2024*
+*Last updated: February 2026*

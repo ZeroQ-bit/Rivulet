@@ -233,6 +233,18 @@ extension PlexLiveTVChannel {
         // Generate a unique session ID for this transcode session
         let sessionId = UUID().uuidString.uppercased()
 
+        // Log transcode URL building start (GitHub #64 - DVB diagnostics)
+        let startBreadcrumb = Breadcrumb(level: .info, category: "plex_livetv")
+        startBreadcrumb.message = "Building Plex transcode URL for DVB channel"
+        startBreadcrumb.data = [
+            "channel_name": title,
+            "channel_number": channelNumber ?? "unknown",
+            "channel_key": key,
+            "session_id": String(sessionId.prefix(8)),
+            "server_host": URL(string: serverURL)?.host ?? "unknown"
+        ]
+        SentrySDK.addBreadcrumb(startBreadcrumb)
+
         var components = URLComponents(string: "\(serverURL)/video/:/transcode/universal/start.m3u8")
 
         // Build the client profile extras - these define codec support and limitations
@@ -295,7 +307,33 @@ extension PlexLiveTVChannel {
             URLQueryItem(name: "X-Plex-Token", value: authToken),
         ]
 
-        return components?.url
+        let resultURL = components?.url
+
+        // Log transcode URL building result (GitHub #64 - DVB diagnostics)
+        if let url = resultURL {
+            let successBreadcrumb = Breadcrumb(level: .info, category: "plex_livetv")
+            successBreadcrumb.message = "Plex transcode URL built successfully"
+            successBreadcrumb.data = [
+                "channel_name": title,
+                "channel_number": channelNumber ?? "unknown",
+                "session_id": String(sessionId.prefix(8)),
+                "url_path": url.path,
+                "url_host": url.host ?? "unknown",
+                "has_query_params": url.query != nil
+            ]
+            SentrySDK.addBreadcrumb(successBreadcrumb)
+        } else {
+            let failBreadcrumb = Breadcrumb(level: .error, category: "plex_livetv")
+            failBreadcrumb.message = "Failed to build Plex transcode URL - URLComponents failed"
+            failBreadcrumb.data = [
+                "channel_name": title,
+                "channel_key": key,
+                "server_url": serverURL
+            ]
+            SentrySDK.addBreadcrumb(failBreadcrumb)
+        }
+
+        return resultURL
     }
 
     /// Build the X-Plex-Client-Profile-Extra parameter value.
@@ -342,8 +380,10 @@ extension PlexLiveTVChannel {
                     "channel_name": title,
                     "channel_number": channelNumber ?? "unknown",
                     "rating_key": ratingKey,
+                    "channel_key": key,
                     "stream_type": "hdhr_direct",
-                    "has_stream_url": true
+                    "has_stream_url": true,
+                    "server_host": URL(string: serverURL)?.host ?? "unknown"
                 ]
                 SentrySDK.addBreadcrumb(breadcrumb)
                 return URL(string: hdhrURL)
@@ -363,8 +403,9 @@ extension PlexLiveTVChannel {
                 "rating_key": ratingKey,
                 "stream_type": "plex_transcode",
                 "channel_key": key,
-                "server_url": serverURL,
-                "transcode_url_built": transcodeURL != nil
+                "server_host": URL(string: serverURL)?.host ?? "unknown",
+                "transcode_url_built": transcodeURL != nil,
+                "transcode_url_host": transcodeURL?.host ?? "none"
             ]
             SentrySDK.addBreadcrumb(breadcrumb)
 

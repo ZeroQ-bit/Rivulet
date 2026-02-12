@@ -9,6 +9,132 @@ import SwiftUI
 
 #if os(tvOS)
 
+// MARK: - Marquee Text (scrolls when truncated and focused)
+
+struct MarqueeText: View {
+    let text: String
+    let font: Font
+    let isFocused: Bool
+
+    @State private var textWidth: CGFloat = 0
+    @State private var containerWidth: CGFloat = 0
+    @State private var offset: CGFloat = 0
+    @State private var isAnimating = false
+
+    /// How much the text overflows the container
+    private var overflow: CGFloat {
+        max(0, textWidth - containerWidth)
+    }
+
+    /// Whether the text needs to scroll
+    private var needsScroll: Bool {
+        overflow > 0
+    }
+
+    var body: some View {
+        GeometryReader { geo in
+            Text(text)
+                .font(font)
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
+                .background(
+                    GeometryReader { textGeo in
+                        Color.clear
+                            .onAppear {
+                                textWidth = textGeo.size.width
+                            }
+                            .onChange(of: text) { _, _ in
+                                textWidth = textGeo.size.width
+                            }
+                    }
+                )
+                .offset(x: offset)
+                .onAppear {
+                    containerWidth = geo.size.width
+                }
+                .onChange(of: geo.size.width) { _, newWidth in
+                    containerWidth = newWidth
+                }
+        }
+        .clipped()
+        .onChange(of: isFocused) { _, focused in
+            if focused && needsScroll {
+                startScrolling()
+            } else {
+                stopScrolling()
+            }
+        }
+        .onChange(of: overflow) { _, _ in
+            if isFocused && needsScroll && !isAnimating {
+                startScrolling()
+            }
+        }
+    }
+
+    private func startScrolling() {
+        guard !isAnimating else { return }
+        isAnimating = true
+
+        // Initial pause before scrolling
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+            guard isFocused else {
+                isAnimating = false
+                return
+            }
+            scrollLeft()
+        }
+    }
+
+    private func scrollLeft() {
+        guard isFocused else {
+            stopScrolling()
+            return
+        }
+
+        // Scroll to show the end of the text
+        withAnimation(.linear(duration: Double(overflow) / 40)) {
+            offset = -overflow
+        }
+
+        // Pause at end, then scroll back
+        DispatchQueue.main.asyncAfter(deadline: .now() + Double(overflow) / 40 + 1.5) {
+            guard isFocused else {
+                stopScrolling()
+                return
+            }
+            scrollRight()
+        }
+    }
+
+    private func scrollRight() {
+        guard isFocused else {
+            stopScrolling()
+            return
+        }
+
+        // Scroll back to start
+        withAnimation(.linear(duration: Double(overflow) / 40)) {
+            offset = 0
+        }
+
+        // Pause at start, then repeat
+        DispatchQueue.main.asyncAfter(deadline: .now() + Double(overflow) / 40 + 1.5) {
+            guard isFocused else {
+                stopScrolling()
+                return
+            }
+            scrollLeft()
+        }
+    }
+
+    private func stopScrolling() {
+        isAnimating = false
+        withAnimation(.easeOut(duration: 0.2)) {
+            offset = 0
+        }
+    }
+}
+
 // MARK: - Focusable Sidebar Row
 
 struct FocusableSidebarRow: View {
@@ -21,34 +147,49 @@ struct FocusableSidebarRow: View {
 
     @FocusState.Binding var focusedItem: String?
 
+    // Base sizes (larger default to match poster cards)
+    private let baseIconSize: CGFloat = 26
+    private let baseTitleSize: CGFloat = 26
+    private let baseIconWidth: CGFloat = 30
+    private let baseSpacing: CGFloat = 16
+    private let baseVerticalPadding: CGFloat = 15
+    private let baseIndicatorSize: CGFloat = 7
+
+    private var isFocused: Bool {
+        focusedItem == id
+    }
+
     var body: some View {
         Button {
             onSelect()
         } label: {
-            HStack(spacing: 14 * fontScale) {
+            HStack(spacing: baseSpacing * fontScale) {
                 Image(systemName: icon)
-                    .font(.system(size: 22 * fontScale, weight: .medium))
-                    .frame(width: 26 * fontScale)
+                    .font(.system(size: baseIconSize * fontScale, weight: .medium))
+                    .frame(width: baseIconWidth * fontScale)
 
-                Text(title)
-                    .font(.system(size: 21 * fontScale, weight: isSelected ? .semibold : .regular))
-                    .lineLimit(1)
+                MarqueeText(
+                    text: title,
+                    font: .system(size: baseTitleSize * fontScale, weight: isSelected ? .semibold : .regular),
+                    isFocused: isFocused
+                )
+                .frame(height: baseTitleSize * fontScale * 1.2)  // Approximate line height
 
                 Spacer(minLength: 4)
 
                 if isSelected {
                     Circle()
                         .fill(.white)
-                        .frame(width: 6 * fontScale, height: 6 * fontScale)
+                        .frame(width: baseIndicatorSize * fontScale, height: baseIndicatorSize * fontScale)
                 }
             }
-            .foregroundStyle(.white.opacity(focusedItem == id || isSelected ? 1.0 : 0.6))
-            .padding(.leading, 16)
-            .padding(.trailing, 4)
-            .padding(.vertical, 13 * fontScale)
+            .foregroundStyle(.white.opacity(isFocused || isSelected ? 1.0 : 0.6))
+            .padding(.leading, 18)
+            .padding(.trailing, 6)
+            .padding(.vertical, baseVerticalPadding * fontScale)
             .background(
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(focusedItem == id ? .white.opacity(0.15) : .clear)
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(isFocused ? .white.opacity(0.15) : .clear)
             )
             .padding(.horizontal, 16)
         }

@@ -45,7 +45,7 @@ struct PlexDevice: Codable, Sendable {
     let publicAddressMatches: Bool?
     let dnsRebindingProtection: Bool?
     let natLoopbackSupported: Bool?
-    let connections: [PlexConnection]
+    let connections: [PlexConnection]?
 
     /// The 32-char server identifier used for plex.direct URLs
     /// This is fetched separately from pms/servers.xml
@@ -93,7 +93,7 @@ struct PlexDevice: Codable, Sendable {
         publicAddressMatches = try container.decodeIfPresent(Bool.self, forKey: .publicAddressMatches)
         dnsRebindingProtection = try container.decodeIfPresent(Bool.self, forKey: .dnsRebindingProtection)
         natLoopbackSupported = try container.decodeIfPresent(Bool.self, forKey: .natLoopbackSupported)
-        connections = try container.decode([PlexConnection].self, forKey: .connections)
+        connections = try container.decodeIfPresent([PlexConnection].self, forKey: .connections)
     }
 }
 

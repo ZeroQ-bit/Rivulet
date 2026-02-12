@@ -37,6 +37,17 @@ export default {
       case "details":
         upstreamPath = `${type}/${tmdbId}`;
         break;
+      case "images":
+        upstreamPath = `${type}/${tmdbId}/images`;
+        break;
+      case "find": {
+        // /tmdb/find/{external_id}?source=tvdb_id (or imdb_id)
+        const externalSource = url.searchParams.get("source") || "tvdb_id";
+        upstreamPath = `find/${tmdbId}`;
+        // Add external_source to upstream URL below
+        url.searchParams.set("_external_source", externalSource);
+        break;
+      }
       default:
         return addCors(new Response("Not Found", { status: 404 }));
     }
@@ -53,6 +64,8 @@ export default {
     const upstreamUrl = new URL(`${TMDB_BASE}/${upstreamPath}`);
     upstreamUrl.searchParams.set("api_key", env.TMDB_API_KEY);
     if (language) upstreamUrl.searchParams.set("language", language);
+    const externalSource = url.searchParams.get("_external_source");
+    if (externalSource) upstreamUrl.searchParams.set("external_source", externalSource);
 
     let upstreamResp: Response;
     try {

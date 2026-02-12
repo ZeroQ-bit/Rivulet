@@ -638,6 +638,8 @@ private final class UniversalPlaybackInputTarget: PlaybackInputTarget {
             }
             if !vm.showInfoPanel {
                 vm.resetSettingsPanel()
+                // Trigger lazy track enumeration when info panel is opened
+                vm.requestTrackEnumeration()
                 withAnimation(.easeOut(duration: 0.3)) {
                     vm.showInfoPanel = true
                 }
@@ -847,6 +849,8 @@ struct UniversalPlayerView: View {
             #endif
             // Deactivate player scope when leaving
             focusScopeManager.deactivate()
+            // Release MPV pre-warm service so it can prepare for next use
+            MPVPrewarmService.shared.releaseController()
         }
         .onChange(of: viewModel.currentTime) { _, newTime in
             // Report progress periodically
@@ -965,7 +969,7 @@ struct UniversalPlayerView: View {
 
             // Error State
             if case .failed(let error) = viewModel.playbackState {
-                errorView(message: error.localizedDescription)
+                errorView(error: error)
             }
 
             // Skip Button (intro/credits) - shows regardless of controls visibility, but not during post-video
@@ -1268,37 +1272,99 @@ struct UniversalPlayerView: View {
 
     // MARK: - Error View
 
-    private func errorView(message: String) -> some View {
+    private func errorView(error: PlayerError) -> some View {
         VStack(spacing: 24) {
-            Image(systemName: "exclamationmark.triangle.fill")
+            Image(systemName: errorIcon(for: error))
                 .font(.system(size: 60))
-                .foregroundStyle(.yellow)
+                .foregroundStyle(errorIconColor(for: error))
 
-            Text("Playback Error")
+            Text(errorTitle(for: error))
                 .font(.title)
                 .foregroundStyle(.white)
 
-            Text(message)
+            Text(error.userFacingDescription)
                 .font(.body)
                 .foregroundStyle(.white.opacity(0.7))
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 60)
 
-            Button("Dismiss") {
-                // On tvOS, set shouldDismiss so the container can handle it
-                // On other platforms, use SwiftUI dismiss
+            HStack(spacing: 20) {
+                if error.isRetryable {
+                    Button("Try Again") {
+                        Task { await viewModel.retryPlayback() }
+                    }
+                    #if os(tvOS)
+                    .buttonStyle(AppStoreButtonStyle())
+                    #else
+                    .buttonStyle(.bordered)
+                    #endif
+                }
+
+                Button("Dismiss") {
+                    #if os(tvOS)
+                    viewModel.shouldDismiss = true
+                    #else
+                    dismiss()
+                    #endif
+                }
                 #if os(tvOS)
-                viewModel.shouldDismiss = true
+                .buttonStyle(AppStoreButtonStyle())
                 #else
-                dismiss()
+                .buttonStyle(.bordered)
                 #endif
             }
-            .buttonStyle(.bordered)
             .padding(.top, 20)
         }
     }
 
+    private func errorIcon(for error: PlayerError) -> String {
+        switch error {
+        case .networkError, .loadFailed:
+            return "wifi.exclamationmark"
+        case .codecUnsupported:
+            return "film.fill"
+        case .invalidURL:
+            return "link.badge.plus"
+        case .unknown:
+            return "exclamationmark.triangle.fill"
+        }
+    }
+
+    private func errorIconColor(for error: PlayerError) -> Color {
+        switch error {
+        case .networkError, .loadFailed:
+            return .orange
+        case .codecUnsupported:
+            return .red
+        default:
+            return .yellow
+        }
+    }
+
+    private func errorTitle(for error: PlayerError) -> String {
+        switch error {
+        case .networkError:
+            return "Connection Problem"
+        case .loadFailed:
+            return "Couldn't Load Video"
+        case .codecUnsupported:
+            return "Format Not Supported"
+        case .invalidURL:
+            return "Invalid Stream"
+        case .unknown:
+            return "Playback Error"
+        }
+    }
+
     // MARK: - Skip Button Overlay
+
+    /// Returns the skip button label, appending countdown if active
+    private var skipButtonDisplayLabel: String {
+        if viewModel.introSkipCountdownSeconds > 0 {
+            return "\(viewModel.skipButtonLabel) (\(viewModel.introSkipCountdownSeconds))"
+        }
+        return viewModel.skipButtonLabel
+    }
 
     private var skipButtonOverlay: some View {
         VStack {
@@ -1311,8 +1377,9 @@ struct UniversalPlayerView: View {
                     HStack(spacing: 12) {
                         Image(systemName: "forward.fill")
                             .font(.system(size: 20, weight: .semibold))
-                        Text(viewModel.skipButtonLabel)
+                        Text(skipButtonDisplayLabel)
                             .font(.system(size: 24, weight: .semibold))
+                            .contentTransition(.numericText())
                     }
                     .foregroundStyle(.white)
                     .padding(.horizontal, 32)
