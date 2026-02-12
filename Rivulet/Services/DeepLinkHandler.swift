@@ -31,6 +31,7 @@ final class DeepLinkHandler: ObservableObject {
         case "play":
             await handlePlayURL(url)
         default:
+            break
         }
     }
 

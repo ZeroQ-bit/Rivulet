@@ -360,6 +360,7 @@ class PlayerContainerViewController: UIViewController {
             break
 
         case .ended, .cancelled:
+            break
 
         default:
             break
@@ -379,6 +380,7 @@ class PlayerContainerViewController: UIViewController {
             break
 
         case .ended, .cancelled:
+            break
 
         default:
             break

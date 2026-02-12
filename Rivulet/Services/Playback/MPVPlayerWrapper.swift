@@ -374,14 +374,19 @@ final class MPVPlayerWrapper: NSObject, PlayerProtocol, MPVPlayerDelegate {
         }
     }
 
-    /// Probe a stream URL to diagnose why it might not be recognized as media
+    /// Probe a stream URL to diagnose why it might not be recognized as media.
+    /// For Plex transcode URLs, uses GET to capture response body (error messages).
+    /// For other URLs, uses HEAD to avoid consuming the stream.
     private func probeStreamURL(_ url: URL) async -> [String: Any] {
         var result: [String: Any] = [:]
 
-        // Use HEAD request to check server response without downloading content
+        let isTranscodeURL = url.path.contains("/transcode/")
+
+        // For transcode URLs, use GET to capture Plex error response body (GitHub #64)
+        // For other URLs, use HEAD to avoid consuming the stream
         var request = URLRequest(url: url)
-        request.httpMethod = "HEAD"
-        request.timeoutInterval = 5
+        request.httpMethod = isTranscodeURL ? "GET" : "HEAD"
+        request.timeoutInterval = 10
 
         // Add headers if we have them stored
         if let headers = pendingHeaders {
@@ -391,7 +396,7 @@ final class MPVPlayerWrapper: NSObject, PlayerProtocol, MPVPlayerDelegate {
         }
 
         do {
-            let (_, response) = try await URLSession.shared.data(for: request)
+            let (data, response) = try await URLSession.shared.data(for: request)
             if let httpResponse = response as? HTTPURLResponse {
                 result["http_status"] = httpResponse.statusCode
                 result["content_type"] = httpResponse.value(forHTTPHeaderField: "Content-Type") ?? "unknown"
@@ -401,9 +406,28 @@ final class MPVPlayerWrapper: NSObject, PlayerProtocol, MPVPlayerDelegate {
                 let contentType = (httpResponse.value(forHTTPHeaderField: "Content-Type") ?? "").lowercased()
                 if contentType.contains("text/html") || contentType.contains("text/plain") {
                     result["likely_error_page"] = true
+
+                    // Capture response body for error pages (first 2KB, GitHub #64 - DVB diagnostics)
+                    if !data.isEmpty {
+                        let bodyPreview = String(data: data.prefix(2048), encoding: .utf8) ?? "<binary>"
+                        result["response_body_preview"] = bodyPreview
+                    }
                 }
+
+                // For non-success responses, always capture body
                 if httpResponse.statusCode >= 400 {
                     result["http_error"] = true
+                    if !data.isEmpty {
+                        let bodyPreview = String(data: data.prefix(2048), encoding: .utf8) ?? "<binary>"
+                        result["response_body_preview"] = bodyPreview
+                    }
+                }
+
+                // For transcode URLs, log first bytes to check if it's valid HLS
+                if isTranscodeURL && httpResponse.statusCode == 200 && !data.isEmpty {
+                    let prefix = String(data: data.prefix(128), encoding: .utf8) ?? "<binary>"
+                    result["response_starts_with"] = prefix
+                    result["is_valid_hls"] = prefix.contains("#EXTM3U")
                 }
             }
         } catch {
@@ -428,7 +452,7 @@ final class MPVPlayerWrapper: NSObject, PlayerProtocol, MPVPlayerDelegate {
 
         var extras: [String: Any] = [
             "error_message": message,
-            "stream_url": loadedURL?.absoluteString ?? "none",
+            "stream_url": redactToken(in: loadedURL?.absoluteString ?? "none"),
             "stream_host": loadedURL?.host ?? "unknown",
             "stream_path": loadedURL?.path ?? "unknown",
             "stream_type": streamType,
@@ -439,6 +463,17 @@ final class MPVPlayerWrapper: NSObject, PlayerProtocol, MPVPlayerDelegate {
             "duration": _duration,
             "current_time": playerController?.currentTime ?? 0
         ]
+
+        // For transcode URLs, log query params (redacted) to diagnose DVB issues (GitHub #64)
+        if let url = loadedURL, let components = URLComponents(url: url, resolvingAgainstBaseURL: false) {
+            let redactedParams = (components.queryItems ?? []).map { item in
+                if item.name.contains("Token") || item.name.contains("token") {
+                    return "\(item.name)=<redacted>"
+                }
+                return "\(item.name)=\(item.value ?? "")"
+            }
+            extras["query_params_redacted"] = redactedParams.joined(separator: "&")
+        }
 
         // Add probe results if available (for format errors)
         if let probe = probeResult {
@@ -501,6 +536,16 @@ final class MPVPlayerWrapper: NSObject, PlayerProtocol, MPVPlayerDelegate {
         } else {
             return "other"
         }
+    }
+
+    /// Redact Plex auth tokens from a string for safe logging
+    private func redactToken(in string: String) -> String {
+        // Redact X-Plex-Token=... values
+        string.replacingOccurrences(
+            of: "(X-Plex-Token=)[^&]+",
+            with: "$1<redacted>",
+            options: .regularExpression
+        )
     }
 
     /// Categorizes MPV error messages for Sentry fingerprinting

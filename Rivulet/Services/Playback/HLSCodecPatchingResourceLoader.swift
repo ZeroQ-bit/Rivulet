@@ -171,9 +171,12 @@ final class HLSCodecPatchingResourceLoader: NSObject, AVAssetResourceLoaderDeleg
 
             // Check for MPEG-TS sync byte (0x47)
             // Check for fMP4 (ftyp or moof box)
-            else if let ftypMarker = "ftyp".data(using: .ascii), data.range(of: ftypMarker) != nil {
+            if let ftypMarker = "ftyp".data(using: .ascii), data.range(of: ftypMarker) != nil {
+                // fMP4 init segment
             } else if let moofMarker = "moof".data(using: .ascii), data.range(of: moofMarker) != nil {
+                // fMP4 media segment
             } else {
+                // Other segment format
             }
         }
 

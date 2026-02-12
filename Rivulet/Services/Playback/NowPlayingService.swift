@@ -165,6 +165,7 @@ final class NowPlayingService: ObservableObject {
             // Interruption began - system is pausing our audio
             // Don't explicitly pause the player - let the system handle it
             // This prevents the "video pauses when opening Control Center" issue
+            break
 
         case .ended:
             // Interruption ended - check if we should resume
@@ -386,6 +387,7 @@ final class NowPlayingService: ObservableObject {
             case .beginSeeking:
                 self?.dispatchInputAction(.scrubNudge(forward: true))
             case .endSeeking:
+                break
             @unknown default:
                 break
             }
@@ -402,6 +404,7 @@ final class NowPlayingService: ObservableObject {
             case .beginSeeking:
                 self?.dispatchInputAction(.scrubNudge(forward: false))
             case .endSeeking:
+                break
             @unknown default:
                 break
             }
