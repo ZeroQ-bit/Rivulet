@@ -90,20 +90,25 @@ final class DVSampleBufferPlayer: ObservableObject {
     // MARK: - Playback Controls
 
     /// Load an HLS stream, parse its init segment, and prepare for playback.
+    /// Protocol conformance wrapper - calls the extended version without profile conversion.
     func load(url: URL, headers: [String: String]?, startTime: TimeInterval?) async throws {
+        try await load(url: url, headers: headers, startTime: startTime, requiresProfileConversion: false)
+    }
+
+    /// Load an HLS stream, parse its init segment, and prepare for playback.
+    /// - Parameters:
+    ///   - url: HLS master playlist URL
+    ///   - headers: Optional HTTP headers for authentication
+    ///   - startTime: Optional start time for resume playback
+    ///   - requiresProfileConversion: Enable DV Profile 7/8.6 → 8.1 conversion
+    func load(url: URL, headers: [String: String]?, startTime: TimeInterval?, requiresProfileConversion: Bool) async throws {
         playbackStateSubject.send(.loading)
 
         // Ensure audio session is configured for playback
-        // IMPORTANT: .allowAirPlay is required for HomePod audio routing on tvOS
-        do {
-            let audioSession = AVAudioSession.sharedInstance()
-            try audioSession.setCategory(.playback, mode: .moviePlayback, options: [.allowAirPlay])
-            try audioSession.setActive(true)
-            let routeType = audioSession.currentRoute.outputs.first?.portType.rawValue ?? "unknown"
-            print("🎬 [DVPlayer] Audio session configured: category=\(audioSession.category.rawValue), mode=\(audioSession.mode.rawValue), route=\(routeType)")
-        } catch {
-            print("🎬 [DVPlayer] ⚠️ Audio session setup failed: \(error)")
-        }
+        PlaybackAudioSessionConfigurator.activatePlaybackSession(
+            mode: .moviePlayback,
+            owner: "[DVPlayer]"
+        )
 
         self.streamURL = url
         self.jitterStats.reset()
@@ -117,6 +122,13 @@ final class DVSampleBufferPlayer: ObservableObject {
         // Demux init segment
         let demuxer = FMP4Demuxer()
         try demuxer.parseInitSegment(initData, forceDVH1: true)
+
+        // Enable DV profile conversion if requested (for P7/P8.6 content)
+        if requiresProfileConversion {
+            demuxer.profileConverter = DoviProfileConverter()
+            print("🎬 [DVPlayer] Profile conversion enabled for P7/P8.6 → P8.1")
+        }
+
         self.demuxer = demuxer
 
         self.duration = fetcher.totalDuration
@@ -440,10 +452,12 @@ final class DVSampleBufferPlayer: ObservableObject {
 
                             if sample.isVideo {
                                 jitterStats.recordVideoPTS(CMTimeGetSeconds(sample.pts))
-                                await enqueueVideoSample(sampleBuffer)
-                                enqueuedVideo += 1
+                                let isFirstVideoSample = enqueuedVideo == 0
 
-                                // Sync synchronizer to first video frame's actual PTS
+                                // IMPORTANT: Set sync time BEFORE enqueueing to avoid deadlock.
+                                // The enqueue pacing logic waits for sync to catch up, but sync
+                                // won't advance if rate is still 0 from seek. We must set the
+                                // rate first so the pacing check passes or the sync advances.
                                 if needsInitialSync {
                                     needsInitialSync = false
                                     renderSynchronizer.setRate(isPlaying ? playbackRate : 0, time: sample.pts)
@@ -451,17 +465,22 @@ final class DVSampleBufferPlayer: ObservableObject {
                                     currentTime = ptsSeconds
                                     timeSubject.send(ptsSeconds)
                                     print("🎬 [DVPlayer] Initial sync to first frame PTS: \(ptsSeconds)s, rate=\(isPlaying ? playbackRate : 0)")
-                                }
-                                // After first video sample post-seek: restore rate or show paused frame
-                                else if needsRateRestoreAfterSeek {
+                                } else if needsRateRestoreAfterSeek {
                                     needsRateRestoreAfterSeek = false
                                     renderSynchronizer.setRate(playbackRate, time: sample.pts)
                                     print("🎬 [DVPlayer] Post-seek: synced to PTS \(CMTimeGetSeconds(sample.pts))s, rate=\(playbackRate)")
-                                } else if !isPlaying && enqueuedVideo == 1 {
+                                } else if !isPlaying && isFirstVideoSample {
                                     // Paused seek: set time so the frame displays, keep rate at 0
                                     renderSynchronizer.setRate(0, time: sample.pts)
-                                    playbackStateSubject.send(.paused)
                                     print("🎬 [DVPlayer] Paused seek: displayed frame at PTS \(CMTimeGetSeconds(sample.pts))s")
+                                }
+
+                                await enqueueVideoSample(sampleBuffer)
+                                enqueuedVideo += 1
+
+                                // Handle paused seek: return after enqueue so frame is displayed
+                                if !isPlaying && isFirstVideoSample {
+                                    playbackStateSubject.send(.paused)
                                     return
                                 }
                             } else {
@@ -545,7 +564,12 @@ final class DVSampleBufferPlayer: ObservableObject {
         if !Task.isCancelled && currentSegmentIndex >= segmentCount {
             isPlaying = false
             playbackStateSubject.send(.ended)
-            print("🎬 [DVPlayer] Playback ended")
+            // Log conversion stats if converter was used
+            if let converter = demuxer.profileConverter {
+                print("🎬 [DVPlayer] Playback ended - \(converter.getStatsSummary())")
+            } else {
+                print("🎬 [DVPlayer] Playback ended")
+            }
         }
     }
 

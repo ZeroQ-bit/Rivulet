@@ -2379,7 +2379,7 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
             // Find a server that matches
             for server in servers {
                 print("🌐 PlexNetwork: Checking server '\(server.name)' (clientId: \(server.clientIdentifier), machineId: \(server.machineIdentifier ?? "nil"), accessToken: \(server.accessToken != nil ? "present" : "nil"))")
-                print("🌐 PlexNetwork: Server '\(server.name)' connections: \(server.connections.map { $0.uri })")
+                print("🌐 PlexNetwork: Server '\(server.name)' connections: \((server.connections ?? []).map { $0.uri })")
 
                 // Check if machine identifier matches
                 if let targetMachineId = targetMachineId,
@@ -2401,7 +2401,7 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
                 }
 
                 // Check connections - look for matching plex.direct URL or same host
-                for connection in server.connections {
+                for connection in server.connections ?? [] {
                     // Direct match
                     if serverURL == connection.uri {
                         if let accessToken = server.accessToken {

@@ -59,6 +59,40 @@ private struct TMDBCreditsResponse: Codable {
     let crew: [TMDBCredit]?
 }
 
+struct TMDBLogo: Codable {
+    let filePath: String?
+    let iso6391: String?
+    let aspectRatio: Double?
+    let voteAverage: Double?
+    let voteCount: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case filePath = "file_path"
+        case iso6391 = "iso_639_1"
+        case aspectRatio = "aspect_ratio"
+        case voteAverage = "vote_average"
+        case voteCount = "vote_count"
+    }
+}
+
+private struct TMDBImagesResponse: Codable {
+    let logos: [TMDBLogo]?
+}
+
+private struct TMDBFindResponse: Codable {
+    let tvResults: [TMDBFindResult]?
+    let movieResults: [TMDBFindResult]?
+
+    enum CodingKeys: String, CodingKey {
+        case tvResults = "tv_results"
+        case movieResults = "movie_results"
+    }
+}
+
+private struct TMDBFindResult: Codable {
+    let id: Int?
+}
+
 struct TMDBItemFeatures: Codable {
     var keywords: [String]
     var cast: [String]
@@ -89,6 +123,11 @@ struct TMDBItemFeatures: Codable {
 private struct CachedFeatures: Codable {
     let generatedAt: Date
     let features: TMDBItemFeatures
+}
+
+private struct CachedLogoURL: Codable {
+    let generatedAt: Date
+    let logoURLString: String?  // nil means "no logo found"
 }
 
 final class TMDBClient: @unchecked Sendable {
@@ -137,16 +176,78 @@ final class TMDBClient: @unchecked Sendable {
         }
     }
 
+    /// Fetches the best English logo URL from TMDB images.
+    /// Returns a URL to the logo image at w500 resolution, or nil if none found.
+    func fetchLogoURL(tmdbId: Int, type: TMDBMediaType) async -> URL? {
+        // Double-optional: nil = not cached, .some(nil) = cached "no logo", .some(url) = cached logo
+        if let cached = loadCachedLogoURL(tmdbId: tmdbId, type: type) {
+            return cached
+        }
+
+        do {
+            let images: TMDBImagesResponse = try await request(endpoint: "tmdb/images/\(tmdbId)", type: type)
+
+            // Prefer English logos, then null-language (often text-less), sorted by vote average
+            let logos = images.logos ?? []
+            let best = logos
+                .filter { $0.filePath != nil }
+                .sorted { a, b in
+                    let aLang = a.iso6391 ?? ""
+                    let bLang = b.iso6391 ?? ""
+                    // English first, then null/empty, then others
+                    let aScore = aLang == "en" ? 0 : (aLang.isEmpty ? 1 : 2)
+                    let bScore = bLang == "en" ? 0 : (bLang.isEmpty ? 1 : 2)
+                    if aScore != bScore { return aScore < bScore }
+                    return (a.voteAverage ?? 0) > (b.voteAverage ?? 0)
+                }
+                .first
+
+            let urlString: String?
+            if let filePath = best?.filePath {
+                urlString = "https://image.tmdb.org/t/p/w500\(filePath)"
+            } else {
+                urlString = nil
+            }
+
+            saveCachedLogoURL(urlString, tmdbId: tmdbId, type: type)
+            if let urlString { return URL(string: urlString) }
+            return nil
+        } catch {
+            return nil
+        }
+    }
+
+    /// Converts a TVDB ID to a TMDB ID using the /find endpoint.
+    func findTmdbId(tvdbId: Int, type: TMDBMediaType) async -> Int? {
+        do {
+            let response: TMDBFindResponse = try await request(
+                endpoint: "tmdb/find/\(tvdbId)",
+                queryItems: [
+                    URLQueryItem(name: "type", value: type.rawValue),
+                    URLQueryItem(name: "source", value: "tvdb_id")
+                ]
+            )
+            let results = type == .tv ? response.tvResults : response.movieResults
+            return results?.first?.id
+        } catch {
+            return nil
+        }
+    }
+
     // MARK: - Networking
 
     private func request<T: Decodable>(endpoint: String, type: TMDBMediaType) async throws -> T {
-        guard var url = URL(string: endpoint, relativeTo: TMDBConfig.proxyBaseURL) else {
+        try await request(endpoint: endpoint, queryItems: [
+            URLQueryItem(name: "type", value: type.rawValue)
+        ])
+    }
+
+    private func request<T: Decodable>(endpoint: String, queryItems: [URLQueryItem]) async throws -> T {
+        guard let url = URL(string: endpoint, relativeTo: TMDBConfig.proxyBaseURL) else {
             throw URLError(.badURL)
         }
         var components = URLComponents(url: url, resolvingAgainstBaseURL: true)
-        components?.queryItems = [
-            URLQueryItem(name: "type", value: type.rawValue)
-        ]
+        components?.queryItems = queryItems
         guard let finalURL = components?.url else {
             throw URLError(.badURL)
         }
@@ -182,6 +283,32 @@ final class TMDBClient: @unchecked Sendable {
         let cached = CachedFeatures(generatedAt: Date(), features: features)
         guard let data = try? JSONEncoder().encode(cached) else { return }
         let url = cacheURL(tmdbId: tmdbId, type: type)
+        try? data.write(to: url, options: [.atomic])
+    }
+
+    // MARK: - Logo Cache
+
+    private func logoCacheURL(tmdbId: Int, type: TMDBMediaType) -> URL {
+        cacheDirectory.appendingPathComponent("\(type.rawValue)_\(tmdbId)_logo.json")
+    }
+
+    private func loadCachedLogoURL(tmdbId: Int, type: TMDBMediaType) -> URL?? {
+        let url = logoCacheURL(tmdbId: tmdbId, type: type)
+        guard let data = try? Data(contentsOf: url) else { return nil }  // No cache file → nil (not cached)
+        guard let cached = try? JSONDecoder().decode(CachedLogoURL.self, from: data) else { return nil }
+        let age = Date().timeIntervalSince(cached.generatedAt)
+        guard age < cacheTTL else { return nil }
+        // Return .some(URL?) — .some(nil) means "cached negative result (no logo)"
+        if let urlString = cached.logoURLString {
+            return .some(URL(string: urlString))
+        }
+        return .some(nil)
+    }
+
+    private func saveCachedLogoURL(_ urlString: String?, tmdbId: Int, type: TMDBMediaType) {
+        let cached = CachedLogoURL(generatedAt: Date(), logoURLString: urlString)
+        guard let data = try? JSONEncoder().encode(cached) else { return }
+        let url = logoCacheURL(tmdbId: tmdbId, type: type)
         try? data.write(to: url, options: [.atomic])
     }
 }

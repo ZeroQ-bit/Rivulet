@@ -103,6 +103,22 @@ final class MPVPlayerWrapper: NSObject, PlayerProtocol, MPVPlayerDelegate {
         print("🎬 [MPVWrapper \(debugId)] load url=\(url.absoluteString), hasController=\(playerController != nil), startTime=\(startTime ?? 0)")
         playbackStateSubject.send(.loading)
 
+        // Log load attempt (GitHub #64 - DVB diagnostics)
+        let streamType = classifyStreamType(url: url)
+        let breadcrumb = Breadcrumb(level: .info, category: "mpv_player")
+        breadcrumb.message = "MPV load started"
+        breadcrumb.data = [
+            "stream_type": streamType,
+            "url_host": url.host ?? "unknown",
+            "url_path": url.path,
+            "url_scheme": url.scheme ?? "unknown",
+            "has_controller": playerController != nil,
+            "is_deferred": playerController == nil,
+            "start_time": startTime ?? 0,
+            "has_headers": headers?.isEmpty == false
+        ]
+        SentrySDK.addBreadcrumb(breadcrumb)
+
         // Store for when controller is ready
         pendingURL = url
         pendingHeaders = headers
@@ -126,6 +142,16 @@ final class MPVPlayerWrapper: NSObject, PlayerProtocol, MPVPlayerDelegate {
 
         // If we have a pending URL, load it now
         if let url = pendingURL {
+            // Log deferred load execution (GitHub #64 - DVB diagnostics)
+            let breadcrumb = Breadcrumb(level: .info, category: "mpv_player")
+            breadcrumb.message = "MPV executing deferred load"
+            breadcrumb.data = [
+                "stream_type": classifyStreamType(url: url),
+                "url_host": url.host ?? "unknown",
+                "url_path": url.path
+            ]
+            SentrySDK.addBreadcrumb(breadcrumb)
+
             loadedURL = url  // Preserve for error reporting
             controller.httpHeaders = pendingHeaders
             controller.startTime = pendingStartTime
@@ -163,6 +189,12 @@ final class MPVPlayerWrapper: NSObject, PlayerProtocol, MPVPlayerDelegate {
     }
 
     // MARK: - Track Management
+
+    /// Request track enumeration (lazy loading for faster startup).
+    /// Should be called when info panel/track picker is opened.
+    func requestTrackEnumeration() {
+        playerController?.enumerateTracksIfNeeded()
+    }
 
     func selectAudioTrack(id: Int) {
         playerController?.selectAudioTrack(id)
@@ -210,6 +242,7 @@ final class MPVPlayerWrapper: NSObject, PlayerProtocol, MPVPlayerDelegate {
     // MARK: - MPVPlayerDelegate
 
     func mpvPlayerDidChangeState(_ state: MPVPlayerState) {
+        let previousState = playbackStateSubject.value
         let universalState: UniversalPlaybackState
         switch state {
         case .idle:
@@ -225,8 +258,30 @@ final class MPVPlayerWrapper: NSObject, PlayerProtocol, MPVPlayerDelegate {
         case .ended:
             universalState = .ended
         case .error(let message):
-            universalState = .failed(.unknown(message))
+            let lowered = message.lowercased()
+            if lowered.contains("loading failed") || lowered.contains("failed to open") {
+                universalState = .failed(.loadFailed(message))
+            } else if lowered.contains("network") || lowered.contains("connection") || lowered.contains("timed out") {
+                universalState = .failed(.networkError(message))
+            } else {
+                universalState = .failed(.unknown(message))
+            }
         }
+
+        // Log state transitions for debugging (GitHub #64 - DVB diagnostics)
+        let streamType = classifyStreamType(url: loadedURL)
+        let breadcrumb = Breadcrumb(level: universalState.isFailed ? .error : .info, category: "mpv_player")
+        breadcrumb.message = "MPV state transition: \(previousState) → \(universalState)"
+        breadcrumb.data = [
+            "previous_state": String(describing: previousState),
+            "new_state": String(describing: universalState),
+            "stream_type": streamType,
+            "stream_host": loadedURL?.host ?? "unknown",
+            "has_controller": playerController != nil,
+            "duration": _duration
+        ]
+        SentrySDK.addBreadcrumb(breadcrumb)
+
         playbackStateSubject.send(universalState)
     }
 
@@ -282,8 +337,23 @@ final class MPVPlayerWrapper: NSObject, PlayerProtocol, MPVPlayerDelegate {
         let streamType = classifyStreamType(url: loadedURL)
         let errorCategory = categorizeMPVError(message)
 
-        // For "unrecognized format" errors, probe the URL to get more info (Fixes RIVULET-13)
-        if errorCategory == "unrecognized-format", let url = loadedURL {
+        // Log breadcrumb before error event (GitHub #64 - DVB diagnostics)
+        let breadcrumb = Breadcrumb(level: .error, category: "mpv_player")
+        breadcrumb.message = "MPV playback error: \(errorCategory)"
+        breadcrumb.data = [
+            "error_message": message,
+            "error_category": errorCategory,
+            "stream_type": streamType,
+            "stream_host": loadedURL?.host ?? "unknown",
+            "stream_path": loadedURL?.path ?? "unknown",
+            "file_extension": fileExtension,
+            "url_scheme": urlScheme
+        ]
+        SentrySDK.addBreadcrumb(breadcrumb)
+
+        // For "loading failed" AND "unrecognized format" errors, probe the URL to get more info
+        // Extended to cover "loading failed" for DVB debugging (GitHub #64)
+        if (errorCategory == "unrecognized-format" || errorCategory == "loading-failed"), let url = loadedURL {
             Task {
                 let probeResult = await probeStreamURL(url)
                 logMPVErrorToSentry(

@@ -23,6 +23,19 @@ struct RivuletApp: App {
             options.enableSwizzling = true
             options.enableAppHangTracking = true
             options.appHangTimeoutInterval = 2
+
+            options.beforeSend = { event in
+                // Drop cancelled URL request errors — these are normal when navigating away
+                if let exceptions = event.exceptions,
+                   exceptions.contains(where: { $0.value?.contains("Code=-999") == true || $0.value?.contains("cancelled") == true }) {
+                    return nil
+                }
+                if let message = event.message?.formatted,
+                   message.contains("Code=-999") || (message.contains("NSURLErrorDomain") && message.contains("cancelled")) {
+                    return nil
+                }
+                return event
+            }
         }
 
         // Initialize Now Playing service early to configure and activate audio session

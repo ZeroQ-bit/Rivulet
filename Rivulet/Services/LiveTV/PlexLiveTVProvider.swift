@@ -67,6 +67,17 @@ actor PlexLiveTVProvider: LiveTVProvider {
            Date().timeIntervalSince(lastFetch) < channelCacheDuration,
            !cachedChannels.isEmpty {
             print("📺 PlexLiveTVProvider: Returning \(cachedChannels.count) cached channels")
+
+            // Log cache hit (GitHub #64 - DVB diagnostics)
+            let breadcrumb = Breadcrumb(level: .info, category: "plex_livetv")
+            breadcrumb.message = "Returning cached Live TV channels"
+            breadcrumb.data = [
+                "channel_count": cachedChannels.count,
+                "cache_age_seconds": Int(Date().timeIntervalSince(lastFetch)),
+                "server_host": URL(string: serverURL)?.host ?? "unknown"
+            ]
+            SentrySDK.addBreadcrumb(breadcrumb)
+
             return cachedChannels
         }
 
@@ -75,6 +86,15 @@ actor PlexLiveTVProvider: LiveTVProvider {
 
     func refreshChannels() async throws -> [UnifiedChannel] {
         print("📺 PlexLiveTVProvider: Fetching channels from Plex Live TV")
+
+        // Log refresh start (GitHub #64 - DVB diagnostics)
+        let startBreadcrumb = Breadcrumb(level: .info, category: "plex_livetv")
+        startBreadcrumb.message = "Starting Plex Live TV channel refresh"
+        startBreadcrumb.data = [
+            "server_host": URL(string: serverURL)?.host ?? "unknown",
+            "source_id": sourceId
+        ]
+        SentrySDK.addBreadcrumb(startBreadcrumb)
 
         // First check capabilities
         let caps: PlexLiveTVCapabilities
@@ -94,6 +114,17 @@ actor PlexLiveTVProvider: LiveTVProvider {
             throw error
         }
         capabilities = caps
+
+        // Log capabilities result (GitHub #64 - DVB diagnostics)
+        let capsBreadcrumb = Breadcrumb(level: .info, category: "plex_livetv")
+        capsBreadcrumb.message = "Plex Live TV capabilities checked"
+        capsBreadcrumb.data = [
+            "allow_tuners": caps.allowTuners,
+            "live_tv_enabled": caps.liveTVEnabled,
+            "has_dvr": caps.hasDVR,
+            "server_host": URL(string: serverURL)?.host ?? "unknown"
+        ]
+        SentrySDK.addBreadcrumb(capsBreadcrumb)
 
         guard caps.liveTVEnabled else {
             throw LiveTVProviderError.notConnected
@@ -127,6 +158,19 @@ actor PlexLiveTVProvider: LiveTVProvider {
                 authToken: authToken
             )
         }
+
+        // Log channel breakdown (GitHub #64 - DVB diagnostics)
+        let channelsWithStreamURL = channels.filter { $0.streamURL != nil }.count
+        let channelsNeedingTranscode = channels.count - channelsWithStreamURL
+        let breakdownBreadcrumb = Breadcrumb(level: .info, category: "plex_livetv")
+        breakdownBreadcrumb.message = "Plex Live TV channel refresh completed"
+        breakdownBreadcrumb.data = [
+            "total_channels": channels.count,
+            "channels_with_stream_url": channelsWithStreamURL,
+            "channels_needing_transcode": channelsNeedingTranscode,
+            "server_host": URL(string: serverURL)?.host ?? "unknown"
+        ]
+        SentrySDK.addBreadcrumb(breakdownBreadcrumb)
 
         // Update cache
         cachedChannels = channels
@@ -256,6 +300,17 @@ actor PlexLiveTVProvider: LiveTVProvider {
     nonisolated func buildStreamURL(for channel: UnifiedChannel) -> URL? {
         guard let originalURL = channel.streamURL else {
             print("📺 PlexLiveTVProvider.buildStreamURL: No stream URL for channel '\(channel.name)'")
+
+            // Log missing stream URL (GitHub #64 - DVB diagnostics)
+            let breadcrumb = Breadcrumb(level: .warning, category: "plex_livetv")
+            breadcrumb.message = "No stream URL available for channel"
+            breadcrumb.data = [
+                "channel_name": channel.name,
+                "channel_id": channel.id,
+                "operation": "build_stream_url"
+            ]
+            SentrySDK.addBreadcrumb(breadcrumb)
+
             return nil
         }
 
@@ -265,14 +320,40 @@ actor PlexLiveTVProvider: LiveTVProvider {
         guard originalURL.path.contains("/transcode/") else {
             // HDHomeRun or other direct URLs - use as-is
             print("📺 PlexLiveTVProvider.buildStreamURL: Using direct URL for '\(channel.name)' (HDHomeRun)")
+
+            // Log direct URL passthrough (GitHub #64 - DVB diagnostics)
+            let breadcrumb = Breadcrumb(level: .info, category: "plex_livetv")
+            breadcrumb.message = "Using direct stream URL (HDHomeRun)"
+            breadcrumb.data = [
+                "channel_name": channel.name,
+                "channel_id": channel.id,
+                "stream_type": "hdhr_direct",
+                "url_host": originalURL.host ?? "unknown"
+            ]
+            SentrySDK.addBreadcrumb(breadcrumb)
+
             return originalURL
         }
 
         // Replace the session parameter with a fresh UUID
         guard var components = URLComponents(url: originalURL, resolvingAgainstBaseURL: false) else {
             print("📺 PlexLiveTVProvider.buildStreamURL: Failed to parse URL components for '\(channel.name)'")
+
+            // Log URL parsing failure (GitHub #64 - DVB diagnostics)
+            let breadcrumb = Breadcrumb(level: .error, category: "plex_livetv")
+            breadcrumb.message = "Failed to parse transcode URL components"
+            breadcrumb.data = [
+                "channel_name": channel.name,
+                "channel_id": channel.id,
+                "original_url_path": originalURL.path
+            ]
+            SentrySDK.addBreadcrumb(breadcrumb)
+
             return originalURL
         }
+
+        // Extract old session ID for logging
+        let oldSessionId = components.queryItems?.first(where: { $0.name == "session" })?.value
 
         let newSessionId = UUID().uuidString.uppercased()
         var queryItems = components.queryItems ?? []
@@ -288,6 +369,21 @@ actor PlexLiveTVProvider: LiveTVProvider {
         components.queryItems = queryItems
         let newURL = components.url ?? originalURL
         print("📺 PlexLiveTVProvider.buildStreamURL: Generated fresh session '\(newSessionId.prefix(8))...' for '\(channel.name)' (Plex transcode)")
+
+        // Log session ID regeneration (GitHub #64 - DVB diagnostics)
+        let breadcrumb = Breadcrumb(level: .info, category: "plex_livetv")
+        breadcrumb.message = "Generated fresh Plex transcode session"
+        breadcrumb.data = [
+            "channel_name": channel.name,
+            "channel_id": channel.id,
+            "stream_type": "plex_transcode",
+            "old_session_id": oldSessionId.map { String($0.prefix(8)) } ?? "none",
+            "new_session_id": String(newSessionId.prefix(8)),
+            "url_host": newURL.host ?? "unknown",
+            "url_path": newURL.path
+        ]
+        SentrySDK.addBreadcrumb(breadcrumb)
+
         return newURL
     }
 

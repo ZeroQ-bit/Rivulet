@@ -97,7 +97,11 @@ struct PlexAuthView: View {
                 authManager.cancelAuthentication()
                 dismiss()
             }
+            #if os(tvOS)
+            .buttonStyle(AppStoreButtonStyle())
+            #else
             .buttonStyle(.bordered)
+            #endif
         }
     }
 
@@ -129,7 +133,11 @@ struct PlexAuthView: View {
                 authManager.reset()
                 dismiss()
             }
+            #if os(tvOS)
+            .buttonStyle(AppStoreButtonStyle())
+            #else
             .buttonStyle(.bordered)
+            #endif
         }
     }
 
@@ -185,7 +193,11 @@ struct PlexAuthView: View {
                     await authManager.startPINAuthentication()
                 }
             }
+            #if os(tvOS)
+            .buttonStyle(AppStoreButtonStyle())
+            #else
             .buttonStyle(.borderedProminent)
+            #endif
         }
     }
 
@@ -229,7 +241,7 @@ struct ServerRowButton: View {
                                 .foregroundStyle(.green)
                         }
 
-                        if let conn = server.connections.first {
+                        if let conn = server.connections?.first {
                             Text(conn.local ? "Local" : "Remote")
                                 .font(.system(size: 14))
                                 .foregroundStyle(.secondary)

@@ -293,6 +293,14 @@ final class UniversalPlayerViewModel: ObservableObject {
     private var skippedCreditsIds: Set<Int> = []  // Track skipped credits by ID (can have multiple)
     private var skippedCommercialIds: Set<Int> = []  // Track skipped commercials by ID
     private var hasTriggeredPostVideo = false
+
+    // MARK: - Intro Skip Countdown State
+    /// Current countdown value (5...4...3...2...1), 0 means no countdown active
+    @Published var introSkipCountdownSeconds: Int = 0
+    private var introSkipCountdownTimer: Timer?
+    private let introSkipDelaySeconds: Int = 5
+    /// Tracks if user cancelled auto-skip for current intro (prevents restarting countdown)
+    private var userDeclinedIntroAutoSkip = false
     @Published var scrubTime: TimeInterval = 0
 
     // MARK: - Post-Video State
@@ -403,6 +411,9 @@ final class UniversalPlayerViewModel: ObservableObject {
     /// DVSampleBufferPlayer (used for DV profiles AVPlayer rejects: Profile 8 CompatID 6, Profile 7 MEL)
     @Published private(set) var dvSampleBufferPlayer: DVSampleBufferPlayer?
 
+    /// Whether DV profile conversion (P7/P8.6 → P8.1) is needed for DVSampleBufferPlayer
+    private var requiresProfileConversion = false
+
     /// Subtitle manager for DVSampleBufferPlayer (handles external subtitle rendering)
     let subtitleManager = SubtitleManager()
 
@@ -488,6 +499,7 @@ final class UniversalPlayerViewModel: ObservableObject {
         // Determine which player to use based on content and settings
         let useAVPlayerForDV = UserDefaults.standard.bool(forKey: "useAVPlayerForDolbyVision")
         let useAVPlayerForAll = UserDefaults.standard.bool(forKey: "useAVPlayerForAllVideos")
+        let isAirPlayRoute = Self.isAirPlayOutput()
         let hasDolbyVision = metadata.hasDolbyVision
 
         // Get container format for logging
@@ -540,7 +552,7 @@ final class UniversalPlayerViewModel: ObservableObject {
             return false
         }()
 
-        print("[Player Selection] useAVPlayerForAll=\(useAVPlayerForAll), useAVPlayerForDV=\(useAVPlayerForDV), hasDolbyVision=\(hasDolbyVision), dvProfile=\(dvProfile ?? -1), blCompatID=\(doviBLCompatID ?? -1), isCompatible=\(isCompatibleDVProfile), canUseDVSB=\(canUseDVSampleBuffer), container=\(container)")
+        print("[Player Selection] useAVPlayerForAll=\(useAVPlayerForAll), useAVPlayerForDV=\(useAVPlayerForDV), airPlayRoute=\(isAirPlayRoute), hasDolbyVision=\(hasDolbyVision), dvProfile=\(dvProfile ?? -1), blCompatID=\(doviBLCompatID ?? -1), isCompatible=\(isCompatibleDVProfile), canUseDVSB=\(canUseDVSampleBuffer), container=\(container)")
 
         // Use AVPlayer if:
         // 1. "Use AVPlayer for All Videos" is enabled, OR
@@ -563,6 +575,10 @@ final class UniversalPlayerViewModel: ObservableObject {
             self.dvSampleBufferPlayer = DVSampleBufferPlayer()
             self.mpvPlayerWrapper = nil
             self.avPlayerWrapper = nil
+
+            // Enable profile conversion for P7 or P8 CompatID 6
+            // These profiles need on-the-fly RPU conversion to P8.1 for Apple TV compatibility
+            self.requiresProfileConversion = (dvProfile == 7) || (dvProfile == 8 && doviBLCompatID == 6)
         } else {
             print("[Player Selection] → Using MPV")
             self.playerType = .mpv
@@ -628,6 +644,19 @@ final class UniversalPlayerViewModel: ObservableObject {
         let networkManager = PlexNetworkManager.shared
 
         guard let ratingKey = metadata.ratingKey else { return }
+
+        // Check if we have a pre-warmed URL in the cache (from PlexDetailView)
+        // This saves 100-500ms by avoiding URL construction at startup
+        if playerType == .mpv, let cached = StreamURLCache.shared.get(ratingKey: ratingKey) {
+            print("🎬 [Cache] Using pre-warmed stream URL for \(metadata.title ?? ratingKey)")
+            streamURL = cached.url
+            streamHeaders = cached.headers
+            StreamURLCache.shared.remove(ratingKey: ratingKey)  // One-time use
+            Task(priority: .utility) {
+                await networkManager.warmDirectPlayStream(url: cached.url, headers: cached.headers)
+            }
+            return
+        }
 
         // Fetch full metadata if Media array is missing (needed for info overlay display)
         // This happens when starting playback from Continue Watching or other hubs with minimal metadata
@@ -769,6 +798,13 @@ final class UniversalPlayerViewModel: ObservableObject {
             "X-Plex-Device": PlexAPI.deviceName,
             "X-Plex-Product": PlexAPI.productName
         ]
+
+        if let url = streamURL {
+            let headers = streamHeaders
+            Task(priority: .utility) {
+                await networkManager.warmDirectPlayStream(url: url, headers: headers)
+            }
+        }
     }
 
     /// Check if the source file is compatible with AVPlayer for true direct play (no server processing).
@@ -841,17 +877,17 @@ final class UniversalPlayerViewModel: ObservableObject {
     /// Check if the current audio output is AirPlay (HomePod)
     /// HomePod supports Dolby Atmos/5.1/7.1 but only in Dolby Digital formats, not multichannel AAC
     private static func isAirPlayOutput() -> Bool {
-        let session = AVAudioSession.sharedInstance()
-        let route = session.currentRoute
-
-        for output in route.outputs {
-            if output.portType == .airPlay {
-                print("🎬 [Audio] Detected AirPlay output: \(output.portName)")
-                return true
-            }
+        guard PlaybackAudioSessionConfigurator.isAirPlayRouteActive() else {
+            return false
         }
 
-        return false
+        let session = AVAudioSession.sharedInstance()
+        if let output = session.currentRoute.outputs.first(where: { $0.portType == .airPlay }) {
+            print("🎬 [Audio] Detected AirPlay output: \(output.portName)")
+        } else {
+            print("🎬 [Audio] Detected AirPlay output")
+        }
+        return true
     }
 
     private func bindPlayerState() {
@@ -1064,6 +1100,18 @@ final class UniversalPlayerViewModel: ObservableObject {
 
     // MARK: - Playback Controls
 
+    func retryPlayback() async {
+        // Reset error state and retry
+        errorMessage = nil
+        playbackState = .loading
+
+        // Stop existing player before retrying
+        mpvPlayerWrapper?.stop()
+        avPlayerWrapper?.stop()
+
+        await startPlayback()
+    }
+
     func startPlayback() async {
         guard let url = streamURL else {
             errorMessage = "No stream URL available"
@@ -1187,7 +1235,7 @@ final class UniversalPlayerViewModel: ObservableObject {
                 // The init segment can timeout if the server is still busy (e.g. returning 500s,
                 // cleaning up a previous transcode, or slow to start muxing a large MKV).
                 do {
-                    try await dvp.load(url: url, headers: streamHeaders, startTime: startOffset)
+                    try await dvp.load(url: url, headers: streamHeaders, startTime: startOffset, requiresProfileConversion: requiresProfileConversion)
                 } catch {
                     print("🎬 [DVSampleBuffer] First load attempt failed: \(error.localizedDescription)")
                     print("🎬 [DVSampleBuffer] Stopping old session and retrying with fresh session...")
@@ -1255,7 +1303,7 @@ final class UniversalPlayerViewModel: ObservableObject {
                         throw PlayerError.loadFailed("HLS transcode session failed to start on retry")
                     }
 
-                    try await dvp.load(url: result.url, headers: result.headers, startTime: startOffset)
+                    try await dvp.load(url: result.url, headers: result.headers, startTime: startOffset, requiresProfileConversion: requiresProfileConversion)
                 }
 
                 dvp.play()
@@ -1742,6 +1790,12 @@ final class UniversalPlayerViewModel: ObservableObject {
     /// Called when the MPV view controller is created
     func setPlayerController(_ controller: MPVMetalViewController) {
         mpvPlayerWrapper?.setPlayerController(controller)
+    }
+
+    /// Request track enumeration (lazy loading for faster startup).
+    /// Should be called when info panel is opened (tracks are deferred until needed).
+    func requestTrackEnumeration() {
+        mpvPlayerWrapper?.requestTrackEnumeration()
     }
 
     func stopPlayback() {
@@ -2493,11 +2547,20 @@ final class UniversalPlayerViewModel: ObservableObject {
             // 2. We've already left the marker region (activeMarker is nil)
             // This allows re-triggering after seeking back without causing repeated skips
             // during initial playback.
-            if hasSkippedIntro {
+            if hasSkippedIntro || userDeclinedIntroAutoSkip {
                 if time < previewStart {
                     hasSkippedIntro = false
+                    userDeclinedIntroAutoSkip = false
+                    // Cancel any running countdown
+                    introSkipCountdownTimer?.invalidate()
+                    introSkipCountdownTimer = nil
+                    introSkipCountdownSeconds = 0
                 } else if previewStart == 0 && time < intro.startTimeSeconds + 1.0 && activeMarker == nil {
                     hasSkippedIntro = false
+                    userDeclinedIntroAutoSkip = false
+                    introSkipCountdownTimer?.invalidate()
+                    introSkipCountdownTimer = nil
+                    introSkipCountdownSeconds = 0
                 }
             }
 
@@ -2610,6 +2673,7 @@ final class UniversalPlayerViewModel: ObservableObject {
     /// Handle when playback enters an intro marker range (or preview window)
     /// Auto-skip only triggers when actually inside the marker (at or past startTimeSeconds),
     /// not during the 5-second preview window before the marker starts.
+    /// When auto-skip is enabled, shows a countdown to give user a chance to cancel.
     private func handleMarkerActive(_ marker: PlexMarker, isIntro: Bool, currentTime: TimeInterval) {
         let autoSkipIntro = UserDefaults.standard.bool(forKey: "autoSkipIntro")
         let showSkipButtonSetting = UserDefaults.standard.object(forKey: "showSkipButton") as? Bool ?? true
@@ -2618,10 +2682,18 @@ final class UniversalPlayerViewModel: ObservableObject {
         // This ensures we use Plex's exact marker timing and don't cut off content
         let insideMarker = currentTime >= marker.startTimeSeconds
 
-        // Check for auto-skip (only when inside actual marker range)
-        if isIntro && autoSkipIntro && !hasSkippedIntro && insideMarker {
-            hasSkippedIntro = true
-            Task { await skipMarker(marker) }
+        // Check for auto-skip with countdown (only when inside actual marker range)
+        if isIntro && autoSkipIntro && !hasSkippedIntro && insideMarker && !userDeclinedIntroAutoSkip {
+            // Start countdown timer if not already running
+            if introSkipCountdownTimer == nil && introSkipCountdownSeconds == 0 {
+                startIntroSkipCountdown(for: marker)
+            }
+            // Show skip button during countdown
+            if showSkipButtonSetting && activeMarker == nil {
+                activeMarker = marker
+                showSkipButton = true
+                print("⏭️ [Skip] Showing skip button with countdown for intro marker: \(marker.startTimeSeconds)s - \(marker.endTimeSeconds)s")
+            }
             return
         }
 
@@ -2633,6 +2705,42 @@ final class UniversalPlayerViewModel: ObservableObject {
                 print("⏭️ [Skip] Showing skip button for intro marker: \(marker.startTimeSeconds)s - \(marker.endTimeSeconds)s")
             }
         }
+    }
+
+    /// Start countdown timer for auto-skip intro
+    private func startIntroSkipCountdown(for marker: PlexMarker) {
+        introSkipCountdownSeconds = introSkipDelaySeconds
+        print("⏭️ [Skip] Starting intro skip countdown: \(introSkipDelaySeconds) seconds")
+
+        introSkipCountdownTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] timer in
+            Task { @MainActor in
+                guard let self = self else {
+                    timer.invalidate()
+                    return
+                }
+
+                self.introSkipCountdownSeconds -= 1
+                print("⏭️ [Skip] Countdown: \(self.introSkipCountdownSeconds)")
+
+                if self.introSkipCountdownSeconds <= 0 {
+                    timer.invalidate()
+                    self.introSkipCountdownTimer = nil
+                    self.hasSkippedIntro = true
+                    await self.skipMarker(marker)
+                }
+            }
+        }
+    }
+
+    /// Cancel the intro skip countdown (called when user presses Menu during countdown)
+    func cancelIntroSkipCountdown() {
+        guard introSkipCountdownTimer != nil || introSkipCountdownSeconds > 0 else { return }
+
+        print("⏭️ [Skip] User cancelled intro skip countdown")
+        introSkipCountdownTimer?.invalidate()
+        introSkipCountdownTimer = nil
+        introSkipCountdownSeconds = 0
+        userDeclinedIntroAutoSkip = true  // Don't restart countdown for this intro
     }
 
     /// Handle when playback enters a credits marker range (or preview window)
@@ -2702,6 +2810,10 @@ final class UniversalPlayerViewModel: ObservableObject {
         // Mark as skipped to prevent re-showing button if user seeks back
         if marker.isIntro {
             hasSkippedIntro = true
+            // Cancel any running countdown (user clicked skip button manually)
+            introSkipCountdownTimer?.invalidate()
+            introSkipCountdownTimer = nil
+            introSkipCountdownSeconds = 0
         } else if marker.isCredits, let creditsId = marker.id {
             skippedCreditsIds.insert(creditsId)
         } else if marker.isCommercial, let commercialId = marker.id {
@@ -3068,6 +3180,12 @@ final class UniversalPlayerViewModel: ObservableObject {
                 "X-Plex-Device": PlexAPI.deviceName,
                 "X-Plex-Product": PlexAPI.productName
             ]
+            if let preloadedURL = preloadedNextStreamURL {
+                let headers = preloadedNextStreamHeaders
+                Task(priority: .utility) {
+                    await networkManager.warmDirectPlayStream(url: preloadedURL, headers: headers)
+                }
+            }
             print("🎬 [Preload] Stream URL ready: \(preloadedNextStreamURL?.absoluteString ?? "nil")")
         }
     }
@@ -3120,6 +3238,12 @@ final class UniversalPlayerViewModel: ObservableObject {
         skippedCreditsIds.removeAll()
         skippedCommercialIds.removeAll()
         hasTriggeredPostVideo = false
+
+        // Reset intro skip countdown state
+        introSkipCountdownTimer?.invalidate()
+        introSkipCountdownTimer = nil
+        introSkipCountdownSeconds = 0
+        userDeclinedIntroAutoSkip = false
         nextEpisode = nil
 
         // Ensure next episode has required metadata for subsequent next-up detection
@@ -3213,6 +3337,7 @@ final class UniversalPlayerViewModel: ObservableObject {
         scrubTimer?.invalidate()
         countdownTimer?.invalidate()
         seekIndicatorTimer?.invalidate()
+        introSkipCountdownTimer?.invalidate()
         if let observer = appBackgroundObserver {
             NotificationCenter.default.removeObserver(observer)
         }

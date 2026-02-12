@@ -116,7 +116,7 @@ struct VideoPlayerView: View {
             Button("Dismiss") {
                 dismiss()
             }
-            .buttonStyle(.bordered)
+            .buttonStyle(AppStoreButtonStyle())
             .padding(.top, 20)
         }
     }

@@ -23,6 +23,7 @@ struct PlexLibraryView: View {
     private let dataStore = PlexDataStore.shared
     @AppStorage("showLibraryHero") private var showLibraryHero = false
     @AppStorage("showLibraryRecommendations") private var showLibraryRecommendations = true
+    @AppStorage("showLibraryRecentRows") private var showLibraryRecentRows = true
     @State private var currentSortOption: LibrarySortOption = .addedAtDesc
     @State private var items: [PlexMetadata] = []
     @State private var hubs: [PlexHub] = []  // Library-specific hubs from Plex API
@@ -131,9 +132,18 @@ struct PlexLibraryView: View {
         return false
     }
 
+    /// Check if a hub is a "recent" type (Recently Added, Recently Released, Newest Releases)
+    private func isRecentHub(_ hub: PlexHub) -> Bool {
+        let identifier = hub.hubIdentifier?.lowercased() ?? ""
+        let title = hub.title?.lowercased() ?? ""
+        return identifier.contains("recentlyadded") || title.contains("recently added") ||
+               identifier.contains("recentlyreleased") || title.contains("recently released") ||
+               identifier.contains("newestreleases") || title.contains("newest releases")
+    }
+
     /// Essential hubs only (Continue Watching, Recently Added, Recently Released)
     private var essentialHubs: [PlexHub] {
-        cachedProcessedHubs.filter { isEssentialHub($0) }
+        cachedProcessedHubs.filter { isEssentialHub($0) && (showLibraryRecentRows || !isRecentHub($0)) }
     }
 
     /// Discovery/recommendation hubs (Rediscover, Because you watched, etc.)
@@ -247,18 +257,28 @@ struct PlexLibraryView: View {
                         hasMoreItems = true
                         totalItemCount = 0
 
+                        // Check in-memory hubs from DataStore first (instant, no disk I/O)
+                        let inMemoryHubs = dataStore.libraryHubs[libraryKey]
+
                         // Load cache in background to avoid main thread JSON decoding jank
                         let libKey = libraryKey
-                        let (cachedItems, cachedHubs) = await Task.detached(priority: .userInitiated) {
+                        let (cachedItems, cachedHubs): ([PlexMetadata], [PlexHub]?) = await Task.detached(priority: .userInitiated) {
                             async let itemsTask = self.getCachedItems()
-                            async let hubsTask = self.cacheManager.getCachedLibraryHubs(forLibrary: libKey)
-                            return await (itemsTask, hubsTask)
+                            // Only hit disk cache if DataStore doesn't have hubs in memory
+                            let hubsResult: [PlexHub]?
+                            if inMemoryHubs != nil {
+                                hubsResult = nil  // Skip disk read, we'll use in-memory
+                            } else {
+                                hubsResult = await self.cacheManager.getCachedLibraryHubs(forLibrary: libKey)
+                            }
+                            return await (itemsTask, hubsResult)
                         }.value
 
-                        // Update UI with cached data
-                        if let cachedHubs = cachedHubs, !cachedHubs.isEmpty {
-                            hubs = cachedHubs
-                            cachedProcessedHubs = computeProcessedHubs(from: cachedHubs)
+                        // Update UI with cached data — prefer in-memory hubs, fall back to disk cache
+                        let hubsToUse = inMemoryHubs ?? cachedHubs
+                        if let hubsToUse, !hubsToUse.isEmpty {
+                            hubs = hubsToUse
+                            cachedProcessedHubs = computeProcessedHubs(from: hubsToUse)
                         }
 
                         if !cachedItems.isEmpty {
@@ -270,8 +290,10 @@ struct PlexLibraryView: View {
                                 selectHeroItemFromCurrentData()
                             }
 
-                            // Refresh in background silently
-                            await loadItemsInBackground()
+                            // Refresh in background only if data isn't fresh from a recent prefetch
+                            if !dataStore.isFresh("libraryItems:\(libraryKey)", within: 60) {
+                                await loadItemsInBackground()
+                            }
                         } else {
                             // No cache - fetch from server (skeleton still showing)
                             await loadItems()
@@ -568,8 +590,7 @@ struct PlexLibraryView: View {
                 Button("Retry") {
                     Task { await refreshRecommendations(force: true) }
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(.white.opacity(0.2))
+                .buttonStyle(AppStoreButtonStyle())
             }
         } else if !recommendations.isEmpty {
             InfiniteContentRow(
@@ -695,25 +716,20 @@ struct PlexLibraryView: View {
                 Text(currentSortOption.displayName)
                     .font(.system(size: 20, weight: .medium))
             }
-            .foregroundStyle(.white)
+            .foregroundStyle(isSortButtonFocused ? .black : .white)
             .padding(.horizontal, 20)
             .padding(.vertical, 14)
             .background(
                 RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .fill(isSortButtonFocused ? .white.opacity(0.18) : .white.opacity(0.08))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 16, style: .continuous)
-                            .strokeBorder(
-                                isSortButtonFocused ? .white.opacity(0.25) : .white.opacity(0.08),
-                                lineWidth: 1
-                            )
-                    )
+                    .fill(isSortButtonFocused ? .white : .white.opacity(0.15))
             )
-            .scaleEffect(isSortButtonFocused ? 1.02 : 1.0)
+            .scaleEffect(isSortButtonFocused ? 1.1 : 1.0)
         }
+        .buttonStyle(.plain)
+        .hoverEffectDisabled()
         .focusEffectDisabled()
         .focused($isSortButtonFocused)
-        .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isSortButtonFocused)
+        .animation(.spring(response: 0.25, dampingFraction: 0.8), value: isSortButtonFocused)
     }
 
     private var currentLibraryType: String? {
@@ -935,8 +951,7 @@ struct PlexLibraryView: View {
                 Text("Try Again")
                     .fontWeight(.medium)
             }
-            .buttonStyle(.borderedProminent)
-            .tint(.white.opacity(0.2))
+            .buttonStyle(AppStoreButtonStyle())
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -963,8 +978,7 @@ struct PlexLibraryView: View {
                 Text("Refresh")
                     .fontWeight(.medium)
             }
-            .buttonStyle(.borderedProminent)
-            .tint(.white.opacity(0.2))
+            .buttonStyle(AppStoreButtonStyle())
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -1014,10 +1028,15 @@ struct PlexLibraryView: View {
         guard let serverURL = authManager.selectedServerURL,
               let token = authManager.selectedServerToken else { return }
 
-        // Fetch both items and hubs silently in background
+        // Fetch items and hubs silently in background, skipping hubs if recently fetched
+        let hubsFresh = dataStore.isFresh("libraryHubs:\(libraryKey)", within: 60)
         async let itemsFetch: () = fetchFromServer(serverURL: serverURL, token: token, updateLoading: false)
-        async let hubsFetch: () = fetchLibraryHubs(serverURL: serverURL, token: token)
-        _ = await (itemsFetch, hubsFetch)
+        if !hubsFresh {
+            async let hubsFetch: () = fetchLibraryHubs(serverURL: serverURL, token: token)
+            _ = await (itemsFetch, hubsFetch)
+        } else {
+            await itemsFetch
+        }
 
         // Only reselect hero if hubs loaded and we don't have one yet
         // or if hubs have better candidates (recently added)
@@ -1179,6 +1198,7 @@ struct PlexLibraryView: View {
                 }
             }
 
+            dataStore.recordFetch(for: "libraryItems:\(libraryKey)")
             error = nil
         } catch {
             // Ignore cancellation errors - they happen when views are recreated
@@ -1284,6 +1304,10 @@ struct PlexLibraryView: View {
                 hubs = fetchedHubs
                 cachedProcessedHubs = computeProcessedHubs(from: fetchedHubs)
             }
+
+            // Write back to DataStore for cross-view sharing
+            dataStore.libraryHubs[libraryKey] = fetchedHubs
+            dataStore.recordFetch(for: "libraryHubs:\(libraryKey)")
 
             // Cache for instant loading next time
             await cacheManager.cacheLibraryHubs(fetchedHubs, forLibrary: libraryKey)

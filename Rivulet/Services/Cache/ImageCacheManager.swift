@@ -219,6 +219,44 @@ actor ImageCacheManager: NSObject {
         return formatter.string(fromByteCount: bytes)
     }
 
+    /// Get raw image data for a URL (for Vision processing)
+    /// Returns cached data or downloads if needed
+    func imageData(for url: URL) async -> Data? {
+        let key = cacheKey(for: url)
+
+        // Check disk cache first
+        if let cacheDir = cacheDirectory {
+            let fileURL = cacheDir.appendingPathComponent(key)
+            if let data = try? Data(contentsOf: fileURL) {
+                return data
+            }
+        }
+
+        // Download if not cached
+        do {
+            let (data, response) = try await session.data(from: url)
+
+            guard let httpResponse = response as? HTTPURLResponse,
+                  httpResponse.statusCode == 200 else {
+                return nil
+            }
+
+            // Validate image data
+            guard let imageSource = CGImageSourceCreateWithData(data as CFData, nil),
+                  CGImageSourceGetStatus(imageSource) == .statusComplete,
+                  CGImageSourceGetCount(imageSource) > 0 else {
+                return nil
+            }
+
+            // Save to disk for future use
+            await saveToDisk(data: data, key: key, url: url)
+
+            return data
+        } catch {
+            return nil
+        }
+    }
+
     // MARK: - Private Implementation
 
     private func updateAccessTime(for key: String) {

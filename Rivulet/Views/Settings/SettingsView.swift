@@ -35,29 +35,7 @@ enum AutoplayCountdown: Int, CaseIterable, CustomStringConvertible {
     }
 }
 
-// MARK: - Sidebar Font Size
-
-enum SidebarFontSize: String, CaseIterable, CustomStringConvertible {
-    case normal = "normal"
-    case large = "large"
-    case extraLarge = "extraLarge"
-
-    var description: String {
-        switch self {
-        case .normal: return "Normal"
-        case .large: return "Large"
-        case .extraLarge: return "Extra Large"
-        }
-    }
-
-    var scale: CGFloat {
-        switch self {
-        case .normal: return 1.0
-        case .large: return 1.25
-        case .extraLarge: return 1.5
-        }
-    }
-}
+// Note: DisplaySize enum is now in Services/UIScale.swift for global access
 
 // MARK: - Language Option
 
@@ -208,6 +186,7 @@ struct SettingsView: View {
     @AppStorage("showHomeHero") private var showHomeHero = false
     @AppStorage("showLibraryHero") private var showLibraryHero = false
     @AppStorage("showLibraryRecommendations") private var showLibraryRecommendations = true
+    @AppStorage("showLibraryRecentRows") private var showLibraryRecentRows = true
     @AppStorage("enablePersonalizedRecommendations") private var enablePersonalizedRecommendations = false
     @AppStorage("liveTVLayout") private var liveTVLayoutRaw = LiveTVLayout.guide.rawValue
     @AppStorage("confirmExitMultiview") private var confirmExitMultiview = true
@@ -224,7 +203,8 @@ struct SettingsView: View {
     @AppStorage("showMarkersOnScrubber") private var showMarkersOnScrubber = true
     @AppStorage("useAVPlayerForDolbyVision") private var useAVPlayerForDolbyVision = true
     @AppStorage("useAVPlayerForAllVideos") private var useAVPlayerForAllVideos = false
-    @AppStorage("sidebarFontSize") private var sidebarFontSizeRaw = SidebarFontSize.normal.rawValue
+    @AppStorage("displaySize") private var displaySizeRaw = DisplaySize.normal.rawValue
+    @AppStorage("posterDepthEffect") private var posterDepthEffect = true
     @Environment(\.focusScopeManager) private var focusScopeManager
     @Environment(\.nestedNavigationState) private var nestedNavState
     #if os(tvOS)
@@ -280,10 +260,10 @@ struct SettingsView: View {
         )
     }
 
-    private var sidebarFontSize: Binding<SidebarFontSize> {
+    private var displaySize: Binding<DisplaySize> {
         Binding(
-            get: { SidebarFontSize(rawValue: sidebarFontSizeRaw) ?? .normal },
-            set: { sidebarFontSizeRaw = $0.rawValue }
+            get: { DisplaySize(rawValue: displaySizeRaw) ?? .normal },
+            set: { displaySizeRaw = $0.rawValue }
         )
     }
 
@@ -322,10 +302,18 @@ struct SettingsView: View {
                             SettingsListPickerRow(
                                 icon: "textformat.size",
                                 iconColor: .orange,
-                                title: "Sidebar Font Size",
-                                subtitle: "Menu text size",
-                                selection: sidebarFontSize,
-                                options: SidebarFontSize.allCases
+                                title: "Display Size",
+                                subtitle: "Scale all interface elements",
+                                selection: displaySize,
+                                options: DisplaySize.allCases
+                            )
+
+                            SettingsToggleRow(
+                                icon: "square.3.layers.3d",
+                                iconColor: .blue,
+                                title: "Poster Depth Effect",
+                                subtitle: "Lifts subject from background when focused",
+                                isOn: $posterDepthEffect
                             )
 
                             SettingsToggleRow(
@@ -350,6 +338,14 @@ struct SettingsView: View {
                                 title: "Discovery Rows",
                                 subtitle: "Top Rated, Rediscover, and similar",
                                 isOn: $showLibraryRecommendations
+                            )
+
+                            SettingsToggleRow(
+                                icon: "clock.arrow.trianglehead.counterclockwise.rotate.90",
+                                iconColor: .blue,
+                                title: "Recent Rows",
+                                subtitle: "Recently Added and Recently Released in libraries",
+                                isOn: $showLibraryRecentRows
                             )
 
                             SettingsToggleRow(

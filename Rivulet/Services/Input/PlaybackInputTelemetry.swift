@@ -138,13 +138,10 @@ final class PlaybackInputTelemetry {
             return
         }
 
-        let event = Event(level: .info)
-        event.message = SentryMessage(formatted: "Playback input session summary")
-        event.tags = [
-            "component": "playback_input",
-            "reason": reason
-        ]
-        event.extra = [
+        let breadcrumb = Breadcrumb(level: .info, category: "playback_input_session")
+        breadcrumb.message = "Playback input session summary"
+        breadcrumb.data = [
+            "reason": reason,
             "duration_seconds": duration,
             "received_count": receivedCount,
             "deduped_count": dedupedCount,
@@ -157,8 +154,7 @@ final class PlaybackInputTelemetry {
             "deduped_by_source": dedupedBySource,
             "scrub_transition_by_type": scrubTransitionByType
         ]
-        event.fingerprint = ["playback_input", "session_summary"]
-        SentrySDK.capture(event: event)
+        SentrySDK.addBreadcrumb(breadcrumb)
 
         resetSession()
     }

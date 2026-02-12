@@ -24,21 +24,21 @@ struct WhatsNewView: View {
         VStack(spacing: 24) {
             Spacer()
 
-            VStack(spacing: 32) {
-                // Header
-                VStack(spacing: 8) {
-                    Text("What's New")
-                        .font(.system(size: 46, weight: .bold))
-                        .foregroundStyle(.white)
+            ScrollView {
+                VStack(spacing: 32) {
+                    // Header
+                    VStack(spacing: 8) {
+                        Text("What's New")
+                            .font(.system(size: 46, weight: .bold))
+                            .foregroundStyle(.white)
 
-                    Text("Version \(version)")
-                        .font(.system(size: 23, weight: .regular))
-                        .foregroundStyle(.white.opacity(0.5))
-                }
-                .padding(.top, 40)
+                        Text("Version \(version)")
+                            .font(.system(size: 23, weight: .regular))
+                            .foregroundStyle(.white.opacity(0.5))
+                    }
+                    .padding(.top, 40)
 
-                // Feature list
-                ScrollView {
+                    // Feature list
                     VStack(alignment: .leading, spacing: 14) {
                         ForEach(Array(features.enumerated()), id: \.offset) { _, feature in
                             HStack(alignment: .top, spacing: 14) {
@@ -55,36 +55,35 @@ struct WhatsNewView: View {
                         }
                     }
                     .padding(.horizontal, 40)
-                }
-                .frame(maxHeight: 400)
 
-                // Continue button
-                Button {
-                    isPresented = false
-                } label: {
-                    Text("Continue")
-                        .font(.system(size: 26, weight: .semibold))
-                        .foregroundStyle(.white)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 18)
-                        .background(
-                            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                                .fill(isContinueFocused ? .white.opacity(0.18) : .white.opacity(0.08))
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 16, style: .continuous)
-                                        .strokeBorder(
-                                            isContinueFocused ? .white.opacity(0.3) : .white.opacity(0.1),
-                                            lineWidth: 1
-                                        )
-                                )
-                        )
+                    // Continue button
+                    Button {
+                        isPresented = false
+                    } label: {
+                        Text("Continue")
+                            .font(.system(size: 26, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 18)
+                            .background(
+                                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                    .fill(isContinueFocused ? .white.opacity(0.18) : .white.opacity(0.08))
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                            .strokeBorder(
+                                                isContinueFocused ? .white.opacity(0.3) : .white.opacity(0.1),
+                                                lineWidth: 1
+                                            )
+                                    )
+                            )
+                    }
+                    .buttonStyle(GlassRowButtonStyle())
+                    .focused($isContinueFocused)
+                    .scaleEffect(isContinueFocused ? 1.02 : 1.0)
+                    .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isContinueFocused)
+                    .padding(.horizontal, 32)
+                    .padding(.bottom, 36)
                 }
-                .buttonStyle(GlassRowButtonStyle())
-                .focused($isContinueFocused)
-                .scaleEffect(isContinueFocused ? 1.02 : 1.0)
-                .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isContinueFocused)
-                .padding(.horizontal, 32)
-                .padding(.bottom, 36)
             }
             .frame(width: 520)
             .background(
@@ -103,6 +102,14 @@ struct WhatsNewView: View {
     // MARK: - Changelog Data
 
     static let changelogs: [(version: String, features: [String])] = [
+        ("1.0.0 (38)", [
+            "Faster video startup for mpv",
+            "Default sizing is slightly larger",
+            "Display Size setting now affects all sizes",
+            "Improved Dolby Vision support for more video formats",
+            "MPV now integrates with Apples Now Playing for control from other apple devices",
+            "Scroll down an episode details page to get to Seasons and episode list",
+        ]),
         ("1.0.0 (37)", [
             "You can now save your PIN for Plex Home profiles",
             "Live TV is more reliable with automatic stream recovery",

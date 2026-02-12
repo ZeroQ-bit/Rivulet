@@ -128,24 +128,10 @@ final class AVPlayerWrapper: NSObject, ObservableObject {
     /// Configure and activate the audio session before loading content.
     /// Sets .playback category required for Now Playing integration.
     private func ensureAudioSessionActive() {
-        let session = AVAudioSession.sharedInstance()
-
-        // Try to set category - may fail if session is already active, but that's OK
-        do {
-            try session.setCategory(.playback, mode: .default, options: [.allowAirPlay])
-            print("🎬 AVPlayerWrapper: Audio session category set to .playback")
-        } catch {
-            print("🎬 AVPlayerWrapper: Could not set audio category: \(error.localizedDescription)")
-        }
-
-        // Always try to activate
-        do {
-            try session.setActive(true)
-            let category = session.category.rawValue
-            print("🎬 AVPlayerWrapper: Audio session active (category: \(category))")
-        } catch {
-            print("🎬 AVPlayerWrapper: Failed to activate audio session - \(error.localizedDescription)")
-        }
+        PlaybackAudioSessionConfigurator.activatePlaybackSession(
+            mode: .moviePlayback,
+            owner: "AVPlayerWrapper"
+        )
     }
 
     // MARK: - Playback Controls
@@ -318,11 +304,6 @@ final class AVPlayerWrapper: NSObject, ObservableObject {
 
     func pause() {
         player?.pause()
-        // Briefly deactivate audio session to flush AirPlay buffer on HomePod
-        // This should cause AirPlay to stop immediately rather than draining its ~2s buffer
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
-        }
     }
 
     func stop() {
@@ -484,9 +465,19 @@ final class AVPlayerWrapper: NSObject, ObservableObject {
                             self.errorSubject.send(.codecUnsupported(compatMessage))
                             return
                         }
+
+                        // Categorize as loadFailed for stream/server errors
+                        let playerError: PlayerError = if nsError.domain == "CoreMediaErrorDomain" || nsError.domain == "NSURLErrorDomain" {
+                            .loadFailed(message)
+                        } else {
+                            .unknown(message)
+                        }
+                        self.playbackStateSubject.send(.failed(playerError))
+                        self.errorSubject.send(playerError)
+                        return
                     }
-                    self.playbackStateSubject.send(.failed(.unknown(message)))
-                    self.errorSubject.send(.unknown(message))
+                    self.playbackStateSubject.send(.failed(.loadFailed(message)))
+                    self.errorSubject.send(.loadFailed(message))
                 case .unknown:
                     break
                 @unknown default:
@@ -545,9 +536,14 @@ final class AVPlayerWrapper: NSObject, ObservableObject {
                         self.playbackStateSubject.send(.failed(.codecUnsupported(message)))
                         self.errorSubject.send(.codecUnsupported(message))
                     } else {
-                        print("🎬 AVPlayerWrapper: Setting state to FAILED (unknown)")
-                        self.playbackStateSubject.send(.failed(.unknown(error.localizedDescription)))
-                        self.errorSubject.send(.unknown(error.localizedDescription))
+                        let playerError: PlayerError = if nsError.domain == "CoreMediaErrorDomain" || nsError.domain == "NSURLErrorDomain" {
+                            .loadFailed(error.localizedDescription)
+                        } else {
+                            .unknown(error.localizedDescription)
+                        }
+                        print("🎬 AVPlayerWrapper: Setting state to FAILED (\(playerError))")
+                        self.playbackStateSubject.send(.failed(playerError))
+                        self.errorSubject.send(playerError)
                     }
                 }
             }
