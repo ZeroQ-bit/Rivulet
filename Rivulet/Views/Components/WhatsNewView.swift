@@ -102,6 +102,15 @@ struct WhatsNewView: View {
     // MARK: - Changelog Data
 
     static let changelogs: [(version: String, features: [String])] = [
+        ("1.0.0 (40)", [
+            "Fun depth effects on posters, because why not",
+            "Redesigned season and episode navigation for TV shows",
+            "Sort libraries by title, date added, rating, and more",
+            "Option to hide recently added from library views",
+            "Smoother video playback when Match Content is off",
+            "Continuing Dolby Vision improvements",
+            "General performance and stability improvements",
+        ]),
         ("1.0.0 (38)", [
             "Faster video startup for mpv",
             "Default sizing is slightly larger",
