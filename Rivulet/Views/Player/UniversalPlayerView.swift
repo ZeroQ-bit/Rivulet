@@ -918,8 +918,8 @@ struct UniversalPlayerView: View {
             playerLayer
                 .ignoresSafeArea()
 
-            // Subtitle Overlay (for DVSampleBufferPlayer)
-            if viewModel.playerType == .dvSampleBuffer {
+            // Subtitle Overlay (for DVSampleBufferPlayer and RivuletPlayer)
+            if viewModel.playerType == .dvSampleBuffer || viewModel.playerType == .rivulet {
                 SubtitleOverlayView(
                     subtitleManager: viewModel.subtitleManager,
                     bottomOffset: viewModel.showControls ? 140 : 60
@@ -1068,6 +1068,13 @@ struct UniversalPlayerView: View {
             case .dvSampleBuffer:
                 if let dvp = viewModel.dvSampleBufferPlayer {
                     DVSampleBufferView(player: dvp)
+                        .scaleEffect(viewModel.videoFrameState.scale, anchor: .topLeading)
+                        .offset(viewModel.videoFrameState.offset)
+                        .animation(.spring(response: 0.5, dampingFraction: 0.85), value: viewModel.videoFrameState)
+                }
+            case .rivulet:
+                if let rp = viewModel.rivuletPlayer {
+                    SampleBufferDisplayView(player: rp)
                         .scaleEffect(viewModel.videoFrameState.scale, anchor: .topLeading)
                         .offset(viewModel.videoFrameState.offset)
                         .animation(.spring(response: 0.5, dampingFraction: 0.85), value: viewModel.videoFrameState)

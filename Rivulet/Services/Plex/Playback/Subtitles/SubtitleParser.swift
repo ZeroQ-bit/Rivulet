@@ -2,7 +2,7 @@
 //  SubtitleParser.swift
 //  Rivulet
 //
-//  Parsers for SRT and WebVTT subtitle formats.
+//  Parsers for SRT, WebVTT, and ASS/SSA subtitle formats.
 //
 
 import Foundation
@@ -296,11 +296,121 @@ struct VTTParser: SubtitleParser {
     }
 }
 
+// MARK: - ASS / SSA Parser
+
+/// Parser for ASS/SSA subtitle files.
+///
+/// Supports the common `[Events]` + `Format:` + `Dialogue:` structure and
+/// strips override/style tags for readable overlay text.
+struct ASSParser: SubtitleParser {
+
+    func parse(_ content: String) throws -> SubtitleTrack {
+        let normalized = content.replacingOccurrences(of: "\r\n", with: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else {
+            throw SubtitleParseError.emptyContent
+        }
+
+        let lines = normalized.components(separatedBy: .newlines)
+
+        var inEvents = false
+        var formatFields: [String] = []
+        var cues: [SubtitleCue] = []
+
+        for rawLine in lines {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            guard !line.isEmpty else { continue }
+
+            // Section header
+            if line.hasPrefix("[") && line.hasSuffix("]") {
+                inEvents = line.caseInsensitiveCompare("[Events]") == .orderedSame
+                continue
+            }
+
+            guard inEvents else { continue }
+
+            if line.lowercased().hasPrefix("format:") {
+                let payload = String(line.dropFirst("format:".count))
+                formatFields = payload
+                    .split(separator: ",", omittingEmptySubsequences: false)
+                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+                continue
+            }
+
+            guard line.lowercased().hasPrefix("dialogue:") else { continue }
+            guard !formatFields.isEmpty else { continue }
+
+            let body = String(line.dropFirst("dialogue:".count)).trimmingCharacters(in: .whitespaces)
+            let fieldCount = formatFields.count
+            let values = body
+                .split(separator: ",", maxSplits: fieldCount - 1, omittingEmptySubsequences: false)
+                .map(String.init)
+            guard values.count == fieldCount else { continue }
+
+            guard let startIndex = formatFields.firstIndex(of: "start"),
+                  let endIndex = formatFields.firstIndex(of: "end"),
+                  let textIndex = formatFields.firstIndex(of: "text"),
+                  let start = parseASSTimestamp(values[startIndex]),
+                  let end = parseASSTimestamp(values[endIndex]),
+                  end > start else {
+                continue
+            }
+
+            let text = cleanASSText(values[textIndex])
+            guard !text.isEmpty else { continue }
+
+            cues.append(
+                SubtitleCue(
+                    id: cues.count,
+                    startTime: start,
+                    endTime: end,
+                    text: text
+                )
+            )
+        }
+
+        return SubtitleTrack(cues: cues.sorted { $0.startTime < $1.startTime })
+    }
+
+    /// Parse ASS timestamp format: H:MM:SS.cc
+    private func parseASSTimestamp(_ timestamp: String) -> TimeInterval? {
+        let cleaned = timestamp.trimmingCharacters(in: .whitespacesAndNewlines)
+        let parts = cleaned.split(separator: ":")
+        guard parts.count == 3,
+              let hours = Double(parts[0]),
+              let minutes = Double(parts[1]),
+              let seconds = Double(parts[2]) else {
+            return nil
+        }
+        return hours * 3600 + minutes * 60 + seconds
+    }
+
+    private func cleanASSText(_ rawText: String) -> String {
+        var text = rawText
+
+        // ASS line breaks
+        text = text.replacingOccurrences(of: "\\N", with: "\n")
+        text = text.replacingOccurrences(of: "\\n", with: "\n")
+
+        // Strip ASS override blocks: {\an8}, {\i1}, etc.
+        text = text.replacingOccurrences(of: #"\{[^}]*\}"#, with: "", options: .regularExpression)
+
+        // Decode common entities from transcoding pipelines
+        text = text.replacingOccurrences(of: "&nbsp;", with: " ")
+        text = text.replacingOccurrences(of: "&amp;", with: "&")
+        text = text.replacingOccurrences(of: "&lt;", with: "<")
+        text = text.replacingOccurrences(of: "&gt;", with: ">")
+
+        return text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
 // MARK: - Parser Factory
 
 enum SubtitleFormat {
     case srt
     case vtt
+    case ass
     case unknown
 
     init(from codec: String?) {
@@ -314,6 +424,8 @@ enum SubtitleFormat {
             self = .srt
         case "vtt", "webvtt":
             self = .vtt
+        case "ass", "ssa":
+            self = .ass
         default:
             self = .unknown
         }
@@ -326,6 +438,8 @@ enum SubtitleFormat {
             self = .srt
         case "vtt":
             self = .vtt
+        case "ass", "ssa":
+            self = .ass
         default:
             self = .unknown
         }
@@ -335,6 +449,7 @@ enum SubtitleFormat {
         switch self {
         case .srt: return SRTParser()
         case .vtt: return VTTParser()
+        case .ass: return ASSParser()
         case .unknown: return nil
         }
     }

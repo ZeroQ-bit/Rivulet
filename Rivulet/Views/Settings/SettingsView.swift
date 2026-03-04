@@ -203,6 +203,7 @@ struct SettingsView: View {
     @AppStorage("showMarkersOnScrubber") private var showMarkersOnScrubber = true
     @AppStorage("useAVPlayerForDolbyVision") private var useAVPlayerForDolbyVision = true
     @AppStorage("useAVPlayerForAllVideos") private var useAVPlayerForAllVideos = false
+    @AppStorage("useRivuletPlayer") private var useRivuletPlayer = false
     @AppStorage("displaySize") private var displaySizeRaw = DisplaySize.normal.rawValue
     @AppStorage("posterDepthEffect") private var posterDepthEffect = true
     @Environment(\.focusScopeManager) private var focusScopeManager
@@ -457,6 +458,17 @@ struct SettingsView: View {
                                 helpTitle: "AVPlayer for All Videos"
                             ) {
                                 avPlayerAllHelpContent
+                            }
+
+                            SettingsToggleRow(
+                                icon: "waveform.badge.magnifyingglass",
+                                iconColor: .orange,
+                                title: "Use Rivulet Player",
+                                subtitle: "Experimental native player — direct play via FFmpeg",
+                                isOn: $useRivuletPlayer,
+                                helpTitle: "Rivulet Player"
+                            ) {
+                                rivuletPlayerHelpContent
                             }
                         }
 
@@ -725,6 +737,31 @@ struct SettingsView: View {
             HelpSection(
                 title: "When to Use",
                 content: "Enable this if you prefer the native Apple experience and don't mind your server doing light remuxing. Most MP4 files will still direct play without any server processing."
+            )
+        }
+        .padding(.vertical, 8)
+    }
+
+    private var rivuletPlayerHelpContent: some View {
+        VStack(alignment: .leading, spacing: 24) {
+            HelpSection(
+                title: "What This Does",
+                content: "Uses a new native player built on AVSampleBufferDisplayLayer and VideoToolbox. Plays files directly from your server using FFmpeg for container demuxing — no remuxing needed for MKV or other formats."
+            )
+
+            HelpSection(
+                title: "Benefits",
+                content: "True direct play for all containers (MKV, MP4, AVI). Full Dolby Vision and HDR support. No server processing for compatible audio. Smaller app size (no MPV/Vulkan)."
+            )
+
+            HelpSection(
+                title: "Trade-offs",
+                content: "Experimental — may have playback issues with some content. DTS and TrueHD audio still require server-side transcode (same as all official Plex clients)."
+            )
+
+            HelpSection(
+                title: "When to Use",
+                content: "Try this if you want true direct play without server remuxing. Report any issues so we can improve it. Disable this setting to go back to the standard player."
             )
         }
         .padding(.vertical, 8)

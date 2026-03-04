@@ -32,6 +32,7 @@ final class NowPlayingService: ObservableObject {
     private var inputCoordinator: PlaybackInputCoordinator?
     private var nowPlayingSession: MPNowPlayingSession?
     private var nowPlayingSessionAnchorPlayer: AVPlayer?
+    private var lastHandledPlaybackState: UniversalPlaybackState?
     /// Track if we've set Now Playing info with valid duration (> 0)
     /// This prevents the system from ignoring our Now Playing registration
     private var hasValidNowPlayingInfo: Bool = false
@@ -60,7 +61,7 @@ final class NowPlayingService: ObservableObject {
         switch playerType {
         case .avplayer:
             return false
-        case .mpv, .dvSampleBuffer:
+        case .mpv, .dvSampleBuffer, .rivulet:
             return true
         }
     }
@@ -219,6 +220,10 @@ final class NowPlayingService: ObservableObject {
             .receive(on: RunLoop.main)
             .sink { [weak self, weak viewModel] state in
                 guard let self, let viewModel else { return }
+                if self.lastHandledPlaybackState == state {
+                    return
+                }
+                self.lastHandledPlaybackState = state
 
                 switch state {
                 case .playing:
@@ -315,6 +320,7 @@ final class NowPlayingService: ObservableObject {
         artworkTask?.cancel()
         artworkTask = nil
         hasValidNowPlayingInfo = false
+        lastHandledPlaybackState = nil
         clearNowPlayingInfo()
         deactivateNowPlayingSession()
     }
@@ -423,6 +429,17 @@ final class NowPlayingService: ObservableObject {
     }
 
     private func dispatchInputAction(_ action: PlaybackInputAction) {
+        switch action {
+        case .seekAbsolute(let time):
+            print("🎵 NowPlaying: remote seek absolute → \(String(format: "%.3f", time))s")
+        case .seekRelative(let seconds):
+            print("🎵 NowPlaying: remote seek relative → \(String(format: "%.3f", seconds))s")
+        case .play, .pause, .playPause:
+            break
+        default:
+            break
+        }
+
         if let inputCoordinator {
             inputCoordinator.handle(action: action, source: .mpRemoteCommand)
             return

@@ -90,6 +90,16 @@ enum SubtitlePreferenceManager {
         }
     }
 
+    /// Whether user has explicitly set subtitle preferences.
+    /// If false, playback should honor stream defaults/forced tracks.
+    static var hasStoredPreference: Bool {
+        UserDefaults.standard.object(forKey: enabledKey) != nil ||
+        UserDefaults.standard.object(forKey: languageKey) != nil ||
+        UserDefaults.standard.object(forKey: codecKey) != nil ||
+        UserDefaults.standard.object(forKey: hearingImpairedKey) != nil ||
+        UserDefaults.standard.object(forKey: "subtitlePreference") != nil
+    }
+
     /// Find best matching subtitle track based on preference
     static func findBestMatch(in tracks: [MediaTrack], preference: SubtitlePreference) -> MediaTrack? {
         guard preference.enabled, let preferredLang = preference.languageCode else {
@@ -262,6 +272,7 @@ enum PlayerType: Equatable {
     case mpv
     case avplayer
     case dvSampleBuffer  // AVSampleBufferDisplayLayer pipeline for DV profiles AVPlayer rejects
+    case rivulet         // Unified native player: FFmpeg demux + AVSampleBufferDisplayLayer
 }
 
 @MainActor
@@ -408,11 +419,15 @@ final class UniversalPlayerViewModel: ObservableObject {
     /// DVSampleBufferPlayer (used for DV profiles AVPlayer rejects: Profile 8 CompatID 6, Profile 7 MEL)
     @Published private(set) var dvSampleBufferPlayer: DVSampleBufferPlayer?
 
-    /// Whether DV profile conversion (P7/P8.6 → P8.1) is needed for DVSampleBufferPlayer
+    /// RivuletPlayer (unified native player: FFmpeg + AVSampleBufferDisplayLayer)
+    @Published private(set) var rivuletPlayer: RivuletPlayer?
+
+    /// Whether DV profile conversion (P7/P8.6 → P8.1) is needed for DVSampleBufferPlayer or RivuletPlayer
     private var requiresProfileConversion = false
 
     /// Subtitle manager for DVSampleBufferPlayer (handles external subtitle rendering)
     let subtitleManager = SubtitleManager()
+    private let subtitleClockSync = SubtitleClockSyncController()
 
     // MARK: - Metadata
 
@@ -494,6 +509,7 @@ final class UniversalPlayerViewModel: ObservableObject {
         self.allowAudioDirectStream = UniversalPlayerViewModel.isAudioDirectStreamCapable(metadata)
 
         // Determine which player to use based on content and settings
+        let useRivuletPlayer = UserDefaults.standard.bool(forKey: "useRivuletPlayer")
         let useAVPlayerForDV = UserDefaults.standard.bool(forKey: "useAVPlayerForDolbyVision")
         let useAVPlayerForAll = UserDefaults.standard.bool(forKey: "useAVPlayerForAllVideos")
         let isAirPlayRoute = Self.isAirPlayOutput()
@@ -549,10 +565,23 @@ final class UniversalPlayerViewModel: ObservableObject {
             return false
         }()
 
+        // Use Rivulet Player if enabled (highest priority — experimental unified player)
+        if useRivuletPlayer {
+            self.playerType = .rivulet
+            self.rivuletPlayer = RivuletPlayer()
+            self.mpvPlayerWrapper = nil
+            self.avPlayerWrapper = nil
+            self.dvSampleBufferPlayer = nil
+
+            // Enable profile conversion for incompatible DV profiles
+            if hasDolbyVision && !isCompatibleDVProfile {
+                self.requiresProfileConversion = (dvProfile == 7) || (dvProfile == 8 && doviBLCompatID == 6)
+            }
+        }
         // Use AVPlayer if:
         // 1. "Use AVPlayer for All Videos" is enabled, OR
         // 2. "Use AVPlayer for DV" is enabled AND content has compatible DV profile
-        if useAVPlayerForAll || (useAVPlayerForDV && canUseAVPlayerForDV) {
+        else if useAVPlayerForAll || (useAVPlayerForDV && canUseAVPlayerForDV) {
             if useAVPlayerForAll {
             } else {
             }
@@ -654,6 +683,70 @@ final class UniversalPlayerViewModel: ObservableObject {
 
         // Check if this is audio content
         let isAudio = metadata.type == "track" || metadata.type == "album" || metadata.type == "artist"
+
+        // Rivulet Player: Use ContentRouter to decide DirectPlay vs HLS
+        if playerType == .rivulet {
+            let routingContext = ContentRoutingContext(
+                metadata: metadata,
+                serverURL: URL(string: serverURL)!,
+                authToken: authToken,
+                requiresProfileConversion: requiresProfileConversion
+            )
+            let route = ContentRouter.route(for: routingContext)
+
+            switch route {
+            case .directPlay(_, _):
+                // Build direct play URL (raw file access)
+                if let partKey = metadata.Media?.first?.Part?.first?.key {
+                    streamURL = networkManager.buildVLCDirectPlayURL(
+                        serverURL: serverURL,
+                        authToken: authToken,
+                        partKey: partKey
+                    )
+                    streamHeaders = [
+                        "X-Plex-Token": authToken,
+                        "X-Plex-Client-Identifier": PlexAPI.clientIdentifier,
+                        "X-Plex-Platform": PlexAPI.platform,
+                        "X-Plex-Device": PlexAPI.deviceName,
+                        "X-Plex-Product": PlexAPI.productName
+                    ]
+                } else {
+                    // No part key — fall back to HLS
+                    if let result = networkManager.buildHLSDirectPlayURL(
+                        serverURL: serverURL,
+                        authToken: authToken,
+                        ratingKey: ratingKey,
+                        offsetMs: Int((startOffset ?? 0) * 1000),
+                        hasHDR: metadata.hasHDR,
+                        useDolbyVision: metadata.hasDolbyVision,
+                        allowAudioDirectStream: allowAudioDirectStream
+                    ) {
+                        streamURL = result.url
+                        streamHeaders = result.headers
+                        plexSessionId = URLComponents(url: result.url, resolvingAgainstBaseURL: false)?
+                            .queryItems?.first(where: { $0.name == "session" })?.value
+                    }
+                }
+
+            case .hls(_, _):
+                // Build HLS URL (server transcodes audio or provides live stream)
+                if let result = networkManager.buildHLSDirectPlayURL(
+                    serverURL: serverURL,
+                    authToken: authToken,
+                    ratingKey: ratingKey,
+                    offsetMs: Int((startOffset ?? 0) * 1000),
+                    hasHDR: metadata.hasHDR,
+                    useDolbyVision: metadata.hasDolbyVision,
+                    allowAudioDirectStream: allowAudioDirectStream
+                ) {
+                    streamURL = result.url
+                    streamHeaders = result.headers
+                    plexSessionId = URLComponents(url: result.url, resolvingAgainstBaseURL: false)?
+                        .queryItems?.first(where: { $0.name == "session" })?.value
+                }
+            }
+            return
+        }
 
         // AVPlayer: Check if source is compatible for true direct play (no server processing)
         // Otherwise fall back to HLS remux which handles container conversion and codec tag fixes
@@ -886,6 +979,11 @@ final class UniversalPlayerViewModel: ObservableObject {
             statePublisher = dvp.playbackStatePublisher
             timePublisher = dvp.timePublisher
             errorPublisher = dvp.errorPublisher
+        case .rivulet:
+            guard let rp = rivuletPlayer else { return }
+            statePublisher = rp.playbackStatePublisher
+            timePublisher = rp.timePublisher
+            errorPublisher = rp.errorPublisher
         }
 
         statePublisher
@@ -944,8 +1042,10 @@ final class UniversalPlayerViewModel: ObservableObject {
                     if let wrapper = self.dvSampleBufferPlayer, wrapper.duration > 0 {
                         self.duration = wrapper.duration
                     }
-                    // Update subtitle manager for DV player
-                    self.subtitleManager.update(time: time)
+                case .rivulet:
+                    if let wrapper = self.rivuletPlayer, wrapper.duration > 0 {
+                        self.duration = wrapper.duration
+                    }
                 }
                 // Check for markers at current time
                 self.checkMarkers(at: time)
@@ -1033,6 +1133,15 @@ final class UniversalPlayerViewModel: ObservableObject {
                 }
                 .store(in: &cancellables)
         }
+
+        if let rp = rivuletPlayer {
+            rp.tracksPublisher
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self] in
+                    self?.updateTrackLists()
+                }
+                .store(in: &cancellables)
+        }
     }
 
     // MARK: - Computed Properties
@@ -1045,6 +1154,8 @@ final class UniversalPlayerViewModel: ObservableObject {
             return avPlayerWrapper?.isPlaying ?? false
         case .dvSampleBuffer:
             return dvSampleBufferPlayer?.isPlaying ?? false
+        case .rivulet:
+            return rivuletPlayer?.isPlaying ?? false
         }
     }
 
@@ -1056,7 +1167,7 @@ final class UniversalPlayerViewModel: ObservableObject {
         let breadcrumb = Breadcrumb(level: .info, category: "playback.selection")
         breadcrumb.message = "Playback selection (\(reason))"
         breadcrumb.data = [
-            "player": playerType == .avplayer ? "avplayer" : playerType == .dvSampleBuffer ? "dvSampleBuffer" : "mpv",
+            "player": playerType == .rivulet ? "rivulet" : playerType == .avplayer ? "avplayer" : playerType == .dvSampleBuffer ? "dvSampleBuffer" : "mpv",
             "has_dv": metadata.hasDolbyVision,
             "dv_profile": dvStream?.DOVIProfile ?? -1,
             "dv_bl_compat": dvStream?.DOVIBLCompatID ?? -1,
@@ -1079,6 +1190,9 @@ final class UniversalPlayerViewModel: ObservableObject {
         // Stop existing player before retrying
         mpvPlayerWrapper?.stop()
         avPlayerWrapper?.stop()
+        dvSampleBufferPlayer?.stop()
+        rivuletPlayer?.stop()
+        subtitleClockSync.stop()
 
         await startPlayback()
     }
@@ -1100,6 +1214,8 @@ final class UniversalPlayerViewModel: ObservableObject {
         do {
             switch playerType {
             case .mpv:
+                subtitleClockSync.stop()
+                subtitleManager.clear()
                 guard let mpv = mpvPlayerWrapper else { return }
 
                 // Configure display criteria to enable Match Frame Rate and Match Dynamic Range
@@ -1127,6 +1243,8 @@ final class UniversalPlayerViewModel: ObservableObject {
                 updateTrackLists()
 
             case .avplayer:
+                subtitleClockSync.stop()
+                subtitleManager.clear()
                 guard let avp = avPlayerWrapper else { return }
 
                 // Configure display criteria for AVPlayer (HDR/DV mode switching)
@@ -1257,7 +1375,63 @@ final class UniversalPlayerViewModel: ObservableObject {
                 }
 
                 dvp.play()
+                configureSubtitleClockSyncForCurrentPlayer()
                 self.duration = dvp.duration
+
+            case .rivulet:
+                guard let rp = rivuletPlayer else { return }
+
+                // Configure display criteria (supports both DV and HDR)
+                #if os(tvOS)
+                DisplayCriteriaManager.shared.configureForContent(
+                    videoStream: metadata.primaryVideoStream
+                )
+                #endif
+
+                // Determine routing
+                let routingContext = ContentRoutingContext(
+                    metadata: metadata,
+                    serverURL: URL(string: serverURL)!,
+                    authToken: authToken,
+                    requiresProfileConversion: requiresProfileConversion
+                )
+                let route = ContentRouter.route(for: routingContext)
+                let isHLS: Bool
+                switch route {
+                case .directPlay: isHLS = false
+                case .hls: isHLS = true
+                }
+
+                // For HLS routes, wait for transcode to be ready
+                if isHLS {
+                    let transcodeReady = await waitForHLSTranscodeReady(url: url, headers: streamHeaders)
+                    if !transcodeReady {
+                        throw PlayerError.loadFailed("HLS transcode session failed to start")
+                    }
+                }
+
+                // Load via routed pipeline
+                if isHLS {
+                    // HLS path: feed HLS URL to RivuletPlayer
+                    // Pass requiresProfileConversion for P7/P8.6 DV content
+                    try await rp.loadHLSWithConversion(url: url, headers: streamHeaders, startTime: startOffset, requiresProfileConversion: requiresProfileConversion)
+                } else {
+                    // Direct play: pass isDolbyVision from Plex metadata so the demuxer
+                    // forces dvh1 format descriptions even if FFmpeg doesn't detect DOVI config.
+                    // This ensures true DV playback for all supported profiles.
+                    let dpRoute = PlaybackRoute.directPlay(url: url, headers: streamHeaders)
+                    try await rp.load(
+                        route: dpRoute,
+                        startTime: startOffset,
+                        isDolbyVision: metadata.hasDolbyVision,
+                        enableDVConversion: requiresProfileConversion
+                    )
+                }
+
+                rp.play()
+                configureSubtitleClockSyncForCurrentPlayer()
+                self.duration = rp.duration
+                updateTrackLists()
             }
 
             // Preload thumbnails for scrubbing
@@ -1304,7 +1478,7 @@ final class UniversalPlayerViewModel: ObservableObject {
             // Capture playback load failure to Sentry
             SentrySDK.capture(error: error) { scope in
                 scope.setTag(value: "playback", key: "component")
-                scope.setTag(value: self.playerType == .avplayer ? "avplayer" : self.playerType == .dvSampleBuffer ? "dvSampleBuffer" : "mpv", key: "player_type")
+                scope.setTag(value: self.playerType == .rivulet ? "rivulet" : self.playerType == .avplayer ? "avplayer" : self.playerType == .dvSampleBuffer ? "dvSampleBuffer" : "mpv", key: "player_type")
                 scope.setExtra(value: url.absoluteString, key: "stream_url")
                 scope.setExtra(value: self.metadata.title ?? "unknown", key: "media_title")
                 scope.setExtra(value: self.metadata.type ?? "unknown", key: "media_type")
@@ -1464,6 +1638,8 @@ final class UniversalPlayerViewModel: ObservableObject {
             throw PlayerError.loadFailed("Already attempted HLS restart")
         }
         hasAttemptedHLSRestart = true
+        subtitleClockSync.stop()
+        subtitleManager.clear()
 
         // Save current position to restore after restart
         let savedPosition = currentTime
@@ -1538,6 +1714,8 @@ final class UniversalPlayerViewModel: ObservableObject {
         }
         hasAttemptedHDR10Fallback = true
         isUsingDolbyVisionHLS = false
+        subtitleClockSync.stop()
+        subtitleManager.clear()
 
         // Save current position to restore after restart
         let savedPosition = currentTime
@@ -1634,6 +1812,8 @@ final class UniversalPlayerViewModel: ObservableObject {
         // Switch to MPV
         playerType = .mpv
         mpvPlayerWrapper = MPVPlayerWrapper()
+        subtitleClockSync.stop()
+        subtitleManager.clear()
 
         // Cancel existing subscriptions and rebind to MPV
         cancellables.removeAll()
@@ -1720,6 +1900,8 @@ final class UniversalPlayerViewModel: ObservableObject {
     }
 
     func stopPlayback() {
+        subtitleClockSync.stop()
+
         switch playerType {
         case .mpv:
             mpvPlayerWrapper?.stop()
@@ -1727,6 +1909,9 @@ final class UniversalPlayerViewModel: ObservableObject {
             avPlayerWrapper?.stop()
         case .dvSampleBuffer:
             dvSampleBufferPlayer?.stop()
+            subtitleManager.clear()
+        case .rivulet:
+            rivuletPlayer?.stop()
             subtitleManager.clear()
         }
 
@@ -1779,6 +1964,12 @@ final class UniversalPlayerViewModel: ObservableObject {
             } else {
                 dvSampleBufferPlayer?.play()
             }
+        case .rivulet:
+            if rivuletPlayer?.isPlaying == true {
+                rivuletPlayer?.pause()
+            } else {
+                rivuletPlayer?.play()
+            }
         }
         showControlsTemporarily()
     }
@@ -1794,6 +1985,8 @@ final class UniversalPlayerViewModel: ObservableObject {
             avPlayerWrapper?.play()
         case .dvSampleBuffer:
             dvSampleBufferPlayer?.play()
+        case .rivulet:
+            rivuletPlayer?.play()
         }
         showControlsTemporarily()
     }
@@ -1807,6 +2000,8 @@ final class UniversalPlayerViewModel: ObservableObject {
             avPlayerWrapper?.pause()
         case .dvSampleBuffer:
             dvSampleBufferPlayer?.pause()
+        case .rivulet:
+            rivuletPlayer?.pause()
         }
         showControlsTemporarily()
     }
@@ -1829,7 +2024,10 @@ final class UniversalPlayerViewModel: ObservableObject {
             await avPlayerWrapper?.seek(to: time)
         case .dvSampleBuffer:
             await dvSampleBufferPlayer?.seek(to: time)
-            subtitleManager.didSeek()
+            subtitleClockSync.didSeek()
+        case .rivulet:
+            await rivuletPlayer?.seek(to: time)
+            subtitleClockSync.didSeek()
         }
         showControlsTemporarily()
     }
@@ -1845,7 +2043,10 @@ final class UniversalPlayerViewModel: ObservableObject {
             await avPlayerWrapper?.seek(to: newTime)
         case .dvSampleBuffer:
             await dvSampleBufferPlayer?.seekRelative(by: seconds)
-            subtitleManager.didSeek()
+            subtitleClockSync.didSeek()
+        case .rivulet:
+            await rivuletPlayer?.seekRelative(by: seconds)
+            subtitleClockSync.didSeek()
         }
         showControlsTemporarily()
 
@@ -2106,12 +2307,100 @@ final class UniversalPlayerViewModel: ObservableObject {
             avPlayerWrapper?.selectAudioTrack(id: id)
         } else if dvSampleBufferPlayer != nil {
             dvSampleBufferPlayer?.selectAudioTrack(id: id)
+        } else if let rp = rivuletPlayer {
+            rp.selectAudioTrack(id: id)
+
+            // For HLS path, rebuild the Plex session with the new audio stream ID
+            if rp.activePipeline == .hls {
+                Task {
+                    await switchHLSAudioTrack(plexStreamId: id)
+                }
+            }
         }
         currentAudioTrackId = id
 
         // Save preference
         if let track = audioTracks.first(where: { $0.id == id }) {
             AudioPreferenceManager.current = AudioPreference(from: track)
+        }
+    }
+
+    /// Switch audio track for RivuletPlayer HLS path by rebuilding the Plex transcode session.
+    /// Sets the preferred audio stream on the Plex server, then starts a fresh transcode session.
+    private func switchHLSAudioTrack(plexStreamId: Int) async {
+        guard let rp = rivuletPlayer, rp.activePipeline == .hls else { return }
+
+        let resumeTime = currentTime
+        let wasPlaying = rp.isPlaying
+
+        print("🎬 [AudioSwitch] Switching HLS audio to stream \(plexStreamId) at \(String(format: "%.1f", resumeTime))s")
+
+        // Stop the current Plex transcode session
+        rp.stop()
+        if let sessionId = plexSessionId {
+            await PlexNetworkManager.shared.stopTranscodeSession(
+                serverURL: serverURL, authToken: authToken, sessionId: sessionId
+            )
+            plexSessionId = nil
+        }
+
+        guard let ratingKey = metadata.ratingKey else { return }
+        let networkManager = PlexNetworkManager.shared
+
+        // Tell Plex which audio stream to use BEFORE starting the new transcode.
+        // Plex reads this preference when building the transcode session.
+        if let partId = metadata.Media?.first?.Part?.first?.id {
+            await networkManager.setSelectedAudioStream(
+                serverURL: serverURL,
+                authToken: authToken,
+                partId: partId,
+                audioStreamID: plexStreamId
+            )
+        }
+
+        // Build new HLS URL (Plex will use the audio stream we just set)
+        guard let result = networkManager.buildHLSDirectPlayURL(
+            serverURL: serverURL,
+            authToken: authToken,
+            ratingKey: ratingKey,
+            offsetMs: Int(resumeTime * 1000),
+            hasHDR: metadata.hasHDR,
+            useDolbyVision: metadata.hasDolbyVision,
+            allowAudioDirectStream: allowAudioDirectStream
+        ) else {
+            print("🎬 [AudioSwitch] Failed to build HLS URL")
+            return
+        }
+
+        streamURL = result.url
+        streamHeaders = result.headers
+        plexSessionId = URLComponents(url: result.url, resolvingAgainstBaseURL: false)?
+            .queryItems?.first(where: { $0.name == "session" })?.value
+
+        // Wait for the new transcode to be ready
+        let transcodeReady = await waitForHLSTranscodeReady(url: result.url, headers: result.headers)
+        if !transcodeReady {
+            print("🎬 [AudioSwitch] New transcode session failed to start")
+            errorMessage = "Failed to switch audio track"
+            return
+        }
+
+        // Reload with new URL
+        do {
+            try await rp.loadHLSWithConversion(
+                url: result.url,
+                headers: result.headers,
+                startTime: resumeTime,
+                requiresProfileConversion: requiresProfileConversion
+            )
+            if wasPlaying {
+                rp.play()
+            }
+            self.duration = rp.duration
+            print("🎬 [AudioSwitch] Switched to audio stream \(plexStreamId) successfully")
+        } catch {
+            print("🎬 [AudioSwitch] Failed to reload with new audio: \(error)")
+            errorMessage = "Failed to switch audio track"
         }
     }
 
@@ -2123,6 +2412,11 @@ final class UniversalPlayerViewModel: ObservableObject {
             avPlayerWrapper?.selectAudioTrack(id: id)
         } else if dvSampleBufferPlayer != nil {
             dvSampleBufferPlayer?.selectAudioTrack(id: id)
+        } else if let rp = rivuletPlayer {
+            rp.selectAudioTrack(id: id)
+            if rp.activePipeline == .hls {
+                Task { await switchHLSAudioTrack(plexStreamId: id) }
+            }
         }
         currentAudioTrackId = id
     }
@@ -2137,6 +2431,9 @@ final class UniversalPlayerViewModel: ObservableObject {
             dvSampleBufferPlayer?.selectSubtitleTrack(id: id)
             // Load external subtitles for DV player
             loadExternalSubtitleForDVPlayer(trackId: id)
+        } else if rivuletPlayer != nil {
+            rivuletPlayer?.selectSubtitleTrack(id: id)
+            loadExternalSubtitleForDVPlayer(trackId: id)
         }
         currentSubtitleTrackId = id
 
@@ -2148,52 +2445,109 @@ final class UniversalPlayerViewModel: ObservableObject {
         }
     }
 
-    /// Load external subtitle file for DVSampleBufferPlayer
+    /// Load external subtitle file for DVSampleBufferPlayer or RivuletPlayer
     private func loadExternalSubtitleForDVPlayer(trackId: Int?) {
-        guard dvSampleBufferPlayer != nil else { return }
+        guard dvSampleBufferPlayer != nil || rivuletPlayer != nil else { return }
 
         // Clear subtitles if no track selected
         guard let trackId = trackId,
               let track = subtitleTracks.first(where: { $0.id == trackId }) else {
             subtitleManager.clear()
+            // Stop FFmpeg subtitle stream and callback for Rivulet
+            if let rp = rivuletPlayer {
+                rp.deselectEmbeddedSubtitle()
+                rp.onSubtitleCue = nil
+            }
             return
         }
 
-        // Check if this is a text-based subtitle we can render
-        let supportedCodecs = ["srt", "subrip", "vtt", "webvtt", "ass", "ssa"]
-        guard let codec = track.codec?.lowercased(),
-              supportedCodecs.contains(codec) else {
-            print("🎬 [Subtitles] Unsupported format for DV player: \(track.codec ?? "unknown")")
-            subtitleManager.clear()
-            return
+        // For RivuletPlayer in DirectPlay mode, enable inline subtitle extraction via FFmpeg.
+        // The read loop delivers subtitle cues as it encounters them (no second HTTP connection).
+        // Falls back to Plex URL for external sidecar subs if FFmpeg has no subtitle tracks.
+        if let rp = rivuletPlayer, rp.activePipeline == .directPlay {
+            let ffmpegSubs = rp.ffmpegSubtitleTracks
+            if !ffmpegSubs.isEmpty {
+                print("🎬 [Subtitles] Enabling inline embedded subtitle for track \(trackId) (FFmpeg has \(ffmpegSubs.count) sub tracks)")
+                subtitleManager.clear()
+
+                // Wire the subtitle cue callback to build SRT content progressively
+                rp.onSubtitleCue = { [weak self] text, start, end in
+                    self?.subtitleManager.addCue(text: text, startTime: start, endTime: end)
+                }
+
+                // Select the subtitle stream in the demuxer
+                rp.selectEmbeddedSubtitle(plexTrackId: trackId, plexSubtitleTracks: subtitleTracks)
+                return
+            }
+
+            // No FFmpeg subtitle tracks — try Plex URL (external sidecar subs)
+            print("🎬 [Subtitles] No embedded subtitle tracks in FFmpeg, trying Plex URL for track \(trackId)")
         }
 
-        // Get subtitle URL from Plex
-        let subtitleURLString: String
-        if let trackKey = track.subtitleKey {
-            // Direct key available
-            subtitleURLString = serverURL + trackKey
-        } else {
-            // No direct key available - subtitle is likely embedded in the container.
-            // Plex doesn't provide a direct download endpoint for embedded subtitles.
-            // They can only be extracted during transcode playback.
-            print("🎬 [Subtitles] Track \(trackId) has no key - embedded subtitles not supported in DV player")
-            print("🎬 [Subtitles] Tip: Use external sidecar .srt files (same name as video) for DV playback")
-            subtitleManager.clear()
-            return
-        }
-        guard let subtitleURL = URL(string: subtitleURLString) else {
-            print("🎬 [Subtitles] Invalid subtitle URL: \(subtitleURLString)")
-            subtitleManager.clear()
-            return
+        loadSubtitleFromPlexURL(trackId: trackId, track: track)
+    }
+
+    /// Load subtitle from Plex server URL (for external sidecar subs or DV player)
+    private func loadSubtitleFromPlexURL(trackId: Int, track: MediaTrack) {
+        let codec = track.codec?.lowercased()
+        let supportedCodecs = ["srt", "subrip", "vtt", "webvtt", "ass", "ssa", "mov_text", "tx3g"]
+        let isLikelyTextSubtitle = codec.map { supportedCodecs.contains($0) } ?? true
+        if let codec, !isLikelyTextSubtitle {
+            print("🎬 [Subtitles] Non-text or unsupported subtitle codec '\(codec)' - attempting SRT conversion fallback")
         }
 
-        // Load the subtitle file
+        let hintedFormat: SubtitleFormat? = isLikelyTextSubtitle ? SubtitleFormat(from: codec) : .srt
         let headers = ["X-Plex-Token": authToken]
-        let format = SubtitleFormat(from: codec)
 
-        Task {
-            await subtitleManager.load(url: subtitleURL, headers: headers, format: format)
+        // Build candidate subtitle URLs.
+        // 1) Use direct track key when available.
+        // 2) Include explicit SRT conversion for track key.
+        // 3) Fallback to /library/streams/{id} variants.
+        var candidateURLStrings: [String] = []
+        if let trackKey = track.subtitleKey {
+            let isAbsolute = trackKey.hasPrefix("http://") || trackKey.hasPrefix("https://")
+            let baseKeyURL = isAbsolute ? trackKey : (serverURL + trackKey)
+            candidateURLStrings.append(baseKeyURL)
+
+            // Explicit conversion endpoint for codecs we cannot parse directly.
+            let separator = baseKeyURL.contains("?") ? "&" : "?"
+            candidateURLStrings.append(baseKeyURL + "\(separator)format=srt")
+        }
+        candidateURLStrings.append("\(serverURL)/library/streams/\(trackId)")
+        candidateURLStrings.append("\(serverURL)/library/streams/\(trackId)?format=srt")
+
+        // Preserve order but avoid duplicate network requests.
+        var seen = Set<String>()
+        candidateURLStrings = candidateURLStrings.filter { seen.insert($0).inserted }
+
+        let candidateURLs = candidateURLStrings.compactMap(URL.init(string:))
+        guard !candidateURLs.isEmpty else {
+            print("🎬 [Subtitles] Could not build subtitle URL candidates for track \(trackId)")
+            subtitleManager.clear()
+            return
+        }
+
+        Task { @MainActor in
+            var loaded = false
+            for candidateURL in candidateURLs {
+                let formatHintForCandidate: SubtitleFormat? =
+                    candidateURL.query?.localizedCaseInsensitiveContains("format=srt") == true ? .srt : hintedFormat
+                await subtitleManager.load(url: candidateURL, headers: headers, format: formatHintForCandidate)
+                if subtitleManager.error == nil {
+                    loaded = true
+                    print("🎬 [Subtitles] Loaded subtitle track \(trackId) from \(candidateURL.absoluteString)")
+                    break
+                }
+                print(
+                    "🎬 [Subtitles] Candidate failed for track \(trackId): \(candidateURL.absoluteString) " +
+                    "(\(subtitleManager.error?.localizedDescription ?? "unknown error"))"
+                )
+            }
+
+            if !loaded {
+                print("🎬 [Subtitles] Failed to load subtitle track \(trackId) from all candidate URLs")
+                subtitleManager.clear()
+            }
         }
     }
 
@@ -2242,15 +2596,40 @@ final class UniversalPlayerViewModel: ObservableObject {
                 newAudioTracks = streams.filter { $0.isAudio }.map { MediaTrack(from: $0) }
                 newSubtitleTracks = streams.filter { $0.isSubtitle }.map { MediaTrack(from: $0) }
 
-                // Set current track to default or first
-                newCurrentAudioTrackId = newAudioTracks.first(where: { $0.isDefault })?.id ?? newAudioTracks.first?.id
-                newCurrentSubtitleTrackId = newSubtitleTracks.first(where: { $0.isDefault })?.id
+                // Prefer explicitly selected streams from Plex metadata, then forced/default fallbacks.
+                let selectedAudioId = streams.first(where: { $0.isAudio && $0.selected == true })?.id
+                let selectedSubtitleId = streams.first(where: { $0.isSubtitle && $0.selected == true })?.id
+                newCurrentAudioTrackId = selectedAudioId ??
+                    newAudioTracks.first(where: { $0.isDefault })?.id ??
+                    newAudioTracks.first?.id
+                newCurrentSubtitleTrackId = selectedSubtitleId ??
+                    newSubtitleTracks.first(where: { $0.isForced })?.id ??
+                    newSubtitleTracks.first(where: { $0.isDefault })?.id
             } else {
                 // Fallback to player-reported tracks if no Plex metadata
                 newAudioTracks = dvSampleBufferPlayer!.audioTracks
                 newSubtitleTracks = dvSampleBufferPlayer!.subtitleTracks
                 newCurrentAudioTrackId = dvSampleBufferPlayer!.currentAudioTrackId
                 newCurrentSubtitleTrackId = dvSampleBufferPlayer!.currentSubtitleTrackId
+            }
+        } else if let rp = rivuletPlayer {
+            // RivuletPlayer: prefer Plex metadata for rich track info, fall back to player tracks
+            if let streams = metadata.Media?.first?.Part?.first?.Stream {
+                newAudioTracks = streams.filter { $0.isAudio }.map { MediaTrack(from: $0) }
+                newSubtitleTracks = streams.filter { $0.isSubtitle }.map { MediaTrack(from: $0) }
+                let selectedAudioId = streams.first(where: { $0.isAudio && $0.selected == true })?.id
+                let selectedSubtitleId = streams.first(where: { $0.isSubtitle && $0.selected == true })?.id
+                newCurrentAudioTrackId = selectedAudioId ??
+                    newAudioTracks.first(where: { $0.isDefault })?.id ??
+                    newAudioTracks.first?.id
+                newCurrentSubtitleTrackId = selectedSubtitleId ??
+                    newSubtitleTracks.first(where: { $0.isForced })?.id ??
+                    newSubtitleTracks.first(where: { $0.isDefault })?.id
+            } else {
+                newAudioTracks = rp.audioTracks
+                newSubtitleTracks = rp.subtitleTracks
+                newCurrentAudioTrackId = rp.currentAudioTrackId
+                newCurrentSubtitleTrackId = rp.currentSubtitleTrackId
             }
         } else {
             // No active player
@@ -2259,8 +2638,15 @@ final class UniversalPlayerViewModel: ObservableObject {
 
         audioTracks = newAudioTracks
         subtitleTracks = newSubtitleTracks
-        currentAudioTrackId = newCurrentAudioTrackId
-        currentSubtitleTrackId = newCurrentSubtitleTrackId
+
+        // Only update current track IDs on first population.
+        // After tracks are populated, the user's explicit selections take precedence.
+        if previousAudioCount == 0 {
+            currentAudioTrackId = newCurrentAudioTrackId
+        }
+        if previousSubtitleCount == 0 {
+            currentSubtitleTrackId = newCurrentSubtitleTrackId
+        }
 
         // Apply saved audio preference when tracks are first available
         if !hasAppliedAudioPreference && !audioTracks.isEmpty && previousAudioCount == 0 {
@@ -2335,6 +2721,18 @@ final class UniversalPlayerViewModel: ObservableObject {
 
     /// Apply saved subtitle preference
     private func applySubtitlePreference() {
+        // No explicit user preference yet: honor selected/default stream behavior.
+        if !SubtitlePreferenceManager.hasStoredPreference {
+            if currentSubtitleTrackId == nil,
+               let forcedTrack = subtitleTracks.first(where: { $0.isForced }) {
+                selectSubtitleTrackWithoutSaving(id: forcedTrack.id)
+            } else if let activeSubtitleTrackId = currentSubtitleTrackId {
+                // For custom renderers, selecting can require explicit file fetch/load.
+                loadExternalSubtitleForDVPlayer(trackId: activeSubtitleTrackId)
+            }
+            return
+        }
+
         let preference = SubtitlePreferenceManager.current
 
         if !preference.enabled {
@@ -2361,8 +2759,42 @@ final class UniversalPlayerViewModel: ObservableObject {
         } else if dvSampleBufferPlayer != nil {
             dvSampleBufferPlayer?.selectSubtitleTrack(id: id)
             loadExternalSubtitleForDVPlayer(trackId: id)
+        } else if rivuletPlayer != nil {
+            rivuletPlayer?.selectSubtitleTrack(id: id)
+            loadExternalSubtitleForDVPlayer(trackId: id)
         }
         currentSubtitleTrackId = id
+    }
+
+    private func configureSubtitleClockSyncForCurrentPlayer() {
+        switch playerType {
+        case .dvSampleBuffer:
+            guard let dvp = dvSampleBufferPlayer else {
+                subtitleClockSync.stop()
+                return
+            }
+            subtitleClockSync.start(
+                owner: "DVSampleBuffer",
+                subtitleManager: subtitleManager,
+                timeProvider: { CMTimeGetSeconds(dvp.renderSynchronizer.currentTime()) },
+                isPlayingProvider: { dvp.isPlaying }
+            )
+
+        case .rivulet:
+            guard let rp = rivuletPlayer else {
+                subtitleClockSync.stop()
+                return
+            }
+            subtitleClockSync.start(
+                owner: "Rivulet",
+                subtitleManager: subtitleManager,
+                timeProvider: { rp.renderer.currentTime },
+                isPlayingProvider: { rp.isPlaying }
+            )
+
+        case .mpv, .avplayer:
+            subtitleClockSync.stop()
+        }
     }
 
     // MARK: - Controls Visibility
@@ -3186,6 +3618,9 @@ final class UniversalPlayerViewModel: ObservableObject {
     // MARK: - Cleanup
 
     deinit {
+        Task { @MainActor [subtitleClockSync] in
+            subtitleClockSync.stop()
+        }
         controlsTimer?.invalidate()
         scrubTimer?.invalidate()
         countdownTimer?.invalidate()

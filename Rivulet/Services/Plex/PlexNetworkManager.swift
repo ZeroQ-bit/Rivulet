@@ -1457,6 +1457,33 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
         return (url, headers)
     }
 
+    /// Set the preferred audio stream on a media part.
+    /// Plex reads this preference when starting a new transcode session.
+    /// Must be called BEFORE starting the transcode for the selection to take effect.
+    func setSelectedAudioStream(
+        serverURL: String,
+        authToken: String,
+        partId: Int,
+        audioStreamID: Int
+    ) async {
+        let urlString = "\(serverURL)/library/parts/\(partId)?audioStreamID=\(audioStreamID)&X-Plex-Token=\(authToken)"
+        guard let url = URL(string: urlString) else {
+            print("[Plex] Failed to build audio stream selection URL")
+            return
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "PUT"
+
+        do {
+            let (_, response) = try await URLSession.shared.data(for: request)
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            print("[Plex] Set audio stream \(audioStreamID) on part \(partId): HTTP \(status)")
+        } catch {
+            print("[Plex] Failed to set audio stream: \(error.localizedDescription)")
+        }
+    }
+
     /// Ping the `/decision` endpoint to tell Plex to actually start the transcode/remux session.
     /// Without this, Plex may return a playlist with segment URLs but never begin muxing,
     /// causing the init segment (`/base/header`) to hang indefinitely.

@@ -42,6 +42,32 @@ final class DoviProfileConverter {
     /// Number of conversion failures (falls back to original)
     private(set) var conversionFailures = 0
 
+    // MARK: - Timing Instrumentation
+
+    /// Rolling window of recent conversion times (seconds)
+    private var recentTimings: [Double] = []
+    private let timingWindowSize = 48
+
+    /// Rolling average conversion time in milliseconds
+    private(set) var averageConversionTimeMs: Double = 0
+
+    /// Whether conversion can sustain the given framerate based on recent measurements.
+    /// Returns true if fewer than `timingWindowSize` frames have been measured (not enough data).
+    func canSustainRealTime(fps: Double = 23.976) -> Bool {
+        guard recentTimings.count >= timingWindowSize else { return true }
+        let budgetMs = 1000.0 / fps
+        return averageConversionTimeMs <= budgetMs
+    }
+
+    /// Record a conversion timing measurement and update rolling average
+    private func recordTiming(_ seconds: Double) {
+        recentTimings.append(seconds)
+        if recentTimings.count > timingWindowSize {
+            recentTimings.removeFirst()
+        }
+        averageConversionTimeMs = (recentTimings.reduce(0, +) / Double(recentTimings.count)) * 1000.0
+    }
+
     // MARK: - Processing
 
     /// Process a video sample, converting DV profile if needed
@@ -67,6 +93,8 @@ final class DoviProfileConverter {
             return data
         }
 
+        let startTime = CFAbsoluteTimeGetCurrent()
+
         // Convert the RPU
         guard let convertedRPU = convertRPU(rpu.data) else {
             conversionFailures += 1
@@ -75,8 +103,37 @@ final class DoviProfileConverter {
         }
 
         // Replace RPU in sample with converted version (using pre-found NAL to avoid re-parsing)
-        let convertedSample = nalParser.replaceRPU(in: data, existingRPU: rpu, with: convertedRPU)
+        var convertedSample = nalParser.replaceRPU(in: data, existingRPU: rpu, with: convertedRPU)
+
+        // Strip Enhancement Layer NALs (type 63) for Profile 7.
+        // P7 is dual-layer (BL + EL + RPU). After converting RPU to P8.1, the EL NALs
+        // are orphaned — Apple TV only supports single-layer DV (P5/P8) and the EL causes
+        // VideoToolbox to stutter. This is equivalent to dovi_tool's `convert --discard`.
+        if detectedProfile == 7 {
+            convertedSample = nalParser.stripEnhancementLayer(from: convertedSample)
+        }
+
         framesConverted += 1
+
+        let elapsed = CFAbsoluteTimeGetCurrent() - startTime
+        recordTiming(elapsed)
+
+        // Log timing periodically
+        if framesConverted == 1 {
+            let strippedNote = detectedProfile == 7 ? " (with EL strip)" : ""
+            print("[DoviConverter] First frame conversion\(strippedNote): \(String(format: "%.1f", elapsed * 1000))ms (in=\(data.count)B out=\(convertedSample.count)B)")
+            // Dump NAL structure of first frame for diagnostics
+            let nalDump = nalParser.describeDetailed(data)
+            print("[DoviConverter] Input NALs: \(nalDump)")
+            if convertedSample.count != data.count {
+                let outDump = nalParser.describeDetailed(convertedSample)
+                print("[DoviConverter] Output NALs: \(outDump)")
+            }
+        } else if framesConverted == timingWindowSize {
+            print("[DoviConverter] Conversion avg after \(timingWindowSize) frames: \(String(format: "%.1f", averageConversionTimeMs))ms/frame (budget=41.7ms at 23.976fps)")
+        } else if framesConverted % 240 == 0 {
+            print("[DoviConverter] Conversion avg: \(String(format: "%.1f", averageConversionTimeMs))ms/frame (\(framesConverted) frames)")
+        }
 
         return convertedSample
     }
@@ -88,6 +145,8 @@ final class DoviProfileConverter {
         framesProcessed = 0
         framesConverted = 0
         conversionFailures = 0
+        recentTimings.removeAll()
+        averageConversionTimeMs = 0
     }
 
     // MARK: - Private
@@ -100,13 +159,17 @@ final class DoviProfileConverter {
 
             let info = libdovi.getInfo(rpu: rpu)
             detectedProfile = info.profile
+            let elTypeLog = info.elType ?? "unknown"
+            print(
+                "[DoviConverter] Detected RPU profile=\(info.profile) " +
+                "elType=\(elTypeLog) fel=\(info.isFEL)"
+            )
 
             // Determine if we need to convert
             switch info.profile {
             case 7:
                 // Profile 7 needs conversion to Profile 8.1
                 needsConversion = true
-                let elTypeStr = info.elType ?? "unknown"
 
                 // Warn about FEL quality limitation
                 if info.isFEL {
