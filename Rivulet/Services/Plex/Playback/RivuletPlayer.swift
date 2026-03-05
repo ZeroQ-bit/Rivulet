@@ -299,10 +299,33 @@ final class RivuletPlayer: ObservableObject {
 
     func selectAudioTrack(id: Int) {
         currentAudioTrackId = id
+        // Note: For DirectPlay, use selectAudioTrack(plexTrackId:plexAudioTracks:) instead
+        // to correctly map Plex IDs to FFmpeg stream indices.
+        // This bare method is kept for PlayerProtocol conformance and HLS use.
+    }
+
+    /// Select audio track by Plex track ID, mapping to FFmpeg stream index by position.
+    /// - Parameters:
+    ///   - plexTrackId: The Plex stream ID (e.g., 209431)
+    ///   - plexAudioTracks: The Plex audio track list from the ViewModel (for position mapping)
+    func selectAudioTrack(plexTrackId: Int, plexAudioTracks: [MediaTrack]) {
+        currentAudioTrackId = plexTrackId
 
         if activePipeline == .directPlay, let pipeline = directPlayPipeline {
-            // For direct play, select the FFmpeg stream
-            try? pipeline.selectAudioTrack(streamIndex: Int32(id))
+            let ffmpegAudio = ffmpegAudioTracks
+
+            guard let plexIndex = plexAudioTracks.firstIndex(where: { $0.id == plexTrackId }),
+                  plexIndex < ffmpegAudio.count else {
+                print("[RivuletPlayer] Cannot map Plex audio track \(plexTrackId) to FFmpeg index " +
+                      "(plex tracks=\(plexAudioTracks.count), ffmpeg tracks=\(ffmpegAudio.count))")
+                return
+            }
+
+            let ffmpegStreamIndex = ffmpegAudio[plexIndex].streamIndex
+            print("[RivuletPlayer] Mapped Plex audio \(plexTrackId) → FFmpeg stream \(ffmpegStreamIndex)")
+            Task {
+                try? await pipeline.selectAudioTrack(streamIndex: ffmpegStreamIndex)
+            }
         }
         // For HLS, audio track switching requires a new HLS stream from Plex
         // with audioStreamID parameter — handled by UniversalPlayerViewModel
@@ -318,6 +341,11 @@ final class RivuletPlayer: ObservableObject {
 
     // MARK: - Embedded Subtitle Selection
 
+    /// The FFmpeg audio track list from the demuxer (for mapping Plex IDs → FFmpeg indices)
+    var ffmpegAudioTracks: [FFmpegTrackInfo] {
+        directPlayPipeline?.demuxer.audioTracks ?? []
+    }
+
     /// The FFmpeg subtitle track list from the demuxer (for mapping Plex IDs → FFmpeg indices)
     var ffmpegSubtitleTracks: [FFmpegTrackInfo] {
         directPlayPipeline?.demuxer.subtitleTracks ?? []
@@ -331,25 +359,60 @@ final class RivuletPlayer: ObservableObject {
     }
 
     /// Enable embedded subtitle extraction for a Plex track ID.
-    /// Maps to FFmpeg stream index by position in the subtitle track list.
-    /// Subtitles are delivered inline via the read loop (no second HTTP connection).
-    func selectEmbeddedSubtitle(plexTrackId: Int, plexSubtitleTracks: [MediaTrack]) {
-        guard activePipeline == .directPlay, let pipeline = directPlayPipeline else { return }
+    /// Matches to FFmpeg stream by codec type to handle Plex lists that include
+    /// external/sidecar subs not present in the container.
+    /// Returns `true` if an embedded FFmpeg match was found, `false` if the track
+    /// is likely external and should be fetched via Plex URL instead.
+    @discardableResult
+    func selectEmbeddedSubtitle(plexTrackId: Int, plexSubtitleTracks: [MediaTrack]) -> Bool {
+        guard activePipeline == .directPlay, let pipeline = directPlayPipeline else { return false }
 
         let ffmpegSubs = ffmpegSubtitleTracks
+        guard let plexTrack = plexSubtitleTracks.first(where: { $0.id == plexTrackId }) else { return false }
 
-        guard let plexIndex = plexSubtitleTracks.firstIndex(where: { $0.id == plexTrackId }),
-              plexIndex < ffmpegSubs.count else {
-            print("[RivuletPlayer] Cannot map Plex track \(plexTrackId) to FFmpeg index " +
-                  "(plex subs=\(plexSubtitleTracks.count), ffmpeg subs=\(ffmpegSubs.count))")
-            return
+        let plexCodec = Self.normalizeSubCodec(plexTrack.codec)
+
+        // Count how many Plex subs with the same codec appear before the selected one.
+        // This gives us the "Nth track of this codec" position.
+        var sameCodecPosition = 0
+        for plex in plexSubtitleTracks {
+            if plex.id == plexTrackId { break }
+            if Self.normalizeSubCodec(plex.codec) == plexCodec {
+                sameCodecPosition += 1
+            }
         }
 
-        let ffmpegStreamIndex = ffmpegSubs[plexIndex].streamIndex
-        let ffmpegCodec = ffmpegSubs[plexIndex].codecName
-        print("[RivuletPlayer] Mapped Plex subtitle \(plexTrackId) → FFmpeg stream \(ffmpegStreamIndex) (\(ffmpegCodec))")
+        // Find the Nth FFmpeg sub with matching codec
+        var matchCount = 0
+        for ffmpeg in ffmpegSubs {
+            if Self.normalizeSubCodec(ffmpeg.codecName) == plexCodec {
+                if matchCount == sameCodecPosition {
+                    print("[RivuletPlayer] Mapped Plex subtitle \(plexTrackId) → FFmpeg stream \(ffmpeg.streamIndex) (\(ffmpeg.codecName))")
+                    pipeline.selectSubtitleStream(ffmpegStreamIndex: ffmpeg.streamIndex)
+                    return true
+                }
+                matchCount += 1
+            }
+        }
 
-        pipeline.selectSubtitleStream(ffmpegStreamIndex: ffmpegStreamIndex)
+        // No match — likely an external/sidecar subtitle not in the container
+        print("[RivuletPlayer] No FFmpeg match for Plex subtitle \(plexTrackId) " +
+              "(\(plexTrack.codec ?? "unknown") \(plexTrack.language ?? "")) — falling back to Plex URL")
+        return false
+    }
+
+    /// Normalize subtitle codec names between Plex and FFmpeg naming conventions.
+    private static func normalizeSubCodec(_ codec: String?) -> String {
+        guard let codec = codec?.lowercased() else { return "unknown" }
+        switch codec {
+        case "subrip", "srt": return "srt"
+        case "ass", "ssa": return "ass"
+        case "pgs", "hdmv_pgs_subtitle", "pgssub": return "pgs"
+        case "dvdsub", "dvd_subtitle": return "dvdsub"
+        case "mov_text", "tx3g": return "mov_text"
+        case "webvtt", "vtt": return "webvtt"
+        default: return codec
+        }
     }
 
     /// Disable embedded subtitle reading.

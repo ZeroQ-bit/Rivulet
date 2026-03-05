@@ -130,10 +130,17 @@ final class DirectPlayPipeline {
         if previousMaxVideoLookahead == nil {
             previousMaxVideoLookahead = renderer.maxVideoLookahead
         }
-        // Conversion sessions benefit from a larger cushion to absorb bursty EL-strip/
-        // demux cadence; non-conversion sessions prefer much tighter lookahead to
-        // avoid overfilling display-layer queues during startup.
-        renderer.maxVideoLookahead = enableDVConversion ? 1.2 : 0.35
+        // DV content needs larger lookahead because VideoToolbox's DV decoder has
+        // variable processing time, causing bursty isReadyForMoreMediaData waits.
+        // Conversion sessions need the most buffer; non-conversion DV still needs
+        // more than plain HEVC to absorb 200-300ms decode stalls.
+        if enableDVConversion {
+            renderer.maxVideoLookahead = 1.2
+        } else if isDolbyVision {
+            renderer.maxVideoLookahead = 0.6
+        } else {
+            renderer.maxVideoLookahead = 0.35
+        }
         print("[DirectPlay] Renderer lookahead set to \(String(format: "%.1f", renderer.maxVideoLookahead))s")
 
         print("[DirectPlay] Loading: \(url.lastPathComponent) (DV=\(isDolbyVision), conversion=\(enableDVConversion))")
@@ -383,10 +390,32 @@ final class DirectPlayPipeline {
 
     // MARK: - Audio Track Selection
 
-    func selectAudioTrack(streamIndex: Int32) throws {
+    func selectAudioTrack(streamIndex: Int32) async throws {
         guard let track = demuxer.audioTracks.first(where: { $0.streamIndex == streamIndex }) else {
             throw FFmpegError.invalidStream
         }
+
+        print("[DirectPlay] Switching audio to stream \(streamIndex) (\(track.codecName) \(track.channels)ch)")
+
+        // Pause the sync clock so it doesn't advance while the read loop is stopped.
+        // Without this, the clock drifts ahead during the restart gap, causing a
+        // cascade of "late video" frames when the new loop starts.
+        renderer.setRate(0)
+
+        // Stop the read loop — it captures audioDecoder/audioFD at startup,
+        // so we must restart it to pick up the new decoder configuration.
+        audioEnqueueTask?.cancel()
+        let oldAudioTask = audioEnqueueTask
+        audioEnqueueTask = nil
+        readTask?.cancel()
+        let oldTask = readTask
+        readTask = nil
+        await oldAudioTask?.value
+        await oldTask?.value
+
+        // Flush audio renderer and decoder
+        renderer.audioRenderer.flush()
+        _ = audioDecoder?.flushBatch()
 
         if codecNeedsClientDecode(track.codecName) {
             try demuxer.selectAudioStreamForClientDecode(index: streamIndex)
@@ -404,8 +433,12 @@ final class DirectPlayPipeline {
             try demuxer.selectAudioStream(index: streamIndex)
         }
 
-        // Flush audio renderer to switch cleanly
-        renderer.audioRenderer.flush()
+        // Restart read loop with preroll — the display layer's lookahead was
+        // partially drained during the restart gap, so we must rebuild video
+        // lead before resuming the clock. Without preroll, the clock runs ahead
+        // of the empty buffer and every frame arrives "late".
+        needsRateRestoreAfterSeek = isPlaying
+        startReadLoop()
     }
 
     // MARK: - Private: Read Loop
@@ -584,7 +617,7 @@ final class DirectPlayPipeline {
                         // If the render clock has run ahead of packet PTS, attempt bounded
                         // clock recovery; only drop in emergency stale-frame cases.
                         if !isFirstVideoFrame {
-                            let syncTime = await renderer.currentTime
+                            let syncTime = renderer.currentTime
                             let lateness = syncTime - packet.ptsSeconds
                             if lateness > lateVideoDropThreshold {
                                 lateVideoObservationCount += 1
@@ -849,7 +882,7 @@ final class DirectPlayPipeline {
                         }
 
                         if videoPacketCount % 240 == 0 {
-                            let syncTime = await renderer.currentTime
+                            let syncTime = renderer.currentTime
                             let syncMinusPTS = (syncTime - ptsSeconds) * 1000
                             let elapsedWall = nowWall - videoDiagStartWall
                             let streamElapsed = firstVideoPTSForDiag.map { ptsSeconds - $0 } ?? 0
@@ -877,35 +910,35 @@ final class DirectPlayPipeline {
                             )
                         }
 
-                        if let layerError = await renderer.displayLayerError {
-                            print("[DirectPlay] Display layer error after frame \(videoPacketCount): \(layerError)")
-                        }
+                        // Single MainActor hop for post-enqueue state updates
+                        // (state transition + paused-seek check + bufferedTime + layer error).
+                        let shouldStop = await MainActor.run { [weak self] () -> Bool in
+                            guard let self else { return false }
 
-                        await MainActor.run { [weak self] in
-                            guard let self else { return }
+                            if let layerError = renderer.displayLayerError {
+                                print("[DirectPlay] Display layer error after frame \(videoPacketCount): \(layerError)")
+                            }
+
                             if self.state == .seeking && self.isPlaying {
                                 self.state = .running
                                 self.onStateChange?(.running)
                             }
-                        }
 
-                        if isFirst {
-                            let shouldStop = await MainActor.run { [weak self] in
-                                guard let self, !self.isPlaying else { return false }
+                            self.bufferedTime = ptsSeconds
+
+                            if isFirst && !self.isPlaying {
                                 self.state = .paused
                                 self.onStateChange?(.paused)
                                 return true
                             }
-                            if shouldStop {
-                                exitReason = .pausedSeek
-                                break readLoop
-                            }
+                            return false
+                        }
+                        if shouldStop {
+                            exitReason = .pausedSeek
+                            break readLoop
                         }
 
                         isFirstVideoFrame = false
-                        await MainActor.run { [weak self] in
-                            self?.bufferedTime = ptsSeconds
-                        }
 
                     case .audio:
                         audioPacketCount += 1

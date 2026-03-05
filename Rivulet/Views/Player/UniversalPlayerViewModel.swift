@@ -2308,7 +2308,7 @@ final class UniversalPlayerViewModel: ObservableObject {
         } else if dvSampleBufferPlayer != nil {
             dvSampleBufferPlayer?.selectAudioTrack(id: id)
         } else if let rp = rivuletPlayer {
-            rp.selectAudioTrack(id: id)
+            rp.selectAudioTrack(plexTrackId: id, plexAudioTracks: audioTracks)
 
             // For HLS path, rebuild the Plex session with the new audio stream ID
             if rp.activePipeline == .hls {
@@ -2413,7 +2413,7 @@ final class UniversalPlayerViewModel: ObservableObject {
         } else if dvSampleBufferPlayer != nil {
             dvSampleBufferPlayer?.selectAudioTrack(id: id)
         } else if let rp = rivuletPlayer {
-            rp.selectAudioTrack(id: id)
+            rp.selectAudioTrack(plexTrackId: id, plexAudioTracks: audioTracks)
             if rp.activePipeline == .hls {
                 Task { await switchHLSAudioTrack(plexStreamId: id) }
             }
@@ -2475,13 +2475,19 @@ final class UniversalPlayerViewModel: ObservableObject {
                     self?.subtitleManager.addCue(text: text, startTime: start, endTime: end)
                 }
 
-                // Select the subtitle stream in the demuxer
-                rp.selectEmbeddedSubtitle(plexTrackId: trackId, plexSubtitleTracks: subtitleTracks)
-                return
+                // Select the subtitle stream in the demuxer.
+                // Returns false if the track is external (not in the container) —
+                // fall through to Plex URL fetch in that case.
+                if rp.selectEmbeddedSubtitle(plexTrackId: trackId, plexSubtitleTracks: subtitleTracks) {
+                    return
+                }
+
+                // Embedded mapping failed — clean up the callback before falling through
+                rp.onSubtitleCue = nil
             }
 
-            // No FFmpeg subtitle tracks — try Plex URL (external sidecar subs)
-            print("🎬 [Subtitles] No embedded subtitle tracks in FFmpeg, trying Plex URL for track \(trackId)")
+            // No embedded match — try Plex URL (external sidecar subs)
+            print("🎬 [Subtitles] Track \(trackId) not embedded in container, trying Plex URL")
         }
 
         loadSubtitleFromPlexURL(trackId: trackId, track: track)
