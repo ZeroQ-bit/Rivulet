@@ -32,12 +32,13 @@ struct SettingsSection<Content: View>: View {
 // MARK: - Settings Row (Navigation)
 
 struct SettingsRow: View {
-    let icon: String
-    let iconColor: Color
+    var icon: String? = nil
+    var iconColor: Color = .clear
     let title: String
     let subtitle: String
     let action: () -> Void
     var focusTrigger: Int? = nil  // When non-nil and changes, claim focus
+    var onFocusChange: ((Bool) -> Void)? = nil
 
     @FocusState private var isFocused: Bool
 
@@ -45,14 +46,16 @@ struct SettingsRow: View {
         Button(action: action) {
             HStack(spacing: 20) {
                 // Icon
-                ZStack {
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .fill(iconColor.gradient)
-                        .frame(width: 64, height: 64)
+                if let icon {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .fill(iconColor.gradient)
+                            .frame(width: 64, height: 64)
 
-                    Image(systemName: icon)
-                        .font(.system(size: 28, weight: .semibold))
-                        .foregroundStyle(.white)
+                        Image(systemName: icon)
+                            .font(.system(size: 28, weight: .semibold))
+                            .foregroundStyle(.white)
+                    }
                 }
 
                 // Text - white for dark glass background
@@ -61,9 +64,11 @@ struct SettingsRow: View {
                         .font(.system(size: 29, weight: .medium))
                         .foregroundStyle(.white)
 
-                    Text(subtitle)
-                        .font(.system(size: 23))
-                        .foregroundStyle(.white.opacity(0.6))
+                    if !subtitle.isEmpty {
+                        Text(subtitle)
+                            .font(.system(size: 23))
+                            .foregroundStyle(.white.opacity(0.6))
+                    }
                 }
 
                 Spacer()
@@ -94,6 +99,9 @@ struct SettingsRow: View {
             if newValue != nil {
                 isFocused = true
             }
+        }
+        .onChange(of: isFocused) { _, focused in
+            onFocusChange?(focused)
         }
         .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isFocused)
     }
@@ -132,25 +140,27 @@ struct SettingsInfoRow: View {
 // MARK: - Settings Toggle Row
 
 struct SettingsToggleRow<HelpContent: View>: View {
-    let icon: String
+    let icon: String?
     let iconColor: Color
     let title: String
     let subtitle: String
     @Binding var isOn: Bool
     let helpTitle: String?
     let helpContent: HelpContent?
+    var onFocusChange: ((Bool) -> Void)? = nil
 
     @FocusState private var isFocused: Bool
     @State private var showHelp = false
 
     /// Initialize with help content
     init(
-        icon: String,
-        iconColor: Color,
+        icon: String? = nil,
+        iconColor: Color = .clear,
         title: String,
         subtitle: String,
         isOn: Binding<Bool>,
         helpTitle: String?,
+        onFocusChange: ((Bool) -> Void)? = nil,
         @ViewBuilder helpContent: () -> HelpContent
     ) {
         self.icon = icon
@@ -160,6 +170,7 @@ struct SettingsToggleRow<HelpContent: View>: View {
         self._isOn = isOn
         self.helpTitle = helpTitle
         self.helpContent = helpContent()
+        self.onFocusChange = onFocusChange
     }
 
     var body: some View {
@@ -168,14 +179,16 @@ struct SettingsToggleRow<HelpContent: View>: View {
         } label: {
             HStack(spacing: 20) {
                 // Icon
-                ZStack {
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .fill(iconColor.gradient)
-                        .frame(width: 64, height: 64)
+                if let icon {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .fill(iconColor.gradient)
+                            .frame(width: 64, height: 64)
 
-                    Image(systemName: icon)
-                        .font(.system(size: 28, weight: .semibold))
-                        .foregroundStyle(.white)
+                        Image(systemName: icon)
+                            .font(.system(size: 28, weight: .semibold))
+                            .foregroundStyle(.white)
+                    }
                 }
 
                 // Text - white for dark glass background
@@ -185,9 +198,11 @@ struct SettingsToggleRow<HelpContent: View>: View {
                         .foregroundStyle(.white)
 
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(subtitle)
-                            .font(.system(size: 23))
-                            .foregroundStyle(.white.opacity(0.6))
+                        if !subtitle.isEmpty {
+                            Text(subtitle)
+                                .font(.system(size: 23))
+                                .foregroundStyle(.white.opacity(0.6))
+                        }
 
                         // Show help hint if help is available
                         if helpContent != nil {
@@ -225,6 +240,9 @@ struct SettingsToggleRow<HelpContent: View>: View {
         ))
         .focused($isFocused)
         .scaleEffect(isFocused ? 1.02 : 1.0)
+        .onChange(of: isFocused) { _, focused in
+            onFocusChange?(focused)
+        }
         .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isFocused)
         #if os(tvOS)
         .sheet(isPresented: $showHelp) {
@@ -241,11 +259,12 @@ struct SettingsToggleRow<HelpContent: View>: View {
 // Extension for SettingsToggleRow without help content
 extension SettingsToggleRow where HelpContent == EmptyView {
     init(
-        icon: String,
-        iconColor: Color,
+        icon: String? = nil,
+        iconColor: Color = .clear,
         title: String,
         subtitle: String,
-        isOn: Binding<Bool>
+        isOn: Binding<Bool>,
+        onFocusChange: ((Bool) -> Void)? = nil
     ) {
         self.icon = icon
         self.iconColor = iconColor
@@ -254,6 +273,7 @@ extension SettingsToggleRow where HelpContent == EmptyView {
         self._isOn = isOn
         self.helpTitle = nil
         self.helpContent = nil
+        self.onFocusChange = onFocusChange
     }
 }
 
@@ -521,6 +541,7 @@ struct SettingsActionRow: View {
     let title: String
     var isDestructive: Bool = false
     let action: () -> Void
+    var onFocusChange: ((Bool) -> Void)? = nil
 
     @FocusState private var isFocused: Bool
 
@@ -549,6 +570,9 @@ struct SettingsActionRow: View {
         .buttonStyle(SettingsButtonStyle())
         .focused($isFocused)
         .scaleEffect(isFocused ? 1.02 : 1.0)
+        .onChange(of: isFocused) { _, focused in
+            onFocusChange?(focused)
+        }
         .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isFocused)
     }
 }
@@ -556,12 +580,13 @@ struct SettingsActionRow: View {
 // MARK: - Settings Picker Row
 
 struct SettingsPickerRow<T: Hashable & CustomStringConvertible>: View {
-    let icon: String
-    let iconColor: Color
+    var icon: String? = nil
+    var iconColor: Color = .clear
     let title: String
     let subtitle: String
     @Binding var selection: T
     let options: [T]
+    var onFocusChange: ((Bool) -> Void)? = nil
 
     @FocusState private var isFocused: Bool
 
@@ -571,14 +596,16 @@ struct SettingsPickerRow<T: Hashable & CustomStringConvertible>: View {
         } label: {
             HStack(spacing: 20) {
                 // Icon
-                ZStack {
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .fill(iconColor.gradient)
-                        .frame(width: 64, height: 64)
+                if let icon {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .fill(iconColor.gradient)
+                            .frame(width: 64, height: 64)
 
-                    Image(systemName: icon)
-                        .font(.system(size: 28, weight: .semibold))
-                        .foregroundStyle(.white)
+                        Image(systemName: icon)
+                            .font(.system(size: 28, weight: .semibold))
+                            .foregroundStyle(.white)
+                    }
                 }
 
                 // Text
@@ -587,9 +614,11 @@ struct SettingsPickerRow<T: Hashable & CustomStringConvertible>: View {
                         .font(.system(size: 29, weight: .medium))
                         .foregroundStyle(.white)
 
-                    Text(subtitle)
-                        .font(.system(size: 23))
-                        .foregroundStyle(.white.opacity(0.6))
+                    if !subtitle.isEmpty {
+                        Text(subtitle)
+                            .font(.system(size: 23))
+                            .foregroundStyle(.white.opacity(0.6))
+                    }
                 }
 
                 Spacer()
@@ -616,6 +645,9 @@ struct SettingsPickerRow<T: Hashable & CustomStringConvertible>: View {
         .buttonStyle(SettingsButtonStyle())
         .focused($isFocused)
         .scaleEffect(isFocused ? 1.02 : 1.0)
+        .onChange(of: isFocused) { _, focused in
+            onFocusChange?(focused)
+        }
         .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isFocused)
     }
 
@@ -629,12 +661,13 @@ struct SettingsPickerRow<T: Hashable & CustomStringConvertible>: View {
 // MARK: - Settings List Picker Row (Popup Selection)
 
 struct SettingsListPickerRow<T: Hashable & CustomStringConvertible>: View {
-    let icon: String
-    let iconColor: Color
+    var icon: String? = nil
+    var iconColor: Color = .clear
     let title: String
     let subtitle: String
     @Binding var selection: T
     let options: [T]
+    var onFocusChange: ((Bool) -> Void)? = nil
 
     @FocusState private var isFocused: Bool
     @State private var showPicker = false
@@ -645,14 +678,16 @@ struct SettingsListPickerRow<T: Hashable & CustomStringConvertible>: View {
         } label: {
             HStack(spacing: 20) {
                 // Icon
-                ZStack {
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .fill(iconColor.gradient)
-                        .frame(width: 64, height: 64)
+                if let icon {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .fill(iconColor.gradient)
+                            .frame(width: 64, height: 64)
 
-                    Image(systemName: icon)
-                        .font(.system(size: 28, weight: .semibold))
-                        .foregroundStyle(.white)
+                        Image(systemName: icon)
+                            .font(.system(size: 28, weight: .semibold))
+                            .foregroundStyle(.white)
+                    }
                 }
 
                 // Text
@@ -661,9 +696,11 @@ struct SettingsListPickerRow<T: Hashable & CustomStringConvertible>: View {
                         .font(.system(size: 29, weight: .medium))
                         .foregroundStyle(.white)
 
-                    Text(subtitle)
-                        .font(.system(size: 23))
-                        .foregroundStyle(.white.opacity(0.6))
+                    if !subtitle.isEmpty {
+                        Text(subtitle)
+                            .font(.system(size: 23))
+                            .foregroundStyle(.white.opacity(0.6))
+                    }
                 }
 
                 Spacer()
@@ -696,6 +733,9 @@ struct SettingsListPickerRow<T: Hashable & CustomStringConvertible>: View {
         .buttonStyle(SettingsButtonStyle())
         .focused($isFocused)
         .scaleEffect(isFocused ? 1.02 : 1.0)
+        .onChange(of: isFocused) { _, focused in
+            onFocusChange?(focused)
+        }
         .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isFocused)
         .sheet(isPresented: $showPicker) {
             ListPickerSheet(
@@ -849,14 +889,15 @@ struct ConnectButton: View {
 
 /// A row that displays a title and current value, tapping opens a text entry sheet
 struct SettingsTextEntryRow: View {
-    let icon: String
-    let iconColor: Color
+    var icon: String? = nil
+    var iconColor: Color = .clear
     let title: String
     @Binding var value: String
     var placeholder: String = ""
     var hint: String? = nil
     var suggestions: [TextEntrySuggestion] = []
     var keyboardType: UIKeyboardType = .default
+    var onFocusChange: ((Bool) -> Void)? = nil
 
     @FocusState private var isFocused: Bool
     @State private var showEntrySheet = false
@@ -867,14 +908,16 @@ struct SettingsTextEntryRow: View {
         } label: {
             HStack(spacing: 20) {
                 // Icon
-                ZStack {
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .fill(iconColor.gradient)
-                        .frame(width: 64, height: 64)
+                if let icon {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .fill(iconColor.gradient)
+                            .frame(width: 64, height: 64)
 
-                    Image(systemName: icon)
-                        .font(.system(size: 28, weight: .semibold))
-                        .foregroundStyle(.white)
+                        Image(systemName: icon)
+                            .font(.system(size: 28, weight: .semibold))
+                            .foregroundStyle(.white)
+                    }
                 }
 
                 // Text
@@ -920,6 +963,9 @@ struct SettingsTextEntryRow: View {
         .buttonStyle(SettingsButtonStyle())
         .focused($isFocused)
         .scaleEffect(isFocused ? 1.02 : 1.0)
+        .onChange(of: isFocused) { _, focused in
+            onFocusChange?(focused)
+        }
         .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isFocused)
         .fullScreenCover(isPresented: $showEntrySheet) {
             TextEntrySheet(
@@ -1117,7 +1163,7 @@ struct TextEntrySheet: View {
             }
             .padding(.horizontal, 80)
         }
-        .preferredColorScheme(.dark)
+        // Use system appearance
         .onAppear {
             editingText = text
             // Focus the first suggestion if available, otherwise the text field
@@ -1134,6 +1180,49 @@ struct TextEntrySheet: View {
             isPresented = false
         }
         #endif
+    }
+}
+
+// MARK: - Settings Back Row
+
+/// A back-navigation row for sub-pages (chevron.left + title)
+struct SettingsBackRow: View {
+    let title: String
+    let action: () -> Void
+
+    @FocusState private var isFocused: Bool
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 12) {
+                Image(systemName: "chevron.left")
+                    .font(.system(size: 22, weight: .semibold))
+                    .foregroundStyle(isFocused ? .white.opacity(0.8) : .white.opacity(0.4))
+
+                Text(title)
+                    .font(.system(size: 29, weight: .medium))
+                    .foregroundStyle(.white)
+
+                Spacer()
+            }
+            .padding(.horizontal, 24)
+            .padding(.vertical, 20)
+            .background(
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(isFocused ? .white.opacity(0.18) : .white.opacity(0.08))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            .strokeBorder(
+                                isFocused ? .white.opacity(0.25) : .white.opacity(0.08),
+                                lineWidth: 1
+                            )
+                    )
+            )
+        }
+        .buttonStyle(SettingsButtonStyle())
+        .focused($isFocused)
+        .scaleEffect(isFocused ? 1.02 : 1.0)
+        .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isFocused)
     }
 }
 

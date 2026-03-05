@@ -164,5 +164,4 @@ final class AVPlayerUIView: UIView {
 #Preview {
     AVPlayerView(playerWrapper: AVPlayerWrapper())
         .frame(width: 400, height: 300)
-        .background(Color.black)
 }

@@ -126,7 +126,7 @@ struct PlexSearchView: View {
             }
         }
         #if os(tvOS)
-        .padding(.horizontal, 80)
+        .padding(.horizontal, ScaledDimensions.rowHorizontalPadding)
         .padding(.top, 16)
         #else
         .padding(.horizontal, 32)
@@ -718,5 +718,4 @@ private struct FlowLayout: Layout {
 
 #Preview {
     PlexSearchView()
-        .preferredColorScheme(.dark)
 }

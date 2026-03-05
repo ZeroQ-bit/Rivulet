@@ -7,22 +7,6 @@
 
 import SwiftUI
 
-// MARK: - Conditional Clip Shape
-
-/// ViewModifier that conditionally applies a rounded rectangle clip shape.
-/// Used to avoid double-clipping when ParallaxLayerStack handles its own clipping.
-private struct ConditionalClipShape: ViewModifier {
-    let shouldClip: Bool
-    let cornerRadius: CGFloat
-
-    func body(content: Content) -> some View {
-        if shouldClip {
-            content.clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
-        } else {
-            content
-        }
-    }
-}
 
 // MARK: - Card Button Style (tvOS - minimal, no focus ring)
 
@@ -86,7 +70,6 @@ struct MediaPosterCard: View, Equatable {
     let authToken: String
 
     @Environment(\.uiScale) private var scale
-    @AppStorage("posterDepthEffect") private var posterDepthEffect = true
 
     // Equatable: only re-render if the item's key data changes
     // Note: viewOffset excluded - it changes during playback and would cause excessive re-renders
@@ -128,11 +111,7 @@ struct MediaPosterCard: View, Equatable {
                 .overlay {
                     progressBarOverlay
                 }
-                // Only clip if not using depth effect (ParallaxLayerStack handles its own clipping)
-                .modifier(ConditionalClipShape(
-                    shouldClip: !posterDepthEffect,
-                    cornerRadius: cornerRadius
-                ))
+                .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
                 #if os(tvOS)
                 .hoverEffect(.highlight)  // Native tvOS focus effect on poster
                 // Simple shadow using .shadow() - more efficient than blur during animations
@@ -170,20 +149,7 @@ struct MediaPosterCard: View, Equatable {
 
     @ViewBuilder
     private var posterImage: some View {
-        #if os(tvOS)
-        if posterDepthEffect {
-            ParallaxPosterImage(
-                url: posterURL,
-                width: posterWidth,
-                height: posterHeight,
-                cornerRadius: cornerRadius
-            )
-        } else {
-            standardPosterImage
-        }
-        #else
         standardPosterImage
-        #endif
     }
 
     private var standardPosterImage: some View {

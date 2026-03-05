@@ -1,0 +1,235 @@
+//
+//  SettingsDescriptors.swift
+//  Rivulet
+//
+//  Per-setting descriptors for the split settings left panel
+//
+
+import SwiftUI
+
+// MARK: - Setting Descriptor
+
+struct SettingDescriptor {
+    let icon: String
+    let iconColor: Color
+    let description: String
+}
+
+// MARK: - Descriptor Store
+
+enum SettingsDescriptorStore {
+    static func descriptor(for id: String) -> SettingDescriptor? {
+        descriptors[id]
+    }
+
+    private static let descriptors: [String: SettingDescriptor] = [
+        // MARK: Root Categories
+        "cat_appearance": SettingDescriptor(
+            icon: "paintbrush.fill",
+            iconColor: .purple,
+            description: "Customize how Rivulet looks — display size, hero banners, sidebar libraries, and content discovery rows."
+        ),
+        "cat_playback": SettingDescriptor(
+            icon: "play.fill",
+            iconColor: .blue,
+            description: "Configure audio, subtitles, skip behavior, autoplay, and video player options."
+        ),
+        "cat_liveTV": SettingDescriptor(
+            icon: "tv.fill",
+            iconColor: .green,
+            description: "Manage Live TV sources, layout preferences, multiview settings, and channel display options."
+        ),
+        "cat_servers": SettingDescriptor(
+            icon: "server.rack",
+            iconColor: .orange,
+            description: "Manage your Plex server connection and user profiles."
+        ),
+        "cat_about": SettingDescriptor(
+            icon: "info.circle.fill",
+            iconColor: .gray,
+            description: "App version, changelog, and other information about Rivulet."
+        ),
+
+        // MARK: Appearance
+        "libraries": SettingDescriptor(
+            icon: "sidebar.squares.left",
+            iconColor: .purple,
+            description: "Choose which libraries appear in the sidebar and set their display order."
+        ),
+        "displaySize": SettingDescriptor(
+            icon: "textformat.size",
+            iconColor: .orange,
+            description: "Scale all interface elements up or down. Useful for different TV sizes and viewing distances."
+        ),
+
+        "homeHero": SettingDescriptor(
+            icon: "sparkles.rectangle.stack",
+            iconColor: .indigo,
+            description: "Shows a large featured content banner at the top of the Home screen with artwork and quick actions."
+        ),
+        "libraryHero": SettingDescriptor(
+            icon: "rectangle.stack",
+            iconColor: .teal,
+            description: "Shows a featured content banner at the top of each library with highlighted picks."
+        ),
+        "discoveryRows": SettingDescriptor(
+            icon: "square.stack.3d.up",
+            iconColor: .cyan,
+            description: "Adds discovery rows like Top Rated, Rediscover, and Similar Items to help you find things to watch."
+        ),
+        "recentRows": SettingDescriptor(
+            icon: "clock.arrow.trianglehead.counterclockwise.rotate.90",
+            iconColor: .blue,
+            description: "Shows Recently Added and Recently Released rows in each library."
+        ),
+        "personalizedRecs": SettingDescriptor(
+            icon: "person.3",
+            iconColor: .mint,
+            description: "Uses TMDB metadata and your watch history to surface personalized recommendations of unwatched content."
+        ),
+
+        // MARK: Playback
+        "audioLanguage": SettingDescriptor(
+            icon: "waveform",
+            iconColor: .cyan,
+            description: "Sets the preferred language for audio tracks. When available, this language will be selected automatically."
+        ),
+        "subtitles": SettingDescriptor(
+            icon: "captions.bubble",
+            iconColor: .yellow,
+            description: "Sets the preferred language for subtitles. Choose Off to disable automatic subtitle selection."
+        ),
+        "showSkipButton": SettingDescriptor(
+            icon: "forward.fill",
+            iconColor: .blue,
+            description: "Shows a skip button when intro, credits, or ad markers are detected during playback."
+        ),
+        "showMarkers": SettingDescriptor(
+            icon: "timeline.selection",
+            iconColor: .yellow,
+            description: "Highlights intro, credits, and advertisement segments on the progress bar during playback."
+        ),
+        "autoSkipIntro": SettingDescriptor(
+            icon: "play.circle",
+            iconColor: .green,
+            description: "Automatically skips TV show intros when markers are available. No button press needed."
+        ),
+        "autoSkipCredits": SettingDescriptor(
+            icon: "stop.circle",
+            iconColor: .orange,
+            description: "Automatically skips end credits when markers are available, going straight to the post-play screen."
+        ),
+        "autoSkipAds": SettingDescriptor(
+            icon: "forward.frame",
+            iconColor: .red,
+            description: "Automatically skips advertisement segments when markers are available."
+        ),
+        "autoplayCountdown": SettingDescriptor(
+            icon: "forward.end.alt",
+            iconColor: .purple,
+            description: "How long to wait before automatically playing the next episode. Set to Off to disable autoplay."
+        ),
+        "highQualityScaling": SettingDescriptor(
+            icon: "sparkles.tv",
+            iconColor: .pink,
+            description: "Enables EWA Lanczos upscaling for sharper 720p/1080p content on your 4K display. Uses slightly more GPU power. Press and hold to learn more."
+        ),
+        "avPlayerDV": SettingDescriptor(
+            icon: "sparkles.tv",
+            iconColor: .purple,
+            description: "Uses Apple's native player for Dolby Vision content, enabling true DV playback with proper TV mode switching. Press and hold to learn more."
+        ),
+        "avPlayerAll": SettingDescriptor(
+            icon: "play.rectangle",
+            iconColor: .blue,
+            description: "Uses Apple's native player for all content. Your Plex server will remux incompatible containers. Press and hold to learn more."
+        ),
+        "rivuletPlayer": SettingDescriptor(
+            icon: "waveform.badge.magnifyingglass",
+            iconColor: .orange,
+            description: "Experimental native player built on AVSampleBufferDisplayLayer and VideoToolbox. True direct play for all containers. Press and hold to learn more."
+        ),
+
+        // MARK: Live TV
+        "liveTVAboveLibraries": SettingDescriptor(
+            icon: "arrow.up.arrow.down",
+            iconColor: .cyan,
+            description: "Moves the Live TV section above your Media libraries in the sidebar for quicker access."
+        ),
+        "classicTVMode": SettingDescriptor(
+            icon: "tv.fill",
+            iconColor: .indigo,
+            description: "Hides player controls during live TV for a traditional television experience. Swipe up to show controls."
+        ),
+        "combineSources": SettingDescriptor(
+            icon: "square.stack.3d.down.right",
+            iconColor: .purple,
+            description: "Shows all Live TV sources in a single combined Channels view, or gives each source its own sidebar entry."
+        ),
+        "defaultLayout": SettingDescriptor(
+            icon: "tv",
+            iconColor: .green,
+            description: "Choose between the channel grid layout or the TV guide layout as your default Live TV view."
+        ),
+        "confirmExitMultiview": SettingDescriptor(
+            icon: "rectangle.split.2x2",
+            iconColor: .blue,
+            description: "Shows a confirmation dialog before closing multiview mode to prevent accidentally ending multiple streams."
+        ),
+        "allowFourStreams": SettingDescriptor(
+            icon: "rectangle.split.2x2.fill",
+            iconColor: .orange,
+            description: "Enables 3 and 4 stream multiview layouts. Warning: 4 streams may cause instability on some devices."
+        ),
+
+        // MARK: Storage
+        "cache": SettingDescriptor(
+            icon: "internaldrive",
+            iconColor: .gray,
+            description: "View storage usage and manage cached images, metadata, and other temporary data."
+        ),
+
+        // MARK: Servers
+        "plexServer": SettingDescriptor(
+            icon: "server.rack",
+            iconColor: .orange,
+            description: "Manage your Plex server connection, view server details, or sign out."
+        ),
+        "userProfiles": SettingDescriptor(
+            icon: "person.crop.circle",
+            iconColor: .cyan,
+            description: "Switch between Plex Home user profiles. Each profile has its own watch history and preferences."
+        ),
+        "liveTVSources": SettingDescriptor(
+            icon: "tv.and.mediabox",
+            iconColor: .blue,
+            description: "Add and manage Live TV sources including Plex Live TV and M3U playlists."
+        ),
+
+        // MARK: About
+        "changelog": SettingDescriptor(
+            icon: "list.bullet.rectangle",
+            iconColor: .blue,
+            description: "See what's new in this version of Rivulet."
+        ),
+    ]
+
+    // MARK: - Page Descriptors
+
+    /// Icon and title for each settings page (shown in left panel header)
+    static func pageInfo(for page: SettingsPage) -> (icon: String, color: Color) {
+        switch page {
+        case .root: return ("gearshape.fill", .gray)
+        case .appearance: return ("paintbrush.fill", .purple)
+        case .playback: return ("play.fill", .blue)
+        case .liveTV: return ("tv.fill", .green)
+        case .servers: return ("server.rack", .orange)
+        case .about: return ("info.circle.fill", .gray)
+        case .plex: return ("server.rack", .orange)
+        case .iptv: return ("tv.and.mediabox", .blue)
+        case .libraries: return ("sidebar.squares.left", .purple)
+        case .cache: return ("internaldrive", .gray)
+        case .userProfiles: return ("person.crop.circle", .cyan)
+        }
+    }
+}

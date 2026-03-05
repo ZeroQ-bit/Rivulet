@@ -8,6 +8,7 @@
 import SwiftUI
 
 struct UserProfileSettingsView: View {
+    @Binding var focusedSettingId: String?
     @StateObject private var profileManager = PlexUserProfileManager.shared
     @State private var showPinEntry = false
     @State private var selectedUserForPin: PlexHomeUser?
@@ -17,90 +18,78 @@ struct UserProfileSettingsView: View {
     @State private var userToForgetPin: PlexHomeUser?
     @FocusState private var focusedUserId: Int?
 
+    init(focusedSettingId: Binding<String?> = .constant(nil)) {
+        self._focusedSettingId = focusedSettingId
+    }
+
     var body: some View {
-        ScrollView(.vertical, showsIndicators: false) {
-            VStack(alignment: .leading, spacing: 32) {
-                // Header
-                Text("User Profiles")
-                    .font(.system(size: 56, weight: .bold))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 80)
-                    .padding(.top, 60)
+        VStack(spacing: 24) {
+            if profileManager.isLoadingUsers {
+                // Loading state
+                VStack(spacing: 20) {
+                    ProgressView()
+                        .scaleEffect(1.5)
+                    Text("Loading profiles...")
+                        .font(.system(size: 26))
+                        .foregroundStyle(.white.opacity(0.6))
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 60)
+            } else if profileManager.homeUsers.isEmpty {
+                // No profiles
+                VStack(spacing: 20) {
+                    Image(systemName: "person.crop.circle")
+                        .font(.system(size: 80, weight: .thin))
+                        .foregroundStyle(.white.opacity(0.5))
 
-                VStack(spacing: 24) {
-                    if profileManager.isLoadingUsers {
-                        // Loading state
-                        VStack(spacing: 20) {
-                            ProgressView()
-                                .scaleEffect(1.5)
-                            Text("Loading profiles...")
-                                .font(.system(size: 26))
-                                .foregroundStyle(.white.opacity(0.6))
-                        }
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 60)
-                    } else if profileManager.homeUsers.isEmpty {
-                        // No profiles (single user or error)
-                        VStack(spacing: 20) {
-                            Image(systemName: "person.crop.circle")
-                                .font(.system(size: 80, weight: .thin))
-                                .foregroundStyle(.white.opacity(0.5))
+                    Text("No Plex Home")
+                        .font(.system(size: 32, weight: .semibold))
+                        .foregroundStyle(.white)
 
-                            Text("No Plex Home")
-                                .font(.system(size: 32, weight: .semibold))
-                                .foregroundStyle(.white)
-
-                            Text("Plex Home is not set up for this account.\nYou can create managed users on plex.tv.")
-                                .font(.system(size: 24))
-                                .foregroundStyle(.white.opacity(0.6))
-                                .multilineTextAlignment(.center)
-                        }
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 60)
-                    } else {
-                        // Current profile card
-                        if let currentUser = profileManager.selectedUser {
-                            SettingsSection(title: "Current Profile") {
-                                CurrentProfileCard(user: currentUser)
-                            }
-                        }
-
-                        // Available profiles
-                        SettingsSection(title: "Available Profiles") {
-                            ForEach(profileManager.homeUsers) { user in
-                                ProfileRow(
-                                    user: user,
-                                    isSelected: user.id == profileManager.selectedUser?.id,
-                                    isLoading: isLoading && selectedUserForPin?.id == user.id,
-                                    isFocused: focusedUserId == user.id,
-                                    hasRememberedPin: profileManager.usersWithRememberedPins.contains(user.uuid)
-                                ) {
-                                    selectProfile(user)
-                                } onForgetPin: {
-                                    userToForgetPin = user
-                                    showForgetPinConfirmation = true
-                                }
-                                .focused($focusedUserId, equals: user.id)
-                            }
-                        }
-
-                        // Settings
-                        SettingsSection(title: "Behavior") {
-                            SettingsToggleRow(
-                                icon: "person.2.square.stack",
-                                iconColor: .purple,
-                                title: "Profile Picker on Launch",
-                                subtitle: "Choose profile when app opens",
-                                isOn: $profileManager.showProfilePickerOnLaunch
-                            )
-                        }
+                    Text("Plex Home is not set up for this account.\nYou can create managed users on plex.tv.")
+                        .font(.system(size: 24))
+                        .foregroundStyle(.white.opacity(0.6))
+                        .multilineTextAlignment(.center)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 60)
+            } else {
+                // Current profile card
+                if let currentUser = profileManager.selectedUser {
+                    SettingsSection(title: "Current Profile") {
+                        CurrentProfileCard(user: currentUser)
                     }
                 }
-                .padding(.horizontal, 80)
-                .padding(.bottom, 80)
+
+                // Available profiles
+                SettingsSection(title: "Available Profiles") {
+                    ForEach(profileManager.homeUsers) { user in
+                        ProfileRow(
+                            user: user,
+                            isSelected: user.id == profileManager.selectedUser?.id,
+                            isLoading: isLoading && selectedUserForPin?.id == user.id,
+                            isFocused: focusedUserId == user.id,
+                            hasRememberedPin: profileManager.usersWithRememberedPins.contains(user.uuid)
+                        ) {
+                            selectProfile(user)
+                        } onForgetPin: {
+                            userToForgetPin = user
+                            showForgetPinConfirmation = true
+                        }
+                        .focused($focusedUserId, equals: user.id)
+                    }
+                }
+
+                // Settings
+                SettingsSection(title: "Behavior") {
+                    SettingsToggleRow(
+                        title: "Profile Picker on Launch",
+                        subtitle: "Choose profile when app opens",
+                        isOn: $profileManager.showProfilePickerOnLaunch
+                    )
+                }
             }
         }
-        .background(Color.black)
         .sheet(isPresented: $showPinEntry) {
             if let user = selectedUserForPin {
                 PinEntrySheet(
@@ -135,7 +124,6 @@ struct UserProfileSettingsView: View {
             Text("You'll need to enter the PIN manually next time you switch to \(user.displayName).")
         }
         .onAppear {
-            // Focus first profile if none focused
             if focusedUserId == nil, let first = profileManager.homeUsers.first {
                 focusedUserId = first.id
             }
@@ -144,7 +132,6 @@ struct UserProfileSettingsView: View {
 
     private func selectProfile(_ user: PlexHomeUser) {
         if user.requiresPin {
-            // Try remembered PIN first
             if profileManager.hasRememberedPin(for: user) {
                 Task {
                     isLoading = true
@@ -155,7 +142,6 @@ struct UserProfileSettingsView: View {
                         selectedUserForPin = nil
                     } else {
                         isLoading = false
-                        // Show PIN entry with error if PIN was invalid
                         pinEntryError = pinWasInvalid ? "Saved PIN is no longer valid. Please enter your PIN." : nil
                         showPinEntry = true
                     }
@@ -203,7 +189,6 @@ private struct CurrentProfileCard: View {
 
     var body: some View {
         HStack(spacing: 20) {
-            // Avatar
             ProfileAvatar(user: user, size: 80)
 
             VStack(alignment: .leading, spacing: 6) {
@@ -257,10 +242,8 @@ private struct ProfileRow: View {
     var body: some View {
         Button(action: onSelect) {
             HStack(spacing: 20) {
-                // Avatar
                 ProfileAvatar(user: user, size: 64)
 
-                // Info
                 VStack(alignment: .leading, spacing: 4) {
                     Text(user.displayName)
                         .font(.system(size: 28, weight: .medium))
@@ -293,7 +276,6 @@ private struct ProfileRow: View {
 
                 Spacer()
 
-                // Status indicator
                 if isLoading {
                     ProgressView()
                         .scaleEffect(0.8)
@@ -379,7 +361,6 @@ private struct ProfileAvatar: View {
     }
 
     private var profileColor: Color {
-        // Generate a consistent color based on user ID
         let colors: [Color] = [.blue, .purple, .pink, .orange, .green, .teal, .indigo]
         return colors[abs(user.id) % colors.count]
     }
@@ -443,7 +424,7 @@ struct PinEntrySheet: View {
                 HStack(spacing: 20) {
                     ForEach(0..<4, id: \.self) { index in
                         PinDigitView(
-                            digit: pin.count > index ? "•" : "",
+                            digit: pin.count > index ? "\u{2022}" : "",
                             isFilled: pin.count > index
                         )
                     }
@@ -493,7 +474,7 @@ struct PinEntrySheet: View {
         }
         .padding(60)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(white: 0.12))
+        .background(.clear)
         .onExitCommand {
             onCancel()
         }

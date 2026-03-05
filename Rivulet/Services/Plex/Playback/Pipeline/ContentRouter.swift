@@ -24,6 +24,36 @@ enum PlaybackRoute: Sendable, CustomStringConvertible {
     }
 }
 
+/// Playback policy for routed startup and fallback behavior.
+enum PlaybackPolicy: String, Sendable {
+    case directPlayFirst
+
+    static let `default`: PlaybackPolicy = .directPlayFirst
+}
+
+/// Classification of direct-play failures used for fallback decisions and diagnostics.
+enum DirectPlayFailureKind: String, Sendable {
+    case unsupportedCodec
+    case demuxInit
+    case decodeInit
+    case runtimeFatal
+    case network
+    case unknown
+}
+
+/// Playback startup plan with primary route, fallback routes, and routing reasons.
+struct PlaybackPlan: Sendable, CustomStringConvertible {
+    let policy: PlaybackPolicy
+    let primary: PlaybackRoute
+    let fallbacks: [PlaybackRoute]
+    let reasoning: [String]
+
+    var description: String {
+        let fallbackSummary = fallbacks.map(\.description).joined(separator: ",")
+        return "policy=\(policy.rawValue) primary=\(primary.description) fallbacks=[\(fallbackSummary)]"
+    }
+}
+
 /// Content routing configuration
 struct ContentRoutingContext: Sendable {
     let metadata: PlexMetadata
@@ -38,6 +68,9 @@ struct ContentRoutingContext: Sendable {
 
     /// Whether DV profile conversion is needed
     var requiresProfileConversion: Bool = false
+
+    /// Preferred playback policy. Defaults to direct-play-first for VOD.
+    var playbackPolicy: PlaybackPolicy = .default
 }
 
 /// Analyzes media metadata to choose the optimal playback pipeline.
@@ -74,53 +107,88 @@ struct ContentRouter {
 
     // MARK: - Route Decision
 
-    /// Determine the playback route for the given content.
+    /// Determine the primary playback route for the given content.
+    /// Maintained for compatibility with existing call sites.
     static func route(for context: ContentRoutingContext) -> PlaybackRoute {
+        plan(for: context).primary
+    }
+
+    /// Determine the playback startup/fallback plan for the given content.
+    static func plan(for context: ContentRoutingContext) -> PlaybackPlan {
         let audioCodec = primaryAudioCodec(from: context.metadata) ?? "unknown"
         let container = context.metadata.Media?.first?.container ?? "unknown"
+        var reasoning: [String] = []
 
         // Live TV always uses HLS
         if context.isLiveTV {
+            reasoning.append("live_tv_requires_hls")
+            let hls = buildHLSRoute(context: context)
             print("[ContentRouter] \(container) | audio=\(audioCodec) → HLS (live TV)")
-            return buildHLSRoute(context: context)
+            return PlaybackPlan(
+                policy: context.playbackPolicy,
+                primary: hls,
+                fallbacks: [],
+                reasoning: reasoning
+            )
         }
 
         // Force HLS fallback
         if context.forceHLS {
+            reasoning.append("force_hls_requested")
+            let hls = buildHLSRoute(context: context)
             print("[ContentRouter] \(container) | audio=\(audioCodec) → HLS (forced)")
-            return buildHLSRoute(context: context)
+            return PlaybackPlan(
+                policy: context.playbackPolicy,
+                primary: hls,
+                fallbacks: [],
+                reasoning: reasoning
+            )
         }
 
         // FFmpeg not available — can't do direct play
         if !FFmpegDemuxer.isAvailable {
+            reasoning.append("ffmpeg_unavailable")
+            let hls = buildHLSRoute(context: context)
             print("[ContentRouter] \(container) | audio=\(audioCodec) → HLS (FFmpeg unavailable)")
-            return buildHLSRoute(context: context)
+            return PlaybackPlan(
+                policy: context.playbackPolicy,
+                primary: hls,
+                fallbacks: [],
+                reasoning: reasoning
+            )
         }
 
-        // If audio requires transcode (DTS/TrueHD), check if we can decode client-side first.
-        // DV content needing profile conversion is allowed — the DirectPlay pipeline uses a
-        // buffered video conversion task that decouples conversion from the read loop, with
-        // auto-fallback to HDR10 if conversion can't sustain real-time throughput.
-        if requiresTranscode(audioCodec: audioCodec) {
-            if isClientDecodable(audioCodec: audioCodec) && FFmpegAudioDecoder.isAvailable {
-                let dvNote = context.requiresProfileConversion ? " + DV conversion" : ""
-                print("[ContentRouter] \(container) | audio=\(audioCodec)\(dvNote) → DirectPlay (client-side audio decode)")
-                return buildDirectPlayRoute(context: context)
+        // Direct-play-first policy for VOD:
+        // if we can build a direct-play URL, try it first regardless of audio codec.
+        if let direct = buildDirectPlayRouteIfPossible(context: context) {
+            reasoning.append("direct_play_first_vod")
+            let hlsFallback = buildHLSRoute(context: context)
+            if requiresTranscode(audioCodec: audioCodec) {
+                reasoning.append("audio_codec_client_decode_expected:\(audioCodec)")
+            } else if !isNativeAudioCodec(audioCodec) {
+                reasoning.append("audio_codec_unverified_but_direct_play_attempted:\(audioCodec)")
+            } else {
+                reasoning.append("audio_codec_native:\(audioCodec)")
             }
-            print("[ContentRouter] \(container) | audio=\(audioCodec) → HLS (audio needs transcode)")
-            return buildHLSRoute(context: context)
+            print("[ContentRouter] \(container) | audio=\(audioCodec) → DirectPlay (policy=\(context.playbackPolicy.rawValue), fallback=HLS)")
+            return PlaybackPlan(
+                policy: context.playbackPolicy,
+                primary: direct,
+                fallbacks: [hlsFallback],
+                reasoning: reasoning
+            )
         }
 
-        // Keep direct play only for codecs verified as native on this OS.
-        // If codec support is uncertain, prefer Plex audio remux/transcode.
-        if !isNativeAudioCodec(audioCodec) {
-            print("[ContentRouter] \(container) | audio=\(audioCodec) → HLS (audio codec not verified on current tvOS)")
-            return buildHLSRoute(context: context)
-        }
-
-        // Audio is compatible — use direct play via FFmpeg
-        print("[ContentRouter] \(container) | audio=\(audioCodec) → DirectPlay")
-        return buildDirectPlayRoute(context: context)
+        // Hard blocker: no direct-play source available.
+        reasoning.append("direct_play_source_unavailable")
+        let hls = buildHLSRoute(context: context)
+        print("[ContentRouter] \(container) | audio=\(audioCodec) → HLS (no direct-play source)")
+        return PlaybackPlan(
+            policy: context.playbackPolicy,
+            primary: hls,
+            fallbacks: [],
+            reasoning: reasoning
+        )
     }
 
     /// Check if a specific audio codec requires server-side transcode.
@@ -180,13 +248,12 @@ struct ContentRouter {
 
     // MARK: - Private: Route Building
 
-    private static func buildDirectPlayRoute(context: ContentRoutingContext) -> PlaybackRoute {
+    private static func buildDirectPlayRouteIfPossible(context: ContentRoutingContext) -> PlaybackRoute? {
         // Build direct play URL: raw file access via Plex
         // Uses the part key to get the raw file bytes
         guard let media = context.metadata.Media?.first,
               let part = media.Part?.first else {
-            // No media info — fall back to HLS
-            return buildHLSRoute(context: context)
+            return nil
         }
 
         var components = URLComponents(url: context.serverURL, resolvingAgainstBaseURL: false)!
@@ -198,7 +265,7 @@ struct ContentRouter {
         components.queryItems = queryItems
 
         guard let url = components.url else {
-            return buildHLSRoute(context: context)
+            return nil
         }
 
         // Also pass auth in headers for redundancy
@@ -218,29 +285,4 @@ struct ContentRouter {
         return .hls(url: context.serverURL, headers: ["X-Plex-Token": context.authToken])
     }
 
-    // MARK: - Diagnostic Info
-
-    /// Human-readable explanation of why a particular route was chosen.
-    static func routingExplanation(for context: ContentRoutingContext) -> String {
-        if context.isLiveTV {
-            return "Live TV → HLS (already HLS from source)"
-        }
-        if context.forceHLS {
-            return "Forced HLS fallback"
-        }
-
-        let audioCodec = primaryAudioCodec(from: context.metadata) ?? "unknown"
-        if requiresTranscode(audioCodec: audioCodec) {
-            if isClientDecodable(audioCodec: audioCodec) && FFmpegAudioDecoder.isAvailable {
-                let dvNote = context.requiresProfileConversion ? " + DV conversion (buffered)" : ""
-                return "\(audioCodec) audio decoded client-side\(dvNote) → DirectPlay (FFmpeg decodes to PCM)"
-            }
-            return "\(audioCodec) audio requires transcode → HLS (Plex transcodes audio, copies video)"
-        }
-        if !isNativeAudioCodec(audioCodec) {
-            return "\(audioCodec) audio support uncertain on current tvOS → HLS (prefer built-in pipeline compatibility)"
-        }
-
-        return "\(audioCodec) audio natively supported → DirectPlay (FFmpeg demuxes, VideoToolbox decodes)"
-    }
 }

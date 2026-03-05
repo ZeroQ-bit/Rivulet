@@ -475,6 +475,14 @@ final class UniversalPlayerViewModel: ObservableObject {
     private let allowAudioDirectStream: Bool
     /// Plex transcode session ID, extracted from HLS stream URL for cleanup on stop
     private var plexSessionId: String?
+    /// Playback startup/fallback plan for Rivulet direct-play-first policy.
+    private var playbackPlan: PlaybackPlan?
+    /// Optional prebuilt HLS fallback URL/headers to reduce fallback startup latency.
+    private var rivuletFallbackURL: URL?
+    private var rivuletFallbackHeaders: [String: String] = [:]
+    /// One-shot direct-play -> HLS fallback guards (prevents loops).
+    private var hasAttemptedRivuletHLSFallback = false
+    private var isAttemptingRivuletHLSFallback = false
 
     // MARK: - Shuffled Queue
 
@@ -699,59 +707,48 @@ final class UniversalPlayerViewModel: ObservableObject {
                 metadata: metadata,
                 serverURL: URL(string: serverURL)!,
                 authToken: authToken,
-                requiresProfileConversion: requiresProfileConversion
+                requiresProfileConversion: requiresProfileConversion,
+                playbackPolicy: .directPlayFirst
             )
-            let route = ContentRouter.route(for: routingContext)
+            let plan = ContentRouter.plan(for: routingContext)
+            playbackPlan = plan
+            rivuletFallbackURL = nil
+            rivuletFallbackHeaders = [:]
 
-            switch route {
-            case .directPlay(_, _):
-                // Build direct play URL (raw file access)
-                if let partKey = metadata.Media?.first?.Part?.first?.key {
-                    streamURL = networkManager.buildVLCDirectPlayURL(
-                        serverURL: serverURL,
-                        authToken: authToken,
-                        partKey: partKey
-                    )
-                    streamHeaders = [
-                        "X-Plex-Token": authToken,
-                        "X-Plex-Client-Identifier": PlexAPI.clientIdentifier,
-                        "X-Plex-Platform": PlexAPI.platform,
-                        "X-Plex-Device": PlexAPI.deviceName,
-                        "X-Plex-Product": PlexAPI.productName
-                    ]
-                } else {
-                    // No part key — fall back to HLS
-                    if let result = networkManager.buildHLSDirectPlayURL(
-                        serverURL: serverURL,
-                        authToken: authToken,
-                        ratingKey: ratingKey,
-                        offsetMs: Int((startOffset ?? 0) * 1000),
-                        hasHDR: metadata.hasHDR,
-                        useDolbyVision: metadata.hasDolbyVision,
-                        allowAudioDirectStream: allowAudioDirectStream
-                    ) {
-                        streamURL = result.url
-                        streamHeaders = result.headers
-                        plexSessionId = URLComponents(url: result.url, resolvingAgainstBaseURL: false)?
-                            .queryItems?.first(where: { $0.name == "session" })?.value
-                    }
-                }
-
-            case .hls(_, _):
-                // Build HLS URL (server transcodes audio or provides live stream)
-                if let result = networkManager.buildHLSDirectPlayURL(
+            switch plan.primary {
+            case .directPlay:
+                if let partKey = metadata.Media?.first?.Part?.first?.key,
+                   let directURL = networkManager.buildVLCDirectPlayURL(
                     serverURL: serverURL,
                     authToken: authToken,
-                    ratingKey: ratingKey,
-                    offsetMs: Int((startOffset ?? 0) * 1000),
-                    hasHDR: metadata.hasHDR,
-                    useDolbyVision: metadata.hasDolbyVision,
-                    allowAudioDirectStream: allowAudioDirectStream
-                ) {
+                    partKey: partKey
+                   ) {
+                    streamURL = directURL
+                    let directHeaders = rivuletDirectPlayHeaders()
+                    streamHeaders = directHeaders
+                    // Direct-play-first: warm direct URL path only.
+                    Task(priority: .utility) {
+                        await networkManager.warmDirectPlayStream(url: directURL, headers: directHeaders)
+                    }
+                } else if let fallback = buildRivuletHLSURL(offset: startOffset) {
+                    // Safety fallback if direct source is unexpectedly unavailable.
+                    streamURL = fallback.url
+                    streamHeaders = fallback.headers
+                    plexSessionId = fallback.sessionId
+                }
+
+                // Optional low-cost fallback prep (URL only, no preflight yet).
+                if plan.fallbacks.contains(where: { if case .hls = $0 { return true } else { return false } }),
+                   let preparedFallback = buildRivuletHLSURL(offset: startOffset) {
+                    rivuletFallbackURL = preparedFallback.url
+                    rivuletFallbackHeaders = preparedFallback.headers
+                }
+
+            case .hls:
+                if let result = buildRivuletHLSURL(offset: startOffset) {
                     streamURL = result.url
                     streamHeaders = result.headers
-                    plexSessionId = URLComponents(url: result.url, resolvingAgainstBaseURL: false)?
-                        .queryItems?.first(where: { $0.name == "session" })?.value
+                    plexSessionId = result.sessionId
                 }
             }
             return
@@ -1065,6 +1062,32 @@ final class UniversalPlayerViewModel: ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] error in
                 guard let self else { return }
+
+                if self.playerType == .rivulet,
+                   let rp = self.rivuletPlayer,
+                   rp.activePipeline == .directPlay,
+                   !self.hasAttemptedRivuletHLSFallback,
+                   !self.isAttemptingRivuletHLSFallback {
+                    Task { @MainActor in
+                        do {
+                            let failureKind = self.classifyDirectPlayFailure(error)
+                            try await self.attemptRivuletHLSFallback(
+                                resumeTime: self.currentTime,
+                                reason: "runtime_error",
+                                failureKind: failureKind
+                            )
+                            self.rivuletPlayer?.play()
+                            self.errorMessage = nil
+                            self.duration = self.rivuletPlayer?.duration ?? self.duration
+                            self.updateTrackLists()
+                        } catch let fallbackError {
+                            print("🎬 [RivuletFallback] Runtime fallback failed: \(fallbackError.localizedDescription)")
+                            self.errorMessage = error.userFacingDescription
+                        }
+                    }
+                    return
+                }
+
                 self.errorMessage = error.userFacingDescription
 
                 // Handle AVPlayer errors with fallbacks
@@ -1195,6 +1218,8 @@ final class UniversalPlayerViewModel: ObservableObject {
         // Reset error state and retry
         errorMessage = nil
         playbackState = .loading
+        hasAttemptedRivuletHLSFallback = false
+        isAttemptingRivuletHLSFallback = false
 
         // Stop existing player before retrying
         mpvPlayerWrapper?.stop()
@@ -1212,6 +1237,8 @@ final class UniversalPlayerViewModel: ObservableObject {
             playbackState = .failed(.invalidURL)
             return
         }
+        hasAttemptedRivuletHLSFallback = false
+        isAttemptingRivuletHLSFallback = false
 
         addPlaybackSelectionBreadcrumb(reason: "startPlayback")
 
@@ -1397,45 +1424,15 @@ final class UniversalPlayerViewModel: ObservableObject {
                 )
                 #endif
 
-                // Determine routing
-                let routingContext = ContentRoutingContext(
+                // Direct-play-first startup with one-shot HLS fallback.
+                let plan = playbackPlan ?? ContentRouter.plan(for: ContentRoutingContext(
                     metadata: metadata,
                     serverURL: URL(string: serverURL)!,
                     authToken: authToken,
-                    requiresProfileConversion: requiresProfileConversion
-                )
-                let route = ContentRouter.route(for: routingContext)
-                let isHLS: Bool
-                switch route {
-                case .directPlay: isHLS = false
-                case .hls: isHLS = true
-                }
-
-                // For HLS routes, wait for transcode to be ready
-                if isHLS {
-                    let transcodeReady = await waitForHLSTranscodeReady(url: url, headers: streamHeaders)
-                    if !transcodeReady {
-                        throw PlayerError.loadFailed("HLS transcode session failed to start")
-                    }
-                }
-
-                // Load via routed pipeline
-                if isHLS {
-                    // HLS path: feed HLS URL to RivuletPlayer
-                    // Pass requiresProfileConversion for P7/P8.6 DV content
-                    try await rp.loadHLSWithConversion(url: url, headers: streamHeaders, startTime: startOffset, requiresProfileConversion: requiresProfileConversion)
-                } else {
-                    // Direct play: pass isDolbyVision from Plex metadata so the demuxer
-                    // forces dvh1 format descriptions even if FFmpeg doesn't detect DOVI config.
-                    // This ensures true DV playback for all supported profiles.
-                    let dpRoute = PlaybackRoute.directPlay(url: url, headers: streamHeaders)
-                    try await rp.load(
-                        route: dpRoute,
-                        startTime: startOffset,
-                        isDolbyVision: metadata.hasDolbyVision,
-                        enableDVConversion: requiresProfileConversion
-                    )
-                }
+                    requiresProfileConversion: requiresProfileConversion,
+                    playbackPolicy: .directPlayFirst
+                ))
+                try await startWithFallback(plan: plan, startTime: startOffset)
 
                 rp.play()
                 configureSubtitleClockSyncForCurrentPlayer()
@@ -1495,6 +1492,184 @@ final class UniversalPlayerViewModel: ObservableObject {
                 scope.setExtra(value: self.startOffset ?? 0, key: "start_offset")
             }
         }
+    }
+
+    // MARK: - Rivulet Direct-Play-First Fallback
+
+    /// Build standard direct-play headers for FFmpeg requests.
+    private func rivuletDirectPlayHeaders() -> [String: String] {
+        [
+            "X-Plex-Token": authToken,
+            "X-Plex-Client-Identifier": PlexAPI.clientIdentifier,
+            "X-Plex-Platform": PlexAPI.platform,
+            "X-Plex-Device": PlexAPI.deviceName,
+            "X-Plex-Product": PlexAPI.productName
+        ]
+    }
+
+    /// Build an HLS URL and headers for Rivulet fallback at the requested offset.
+    private func buildRivuletHLSURL(offset: TimeInterval?) -> (url: URL, headers: [String: String], sessionId: String?)? {
+        guard let ratingKey = metadata.ratingKey else { return nil }
+        guard let result = PlexNetworkManager.shared.buildHLSDirectPlayURL(
+            serverURL: serverURL,
+            authToken: authToken,
+            ratingKey: ratingKey,
+            offsetMs: Int((offset ?? 0) * 1000),
+            hasHDR: metadata.hasHDR,
+            useDolbyVision: metadata.hasDolbyVision,
+            allowAudioDirectStream: allowAudioDirectStream
+        ) else {
+            return nil
+        }
+        let sessionId = URLComponents(url: result.url, resolvingAgainstBaseURL: false)?
+            .queryItems?.first(where: { $0.name == "session" })?.value
+        return (url: result.url, headers: result.headers, sessionId: sessionId)
+    }
+
+    private func classifyDirectPlayFailure(_ error: Error) -> DirectPlayFailureKind {
+        if let playerError = error as? PlayerError {
+            switch playerError {
+            case .codecUnsupported:
+                return .unsupportedCodec
+            case .networkError:
+                return .network
+            case .loadFailed(let message):
+                let lower = message.lowercased()
+                if lower.contains("unsupported codec") { return .unsupportedCodec }
+                if lower.contains("open input") || lower.contains("stream info") ||
+                    lower.contains("no codec parameters") || lower.contains("invalid stream") {
+                    return .demuxInit
+                }
+                if lower.contains("formatdescription") || lower.contains("samplebuffer") ||
+                    lower.contains("decoder") || lower.contains("decode") {
+                    return .decodeInit
+                }
+                return .runtimeFatal
+            case .invalidURL:
+                return .demuxInit
+            case .unknown:
+                return .unknown
+            }
+        }
+
+        let lower = error.localizedDescription.lowercased()
+        if lower.contains("network") || lower.contains("timed out") || lower.contains("connection") {
+            return .network
+        }
+        if lower.contains("unsupported codec") {
+            return .unsupportedCodec
+        }
+        return .unknown
+    }
+
+    /// Load Rivulet content using direct-play-first policy with one-shot HLS fallback.
+    private func startWithFallback(plan: PlaybackPlan, startTime: TimeInterval?) async throws {
+        guard let rp = rivuletPlayer else { return }
+
+        switch plan.primary {
+        case .directPlay(let directURLFromPlan, let directHeadersFromPlan):
+            let directURL = streamURL ?? directURLFromPlan
+            let directHeaders = streamHeaders.isEmpty
+                ? (directHeadersFromPlan ?? rivuletDirectPlayHeaders())
+                : streamHeaders
+
+            do {
+                try await rp.load(
+                    route: .directPlay(url: directURL, headers: directHeaders),
+                    startTime: startTime,
+                    isDolbyVision: metadata.hasDolbyVision,
+                    enableDVConversion: requiresProfileConversion
+                )
+            } catch {
+                guard plan.fallbacks.contains(where: { if case .hls = $0 { return true } else { return false } }) else {
+                    throw error
+                }
+                let failureKind = classifyDirectPlayFailure(error)
+                try await attemptRivuletHLSFallback(
+                    resumeTime: startTime ?? 0,
+                    reason: "startup_directplay_failure",
+                    failureKind: failureKind
+                )
+            }
+
+        case .hls:
+            // streamURL is built during URL-building phase; the plan's HLS URL is just
+            // a placeholder (server base URL), so we must have a real URL here.
+            if streamURL == nil, let builtHLS = buildRivuletHLSURL(offset: startTime) {
+                streamURL = builtHLS.url
+                streamHeaders = builtHLS.headers
+                plexSessionId = builtHLS.sessionId
+            }
+            guard let hlsURL = streamURL else {
+                throw PlayerError.loadFailed("Unable to build HLS URL")
+            }
+
+            let transcodeReady = await waitForHLSTranscodeReady(url: hlsURL, headers: streamHeaders)
+            if !transcodeReady {
+                throw PlayerError.loadFailed("HLS transcode session failed to start")
+            }
+            try await rp.loadHLSWithConversion(
+                url: hlsURL,
+                headers: streamHeaders,
+                startTime: startTime,
+                requiresProfileConversion: requiresProfileConversion
+            )
+        }
+    }
+
+    /// One-shot fallback path from direct play to HLS.
+    private func attemptRivuletHLSFallback(
+        resumeTime: TimeInterval,
+        reason: String,
+        failureKind: DirectPlayFailureKind
+    ) async throws {
+        guard !isAttemptingRivuletHLSFallback else {
+            throw PlayerError.loadFailed("HLS fallback already in progress")
+        }
+        guard !hasAttemptedRivuletHLSFallback else {
+            throw PlayerError.loadFailed("Already attempted HLS fallback")
+        }
+        guard let rp = rivuletPlayer else {
+            throw PlayerError.loadFailed("Rivulet player unavailable for fallback")
+        }
+
+        isAttemptingRivuletHLSFallback = true
+        hasAttemptedRivuletHLSFallback = true
+        defer { isAttemptingRivuletHLSFallback = false }
+
+        print("🎬 [RivuletFallback] DirectPlay failed (\(failureKind.rawValue), reason=\(reason)) → HLS")
+
+        let fallback: (url: URL, headers: [String: String], sessionId: String?)?
+        // Use pre-built fallback URL only when near the start of playback — it has
+        // the original offset baked in, so it's invalid once playback has progressed.
+        if resumeTime <= 0.5, let prebuiltURL = rivuletFallbackURL, !rivuletFallbackHeaders.isEmpty {
+            let sessionId = URLComponents(url: prebuiltURL, resolvingAgainstBaseURL: false)?
+                .queryItems?.first(where: { $0.name == "session" })?.value
+            fallback = (prebuiltURL, rivuletFallbackHeaders, sessionId)
+        } else {
+            fallback = buildRivuletHLSURL(offset: resumeTime)
+        }
+
+        guard let fallback else {
+            throw PlayerError.loadFailed("Unable to build HLS fallback URL")
+        }
+
+        rp.stop()
+        streamURL = fallback.url
+        streamHeaders = fallback.headers
+        plexSessionId = fallback.sessionId
+
+        let transcodeReady = await waitForHLSTranscodeReady(url: fallback.url, headers: fallback.headers)
+        if !transcodeReady {
+            throw PlayerError.loadFailed("HLS transcode session failed to start")
+        }
+
+        try await rp.loadHLSWithConversion(
+            url: fallback.url,
+            headers: fallback.headers,
+            startTime: resumeTime,
+            requiresProfileConversion: requiresProfileConversion
+        )
     }
 
     // MARK: - HLS Transcode Preflight

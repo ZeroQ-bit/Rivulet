@@ -80,7 +80,7 @@ enum ScaledDimensions {
     // Spacing
     static let rowHorizontalPadding: CGFloat = 48
     static let rowVerticalPadding: CGFloat = 32
-    static let rowItemSpacing: CGFloat = 28
+    static let rowItemSpacing: CGFloat = 40
 
     // Corner radii
     static let posterCornerRadius: CGFloat = 16

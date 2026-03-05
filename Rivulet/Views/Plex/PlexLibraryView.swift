@@ -540,7 +540,7 @@ struct PlexLibraryView: View {
                 }
             }
             #if os(tvOS)
-            .padding(.horizontal, 80)
+            .padding(.horizontal, ScaledDimensions.rowHorizontalPadding)
             .padding(.top, 100)  // Extra top padding since essential rows are first
             #else
             .padding(.horizontal, 40)
@@ -630,7 +630,7 @@ struct PlexLibraryView: View {
                 }
             }
             #if os(tvOS)
-            .padding(.horizontal, 80)
+            .padding(.horizontal, ScaledDimensions.rowHorizontalPadding)
             .padding(.top, 48)
             #else
             .padding(.horizontal, 40)
@@ -665,7 +665,7 @@ struct PlexLibraryView: View {
             #endif
         }
         #if os(tvOS)
-        .padding(.horizontal, 80)
+        .padding(.horizontal, ScaledDimensions.rowHorizontalPadding)
         .padding(.top, 60)
         .padding(.bottom, 32)
         #else
@@ -792,7 +792,7 @@ struct PlexLibraryView: View {
             }
         }
         #if os(tvOS)
-        .padding(.horizontal, 80)
+        .padding(.horizontal, ScaledDimensions.rowHorizontalPadding)
         .padding(.vertical, 28)
         .padding(.bottom, 60)
         .focusSection()  // Help focus engine navigate the grid efficiently
@@ -857,7 +857,7 @@ struct PlexLibraryView: View {
                     }
                 }
                 #if os(tvOS)
-                .padding(.horizontal, 80)
+                .padding(.horizontal, ScaledDimensions.rowHorizontalPadding)
                 .padding(.vertical, 28)
                 #else
                 .padding(.horizontal, 40)
@@ -880,7 +880,7 @@ struct PlexLibraryView: View {
                 .frame(width: 80, height: 17)
         }
         #if os(tvOS)
-        .padding(.horizontal, 80)
+        .padding(.horizontal, ScaledDimensions.rowHorizontalPadding)
         .padding(.top, 60)
         .padding(.bottom, 32)
         #else

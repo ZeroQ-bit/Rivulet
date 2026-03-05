@@ -35,7 +35,7 @@ struct AddLiveTVSourceSheet: View {
                 }
             }
         }
-        .preferredColorScheme(.dark)  // Ensure dark mode for keyboard and UI
+        // Use system appearance
         #if os(tvOS)
         .onExitCommand {
             // Navigate back within sheet before dismissing

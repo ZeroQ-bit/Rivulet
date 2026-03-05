@@ -442,7 +442,7 @@ struct PlexHomeView: View {
                         .strokeBorder(.yellow.opacity(0.3), lineWidth: 1)
                 )
         )
-        .padding(.horizontal, 80)
+        .padding(.horizontal, ScaledDimensions.rowHorizontalPadding)
         .padding(.top, 100)  // Below safe area
         .padding(.bottom, 20)
     }
@@ -478,7 +478,7 @@ struct PlexHomeView: View {
                 }
                 Spacer()
             }
-            .padding(.horizontal, 80)
+            .padding(.horizontal, ScaledDimensions.rowHorizontalPadding)
             .padding(.top, 24)
         } else if let error = recommendationsError {
             HStack(spacing: 12) {
@@ -498,7 +498,7 @@ struct PlexHomeView: View {
                 }
                 .buttonStyle(AppStoreButtonStyle())
             }
-            .padding(.horizontal, 80)
+            .padding(.horizontal, ScaledDimensions.rowHorizontalPadding)
             .padding(.vertical, 12)
         } else if !recommendations.isEmpty {
             InfiniteContentRow(
@@ -865,13 +865,13 @@ struct ContentRow: View {
         VStack(alignment: .leading, spacing: 24) {
             // Section title
             Text(title)
-                .font(.system(size: 28, weight: .semibold))
+                .font(.system(size: ScaledDimensions.sectionTitleSize, weight: .semibold))
                 .foregroundStyle(.white.opacity(0.9))
-                .padding(.horizontal, 80)
+                .padding(.horizontal, ScaledDimensions.rowHorizontalPadding)
 
             // Horizontal scroll of posters
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 24) {
+                HStack(spacing: ScaledDimensions.rowItemSpacing) {
                     ForEach(items, id: \.ratingKey) { item in
                         Button {
                             onItemSelected?(item)
@@ -889,8 +889,8 @@ struct ContentRow: View {
                         #endif
                     }
                 }
-                .padding(.horizontal, 80)
-                .padding(.vertical, 32)  // Room for scale effect and shadow
+                .padding(.horizontal, ScaledDimensions.rowHorizontalPadding)
+                .padding(.vertical, ScaledDimensions.rowVerticalPadding)  // Room for scale effect and shadow
             }
             .scrollClipDisabled()  // Allow shadow overflow
         }
@@ -964,11 +964,11 @@ struct InfiniteContentRow: View {
                         .foregroundStyle(.white.opacity(0.4))
                 }
             }
-            .padding(.horizontal, 80)
+            .padding(.horizontal, ScaledDimensions.rowHorizontalPadding)
 
             // Horizontal scroll of posters with infinite loading
             ScrollView(.horizontal, showsIndicators: false) {
-                LazyHStack(spacing: 24) {  // Lazy to avoid laying out hundreds of offscreen posters
+                LazyHStack(spacing: ScaledDimensions.rowItemSpacing) {  // Lazy to avoid laying out hundreds of offscreen posters
                     ForEach(Array(items.enumerated()), id: \.element.ratingKey) { index, item in
                         Button {
                             print("[PlexHome] Button pressed: \(item.title ?? "?") (index: \(index), row: \(title))")
@@ -1010,8 +1010,8 @@ struct InfiniteContentRow: View {
                         endIndicator
                     }
                 }
-                .padding(.horizontal, 80)
-                .padding(.vertical, 32)  // Room for scale effect and shadow
+                .padding(.horizontal, ScaledDimensions.rowHorizontalPadding)
+                .padding(.vertical, ScaledDimensions.rowVerticalPadding)  // Room for scale effect and shadow
             }
             .scrollClipDisabled()  // Allow shadow overflow
         }
@@ -1175,5 +1175,4 @@ struct InfiniteContentRow: View {
 
 #Preview {
     PlexHomeView()
-        .preferredColorScheme(.dark)
 }

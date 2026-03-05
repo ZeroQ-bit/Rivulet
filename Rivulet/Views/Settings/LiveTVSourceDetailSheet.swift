@@ -76,7 +76,7 @@ struct LiveTVSourceDetailSheet: View {
         } message: {
             Text("This will remove \"\(source.displayName)\" and all its channels from Live TV.")
         }
-        .preferredColorScheme(.dark)  // Ensure dark mode for all system UI
+        // Use system appearance
         #if os(tvOS)
         .onExitCommand {
             dismiss()

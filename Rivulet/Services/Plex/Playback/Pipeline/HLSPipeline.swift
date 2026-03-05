@@ -182,6 +182,30 @@ final class HLSPipeline {
         onStateChange?(.idle)
     }
 
+    /// Deterministic shutdown that cancels and awaits feeding tasks.
+    func shutdown() async {
+        isPlaying = false
+
+        if let buffer = segmentBuffer {
+            await buffer.cancel()
+        }
+        downloadTask?.cancel()
+        enqueueTask?.cancel()
+
+        let oldDownload = downloadTask
+        let oldEnqueue = enqueueTask
+        downloadTask = nil
+        enqueueTask = nil
+        segmentBuffer = nil
+
+        await oldDownload?.value
+        await oldEnqueue?.value
+
+        hasStartedFeeding = false
+        state = .idle
+        onStateChange?(.idle)
+    }
+
     // MARK: - Seek
 
     func seek(to time: TimeInterval, isPlaying: Bool) async {

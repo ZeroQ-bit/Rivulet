@@ -8,83 +8,72 @@
 import SwiftUI
 
 struct LibrarySettingsView: View {
+    @Binding var focusedSettingId: String?
     @StateObject private var dataStore = PlexDataStore.shared
     @StateObject private var librarySettings = LibrarySettingsManager.shared
-    @State private var reorderingLibrary: PlexLibrary?  // Library currently being reordered
+    @State private var reorderingLibrary: PlexLibrary?
+
+    init(focusedSettingId: Binding<String?> = .constant(nil)) {
+        self._focusedSettingId = focusedSettingId
+    }
 
     var body: some View {
-        ScrollView(.vertical, showsIndicators: false) {
-            VStack(alignment: .leading, spacing: 32) {
-                // Header (Menu button on remote navigates back)
-                Text("Sidebar Libraries")
-                    .font(.system(size: 56, weight: .bold))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 80)
-                    .padding(.top, 60)
+        VStack(spacing: 24) {
+            Text("Choose which libraries appear in the sidebar. Click to toggle, long press to reorder.")
+                .font(.system(size: 24))
+                .foregroundStyle(.white.opacity(0.5))
 
-                Text("Choose which libraries appear in the sidebar. Click to toggle, long press to move up and donwn.")
-                    .font(.system(size: 24))
-                    .foregroundStyle(.white.opacity(0.5))
-                    .padding(.horizontal, 80)
+            if dataStore.libraries.isEmpty {
+                // No libraries
+                VStack(spacing: 32) {
+                    Image(systemName: "folder")
+                        .font(.system(size: 80, weight: .thin))
+                        .foregroundStyle(.white.opacity(0.5))
 
-                if dataStore.libraries.isEmpty {
-                    // No libraries
-                    VStack(spacing: 32) {
-                        Image(systemName: "folder")
-                            .font(.system(size: 80, weight: .thin))
-                            .foregroundStyle(.white.opacity(0.5))
+                    Text("No Libraries")
+                        .font(.system(size: 40, weight: .semibold))
+                        .foregroundStyle(.white)
 
-                        Text("No Libraries")
-                            .font(.system(size: 40, weight: .semibold))
-                            .foregroundStyle(.white)
-
-                        Text("Connect to a Plex server to manage library visibility.")
-                            .font(.system(size: 26))
-                            .foregroundStyle(.white.opacity(0.6))
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 70)
-                    .background(
-                        RoundedRectangle(cornerRadius: 28, style: .continuous)
-                            .fill(.white.opacity(0.08))
-                    )
-                    .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 28, style: .continuous))
-                    .padding(.horizontal, 80)
-                } else {
-                    // Library list
-                    VStack(spacing: 24) {
-                        SettingsSection(title: "Sidebar") {
-                            ForEach(orderedLibraries, id: \.key) { library in
-                                LibraryVisibilityRow(
-                                    library: library,
-                                    isVisible: librarySettings.isLibraryVisible(library.key),
-                                    isShownOnHome: (library.isVideoLibrary || library.isMusicLibrary) ? librarySettings.isLibraryShownOnHome(library.key) : nil,
-                                    onToggle: {
-                                        librarySettings.toggleVisibility(for: library.key)
-                                    },
-                                    onLongPress: {
-                                        reorderingLibrary = library
-                                    }
-                                )
+                    Text("Connect to a Plex server to manage library visibility.")
+                        .font(.system(size: 26))
+                        .foregroundStyle(.white.opacity(0.6))
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 70)
+                .background(
+                    RoundedRectangle(cornerRadius: 28, style: .continuous)
+                        .fill(.white.opacity(0.08))
+                )
+                .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 28, style: .continuous))
+            } else {
+                // Library list
+                SettingsSection(title: "Sidebar") {
+                    ForEach(orderedLibraries, id: \.key) { library in
+                        LibraryVisibilityRow(
+                            library: library,
+                            isVisible: librarySettings.isLibraryVisible(library.key),
+                            isShownOnHome: (library.isVideoLibrary || library.isMusicLibrary) ? librarySettings.isLibraryShownOnHome(library.key) : nil,
+                            onToggle: {
+                                librarySettings.toggleVisibility(for: library.key)
+                            },
+                            onLongPress: {
+                                reorderingLibrary = library
                             }
-                        }
-
-                        // Reset button
-                        SettingsSection(title: "Reset") {
-                            SettingsActionRow(
-                                title: "Reset to Defaults",
-                                isDestructive: false
-                            ) {
-                                librarySettings.resetToDefaults()
-                            }
-                        }
+                        )
                     }
-                    .padding(.horizontal, 80)
-                    .padding(.bottom, 80)
+                }
+
+                // Reset button
+                SettingsSection(title: "Reset") {
+                    SettingsActionRow(
+                        title: "Reset to Defaults",
+                        isDestructive: false
+                    ) {
+                        librarySettings.resetToDefaults()
+                    }
                 }
             }
         }
-        .background(Color.black)
         .sheet(item: $reorderingLibrary) { library in
             LibraryReorderSheet(
                 library: library,
@@ -97,8 +86,7 @@ struct LibrarySettingsView: View {
 
     // MARK: - Helpers
 
-    /// Libraries sorted by user preference (for display in settings)
-    /// Includes video and music libraries (excludes photos, etc.)
+    /// Libraries sorted by user preference
     private var orderedLibraries: [PlexLibrary] {
         librarySettings.sortLibraries(dataStore.libraries.filter { $0.isVideoLibrary || $0.isMusicLibrary })
     }
@@ -141,7 +129,7 @@ struct LibrarySettingsView: View {
 struct LibraryVisibilityRow: View {
     let library: PlexLibrary
     let isVisible: Bool
-    let isShownOnHome: Bool?  // nil for non-video libraries
+    let isShownOnHome: Bool?
     let onToggle: () -> Void
     let onLongPress: () -> Void
 
@@ -186,7 +174,6 @@ struct LibraryVisibilityRow: View {
                     .font(.system(size: 29, weight: .medium))
                     .foregroundStyle(.white)
 
-                // Show Home status for video libraries
                 if let showOnHome = isShownOnHome {
                     Text(showOnHome ? "On Home" : "Hidden from Home")
                         .font(.system(size: 23))
@@ -244,12 +231,10 @@ struct LibraryReorderSheet: View {
         case up, down, home, done
     }
 
-    /// Whether this library supports Home screen visibility (video and music libraries)
     private var supportsHomeScreen: Bool {
         library.isVideoLibrary || library.isMusicLibrary
     }
 
-    /// Whether this library is shown on Home
     private var isShownOnHome: Bool {
         librarySettings.isLibraryShownOnHome(library.key)
     }
@@ -274,26 +259,22 @@ struct LibraryReorderSheet: View {
         }
     }
 
-    /// Current index in the sorted order
     private var currentIndex: Int? {
         let sortedLibraries = librarySettings.sortLibraries(allLibraries)
         return sortedLibraries.firstIndex(where: { $0.key == library.key })
     }
 
-    /// Can move up (not first in list)
     private var canMoveUp: Bool {
         guard let index = currentIndex else { return false }
         return index > 0
     }
 
-    /// Can move down (not last in list)
     private var canMoveDown: Bool {
         guard let index = currentIndex else { return false }
         let sortedLibraries = librarySettings.sortLibraries(allLibraries)
         return index < sortedLibraries.count - 1
     }
 
-    /// Current position text (e.g., "2 of 5")
     private var positionText: String {
         let sortedLibraries = librarySettings.sortLibraries(allLibraries)
         guard let index = currentIndex else { return "Reorder Library" }
@@ -338,7 +319,6 @@ struct LibraryReorderSheet: View {
 
             // Reorder buttons
             VStack(spacing: 18) {
-                // Move Up button
                 Button {
                     moveUp()
                 } label: {
@@ -370,7 +350,6 @@ struct LibraryReorderSheet: View {
                 .disabled(!canMoveUp)
                 .opacity(canMoveUp ? 1.0 : 0.4)
 
-                // Move Down button
                 Button {
                     moveDown()
                 } label: {
@@ -402,10 +381,8 @@ struct LibraryReorderSheet: View {
                 .disabled(!canMoveDown)
                 .opacity(canMoveDown ? 1.0 : 0.4)
 
-                // Home Screen toggle (for video and music libraries)
                 if supportsHomeScreen {
                     Button {
-                        // Pass all visible media library keys for first-time setup
                         let allMediaKeys = allLibraries
                             .filter { $0.isVideoLibrary || $0.isMusicLibrary }
                             .map { $0.key }
@@ -478,7 +455,6 @@ struct LibraryReorderSheet: View {
         .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 32, style: .continuous))
         .foregroundStyle(.white)
         .onAppear {
-            // Focus on first available button (delay needed for FocusState to be ready)
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                 if canMoveUp {
                     focusedButton = .up

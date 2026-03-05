@@ -3139,7 +3139,6 @@ struct ArtistBioSheet: View {
             }
             .padding(8) // Room for scale effect
         }
-        .background(Color(white: 0.12))
         .onExitCommand {
             dismiss()
         }
@@ -3182,7 +3181,6 @@ struct ArtistBioSheet: View {
                 }
                 .padding()
             }
-            .background(Color(white: 0.12))
             .navigationTitle(artistName)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

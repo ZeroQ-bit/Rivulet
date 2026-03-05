@@ -81,6 +81,7 @@ final class RivuletPlayer: ObservableObject {
     private var timeObserverTask: Task<Void, Never>?
     private var streamURL: URL?
     private var loadHeaders: [String: String]?
+    private var pipelineGeneration: UInt64 = 0
 
     // MARK: - Init
 
@@ -138,7 +139,9 @@ final class RivuletPlayer: ObservableObject {
     // MARK: - Private: Load Implementations
 
     private func loadDirectPlay(url: URL, headers: [String: String]?, startTime: TimeInterval?, isDolbyVision: Bool = false, enableDVConversion: Bool) async throws {
-        cleanupPipelines()
+        invalidatePipelineGeneration()
+        let generation = pipelineGeneration
+        await cleanupPipelinesAsync()
 
         let pipeline = DirectPlayPipeline(renderer: renderer)
         self.directPlayPipeline = pipeline
@@ -148,13 +151,22 @@ final class RivuletPlayer: ObservableObject {
 
         // Wire callbacks
         pipeline.onStateChange = { [weak self] state in
-            self?.handlePipelineStateChange(state)
+            Task { @MainActor [weak self] in
+                guard let self, self.pipelineGeneration == generation else { return }
+                self.handlePipelineStateChange(state)
+            }
         }
         pipeline.onError = { [weak self] error in
-            self?.handlePipelineError(error)
+            Task { @MainActor [weak self] in
+                guard let self, self.pipelineGeneration == generation else { return }
+                self.handlePipelineError(error)
+            }
         }
         pipeline.onEndOfStream = { [weak self] in
-            self?.handleEndOfStream()
+            Task { @MainActor [weak self] in
+                guard let self, self.pipelineGeneration == generation else { return }
+                self.handleEndOfStream()
+            }
         }
 
         try await pipeline.load(url: url, headers: headers, startTime: startTime, isDolbyVision: isDolbyVision, enableDVConversion: enableDVConversion)
@@ -174,7 +186,9 @@ final class RivuletPlayer: ObservableObject {
     }
 
     private func loadHLS(url: URL, headers: [String: String]?, startTime: TimeInterval?, requiresProfileConversion: Bool = false) async throws {
-        cleanupPipelines()
+        invalidatePipelineGeneration()
+        let generation = pipelineGeneration
+        await cleanupPipelinesAsync()
 
         let pipeline = HLSPipeline(renderer: renderer)
         self.hlsPipeline = pipeline
@@ -183,13 +197,22 @@ final class RivuletPlayer: ObservableObject {
 
         // Wire callbacks
         pipeline.onStateChange = { [weak self] state in
-            self?.handlePipelineStateChange(state)
+            Task { @MainActor [weak self] in
+                guard let self, self.pipelineGeneration == generation else { return }
+                self.handlePipelineStateChange(state)
+            }
         }
         pipeline.onError = { [weak self] error in
-            self?.handlePipelineError(error)
+            Task { @MainActor [weak self] in
+                guard let self, self.pipelineGeneration == generation else { return }
+                self.handlePipelineError(error)
+            }
         }
         pipeline.onEndOfStream = { [weak self] in
-            self?.handleEndOfStream()
+            Task { @MainActor [weak self] in
+                guard let self, self.pipelineGeneration == generation else { return }
+                self.handleEndOfStream()
+            }
         }
 
         try await pipeline.load(url: url, headers: headers, startTime: startTime, requiresProfileConversion: requiresProfileConversion)
@@ -246,6 +269,7 @@ final class RivuletPlayer: ObservableObject {
     }
 
     func stop() {
+        invalidatePipelineGeneration()
         let pipelineName: String = switch activePipeline {
         case .directPlay: "directPlay"
         case .hls: "hls"
@@ -454,6 +478,7 @@ final class RivuletPlayer: ObservableObject {
     // MARK: - Private: Pipeline Management
 
     private func cleanupPipelines() {
+        invalidatePipelineGeneration()
         directPlayPipeline?.stop()
         directPlayPipeline = nil
         hlsPipeline?.stop()
@@ -464,6 +489,24 @@ final class RivuletPlayer: ObservableObject {
         // don't have stale data from a previous pipeline.
         renderer.flush()
         renderer.setRate(0)
+    }
+
+    private func cleanupPipelinesAsync() async {
+        let oldDirect = directPlayPipeline
+        let oldHLS = hlsPipeline
+        directPlayPipeline = nil
+        hlsPipeline = nil
+        activePipeline = .none
+
+        await oldDirect?.shutdown()
+        await oldHLS?.shutdown()
+
+        renderer.flush()
+        renderer.setRate(0)
+    }
+
+    private func invalidatePipelineGeneration() {
+        pipelineGeneration &+= 1
     }
 
     // MARK: - Private: Pipeline Callbacks

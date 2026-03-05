@@ -11,7 +11,12 @@ UniversalPlayerViewModel (player selection + state)
    RivuletPlayer (PlayerProtocol)
         │
         ▼
-  DirectPlayPipeline (orchestrates playback)
+  ContentRouter.plan()
+        │
+        ├── primary: DirectPlayPipeline
+        │
+        └── fallback: HLSPipeline
+                     (HLS used only as fallback for VOD)
    ┌────┼────────────────┐
    ▼    ▼                ▼
 FFmpegDemuxer    FFmpegAudioDecoder    SampleBufferRenderer
@@ -31,7 +36,7 @@ SubtitleManager → SubtitleOverlayView
 
 | File | Lines | Description |
 |------|-------|-------------|
-| `Services/Plex/Playback/RivuletPlayer.swift` | 559 | `PlayerProtocol` conformance. Bridges DirectPlayPipeline to UniversalPlayerViewModel. Manages play/pause/seek/stop, audio/subtitle track selection, and state publishing via Combine. |
+| `Services/Plex/Playback/RivuletPlayer.swift` | 559 | `PlayerProtocol` conformance. Bridges DirectPlayPipeline and HLSPipeline to UniversalPlayerViewModel. Manages play/pause/seek/stop, audio/subtitle track selection, state publishing, and deterministic pipeline shutdown during reload/fallback. |
 | `Services/Plex/Playback/PlayerProtocol.swift` | ~60 | `@MainActor` protocol all players conform to. Defines `play()`, `pause()`, `seek()`, `selectAudioTrack()`, `selectSubtitleTrack()`, state publishers. |
 | `Views/Player/SampleBufferDisplayView.swift` | ~80 | SwiftUI `UIViewRepresentable` wrapping `AVSampleBufferDisplayLayer` for rendering. |
 
@@ -41,7 +46,7 @@ SubtitleManager → SubtitleOverlayView
 |------|-------|-------------|
 | `Services/Plex/Playback/Pipeline/DirectPlayPipeline.swift` | 1252 | Core playback engine. Runs the read loop (demux → decode → enqueue), handles seeking (with dedup), preroll buffering, audio track switching, and pause/resume with dead-loop detection. |
 | `Services/Plex/Playback/Pipeline/SampleBufferRenderer.swift` | 289 | Owns `AVSampleBufferDisplayLayer`, `AVSampleBufferAudioRenderer`, and `AVSampleBufferRenderSynchronizer`. Handles video/audio enqueue with pacing, backpressure, and error recovery. |
-| `Services/Plex/Playback/Pipeline/ContentRouter.swift` | ~120 | Routes content to the correct pipeline/player based on codec, container, and DV profile. |
+| `Services/Plex/Playback/Pipeline/ContentRouter.swift` | ~170 | Produces `PlaybackPlan` (primary + fallback routes) using direct-play-first policy for VOD and HLS for hard blockers. |
 | `Services/Plex/Playback/Pipeline/SegmentBuffer.swift` | ~200 | Actor-based producer/consumer buffer for HLS segments. |
 
 ### FFmpeg Integration
@@ -133,6 +138,20 @@ SubtitleManager → SubtitleOverlayView
 2. **AVPlayer** — Used when "Use AVPlayer for DV" or "Use AVPlayer for All" is enabled
 3. **DVSampleBufferPlayer** — Fallback for Dolby Vision P7/P8.6 when RivuletPlayer is off
 4. **MPV** — Fallback for everything else; primary player for Live TV
+
+## VOD Routing Policy (Rivulet)
+
+Rivulet now uses a strict direct-play-first policy for VOD:
+
+1. Build a `PlaybackPlan` from `ContentRouter.plan(...)`.
+2. Start `primary` route immediately (normally DirectPlay when FFmpeg and part key are available).
+3. On direct-play init/runtime fatal error, auto-fallback once to HLS at current playback time.
+4. No auto-fallback from Rivulet to MPV in this path.
+
+Hard blockers that start on HLS immediately:
+- FFmpeg unavailable
+- No direct-play source/part key
+- Live TV / forced HLS
 
 ## Key Codec Handling
 

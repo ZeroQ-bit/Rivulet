@@ -902,7 +902,7 @@ struct UniversalPlayerView: View {
                 }
             }
         }
-        .preferredColorScheme(.dark)  // Ensure dark mode for all system UI elements
+        // System appearance
     }
 
     // MARK: - Player Content Layer (all player UI except post-video)

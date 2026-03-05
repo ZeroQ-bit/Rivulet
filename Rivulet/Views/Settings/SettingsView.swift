@@ -2,19 +2,33 @@
 //  SettingsView.swift
 //  Rivulet
 //
-//  Main settings screen for tvOS
+//  Main settings screen for tvOS — Apple TV-style split layout
 //
 
 import SwiftUI
 
-// MARK: - Settings Destination
+// MARK: - Settings Page
 
-enum SettingsDestination: Hashable {
-    case plex
-    case iptv
-    case libraries
-    case cache
-    case userProfiles
+enum SettingsPage: Hashable, CaseIterable {
+    case root
+    case appearance, playback, liveTV, servers, about
+    case plex, iptv, libraries, cache, userProfiles
+
+    var title: String {
+        switch self {
+        case .root: return "Settings"
+        case .appearance: return "Appearance"
+        case .playback: return "Playback"
+        case .liveTV: return "Live TV"
+        case .servers: return "Servers"
+        case .about: return "About"
+        case .plex: return "Plex Server"
+        case .iptv: return "Live TV Sources"
+        case .libraries: return "Sidebar Libraries"
+        case .cache: return "Cache & Storage"
+        case .userProfiles: return "User Profiles"
+        }
+    }
 }
 
 // MARK: - Autoplay Countdown
@@ -182,7 +196,18 @@ enum SubtitleOption: Hashable, CaseIterable, CustomStringConvertible {
 // MARK: - Settings View
 
 struct SettingsView: View {
-    @State private var navigationPath = NavigationPath()
+    // Navigation
+    @State private var navigationStack: [SettingsPage] = [.root]
+    @State private var isForward = true
+
+    private var currentPage: SettingsPage {
+        navigationStack.last ?? .root
+    }
+    @State private var focusedSettingId: String?
+    @State private var focusTrigger = 0
+    @State private var showChangelog = false
+
+    // AppStorage
     @AppStorage("showHomeHero") private var showHomeHero = false
     @AppStorage("showLibraryHero") private var showLibraryHero = false
     @AppStorage("showLibraryRecommendations") private var showLibraryRecommendations = true
@@ -205,18 +230,20 @@ struct SettingsView: View {
     @AppStorage("useAVPlayerForAllVideos") private var useAVPlayerForAllVideos = false
     @AppStorage("useRivuletPlayer") private var useRivuletPlayer = true
     @AppStorage("displaySize") private var displaySizeRaw = DisplaySize.normal.rawValue
-    @AppStorage("posterDepthEffect") private var posterDepthEffect = true
+
+
+    // Environment
     @Environment(\.focusScopeManager) private var focusScopeManager
     @Environment(\.nestedNavigationState) private var nestedNavState
-    @State private var focusTrigger = 0  // Increment to trigger first row focus
-    @State private var showChangelog = false
 
-    // Audio/Subtitle preference state (synced with preference managers)
+    // Audio/Subtitle preference state
     @State private var audioLanguage: LanguageOption = LanguageOption(languageCode: AudioPreferenceManager.current.languageCode)
     @State private var subtitleOption: SubtitleOption = SubtitleOption(
         enabled: SubtitlePreferenceManager.current.enabled,
         languageCode: SubtitlePreferenceManager.current.languageCode
     )
+
+    // MARK: - Bindings
 
     private var audioLanguageBinding: Binding<LanguageOption> {
         Binding(
@@ -270,356 +297,65 @@ struct SettingsView: View {
         return "\(version) (\(build))"
     }
 
+    // MARK: - Body
+
     var body: some View {
-        NavigationStack(path: $navigationPath) {
-            ScrollView(.vertical, showsIndicators: false) {
-                VStack(alignment: .leading, spacing: 32) {
-                    // Header
-                    Text("Settings")
-                        .font(.system(size: 56, weight: .bold))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 80)
-                        .padding(.top, 60)
+        GeometryReader { geo in
+            VStack(spacing: 0) {
+                // Page title
+                Text(currentPage.title)
+                    .font(.system(size: 48, weight: .bold))
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.top, 50)
+                    .padding(.bottom, 24)
+                    .animation(.easeInOut(duration: 0.2), value: currentPage)
 
-                    // Settings categories
-                    VStack(spacing: 24) {
-                        // Appearance section
-                        SettingsSection(title: "Appearance") {
-                            SettingsRow(
-                                icon: "sidebar.squares.left",
-                                iconColor: .purple,
-                                title: "Sidebar Libraries",
-                                subtitle: "Show, hide, and reorder libraries",
-                                action: {
-                                    navigationPath.append(SettingsDestination.libraries)
-                                },
-                                focusTrigger: focusTrigger  // First row gets focus
-                            )
+                // Split layout
+                HStack(alignment: .top, spacing: 0) {
+                    // Left info panel
+                    leftPanel
+                        .frame(width: geo.size.width * 0.55)
 
-                            SettingsListPickerRow(
-                                icon: "textformat.size",
-                                iconColor: .orange,
-                                title: "Display Size",
-                                subtitle: "Scale all interface elements",
-                                selection: displaySize,
-                                options: DisplaySize.allCases
-                            )
-
-                            SettingsToggleRow(
-                                icon: "square.3.layers.3d",
-                                iconColor: .blue,
-                                title: "Poster Depth Effect",
-                                subtitle: "Lifts subject from background when focused",
-                                isOn: $posterDepthEffect
-                            )
-
-                            SettingsToggleRow(
-                                icon: "sparkles.rectangle.stack",
-                                iconColor: .indigo,
-                                title: "Home Hero",
-                                subtitle: "Featured content banner on Home",
-                                isOn: $showHomeHero
-                            )
-
-                            SettingsToggleRow(
-                                icon: "rectangle.stack",
-                                iconColor: .teal,
-                                title: "Library Hero",
-                                subtitle: "Featured content banner in libraries",
-                                isOn: $showLibraryHero
-                            )
-
-                            SettingsToggleRow(
-                                icon: "square.stack.3d.up",
-                                iconColor: .cyan,
-                                title: "Discovery Rows",
-                                subtitle: "Top Rated, Rediscover, and similar",
-                                isOn: $showLibraryRecommendations
-                            )
-
-                            SettingsToggleRow(
-                                icon: "clock.arrow.trianglehead.counterclockwise.rotate.90",
-                                iconColor: .blue,
-                                title: "Recent Rows",
-                                subtitle: "Recently Added and Recently Released in libraries",
-                                isOn: $showLibraryRecentRows
-                            )
-
-                            SettingsToggleRow(
-                                icon: "person.3",
-                                iconColor: .mint,
-                                title: "Personalized Recommendations",
-                                subtitle: "Use TMDB + watch history to surface unwatched picks",
-                                isOn: $enablePersonalizedRecommendations
-                            )
+                    // Right settings list
+                    ZStack {
+                        ScrollView(.vertical, showsIndicators: false) {
+                            pageContent(for: currentPage)
+                                .padding(.horizontal, 40)
+                                .padding(.bottom, 80)
+                                .padding(.top, 8)
                         }
-
-                        // Playback section
-                        SettingsSection(title: "Playback") {
-                            SettingsListPickerRow(
-                                icon: "waveform",
-                                iconColor: .cyan,
-                                title: "Audio Language",
-                                subtitle: "Preferred language for audio tracks",
-                                selection: audioLanguageBinding,
-                                options: LanguageOption.allCases
-                            )
-
-                            SettingsListPickerRow(
-                                icon: "captions.bubble",
-                                iconColor: .yellow,
-                                title: "Subtitles",
-                                subtitle: "Preferred language for subtitles",
-                                selection: subtitleOptionBinding,
-                                options: SubtitleOption.allCases
-                            )
-
-                            SettingsToggleRow(
-                                icon: "forward.fill",
-                                iconColor: .blue,
-                                title: "Show Skip Button",
-                                subtitle: "Display button to skip intro and credits",
-                                isOn: $showSkipButton
-                            )
-
-                            SettingsToggleRow(
-                                icon: "timeline.selection",
-                                iconColor: .yellow,
-                                title: "Show Markers on Scrubber",
-                                subtitle: "Highlight intro, credits, and ads on the progress bar",
-                                isOn: $showMarkersOnScrubber
-                            )
-
-                            SettingsToggleRow(
-                                icon: "play.circle",
-                                iconColor: .green,
-                                title: "Auto-Skip Intro",
-                                subtitle: "Automatically skip TV show intros",
-                                isOn: $autoSkipIntro
-                            )
-
-                            SettingsToggleRow(
-                                icon: "stop.circle",
-                                iconColor: .orange,
-                                title: "Auto-Skip Credits",
-                                subtitle: "Automatically skip end credits",
-                                isOn: $autoSkipCredits
-                            )
-
-                            SettingsToggleRow(
-                                icon: "forward.frame",
-                                iconColor: .red,
-                                title: "Auto-Skip Ads",
-                                subtitle: "Automatically skip advertisements",
-                                isOn: $autoSkipAds
-                            )
-
-                            SettingsPickerRow(
-                                icon: "forward.end.alt",
-                                iconColor: .purple,
-                                title: "Autoplay Countdown",
-                                subtitle: "Time before next episode plays",
-                                selection: autoplayCountdown,
-                                options: AutoplayCountdown.allCases
-                            )
-
-                            SettingsToggleRow(
-                                icon: "sparkles.tv",
-                                iconColor: .pink,
-                                title: "High Quality Scaling",
-                                subtitle: "Sharper upscaling for 720p/1080p content",
-                                isOn: $highQualityScaling,
-                                helpTitle: "High Quality Scaling"
-                            ) {
-                                highQualityScalingHelpContent
-                            }
-
-                            SettingsToggleRow(
-                                icon: "sparkles.tv",
-                                iconColor: .purple,
-                                title: "Use AVPlayer for Dolby Vision",
-                                subtitle: "If Plex can send it, we can play it",
-                                isOn: $useAVPlayerForDolbyVision,
-                                helpTitle: "AVPlayer for Dolby Vision"
-                            ) {
-                                avPlayerDVHelpContent
-                            }
-
-                            SettingsToggleRow(
-                                icon: "play.rectangle",
-                                iconColor: .blue,
-                                title: "Use AVPlayer for All Videos",
-                                subtitle: "If you like remuxing and Direct Stream, here's to you",
-                                isOn: $useAVPlayerForAllVideos,
-                                helpTitle: "AVPlayer for All Videos"
-                            ) {
-                                avPlayerAllHelpContent
-                            }
-
-                            SettingsToggleRow(
-                                icon: "waveform.badge.magnifyingglass",
-                                iconColor: .orange,
-                                title: "Use Rivulet Player",
-                                subtitle: "Native player — direct play via FFmpeg",
-                                isOn: $useRivuletPlayer,
-                                helpTitle: "Rivulet Player"
-                            ) {
-                                rivuletPlayerHelpContent
-                            }
-                        }
-
-                        // Live TV section
-                        SettingsSection(title: "Live TV") {
-                            SettingsToggleRow(
-                                icon: "arrow.up.arrow.down",
-                                iconColor: .cyan,
-                                title: "Live TV Above Libraries",
-                                subtitle: "Show Live TV section above Media libraries in sidebar",
-                                isOn: $liveTVAboveLibraries
-                            )
-
-                            SettingsToggleRow(
-                                icon: "tv.fill",
-                                iconColor: .indigo,
-                                title: "Classic TV Mode",
-                                subtitle: "Hide player controls for a traditional TV experience",
-                                isOn: $classicTVMode
-                            )
-
-                            SettingsToggleRow(
-                                icon: "square.stack.3d.down.right",
-                                iconColor: .purple,
-                                title: "Combine Sources",
-                                subtitle: "Show all sources in one Channels view, or separate sidebar entries",
-                                isOn: $combineLiveTVSources
-                            )
-
-                            SettingsPickerRow(
-                                icon: "tv",
-                                iconColor: .green,
-                                title: "Default Layout",
-                                subtitle: "Choose channel grid or TV guide view",
-                                selection: liveTVLayout,
-                                options: LiveTVLayout.allCases
-                            )
-
-                            SettingsToggleRow(
-                                icon: "rectangle.split.2x2",
-                                iconColor: .blue,
-                                title: "Confirm Exit Multiview",
-                                subtitle: "Ask before closing multiple streams",
-                                isOn: $confirmExitMultiview
-                            )
-
-                            SettingsToggleRow(
-                                icon: "rectangle.split.2x2.fill",
-                                iconColor: .orange,
-                                title: "Allow 3 or 4 Streams",
-                                subtitle: "4 streams may crash the app, but I won't stop you",
-                                isOn: $allowFourStreams
-                            )
-                        }
-
-                        // Storage section
-                        SettingsSection(title: "Storage") {
-                            SettingsRow(
-                                icon: "internaldrive",
-                                iconColor: .gray,
-                                title: "Cache & Storage",
-                                subtitle: "Manage cached images and data"
-                            ) {
-                                navigationPath.append(SettingsDestination.cache)
-                            }
-                        }
-
-                        // Servers section
-                        SettingsSection(title: "Servers") {
-                            SettingsRow(
-                                icon: "server.rack",
-                                iconColor: .orange,
-                                title: "Plex Server",
-                                subtitle: "Media library connection"
-                            ) {
-                                navigationPath.append(SettingsDestination.plex)
-                            }
-
-                            SettingsRow(
-                                icon: "person.crop.circle",
-                                iconColor: .cyan,
-                                title: "User Profiles",
-                                subtitle: PlexUserProfileManager.shared.selectedUser?.displayName ?? "Default"
-                            ) {
-                                navigationPath.append(SettingsDestination.userProfiles)
-                            }
-
-                            SettingsRow(
-                                icon: "tv.and.mediabox",
-                                iconColor: .blue,
-                                title: "Live TV Sources",
-                                subtitle: "Manage channel sources"
-                            ) {
-                                navigationPath.append(SettingsDestination.iptv)
-                            }
-                        }
-
-                        // About section
-                        SettingsSection(title: "About") {
-                            SettingsInfoRow(title: "App", value: "Rivulet")
-                            SettingsInfoRow(title: "Version", value: appVersion)
-
-                            SettingsRow(
-                                icon: "list.bullet.rectangle",
-                                iconColor: .blue,
-                                title: "Changelog",
-                                subtitle: "See what's new in this version"
-                            ) {
-                                showChangelog = true
-                            }
-                        }
+                        .id(currentPage)
+                        .transition(.asymmetric(
+                            insertion: .move(edge: isForward ? .trailing : .leading),
+                            removal: .move(edge: isForward ? .leading : .trailing)
+                        ))
                     }
-                    .padding(.horizontal, 80)
-                    .padding(.bottom, 80)
-                }
-            }
-            .background(Color.black)
-            .fullScreenCover(isPresented: $showChangelog) {
-                WhatsNewView(isPresented: $showChangelog, version: appVersion)
-            }
-            .onAppear {
-                // Set initial focus when view first appears
-                DispatchQueue.main.async {
-                    focusTrigger += 1
-                }
-            }
-            .onChange(of: focusScopeManager.restoreTrigger) { _, _ in
-                // Trigger first row to claim focus when sidebar closes
-                focusTrigger += 1
-            }
-            .navigationDestination(for: SettingsDestination.self) { destination in
-                switch destination {
-                case .plex:
-                    PlexSettingsView()
-                case .iptv:
-                    IPTVSettingsView()
-                case .libraries:
-                    LibrarySettingsView()
-                case .cache:
-                    CacheSettingsView()
-                case .userProfiles:
-                    UserProfileSettingsView()
+                    .clipped()
+                    .frame(width: geo.size.width * 0.45)
+                    .animation(.easeInOut(duration: 0.3), value: currentPage)
                 }
             }
         }
-        // Tell parent we're in nested navigation when path is not empty
-        .onChange(of: navigationPath.count) { _, newCount in
-            let isNested = newCount > 0
+        .background(.clear)
+        .fullScreenCover(isPresented: $showChangelog) {
+            WhatsNewView(isPresented: $showChangelog, version: appVersion)
+        }
+        .onAppear {
+            DispatchQueue.main.async {
+                focusTrigger += 1
+            }
+        }
+        .onChange(of: focusScopeManager.restoreTrigger) { _, _ in
+            focusTrigger += 1
+        }
+        .onChange(of: navigationStack) { _, newStack in
+            let isNested = newStack.count > 1
             nestedNavState.isNested = isNested
             if isNested {
                 nestedNavState.goBackAction = { [weak nestedNavState] in
-                    if !navigationPath.isEmpty {
-                        navigationPath.removeLast()
-                    }
-                    if navigationPath.isEmpty {
+                    goBack()
+                    if navigationStack.count <= 1 {
                         nestedNavState?.isNested = false
                     }
                 }
@@ -627,6 +363,403 @@ struct SettingsView: View {
                 nestedNavState.goBackAction = nil
             }
         }
+        #if os(tvOS)
+        .onExitCommand {
+            if currentPage != .root {
+                goBack()
+            }
+        }
+        #endif
+    }
+
+    // MARK: - Left Panel
+
+    private var leftPanel: some View {
+        VStack(spacing: 28) {
+            Spacer()
+
+            // Decorative icon
+            let descriptor = focusedSettingId.flatMap { SettingsDescriptorStore.descriptor(for: $0) }
+            let pageInfo = SettingsDescriptorStore.pageInfo(for: currentPage)
+            let iconName = descriptor?.icon ?? pageInfo.icon
+            let iconColor = descriptor?.iconColor ?? pageInfo.color
+
+            ZStack {
+                RoundedRectangle(cornerRadius: 28, style: .continuous)
+                    .fill(iconColor.opacity(0.12))
+                    .frame(width: 140, height: 140)
+
+                Image(systemName: iconName)
+                    .font(.system(size: 56, weight: .medium))
+                    .foregroundStyle(iconColor)
+            }
+            .animation(.easeInOut(duration: 0.25), value: focusedSettingId)
+
+            // Description text
+            if let desc = descriptor?.description {
+                Text(desc)
+                    .font(.system(size: 24))
+                    .foregroundStyle(.white.opacity(0.55))
+                    .multilineTextAlignment(.center)
+                    .lineSpacing(4)
+                    .frame(maxWidth: 420)
+                    .transition(.opacity)
+                    .id(focusedSettingId)
+            }
+
+            Spacer()
+        }
+        .animation(.easeInOut(duration: 0.2), value: focusedSettingId)
+    }
+
+    // MARK: - Page Content
+
+    @ViewBuilder
+    private func pageContent(for page: SettingsPage) -> some View {
+        switch page {
+        case .root:
+            rootSettingsList
+        case .appearance:
+            appearanceSettings
+        case .playback:
+            playbackSettings
+        case .liveTV:
+            liveTVSettings
+        case .servers:
+            serversSettings
+        case .about:
+            aboutSettings
+        case .plex:
+            PlexSettingsView(focusedSettingId: $focusedSettingId)
+        case .iptv:
+            IPTVSettingsView(focusedSettingId: $focusedSettingId)
+        case .libraries:
+            LibrarySettingsView(focusedSettingId: $focusedSettingId)
+        case .cache:
+            CacheSettingsView(focusedSettingId: $focusedSettingId)
+        case .userProfiles:
+            UserProfileSettingsView(focusedSettingId: $focusedSettingId)
+        }
+    }
+
+    // MARK: - Root Settings List
+
+    private var rootSettingsList: some View {
+        VStack(spacing: 8) {
+            SettingsRow(
+                title: "Appearance",
+                subtitle: "",
+                action: { navigate(to: .appearance) },
+                focusTrigger: focusTrigger,
+                onFocusChange: { if $0 { focusedSettingId = "cat_appearance" } }
+            )
+
+            SettingsRow(
+                title: "Playback",
+                subtitle: "",
+                action: { navigate(to: .playback) },
+                onFocusChange: { if $0 { focusedSettingId = "cat_playback" } }
+            )
+
+            SettingsRow(
+                title: "Live TV",
+                subtitle: "",
+                action: { navigate(to: .liveTV) },
+                onFocusChange: { if $0 { focusedSettingId = "cat_liveTV" } }
+            )
+
+            SettingsRow(
+                title: "Servers",
+                subtitle: "",
+                action: { navigate(to: .servers) },
+                onFocusChange: { if $0 { focusedSettingId = "cat_servers" } }
+            )
+
+            SettingsRow(
+                title: "Cache & Storage",
+                subtitle: "",
+                action: { navigate(to: .cache) },
+                onFocusChange: { if $0 { focusedSettingId = "cache" } }
+            )
+
+            SettingsRow(
+                title: "About",
+                subtitle: "",
+                action: { navigate(to: .about) },
+                onFocusChange: { if $0 { focusedSettingId = "cat_about" } }
+            )
+        }
+    }
+
+    // MARK: - Appearance Settings
+
+    private var appearanceSettings: some View {
+        VStack(spacing: 8) {
+            SettingsRow(
+                title: "Sidebar Libraries",
+                subtitle: "",
+                action: { navigate(to: .libraries) },
+                focusTrigger: focusTrigger,
+                onFocusChange: { if $0 { focusedSettingId = "libraries" } }
+            )
+
+            SettingsListPickerRow(
+                title: "Display Size",
+                subtitle: "",
+                selection: displaySize,
+                options: DisplaySize.allCases,
+                onFocusChange: { if $0 { focusedSettingId = "displaySize" } }
+            )
+
+            SettingsToggleRow(
+                title: "Home Hero",
+                subtitle: "",
+                isOn: $showHomeHero,
+                onFocusChange: { if $0 { focusedSettingId = "homeHero" } }
+            )
+
+            SettingsToggleRow(
+                title: "Library Hero",
+                subtitle: "",
+                isOn: $showLibraryHero,
+                onFocusChange: { if $0 { focusedSettingId = "libraryHero" } }
+            )
+
+            SettingsToggleRow(
+                title: "Discovery Rows",
+                subtitle: "",
+                isOn: $showLibraryRecommendations,
+                onFocusChange: { if $0 { focusedSettingId = "discoveryRows" } }
+            )
+
+            SettingsToggleRow(
+                title: "Recent Rows",
+                subtitle: "",
+                isOn: $showLibraryRecentRows,
+                onFocusChange: { if $0 { focusedSettingId = "recentRows" } }
+            )
+
+            SettingsToggleRow(
+                title: "Personalized Recommendations",
+                subtitle: "",
+                isOn: $enablePersonalizedRecommendations,
+                onFocusChange: { if $0 { focusedSettingId = "personalizedRecs" } }
+            )
+        }
+    }
+
+    // MARK: - Playback Settings
+
+    private var playbackSettings: some View {
+        VStack(spacing: 8) {
+            SettingsListPickerRow(
+                title: "Audio Language",
+                subtitle: "",
+                selection: audioLanguageBinding,
+                options: LanguageOption.allCases,
+                onFocusChange: { if $0 { focusedSettingId = "audioLanguage" } }
+            )
+
+            SettingsListPickerRow(
+                title: "Subtitles",
+                subtitle: "",
+                selection: subtitleOptionBinding,
+                options: SubtitleOption.allCases,
+                onFocusChange: { if $0 { focusedSettingId = "subtitles" } }
+            )
+
+            SettingsToggleRow(
+                title: "Show Skip Button",
+                subtitle: "",
+                isOn: $showSkipButton,
+                onFocusChange: { if $0 { focusedSettingId = "showSkipButton" } }
+            )
+
+            SettingsToggleRow(
+                title: "Show Markers on Scrubber",
+                subtitle: "",
+                isOn: $showMarkersOnScrubber,
+                onFocusChange: { if $0 { focusedSettingId = "showMarkers" } }
+            )
+
+            SettingsToggleRow(
+                title: "Auto-Skip Intro",
+                subtitle: "",
+                isOn: $autoSkipIntro,
+                onFocusChange: { if $0 { focusedSettingId = "autoSkipIntro" } }
+            )
+
+            SettingsToggleRow(
+                title: "Auto-Skip Credits",
+                subtitle: "",
+                isOn: $autoSkipCredits,
+                onFocusChange: { if $0 { focusedSettingId = "autoSkipCredits" } }
+            )
+
+            SettingsToggleRow(
+                title: "Auto-Skip Ads",
+                subtitle: "",
+                isOn: $autoSkipAds,
+                onFocusChange: { if $0 { focusedSettingId = "autoSkipAds" } }
+            )
+
+            SettingsPickerRow(
+                title: "Autoplay Countdown",
+                subtitle: "",
+                selection: autoplayCountdown,
+                options: AutoplayCountdown.allCases,
+                onFocusChange: { if $0 { focusedSettingId = "autoplayCountdown" } }
+            )
+
+            SettingsToggleRow(
+                title: "High Quality Scaling",
+                subtitle: "",
+                isOn: $highQualityScaling,
+                helpTitle: "High Quality Scaling",
+                onFocusChange: { if $0 { focusedSettingId = "highQualityScaling" } }
+            ) {
+                highQualityScalingHelpContent
+            }
+
+            SettingsToggleRow(
+                title: "AVPlayer for Dolby Vision",
+                subtitle: "",
+                isOn: $useAVPlayerForDolbyVision,
+                helpTitle: "AVPlayer for Dolby Vision",
+                onFocusChange: { if $0 { focusedSettingId = "avPlayerDV" } }
+            ) {
+                avPlayerDVHelpContent
+            }
+
+            SettingsToggleRow(
+                title: "AVPlayer for All Videos",
+                subtitle: "",
+                isOn: $useAVPlayerForAllVideos,
+                helpTitle: "AVPlayer for All Videos",
+                onFocusChange: { if $0 { focusedSettingId = "avPlayerAll" } }
+            ) {
+                avPlayerAllHelpContent
+            }
+
+            SettingsToggleRow(
+                title: "Rivulet Player",
+                subtitle: "",
+                isOn: $useRivuletPlayer,
+                helpTitle: "Rivulet Player",
+                onFocusChange: { if $0 { focusedSettingId = "rivuletPlayer" } }
+            ) {
+                rivuletPlayerHelpContent
+            }
+        }
+    }
+
+    // MARK: - Live TV Settings
+
+    private var liveTVSettings: some View {
+        VStack(spacing: 8) {
+            SettingsRow(
+                title: "Live TV Sources",
+                subtitle: "",
+                action: { navigate(to: .iptv) },
+                focusTrigger: focusTrigger,
+                onFocusChange: { if $0 { focusedSettingId = "liveTVSources" } }
+            )
+
+            SettingsToggleRow(
+                title: "Live TV Above Libraries",
+                subtitle: "",
+                isOn: $liveTVAboveLibraries,
+                onFocusChange: { if $0 { focusedSettingId = "liveTVAboveLibraries" } }
+            )
+
+            SettingsToggleRow(
+                title: "Classic TV Mode",
+                subtitle: "",
+                isOn: $classicTVMode,
+                onFocusChange: { if $0 { focusedSettingId = "classicTVMode" } }
+            )
+
+            SettingsToggleRow(
+                title: "Combine Sources",
+                subtitle: "",
+                isOn: $combineLiveTVSources,
+                onFocusChange: { if $0 { focusedSettingId = "combineSources" } }
+            )
+
+            SettingsPickerRow(
+                title: "Default Layout",
+                subtitle: "",
+                selection: liveTVLayout,
+                options: LiveTVLayout.allCases,
+                onFocusChange: { if $0 { focusedSettingId = "defaultLayout" } }
+            )
+
+            SettingsToggleRow(
+                title: "Confirm Exit Multiview",
+                subtitle: "",
+                isOn: $confirmExitMultiview,
+                onFocusChange: { if $0 { focusedSettingId = "confirmExitMultiview" } }
+            )
+
+            SettingsToggleRow(
+                title: "Allow 3 or 4 Streams",
+                subtitle: "",
+                isOn: $allowFourStreams,
+                onFocusChange: { if $0 { focusedSettingId = "allowFourStreams" } }
+            )
+        }
+    }
+
+    // MARK: - Servers Settings
+
+    private var serversSettings: some View {
+        VStack(spacing: 8) {
+            SettingsRow(
+                title: "Plex Server",
+                subtitle: "",
+                action: { navigate(to: .plex) },
+                focusTrigger: focusTrigger,
+                onFocusChange: { if $0 { focusedSettingId = "plexServer" } }
+            )
+
+            SettingsRow(
+                title: "User Profiles",
+                subtitle: "",
+                action: { navigate(to: .userProfiles) },
+                onFocusChange: { if $0 { focusedSettingId = "userProfiles" } }
+            )
+        }
+    }
+
+    // MARK: - About Settings
+
+    private var aboutSettings: some View {
+        VStack(spacing: 8) {
+            SettingsInfoRow(title: "App", value: "Rivulet")
+            SettingsInfoRow(title: "Version", value: appVersion)
+
+            SettingsRow(
+                title: "Changelog",
+                subtitle: "",
+                action: { showChangelog = true },
+                onFocusChange: { if $0 { focusedSettingId = "changelog" } }
+            )
+        }
+    }
+
+    // MARK: - Navigation
+
+    private func navigate(to page: SettingsPage) {
+        focusedSettingId = nil
+        isForward = true
+        navigationStack.append(page)
+    }
+
+    private func goBack() {
+        guard navigationStack.count > 1 else { return }
+        focusedSettingId = nil
+        isForward = false
+        navigationStack.removeLast()
     }
 
     // MARK: - Help Content

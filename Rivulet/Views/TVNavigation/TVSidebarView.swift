@@ -37,16 +37,27 @@ struct TVSidebarView: View {
         (DisplaySize(rawValue: displaySizeRaw) ?? .normal).scale
     }
 
-    private var accountTabTitle: String {
-        let name = profileManager.selectedUser?.displayName ?? authManager.username ?? "Account"
-        if currentTime.isEmpty { return name }
-        return "\(name)  \(currentTime)"
+    private var profileName: String {
+        profileManager.selectedUser?.displayName ?? authManager.username ?? "Account"
     }
 
     var body: some View {
         TabView(selection: $selectedTab) {
-            Tab(accountTabTitle, systemImage: "person.circle.fill", value: .account) {
+            Tab(value: .account) {
                 tabContent(for: .account)
+            } label: {
+                Label {
+                    HStack {
+                        Text(profileName)
+                        if !currentTime.isEmpty {
+                            Spacer()
+                            Text(currentTime)
+                                .foregroundStyle(.tertiary)
+                        }
+                    }
+                } icon: {
+                    SidebarProfileAvatar(user: profileManager.selectedUser, size: 36)
+                }
             }
 
             Tab("Search", systemImage: "magnifyingglass", value: .search) {
@@ -229,7 +240,7 @@ struct TVSidebarView: View {
         }
         .task {
             let formatter = DateFormatter()
-            formatter.dateFormat = "h:mm"
+            formatter.dateFormat = "h:mm a"
             currentTime = formatter.string(from: Date())
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(30))

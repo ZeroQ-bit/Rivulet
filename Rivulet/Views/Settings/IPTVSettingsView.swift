@@ -8,6 +8,7 @@
 import SwiftUI
 
 struct IPTVSettingsView: View {
+    @Binding var focusedSettingId: String?
     @StateObject private var dataStore = LiveTVDataStore.shared
     @StateObject private var authManager = PlexAuthManager.shared
     @State private var showAddSourceSheet = false
@@ -17,55 +18,44 @@ struct IPTVSettingsView: View {
     @State private var isAddingPlexLiveTV: Bool = false
     @State private var plexAddError: String?
 
+    init(focusedSettingId: Binding<String?> = .constant(nil)) {
+        self._focusedSettingId = focusedSettingId
+    }
+
     var body: some View {
-        ScrollView(.vertical, showsIndicators: false) {
-            VStack(alignment: .leading, spacing: 32) {
-                // Header
-                Text("Live TV Sources")
-                    .font(.system(size: 56, weight: .bold))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 80)
-                    .padding(.top, 60)
+        VStack(spacing: 24) {
+            Text("Add sources for Live TV channels. You can use Plex Live TV or any M3U playlist.")
+                .font(.system(size: 24))
+                .foregroundStyle(.white.opacity(0.5))
 
-                Text("Add sources for Live TV channels. You can use Plex Live TV or any M3U playlist.")
-                    .font(.system(size: 24))
-                    .foregroundStyle(.white.opacity(0.5))
-                    .padding(.horizontal, 80)
-
-                VStack(spacing: 24) {
-                    // Connected Sources
-                    if !dataStore.sources.isEmpty {
-                        SettingsSection(title: "Connected Sources") {
-                            ForEach(dataStore.sources) { source in
-                                LiveTVSourceRow(source: source) {
-                                    selectedSourceForDetail = source
-                                }
-                            }
-                        }
-                    }
-
-                    // Add Source Button
-                    SettingsSection(title: dataStore.sources.isEmpty ? "Get Started" : "Add More") {
-                        AddSourceButton {
-                            showAddSourceSheet = true
-                        }
-                    }
-
-                    // Plex Live TV availability hint - only show if DVR is confirmed available
-                    if authManager.isAuthenticated && !hasPlexLiveTVSource && plexDVRAvailable {
-                        PlexLiveTVHintCard(
-                            isLoading: isAddingPlexLiveTV,
-                            errorMessage: plexAddError
-                        ) {
-                            addPlexLiveTV()
+            // Connected Sources
+            if !dataStore.sources.isEmpty {
+                SettingsSection(title: "Connected Sources") {
+                    ForEach(dataStore.sources) { source in
+                        LiveTVSourceRow(source: source) {
+                            selectedSourceForDetail = source
                         }
                     }
                 }
-                .padding(.horizontal, 80)
-                .padding(.bottom, 80)
+            }
+
+            // Add Source Button
+            SettingsSection(title: dataStore.sources.isEmpty ? "Get Started" : "Add More") {
+                AddSourceButton {
+                    showAddSourceSheet = true
+                }
+            }
+
+            // Plex Live TV availability hint
+            if authManager.isAuthenticated && !hasPlexLiveTVSource && plexDVRAvailable {
+                PlexLiveTVHintCard(
+                    isLoading: isAddingPlexLiveTV,
+                    errorMessage: plexAddError
+                ) {
+                    addPlexLiveTV()
+                }
             }
         }
-        .background(Color.black)
         .task {
             await checkPlexDVRAvailability()
         }
@@ -136,7 +126,6 @@ struct IPTVSettingsView: View {
 
             await MainActor.run {
                 isAddingPlexLiveTV = false
-                // Hide the hint card by updating state - already handled by hasPlexLiveTVSource
             }
         }
     }
@@ -200,7 +189,7 @@ struct LiveTVSourceRow: View {
                         .foregroundStyle(.white.opacity(0.6))
 
                     if source.channelCount > 0 {
-                        Text("•")
+                        Text("\u{2022}")
                             .foregroundStyle(.white.opacity(0.6))
                         Text("\(source.channelCount) channels")
                             .font(.system(size: 21))

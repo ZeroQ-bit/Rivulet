@@ -45,13 +45,47 @@ enum PipelineState: Sendable, Equatable {
 /// Read loop increments pending count when yielding a buffer;
 /// audio enqueue task decrements after renderer enqueue completes.
 private final class AudioBufferGate: @unchecked Sendable {
-    nonisolated(unsafe) var pending = 0
-    nonisolated(unsafe) var dropped = 0
-    nonisolated(unsafe) var maxPending = 0
+    private let lock = NSLock()
+    private var pending = 0
+    private var dropped = 0
+    private var maxPending = 0
     let limit: Int
 
     init(limit: Int) {
         self.limit = limit
+    }
+
+    /// Attempts to reserve one queue slot and updates queue diagnostics.
+    func reserveSlot() -> (accepted: Bool, depth: Int, dropped: Int) {
+        lock.lock()
+        defer { lock.unlock() }
+
+        let depth = pending
+        if depth > maxPending {
+            maxPending = depth
+        }
+
+        if depth >= limit {
+            dropped += 1
+            return (accepted: false, depth: depth, dropped: dropped)
+        }
+
+        pending += 1
+        return (accepted: true, depth: depth, dropped: dropped)
+    }
+
+    func completeOne() {
+        lock.lock()
+        defer { lock.unlock() }
+        if pending > 0 {
+            pending -= 1
+        }
+    }
+
+    func snapshot() -> (pending: Int, dropped: Int, maxPending: Int) {
+        lock.lock()
+        defer { lock.unlock() }
+        return (pending: pending, dropped: dropped, maxPending: maxPending)
     }
 }
 
@@ -339,6 +373,36 @@ final class DirectPlayPipeline {
         onStateChange?(.idle)
     }
 
+    /// Deterministic shutdown that waits for background tasks before tearing down decoders/demuxer.
+    func shutdown() async {
+        isPlaying = false
+
+        audioEnqueueTask?.cancel()
+        readTask?.cancel()
+
+        let oldAudioTask = audioEnqueueTask
+        let oldReadTask = readTask
+        audioEnqueueTask = nil
+        readTask = nil
+
+        await oldAudioTask?.value
+        await oldReadTask?.value
+
+        audioDecoder?.close()
+        audioDecoder = nil
+        subtitleDecoder?.close()
+        subtitleDecoder = nil
+        demuxer.close()
+
+        if let previousMaxVideoLookahead {
+            renderer.maxVideoLookahead = previousMaxVideoLookahead
+            self.previousMaxVideoLookahead = nil
+        }
+
+        state = .idle
+        onStateChange?(.idle)
+    }
+
     /// Enable embedded subtitle extraction for a specific FFmpeg stream index.
     /// Subtitle packets will be delivered via the `onSubtitleCue` or `onBitmapSubtitleCue` callback.
     func selectSubtitleStream(ffmpegStreamIndex: Int32) {
@@ -533,7 +597,7 @@ final class DirectPlayPipeline {
                 for await sampleBuffer in stream {
                     guard !Task.isCancelled else { break }
                     await renderer.enqueueAudio(sampleBuffer)
-                    gate.pending -= 1
+                    gate.completeOne()
                 }
             }
         }
@@ -591,24 +655,18 @@ final class DirectPlayPipeline {
 
             let enqueueAudioBuffer: @Sendable (CMSampleBuffer) async -> Void = { sampleBuffer in
                 if let localAudioContinuation, let localAudioGate {
-                    let depth = localAudioGate.pending
-                    if depth > localAudioGate.maxPending {
-                        localAudioGate.maxPending = depth
-                    }
-
-                    if depth >= localAudioGate.limit {
-                        localAudioGate.dropped += 1
-                        let dropped = localAudioGate.dropped
+                    let reservation = localAudioGate.reserveSlot()
+                    if !reservation.accepted {
+                        let dropped = reservation.dropped
                         if dropped <= 10 || dropped % 120 == 0 {
                             print("[DirectPlayDiag] Dropping queued audio sample #\(dropped) " +
-                                  "(audioQ=\(depth), limit=\(localAudioGate.limit))")
+                                  "(audioQ=\(reservation.depth), limit=\(localAudioGate.limit))")
                         }
                         return
                     }
 
                     guard !Task.isCancelled else { return }
                     localAudioContinuation.yield(sampleBuffer)
-                    localAudioGate.pending += 1
                 } else {
                     await renderer.enqueueAudio(sampleBuffer)
                 }
@@ -629,7 +687,7 @@ final class DirectPlayPipeline {
                             }
                         }
 
-                        localAudioDecodeGate.pending -= 1
+                        localAudioDecodeGate.completeOne()
                     }
 
                     // Flush residual decoder batch on stream end.
@@ -886,7 +944,7 @@ final class DirectPlayPipeline {
                             } else if videoPacketCount <= 10 || videoPacketCount % 120 == 0 {
                                 print(
                                     "[DirectPlayDiag] Waiting for preroll start: frame=\(videoPacketCount) " +
-                                    "pts=\(String(format: "%.3f", ptsSeconds))s audioQ=\(localAudioGate?.pending ?? -1) " +
+                                    "pts=\(String(format: "%.3f", ptsSeconds))s audioQ=\(localAudioGate?.snapshot().pending ?? -1) " +
                                     "audioPrimed=\(audioPrimed) videoLead=\(String(format: "%.0f", prerollLeadSeconds * 1000))ms " +
                                     "needLead=\(String(format: "%.0f", requiredPrerollLeadSeconds * 1000))ms " +
                                     "wait=\(String(format: "%.0f", waitedMs))ms"
@@ -940,12 +998,14 @@ final class DirectPlayPipeline {
                             let elapsedWall = nowWall - videoDiagStartWall
                             let streamElapsed = firstVideoPTSForDiag.map { ptsSeconds - $0 } ?? 0
                             let playbackRateVsWall = elapsedWall > 0 ? (streamElapsed / elapsedWall) : 0
-                            let audioQueueDepth = localAudioGate?.pending ?? -1
-                            let audioQueueMaxDepth = localAudioGate?.maxPending ?? -1
-                            let audioQueueDrops = localAudioGate?.dropped ?? -1
-                            let audioDecodeQueueDepth = localAudioDecodeGate?.pending ?? -1
-                            let audioDecodeQueueMaxDepth = localAudioDecodeGate?.maxPending ?? -1
-                            let audioDecodeQueueDrops = localAudioDecodeGate?.dropped ?? -1
+                            let audioSnapshot = localAudioGate?.snapshot()
+                            let audioDecodeSnapshot = localAudioDecodeGate?.snapshot()
+                            let audioQueueDepth = audioSnapshot?.pending ?? -1
+                            let audioQueueMaxDepth = audioSnapshot?.maxPending ?? -1
+                            let audioQueueDrops = audioSnapshot?.dropped ?? -1
+                            let audioDecodeQueueDepth = audioDecodeSnapshot?.pending ?? -1
+                            let audioDecodeQueueMaxDepth = audioDecodeSnapshot?.maxPending ?? -1
+                            let audioDecodeQueueDrops = audioDecodeSnapshot?.dropped ?? -1
 
                             print(
                                 "[DirectPlayDiag] v=\(videoPacketCount) a=\(audioPacketCount) " +
@@ -1009,23 +1069,17 @@ final class DirectPlayPipeline {
 
                         if let decoder = audioDecoder {
                             if let localAudioDecodeContinuation, let localAudioDecodeGate {
-                                let depth = localAudioDecodeGate.pending
-                                if depth > localAudioDecodeGate.maxPending {
-                                    localAudioDecodeGate.maxPending = depth
-                                }
-
-                                if depth >= localAudioDecodeGate.limit {
-                                    localAudioDecodeGate.dropped += 1
-                                    let dropped = localAudioDecodeGate.dropped
+                                let reservation = localAudioDecodeGate.reserveSlot()
+                                if !reservation.accepted {
+                                    let dropped = reservation.dropped
                                     if dropped <= 10 || dropped % 120 == 0 {
                                         print("[DirectPlayDiag] Dropping queued compressed audio packet #\(dropped) " +
-                                              "(audioDecQ=\(depth), limit=\(localAudioDecodeGate.limit))")
+                                              "(audioDecQ=\(reservation.depth), limit=\(localAudioDecodeGate.limit))")
                                     }
                                     continue
                                 }
 
                                 localAudioDecodeContinuation.yield(packet)
-                                localAudioDecodeGate.pending += 1
                             } else {
                                 // Fallback if decode queue setup failed.
                                 let batchedFrames = decoder.decodeAndBatch(packet)
@@ -1069,9 +1123,9 @@ final class DirectPlayPipeline {
                                 }
                             }
                         } else {
-                            // Text subtitle (SRT, ASS)
+                            // Text subtitle (SRT, ASS embedded in MKV)
                             let rawText = String(data: packet.data, encoding: .utf8) ?? ""
-                            let text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+                            let text = Self.cleanEmbeddedSubtitleText(rawText)
                             if !text.isEmpty {
                                 let start = packet.ptsSeconds
                                 let dur = Double(packet.duration) * Double(packet.timebase.value) / Double(packet.timebase.timescale)
@@ -1091,10 +1145,12 @@ final class DirectPlayPipeline {
             }
 
             // --- Cleanup ---
-            let summaryMaxAudioQ = localAudioGate?.maxPending ?? -1
-            let summaryAudioDrops = localAudioGate?.dropped ?? -1
-            let summaryMaxAudioDecQ = localAudioDecodeGate?.maxPending ?? -1
-            let summaryAudioDecDrops = localAudioDecodeGate?.dropped ?? -1
+            let summaryAudio = localAudioGate?.snapshot()
+            let summaryAudioDec = localAudioDecodeGate?.snapshot()
+            let summaryMaxAudioQ = summaryAudio?.maxPending ?? -1
+            let summaryAudioDrops = summaryAudio?.dropped ?? -1
+            let summaryMaxAudioDecQ = summaryAudioDec?.maxPending ?? -1
+            let summaryAudioDecDrops = summaryAudioDec?.dropped ?? -1
             print("[DirectPlay] Read loop exiting: reason=\(exitReason) video=\(videoPacketCount) audio=\(audioPacketCount)")
             print("[DirectPlayDiag] Summary: maxWallGap=\(String(format: "%.0f", maxVideoWallGapMs))ms " +
                   "maxAudioQ=\(summaryMaxAudioQ) audioQDrops=\(summaryAudioDrops) " +
@@ -1222,6 +1278,47 @@ final class DirectPlayPipeline {
             "mp3", "mp2", "opus", "pcm"
         ]
         return nativePrefixes.contains(where: { normalized == $0 || normalized.hasPrefix($0) })
+    }
+
+    /// Strip ASS/SSA dialogue metadata from embedded subtitle packets.
+    /// FFmpeg returns embedded ASS subtitles as raw dialogue events:
+    ///   "ReadOrder,Layer,Style,Name,MarginL,MarginR,MarginV,Effect,Text"
+    /// We need to extract just the Text field (everything after the 8th comma).
+    nonisolated private static func cleanEmbeddedSubtitleText(_ rawText: String) -> String {
+        var text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return "" }
+
+        // ASS event format: 8 metadata fields followed by the text field.
+        // The text field is everything after the 8th comma (may itself contain commas).
+        let assFieldCount = 8
+        var commaCount = 0
+        for (i, char) in text.enumerated() {
+            if char == "," {
+                commaCount += 1
+                if commaCount == assFieldCount {
+                    // Check that preceding fields look like ASS metadata
+                    // (contain a style name like "Default" or digits)
+                    let prefix = String(text[text.startIndex..<text.index(text.startIndex, offsetBy: i)])
+                    if prefix.contains("Default") || prefix.contains("default") ||
+                       prefix.allSatisfy({ $0.isNumber || $0 == "," || $0.isWhitespace }) {
+                        text = String(text[text.index(text.startIndex, offsetBy: i + 1)...])
+                    }
+                    break
+                }
+            }
+        }
+
+        // ASS line breaks
+        text = text.replacingOccurrences(of: "\\N", with: "\n")
+        text = text.replacingOccurrences(of: "\\n", with: "\n")
+
+        // Strip ASS override blocks: {\an8}, {\i1}, {\pos(x,y)}, etc.
+        text = text.replacingOccurrences(of: #"\{[^}]*\}"#, with: "", options: .regularExpression)
+
+        // Strip HTML-like tags sometimes present in embedded subs
+        text = text.replacingOccurrences(of: #"<[^>]+>"#, with: "", options: .regularExpression)
+
+        return text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private func nativeTrackScore(_ track: FFmpegTrackInfo) -> Int {

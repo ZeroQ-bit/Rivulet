@@ -470,7 +470,7 @@ struct LiveTVPlayerView: View {
             }
         }
         .animation(.easeInOut(duration: 0.2), value: showExitConfirmation)
-        .preferredColorScheme(.dark)  // Ensure dark mode for all system UI
+        // System appearance
     }
 
     // MARK: - Stream Content

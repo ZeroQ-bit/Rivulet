@@ -69,7 +69,6 @@ struct RivuletApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()
-                .preferredColorScheme(.dark)  // Force dark mode
                 .onOpenURL { url in
                     // Handle deep links from Top Shelf
                     Task {

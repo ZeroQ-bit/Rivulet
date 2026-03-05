@@ -171,5 +171,4 @@ private struct TrackRow: View {
         onSelect: { id in
         }
     )
-    .preferredColorScheme(.dark)
 }

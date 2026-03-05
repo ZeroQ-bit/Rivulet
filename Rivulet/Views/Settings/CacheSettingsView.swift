@@ -8,6 +8,7 @@
 import SwiftUI
 
 struct CacheSettingsView: View {
+    @Binding var focusedSettingId: String?
     @State private var imageCacheSize: Int64 = 0
     @State private var metadataCacheSize: Int64 = 0
     @State private var isLoadingSizes = true
@@ -17,61 +18,50 @@ struct CacheSettingsView: View {
 
     private let cacheManager = CacheManager.shared
 
+    init(focusedSettingId: Binding<String?> = .constant(nil)) {
+        self._focusedSettingId = focusedSettingId
+    }
+
     var body: some View {
-        ScrollView(.vertical, showsIndicators: false) {
-            VStack(alignment: .leading, spacing: 32) {
-                // Header
-                Text("Cache & Storage")
-                    .font(.system(size: 48, weight: .bold))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 80)
-                    .padding(.top, 60)
+        VStack(spacing: 24) {
+            SettingsSection(title: "Storage Usage") {
+                cacheInfoRow(
+                    title: "Image Cache",
+                    subtitle: "Poster and backdrop images",
+                    size: imageCacheSize,
+                    isLoading: isLoadingSizes
+                )
 
-                // Cache sizes
-                VStack(spacing: 24) {
-                    SettingsSection(title: "Storage Usage") {
-                        cacheInfoRow(
-                            title: "Image Cache",
-                            subtitle: "Poster and backdrop images",
-                            size: imageCacheSize,
-                            isLoading: isLoadingSizes
-                        )
+                cacheInfoRow(
+                    title: "Metadata Cache",
+                    subtitle: "Library and media information",
+                    size: metadataCacheSize,
+                    isLoading: isLoadingSizes
+                )
 
-                        cacheInfoRow(
-                            title: "Metadata Cache",
-                            subtitle: "Library and media information",
-                            size: metadataCacheSize,
-                            isLoading: isLoadingSizes
-                        )
+                Divider()
+                    .background(.white.opacity(0.1))
+                    .padding(.horizontal, 20)
 
-                        Divider()
-                            .background(.white.opacity(0.1))
-                            .padding(.horizontal, 20)
-
-                        totalCacheRow
-                    }
-
-                    SettingsSection(title: "Actions") {
-                        SettingsActionRow(title: "Force Refresh Libraries") {
-                            showRefreshConfirmation = true
-                        }
-
-                        SettingsActionRow(title: "Clear All Cache", isDestructive: true) {
-                            showClearConfirmation = true
-                        }
-                    }
-
-                    // Info text
-                    Text("Clearing the cache will remove all cached images and metadata. Content will be re-downloaded as needed.")
-                        .font(.system(size: 17))
-                        .foregroundStyle(.white.opacity(0.4))
-                        .padding(.horizontal, 10)
-                }
-                .padding(.horizontal, 80)
-                .padding(.bottom, 80)
+                totalCacheRow
             }
+
+            SettingsSection(title: "Actions") {
+                SettingsActionRow(title: "Force Refresh Libraries") {
+                    showRefreshConfirmation = true
+                }
+
+                SettingsActionRow(title: "Clear All Cache", isDestructive: true) {
+                    showClearConfirmation = true
+                }
+            }
+
+            // Info text
+            Text("Clearing the cache will remove all cached images and metadata. Content will be re-downloaded as needed.")
+                .font(.system(size: 17))
+                .foregroundStyle(.white.opacity(0.4))
+                .padding(.horizontal, 10)
         }
-        .background(Color.black)
         .task {
             await loadCacheSizes()
         }
