@@ -27,9 +27,6 @@ struct FocusScope: Hashable, Equatable, CustomStringConvertible {
     /// Main content area (home, library, search results)
     static let content = FocusScope("content")
 
-    /// Sidebar navigation menu
-    static let sidebar = FocusScope("sidebar")
-
     /// Video player controls
     static let player = FocusScope("player")
 
@@ -88,11 +85,6 @@ struct FocusItemId: Hashable, Equatable, CustomStringConvertible {
     /// Convenience initializer for content scope items
     static func content(_ itemId: String, context: String? = nil) -> FocusItemId {
         FocusItemId(scope: .content, context: context, itemId: itemId)
-    }
-
-    /// Convenience initializer for sidebar items
-    static func sidebar(_ itemId: String) -> FocusItemId {
-        FocusItemId(scope: .sidebar, context: nil, itemId: itemId)
     }
 
     /// Convenience initializer for player items

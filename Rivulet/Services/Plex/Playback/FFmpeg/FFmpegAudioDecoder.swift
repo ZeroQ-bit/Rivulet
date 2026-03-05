@@ -39,10 +39,13 @@ import Libswresample
 final class FFmpegAudioDecoder: @unchecked Sendable {
 
     /// Audio codecs this decoder handles (everything Apple TV can't natively decode).
+    /// Uses prefix matching via `codecNeedsClientDecode` — "pcm" matches pcm_s24le, pcm_s16le, etc.
     static let supportedCodecs: Set<String> = [
         "truehd", "mlp",                   // Dolby TrueHD / MLP
         "dts", "dca",                       // DTS Core
         "dts-hd", "dtshd", "dts-hd ma",    // DTS-HD (MA and HRA)
+        "pcm",                              // Raw PCM variants (pcm_s24le, pcm_s16le, etc.)
+        "flac",                             // FLAC lossless
     ]
 
     /// Whether FFmpeg audio decoding is available

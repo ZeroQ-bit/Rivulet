@@ -15,7 +15,6 @@ struct PlexHomeView: View {
     @AppStorage("enablePersonalizedRecommendations") private var enablePersonalizedRecommendations = false
     @Environment(\.nestedNavigationState) private var nestedNavState
     @Environment(\.focusScopeManager) private var focusScopeManager
-    @Environment(\.isSidebarVisible) private var isSidebarVisible
     @State private var selectedItem: PlexMetadata?
     @State private var heroItem: PlexMetadata?
     @State private var cachedProcessedHubs: [PlexHub] = []  // Memoized to avoid recalculation on every render
@@ -133,6 +132,7 @@ struct PlexHomeView: View {
     var body: some View {
         NavigationStack {
             ZStack {
+                let _ = print("[PlexHome] body evaluated, hubs=\(dataStore.hubs.count), focusedItemId=\(focusedItemId ?? "nil")")
                 if !authManager.hasCredentials {
                     notConnectedView
                 } else if dataStore.isLoadingHubs && dataStore.hubs.isEmpty {
@@ -207,6 +207,7 @@ struct PlexHomeView: View {
         }
         // Tell parent we're in nested navigation when viewing detail
         .onChange(of: selectedItem) { _, newValue in
+            print("[PlexHome] selectedItem changed: \(newValue?.title ?? "nil") (ratingKey: \(newValue?.ratingKey ?? "nil"))")
             let isNested = newValue != nil
             nestedNavState.isNested = isNested
             if isNested {
@@ -220,7 +221,8 @@ struct PlexHomeView: View {
             }
         }
         // Save focus when it changes (only when content scope is active)
-        .onChange(of: focusedItemId) { _, newValue in
+        .onChange(of: focusedItemId) { oldValue, newValue in
+            print("[PlexHome] focusedItemId: \(oldValue ?? "nil") → \(newValue ?? "nil")")
             guard focusScopeManager.isScopeActive(.content) else {
                 // Scope not active, don't track focus changes
                 return
@@ -398,10 +400,6 @@ struct PlexHomeView: View {
             }
         }
         .scrollClipDisabled()  // Allow shadow overflow
-        #if os(tvOS)
-        .ignoresSafeArea(edges: .top)
-        .defaultFocus($focusedItemId, "hero")  // Set initial focus to hero
-        #endif
     }
 
     // MARK: - Connection Error Banner
@@ -608,9 +606,6 @@ struct HeroView<FocusTarget: Hashable>: View {
     let serverURL: String
     let authToken: String
     let onSelect: () -> Void
-
-    @Environment(\.openSidebar) private var openSidebar
-    @Environment(\.isSidebarVisible) private var isSidebarVisible
 
     // Hero art image loaded at full size with guaranteed off-main-thread decoding
     @State private var heroArtImage: UIImage?
@@ -821,13 +816,6 @@ struct HeroView<FocusTarget: Hashable>: View {
             )
             .scaleEffect(isFocused ? 1.02 : 1.0)
             .animation(.easeOut(duration: 0.1), value: isFocused)  // Faster de-focus
-            .onMoveCommand { direction in
-                // Ignore input when sidebar is visible
-                guard !isSidebarVisible else { return }
-                if direction == .left {
-                    openSidebar()
-                }
-            }
 
         case .enumTarget(let binding, let target):
             Button(action: onSelect) {
@@ -848,13 +836,6 @@ struct HeroView<FocusTarget: Hashable>: View {
             )
             .scaleEffect(isFocused ? 1.02 : 1.0)
             .animation(.easeOut(duration: 0.1), value: isFocused)  // Faster de-focus
-            .onMoveCommand { direction in
-                // Ignore input when sidebar is visible
-                guard !isSidebarVisible else { return }
-                if direction == .left {
-                    openSidebar()
-                }
-            }
         }
     }
     #endif
@@ -930,9 +911,7 @@ struct InfiniteContentRow: View {
     var onItemSelected: ((PlexMetadata) -> Void)?
     var onRefreshNeeded: MediaItemRefreshCallback?
 
-    @Environment(\.openSidebar) private var openSidebar
     @Environment(\.focusScopeManager) private var focusScopeManager
-    @Environment(\.isSidebarVisible) private var isSidebarVisible
 
     @State private var items: [PlexMetadata] = []
     @State private var isLoadingMore = false
@@ -992,6 +971,7 @@ struct InfiniteContentRow: View {
                 LazyHStack(spacing: 24) {  // Lazy to avoid laying out hundreds of offscreen posters
                     ForEach(Array(items.enumerated()), id: \.element.ratingKey) { index, item in
                         Button {
+                            print("[PlexHome] Button pressed: \(item.title ?? "?") (index: \(index), row: \(title))")
                             onItemSelected?(item)
                         } label: {
                             MediaPosterCard(
@@ -1003,7 +983,6 @@ struct InfiniteContentRow: View {
                         #if os(tvOS)
                         .buttonStyle(CardButtonStyle())
                         .focused($focusedItemId, equals: focusId(for: item))
-                        .modifier(LeftEdgeSidebarTrigger(isFirstItem: index == 0, openSidebar: openSidebar))
                         #else
                         .buttonStyle(.plain)
                         #endif
@@ -1191,30 +1170,6 @@ struct InfiniteContentRow: View {
         }
 
         isLoadingMore = false
-    }
-}
-
-// MARK: - Left Edge Sidebar Trigger Modifier
-
-/// A modifier that only adds onMoveCommand to the first item in a row
-struct LeftEdgeSidebarTrigger: ViewModifier {
-    let isFirstItem: Bool
-    let openSidebar: () -> Void
-
-    @Environment(\.isSidebarVisible) private var isSidebarVisible
-
-    func body(content: Content) -> some View {
-        if isFirstItem {
-            content.onMoveCommand { direction in
-                // Ignore input when sidebar is visible
-                guard !isSidebarVisible else { return }
-                if direction == .left {
-                    openSidebar()
-                }
-            }
-        } else {
-            content
-        }
     }
 }
 

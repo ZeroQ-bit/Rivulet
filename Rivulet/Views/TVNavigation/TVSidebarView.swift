@@ -2,123 +2,144 @@
 //  TVSidebarView.swift
 //  Rivulet
 //
-//  Main tvOS sidebar navigation view with sliding glass panel
+//  Main tvOS navigation using system TabView with sidebarAdaptable style
 //
 
 import SwiftUI
 
 #if os(tvOS)
 
+// MARK: - TVSidebarView
+
 struct TVSidebarView: View {
     @StateObject private var authManager = PlexAuthManager.shared
     @StateObject private var dataStore = PlexDataStore.shared
     @StateObject private var liveTVDataStore = LiveTVDataStore.shared
     @StateObject private var profileManager = PlexUserProfileManager.shared
-    @StateObject private var librarySettings = LibrarySettingsManager.shared
     @StateObject private var nestedNavState = NestedNavigationState()
     @StateObject private var focusScopeManager = FocusScopeManager()
     @StateObject private var deepLinkHandler = DeepLinkHandler.shared
     @AppStorage("combineLiveTVSources") private var combineLiveTVSources = true
     @AppStorage("liveTVAboveLibraries") private var liveTVAboveLibraries = false
     @AppStorage("displaySize") private var displaySizeRaw = DisplaySize.normal.rawValue
-    @State private var selectedDestination: TVDestination = .home
-    @State private var selectedLibraryKey: String?
-    @State private var selectedLiveTVSourceId: String?  // nil = all sources, non-nil = specific source
-    @FocusState private var sidebarFocusedItem: String?  // Track focused item in sidebar
-    @State private var pendingDestination: TVDestination?
-    @State private var pendingLibraryKey: String?
-    @State private var pendingLiveTVSourceId: String?
+    @State private var selectedTab: SidebarTab = .home
     @State private var showProfilePicker = false
     @State private var hasCheckedProfilePicker = false
     @State private var isAwaitingProfileSelection = false
     @AppStorage("lastSeenBuild") private var lastSeenBuild = ""
     @State private var showWhatsNew = false
     @State private var whatsNewVersion = ""
-
-    /// Computed property for sidebar visibility based on active scope
-    private var isSidebarVisible: Bool {
-        focusScopeManager.isScopeActive(.sidebar)
-    }
-
-    private let sidebarWidth: CGFloat = 340
+    @State private var currentTime = ""
+    @Namespace private var contentNamespace
+    @Environment(\.resetFocus) private var resetFocus
 
     private var uiScale: CGFloat {
         (DisplaySize(rawValue: displaySizeRaw) ?? .normal).scale
     }
 
+    private var accountTabTitle: String {
+        let name = profileManager.selectedUser?.displayName ?? authManager.username ?? "Account"
+        if currentTime.isEmpty { return name }
+        return "\(name)  \(currentTime)"
+    }
+
     var body: some View {
-        ZStack {
-            // Full-screen content with left-edge trigger
-            HStack(spacing: 0) {
-                // Left-edge trigger - completely removed when guide is active to prevent focus interference
-                // Also disabled as fallback in case conditional render has timing issues
-                if !focusScopeManager.isScopeActive(.guide) {
-                    LeftEdgeTrigger(
-                        action: openSidebar,
-                        isDisabled: isSidebarVisible || nestedNavState.isNested || focusScopeManager.isScopeActive(.guide)
-                    )
-                    .opacity(isSidebarVisible || nestedNavState.isNested ? 0 : 1)
-                    .allowsHitTesting(!isSidebarVisible && !nestedNavState.isNested && !focusScopeManager.isScopeActive(.guide))
+        TabView(selection: $selectedTab) {
+            Tab(accountTabTitle, systemImage: "person.circle.fill", value: .account) {
+                tabContent(for: .account)
+            }
+
+            Tab("Search", systemImage: "magnifyingglass", value: .search) {
+                tabContent(for: .search)
+            }
+
+            Tab("Home", systemImage: "house.fill", value: .home) {
+                tabContent(for: .home)
+            }
+
+            // Dynamic sections (order controlled by liveTVAboveLibraries)
+            if liveTVAboveLibraries {
+                if liveTVDataStore.hasConfiguredSources {
+                    TabSection("Live TV") {
+                        if combineLiveTVSources {
+                            Tab("Channels", systemImage: "tv.and.mediabox",
+                                value: SidebarTab.liveTV(sourceId: nil)) {
+                                tabContent(for: .liveTV(sourceId: nil))
+                            }
+                        } else {
+                            ForEach(liveTVDataStore.sources) { source in
+                                Tab(source.displayName.replacingOccurrences(of: " Live TV", with: ""),
+                                    systemImage: iconForSourceType(source.sourceType),
+                                    value: SidebarTab.liveTV(sourceId: source.id)) {
+                                    tabContent(for: .liveTV(sourceId: source.id))
+                                }
+                            }
+                        }
+                    }
                 }
 
-                mainContent
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    // Disable content when sidebar visible to prevent focus from escaping
-                    .disabled(isSidebarVisible)
-                    .environment(\.openSidebar, openSidebar)
-                    .environment(\.nestedNavigationState, nestedNavState)
-                    .environment(\.isSidebarVisible, isSidebarVisible)
-                    .environment(\.focusScopeManager, focusScopeManager)
-                    .environment(\.uiScale, uiScale)
-            }
-            .zIndex(0)
-
-            // Dim overlay - animated separately
-            Color.black
-                .opacity(isSidebarVisible ? 0.4 : 0)
-                .ignoresSafeArea()
-                .allowsHitTesting(isSidebarVisible)
-                .onTapGesture {
-                    closeSidebar()
+                if authManager.hasCredentials && !dataStore.visibleMediaLibraries.isEmpty {
+                    TabSection(authManager.savedServerName ?? "Library") {
+                        ForEach(dataStore.visibleMediaLibraries, id: \.key) { library in
+                            Tab(library.title, systemImage: iconForLibrary(library),
+                                value: SidebarTab.library(key: library.key)) {
+                                tabContent(for: .library(key: library.key))
+                            }
+                        }
+                    }
                 }
-                .animation(.easeOut(duration: 0.12), value: isSidebarVisible)
-                .zIndex(1)
-
-            HStack(spacing: 0) {
-                sidebarContent
-                    .frame(width: sidebarWidth)
-                    .frame(maxHeight: .infinity)
-                    .contentShape(RoundedRectangle(cornerRadius: 44, style: .continuous))
-                    .clipped()
-                    .glassEffect(
-                        .regular,
-                        in: RoundedRectangle(cornerRadius: 44, style: .continuous)
-                    )
-                    // GPU-accelerated shadow using blur instead of CPU-rendered .shadow()
-                    .background(
-                        RoundedRectangle(cornerRadius: 44, style: .continuous)
-                            .fill(.black)
-                            .blur(radius: 30)
-                            .offset(x: 15)
-                            .opacity(0.5)
-                    )
-                    .padding(.leading, 12)
-                    .offset(x: isSidebarVisible ? 0 : -sidebarWidth - 60)
-
-                Spacer()
-            }
-            .zIndex(2)
-            .animation(.spring(response: 0.16, dampingFraction: 0.9), value: isSidebarVisible)
-        }
-        .ignoresSafeArea()
-        // Handle exit command based on current state
-        .onExitCommand {
-            if isSidebarVisible {
-                closeSidebar()
-            } else if nestedNavState.isNested {
-                nestedNavState.goBack()
             } else {
-                openSidebar()
+                if authManager.hasCredentials && !dataStore.visibleMediaLibraries.isEmpty {
+                    TabSection(authManager.savedServerName ?? "Library") {
+                        ForEach(dataStore.visibleMediaLibraries, id: \.key) { library in
+                            Tab(library.title, systemImage: iconForLibrary(library),
+                                value: SidebarTab.library(key: library.key)) {
+                                tabContent(for: .library(key: library.key))
+                            }
+                        }
+                    }
+                }
+
+                if liveTVDataStore.hasConfiguredSources {
+                    TabSection("Live TV") {
+                        if combineLiveTVSources {
+                            Tab("Channels", systemImage: "tv.and.mediabox",
+                                value: SidebarTab.liveTV(sourceId: nil)) {
+                                tabContent(for: .liveTV(sourceId: nil))
+                            }
+                        } else {
+                            ForEach(liveTVDataStore.sources) { source in
+                                Tab(source.displayName.replacingOccurrences(of: " Live TV", with: ""),
+                                    systemImage: iconForSourceType(source.sourceType),
+                                    value: SidebarTab.liveTV(sourceId: source.id)) {
+                                    tabContent(for: .liveTV(sourceId: source.id))
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            TabSection("") {
+                Tab("Settings", systemImage: "gearshape.fill",
+                    value: SidebarTab.settings) {
+                    tabContent(for: .settings)
+                }
+            }
+        }
+        .tabViewStyle(.sidebarAdaptable)
+        .onExitCommand {
+            resetFocus(in: contentNamespace)
+        }
+        // Handle tab selection
+        .onChange(of: selectedTab) { _, _ in
+            nestedNavState.isNested = false
+            nestedNavState.goBackAction = nil
+        }
+        // Reset tab selection when live TV source mode changes
+        .onChange(of: combineLiveTVSources) { _, combined in
+            if case .liveTV = selectedTab {
+                selectedTab = .liveTV(sourceId: combined ? nil : liveTVDataStore.sources.first?.id)
             }
         }
         .task(id: authManager.hasCredentials) {
@@ -150,7 +171,7 @@ struct TVSidebarView: View {
             // CRITICAL PATH: Only hubs needed for home screen to render
             await dataStore.loadHubsIfNeeded()
 
-            // BACKGROUND: Libraries → library hubs → prefetch (chained, not blocking home)
+            // BACKGROUND: Libraries -> library hubs -> prefetch (chained, not blocking home)
             Task {
                 await dataStore.loadLibrariesIfNeeded()
                 await dataStore.loadLibraryHubsIfNeeded()
@@ -178,7 +199,7 @@ struct TVSidebarView: View {
             }
             checkAndShowWhatsNew()
         }
-        // Profile picker overlay
+        // Profile picker overlay (launch-time "Who's Watching")
         .fullScreenCover(isPresented: $showProfilePicker) {
             ProfilePickerOverlay(isPresented: $showProfilePicker)
         }
@@ -193,7 +214,7 @@ struct TVSidebarView: View {
                         // CRITICAL PATH: Only hubs needed for home screen to render
                         await dataStore.loadHubsIfNeeded()
 
-                        // BACKGROUND: Libraries → library hubs → prefetch
+                        // BACKGROUND: Libraries -> library hubs -> prefetch
                         Task {
                             await dataStore.loadLibrariesIfNeeded()
                             await dataStore.loadLibraryHubsIfNeeded()
@@ -206,13 +227,99 @@ struct TVSidebarView: View {
                 checkAndShowWhatsNew()
             }
         }
+        .task {
+            let formatter = DateFormatter()
+            formatter.dateFormat = "h:mm"
+            currentTime = formatter.string(from: Date())
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(30))
+                currentTime = formatter.string(from: Date())
+            }
+        }
+    }
+
+    // MARK: - Tab Content
+
+    @ViewBuilder
+    private func tabContent(for tab: SidebarTab) -> some View {
+        Group {
+            if isAwaitingProfileSelection {
+                Color.black.ignoresSafeArea()
+            } else {
+                switch tab {
+                case .account:
+                    Color.clear
+                case .search:
+                    PlexSearchView()
+                case .home:
+                    if authManager.hasCredentials {
+                        PlexHomeView()
+                    } else {
+                        welcomeView
+                    }
+                case .library(let key):
+                    if let lib = dataStore.libraries.first(where: { $0.key == key }) {
+                        PlexLibraryView(libraryKey: lib.key, libraryTitle: lib.title)
+                    }
+                case .liveTV(let sourceId):
+                    LiveTVContainerView(sourceIdFilter: sourceId)
+                case .settings:
+                    SettingsView()
+                }
+            }
+        }
+        .focusScope(contentNamespace)
+        .environment(\.nestedNavigationState, nestedNavState)
+        .environment(\.focusScopeManager, focusScopeManager)
+        .environment(\.uiScale, uiScale)
+    }
+
+    // MARK: - Welcome View
+
+    private var welcomeView: some View {
+        VStack(spacing: 28) {
+            Image(systemName: "play.rectangle.fill")
+                .font(.system(size: 72, weight: .ultraLight))
+                .foregroundStyle(.white.opacity(0.3))
+
+            VStack(spacing: 12) {
+                Text("Welcome to Rivulet")
+                    .font(.system(size: 46, weight: .semibold))
+
+                Text("Open the sidebar to navigate to Settings and connect your Plex server.")
+                    .font(.system(size: 28))
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 500)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    // MARK: - Icon Helpers
+
+    private func iconForLibrary(_ library: PlexLibrary) -> String {
+        switch library.type {
+        case "movie": return "film.fill"
+        case "show": return "tv.fill"
+        case "artist": return "music.note"
+        case "photo": return "photo.fill"
+        default: return "folder.fill"
+        }
+    }
+
+    private func iconForSourceType(_ sourceType: LiveTVSourceType) -> String {
+        switch sourceType {
+        case .plex: return "play.rectangle.fill"
+        case .dispatcharr: return "antenna.radiowaves.left.and.right"
+        case .genericM3U: return "list.bullet.rectangle"
+        }
     }
 
     // MARK: - Deep Link Player
 
     /// Present player for a deep link from Top Shelf
     private func presentPlayerForDeepLink(_ metadata: PlexMetadata) {
-        // Get images for loading screen (from cache or fetch if needed)
         Task {
             let (artImage, thumbImage) = await getPlayerImages(for: metadata)
 
@@ -256,370 +363,18 @@ struct TVSidebarView: View {
         let art = metadata.bestArt
         let thumb = metadata.thumb ?? metadata.bestThumb
 
-        // Build URLs
         let artURL = art.flatMap { URL(string: "\(serverURL)\($0)?X-Plex-Token=\(token)") }
         let thumbURL = thumb.flatMap { URL(string: "\(serverURL)\($0)?X-Plex-Token=\(token)") }
 
-        // Fetch both images concurrently (from cache or network)
         async let artTask: UIImage? = artURL != nil ? ImageCacheManager.shared.image(for: artURL!) : nil
         async let thumbTask: UIImage? = thumbURL != nil ? ImageCacheManager.shared.image(for: thumbURL!) : nil
 
         return await (artTask, thumbTask)
     }
 
-    // MARK: - Sidebar Content
-
-    private var sidebarContent: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            // Navigation with individually focusable items (enables native hold-to-scroll)
-            ScrollViewReader { proxy in
-                ScrollView(.vertical, showsIndicators: false) {
-                    GlassEffectContainer {
-                        VStack(alignment: .leading, spacing: 4) {
-                            // Search
-                            FocusableSidebarRow(
-                                id: "search",
-                                icon: "magnifyingglass",
-                                title: "Search",
-                                isSelected: selectedDestination == .search,
-                                onSelect: { queueNavigation(destination: .search, libraryKey: nil) },
-                                fontScale: uiScale,
-                                focusedItem: $sidebarFocusedItem
-                            )
-
-                            // Home
-                            FocusableSidebarRow(
-                                id: "home",
-                                icon: "house.fill",
-                                title: "Home",
-                                isSelected: selectedDestination == .home && selectedLibraryKey == nil,
-                                onSelect: { queueNavigation(destination: .home, libraryKey: nil) },
-                                fontScale: uiScale,
-                                focusedItem: $sidebarFocusedItem
-                            )
-
-                            // Live TV section (shown first if liveTVAboveLibraries is enabled)
-                            if liveTVAboveLibraries {
-                                liveTVSection
-                                librariesSection
-                            } else {
-                                librariesSection
-                                liveTVSection
-                            }
-
-                            Spacer(minLength: 60)
-
-                            // Settings
-                            Divider()
-                                .background(.white.opacity(0.2))
-                                .padding(.horizontal, 24)
-                                .padding(.vertical, 20)
-
-                            FocusableSidebarRow(
-                                id: "settings",
-                                icon: "gearshape.fill",
-                                title: "Settings",
-                                isSelected: selectedDestination == .settings,
-                                onSelect: { queueNavigation(destination: .settings, libraryKey: nil) },
-                                fontScale: uiScale,
-                                focusedItem: $sidebarFocusedItem
-                            )
-                        }
-                        .padding(.bottom, 50)
-                    }
-                }
-                .focusSection()
-                .disabled(!focusScopeManager.isScopeActive(.sidebar))
-                .onExitCommand {
-                    closeSidebar()
-                }
-                .onChange(of: isSidebarVisible) { _, isVisible in
-                    if isVisible {
-                        // Focus the currently selected item when sidebar opens
-                        let itemToFocus = currentSidebarItemId
-                        sidebarFocusedItem = itemToFocus
-                        proxy.scrollTo(itemToFocus, anchor: .center)
-                    } else {
-                        sidebarFocusedItem = nil
-                        // Apply deferred navigation after the close animation completes
-                        applyPendingNavigation()
-                    }
-                }
-            }
-        }
-        .padding(.top, 50)
-        .padding(.bottom, 24)
-        .frame(maxHeight: .infinity, alignment: .top)
-    }
-
-    /// Returns the ID of the currently selected sidebar item
-    private var currentSidebarItemId: String {
-        if let libraryKey = selectedLibraryKey {
-            return libraryKey
-        }
-        switch selectedDestination {
-        case .search: return "search"
-        case .home: return "home"
-        case .liveTV:
-            if let sourceId = selectedLiveTVSourceId {
-                return "liveTV:\(sourceId)"
-            }
-            return "liveTV"
-        case .settings: return "settings"
-        }
-    }
-
-    private func sectionHeader(_ title: String) -> some View {
-        Text(title)
-            .font(.system(size: 16 * uiScale, weight: .bold))
-            .tracking(1.8 * uiScale)
-            .foregroundStyle(.white.opacity(0.5))
-            .padding(.horizontal, 36)
-            .padding(.top, 28)
-            .padding(.bottom, 10)
-    }
-
-    // MARK: - Main Content
-
-    @ViewBuilder
-    private var mainContent: some View {
-        Group {
-            // Block content while awaiting profile selection (privacy)
-            if isAwaitingProfileSelection {
-                Color.black
-                    .ignoresSafeArea()
-            } else if let libraryKey = selectedLibraryKey,
-               let library = dataStore.libraries.first(where: { $0.key == libraryKey }) {
-                PlexLibraryView(libraryKey: library.key, libraryTitle: library.title)
-                // Removed .id() to preserve AsyncImage caches across library switches
-                // The .task(id: libraryKey) in PlexLibraryView handles data switching
-            } else {
-                switch selectedDestination {
-                case .search:
-                    PlexSearchView()
-                case .home:
-                    // Show PlexHomeView if user has credentials (even if disconnected - will show cache)
-                    if authManager.hasCredentials {
-                        PlexHomeView()
-                    } else {
-                        welcomeView
-                    }
-                case .liveTV:
-                    LiveTVContainerView(sourceIdFilter: selectedLiveTVSourceId)
-                case .settings:
-                    SettingsView()
-                }
-            }
-        }
-    }
-
-    private var welcomeView: some View {
-        VStack(spacing: 28) {
-            Image(systemName: "play.rectangle.fill")
-                .font(.system(size: 72, weight: .ultraLight))
-                .foregroundStyle(.white.opacity(0.3))
-
-            VStack(spacing: 12) {
-                Text("Welcome to Rivulet")
-                    .font(.system(size: 46, weight: .semibold))
-
-                Text("Press the Back button or navigate left to open the sidebar, go to Settings, and scroll to the bottom to connect your Plex server.")
-                    .font(.system(size: 28))
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-                    .frame(maxWidth: 500)
-            }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-
-    // MARK: - Sidebar Sections
-
-    @ViewBuilder
-    private var librariesSection: some View {
-        // Libraries section
-        if authManager.hasCredentials && !dataStore.visibleMediaLibraries.isEmpty {
-            sectionHeader(authManager.savedServerName?.uppercased() ?? "LIBRARY")
-
-            ForEach(dataStore.visibleMediaLibraries, id: \.key) { library in
-                FocusableSidebarRow(
-                    id: library.key,
-                    icon: iconForLibrary(library),
-                    title: library.title,
-                    isSelected: selectedLibraryKey == library.key,
-                    onSelect: { queueNavigation(destination: .home, libraryKey: library.key) },
-                    fontScale: uiScale,
-                    focusedItem: $sidebarFocusedItem
-                )
-            }
-        }
-
-        if dataStore.isLoadingLibraries {
-            HStack(spacing: 14) {
-                ProgressView()
-                    .tint(.white.opacity(0.5))
-                Text("Loading...")
-                    .font(.system(size: 22 * uiScale))
-                    .foregroundStyle(.white.opacity(0.5))
-            }
-            .padding(.horizontal, 36)
-            .padding(.vertical, 18)
-        }
-    }
-
-    @ViewBuilder
-    private var liveTVSection: some View {
-        // Live TV section
-        if liveTVDataStore.hasConfiguredSources {
-            sectionHeader("LIVE TV")
-
-            if combineLiveTVSources {
-                // Combined: Single "Channels" entry for all sources
-                FocusableSidebarRow(
-                    id: "liveTV",
-                    icon: "tv.and.mediabox",
-                    title: "Channels",
-                    isSelected: selectedDestination == .liveTV && selectedLiveTVSourceId == nil,
-                    onSelect: { queueLiveTVNavigation(sourceId: nil) },
-                    fontScale: uiScale,
-                    focusedItem: $sidebarFocusedItem
-                )
-            } else {
-                // Separate: Individual entry for each source
-                ForEach(liveTVDataStore.sources) { source in
-                    FocusableSidebarRow(
-                        id: "liveTV:\(source.id)",
-                        icon: iconForSourceType(source.sourceType),
-                        title: source.displayName.replacingOccurrences(of: " Live TV", with: ""),
-                        isSelected: selectedDestination == .liveTV && selectedLiveTVSourceId == source.id,
-                        onSelect: { queueLiveTVNavigation(sourceId: source.id) },
-                        fontScale: uiScale,
-                        focusedItem: $sidebarFocusedItem
-                    )
-                }
-            }
-        }
-    }
-
-    // MARK: - Navigation Actions
-
-    /// Queue navigation and close the sidebar; actual navigation applies after close to keep animation smooth
-    private func queueNavigation(destination: TVDestination, libraryKey: String?) {
-        pendingDestination = destination
-        pendingLibraryKey = libraryKey
-        pendingLiveTVSourceId = nil
-        closeSidebar()
-    }
-
-    /// Queue Live TV navigation with optional source filter
-    private func queueLiveTVNavigation(sourceId: String?) {
-        pendingDestination = .liveTV
-        pendingLibraryKey = nil
-        pendingLiveTVSourceId = sourceId
-        closeSidebar()
-    }
-
-    private func applyPendingNavigation() {
-        guard let destination = pendingDestination else { return }
-
-        // Apply pending navigation now that sidebar is closed
-        switch destination {
-        case .home:
-            if let libraryKey = pendingLibraryKey,
-               let library = dataStore.libraries.first(where: { $0.key == libraryKey }) {
-                navigateToLibrary(library)
-            } else {
-                navigateToHome()
-            }
-        case .search:
-            navigateToSearch()
-        case .liveTV:
-            navigateToLiveTV(sourceId: pendingLiveTVSourceId)
-        case .settings:
-            navigateToSettings()
-        }
-
-        pendingDestination = nil
-        pendingLibraryKey = nil
-        pendingLiveTVSourceId = nil
-    }
-
-    private func openSidebar() {
-        // Activate sidebar scope (saves content focus automatically) with a short spring
-        withAnimation(.spring(response: 0.16, dampingFraction: 0.92)) {
-            focusScopeManager.activate(.sidebar)
-        }
-    }
-
-    private func closeSidebar() {
-        // Deactivate sidebar scope (restores content focus automatically) with a quick snap
-        withAnimation(.easeOut(duration: 0.08)) {
-            focusScopeManager.deactivate()
-        }
-    }
-
-    private func handleExitCommand() {
-        // At root level: Menu button toggles sidebar
-        if isSidebarVisible {
-            closeSidebar()
-        } else {
-            openSidebar()
-        }
-    }
-
-    private func iconForLibrary(_ library: PlexLibrary) -> String {
-        switch library.type {
-        case "movie": return "film.fill"
-        case "show": return "tv.fill"
-        case "artist": return "music.note"
-        case "photo": return "photo.fill"
-        default: return "folder.fill"
-        }
-    }
-
-
-    // MARK: - Explicit Navigation (on button press or right arrow)
-
-    private func navigateToHome() {
-        selectedDestination = .home
-        selectedLibraryKey = nil
-    }
-
-    private func navigateToSearch() {
-        selectedDestination = .search
-        selectedLibraryKey = nil
-    }
-
-    private func navigateToLibrary(_ library: PlexLibrary) {
-        selectedLibraryKey = library.key
-        // Keep destination as .home so library view shows (not .settings)
-        selectedDestination = .home
-    }
-
-    private func navigateToLiveTV(sourceId: String? = nil) {
-        selectedDestination = .liveTV
-        selectedLibraryKey = nil
-        selectedLiveTVSourceId = sourceId
-    }
-
-    private func iconForSourceType(_ sourceType: LiveTVSourceType) -> String {
-        switch sourceType {
-        case .plex: return "play.rectangle.fill"
-        case .dispatcharr: return "antenna.radiowaves.left.and.right"
-        case .genericM3U: return "list.bullet.rectangle"
-        }
-    }
-
-    private func navigateToSettings() {
-        selectedDestination = .settings
-        selectedLibraryKey = nil
-    }
-
     // MARK: - What's New
 
-    /// Check and show What's New overlay if applicable
     private func checkAndShowWhatsNew() {
-        // Don't show if profile picker is still pending
         guard !isAwaitingProfileSelection else { return }
 
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0"
@@ -630,11 +385,57 @@ struct TVSidebarView: View {
             if WhatsNewView.features(for: current) != nil {
                 whatsNewVersion = current
                 showWhatsNew = true
-            } else {
             }
             lastSeenBuild = current
-        } else {
         }
+    }
+}
+
+// MARK: - Sidebar Profile Avatar
+
+struct SidebarProfileAvatar: View {
+    let user: PlexHomeUser?
+    let size: CGFloat
+
+    var body: some View {
+        Group {
+            if let thumbURL = user?.thumb, let url = URL(string: thumbURL) {
+                CachedAsyncImage(url: url) { phase in
+                    switch phase {
+                    case .success(let image):
+                        image.resizable().aspectRatio(contentMode: .fill)
+                    default:
+                        placeholder
+                    }
+                }
+            } else {
+                placeholder
+            }
+        }
+        .frame(width: size, height: size)
+        .clipShape(Circle())
+        .overlay(
+            Circle().strokeBorder(.white.opacity(0.15), lineWidth: 1)
+        )
+    }
+
+    private var placeholder: some View {
+        ZStack {
+            Circle().fill(profileColor.gradient)
+            Text(initial)
+                .font(.system(size: size * 0.4, weight: .bold))
+                .foregroundStyle(.white)
+        }
+    }
+
+    private var initial: String {
+        (user?.displayName ?? "?").prefix(1).uppercased()
+    }
+
+    private var profileColor: Color {
+        let colors: [Color] = [.blue, .purple, .pink, .orange, .green, .teal, .indigo]
+        guard let id = user?.id else { return .gray }
+        return colors[abs(id) % colors.count]
     }
 }
 

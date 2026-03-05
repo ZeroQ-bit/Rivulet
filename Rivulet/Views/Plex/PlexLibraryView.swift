@@ -12,10 +12,8 @@ struct PlexLibraryView: View {
     let libraryKey: String
     let libraryTitle: String
 
-    @Environment(\.openSidebar) private var openSidebar
     @Environment(\.nestedNavigationState) private var nestedNavState
     @Environment(\.focusScopeManager) private var focusScopeManager
-    @Environment(\.isSidebarVisible) private var isSidebarVisible
     @Environment(\.uiScale) private var scale
 
     @StateObject private var authManager = PlexAuthManager.shared
@@ -429,9 +427,6 @@ struct PlexLibraryView: View {
             }
         }
         .id(libraryKey)  // Force fresh ScrollView when library changes - starts at top
-        #if os(tvOS)
-        .ignoresSafeArea(edges: .top)
-        #endif
         .onAppear {
             // Hero will be selected when items load via task handler
             if heroItem == nil && !items.isEmpty {
@@ -822,7 +817,6 @@ struct PlexLibraryView: View {
         #if os(tvOS)
         .buttonStyle(CardButtonStyle())
         .focused($focusedItemId, equals: gridFocusId(for: item))
-        .modifier(LeftEdgeSidebarTrigger(isFirstItem: index % 6 == 0, openSidebar: openSidebar))
         .onAppear {
             // Trigger loading more items when nearing the end
             if index >= items.count - 12 && hasMoreItems && !isLoadingMore {

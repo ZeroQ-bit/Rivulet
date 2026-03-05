@@ -259,11 +259,13 @@ final class DisplayCriteriaManager {
             return nil
         }
 
-        // avDisplayManager may not exist on all tvOS versions (e.g. tvOS 26 simulator)
+        #if targetEnvironment(simulator)
+        // avDisplayManager category may not load on the simulator (no real display hardware)
         guard window.responds(to: Selector(("avDisplayManager"))) else {
-            print("🖥️ DisplayCriteria: avDisplayManager not available on this platform")
+            print("🖥️ DisplayCriteria: avDisplayManager not available on simulator")
             return nil
         }
+        #endif
 
         return window.avDisplayManager
     }

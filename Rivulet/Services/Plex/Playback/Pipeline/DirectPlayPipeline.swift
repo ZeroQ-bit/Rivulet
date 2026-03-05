@@ -311,9 +311,11 @@ final class DirectPlayPipeline {
         if readTask == nil {
             // Read loop exited after a paused seek (only a preview frame was shown).
             // Restart it with preroll so buffers refill before the clock starts.
+            print("[DirectPlay] resume: read loop was dead, restarting with preroll")
             needsRateRestoreAfterSeek = true
             startReadLoop()
         } else {
+            print("[DirectPlay] resume (rate=\(playbackRate))")
             renderer.setRate(playbackRate)
         }
     }
@@ -382,10 +384,12 @@ final class DirectPlayPipeline {
 
         // Drop noisy duplicate seek requests that arrive back-to-back with nearly identical targets.
         if now - lastSeekWallTime < 0.2 && deltaFromLastRequest < 0.25 {
+            print("[DirectPlay] seek deduped: Δ=\(String(format: "%.0f", deltaFromLastRequest * 1000))ms from last request")
             return
         }
         // Ignore tiny seeks near current position to avoid unnecessary read-loop churn.
         if deltaFromCurrent < 0.20 {
+            print("[DirectPlay] seek ignored: Δ=\(String(format: "%.0f", deltaFromCurrent * 1000))ms from current (too small)")
             return
         }
 
@@ -458,6 +462,7 @@ final class DirectPlayPipeline {
         _ = audioDecoder?.flushBatch()
 
         if codecNeedsClientDecode(track.codecName) {
+            print("[DirectPlay] Audio switch: \(track.codecName) → client decode path")
             try demuxer.selectAudioStreamForClientDecode(index: streamIndex)
             guard let codecpar = demuxer.codecParameters(forStream: streamIndex) else {
                 throw FFmpegError.noCodecParameters
@@ -468,6 +473,7 @@ final class DirectPlayPipeline {
                 codecNameHint: track.codecName
             )
         } else {
+            print("[DirectPlay] Audio switch: \(track.codecName) → passthrough path")
             audioDecoder?.close()
             audioDecoder = nil
             try demuxer.selectAudioStream(index: streamIndex)
@@ -477,6 +483,7 @@ final class DirectPlayPipeline {
         // partially drained during the restart gap, so we must rebuild video
         // lead before resuming the clock. Without preroll, the clock runs ahead
         // of the empty buffer and every frame arrives "late".
+        print("[DirectPlay] Audio switch complete, restarting read loop")
         needsRateRestoreAfterSeek = isPlaying
         startReadLoop()
     }
@@ -846,6 +853,12 @@ final class DirectPlayPipeline {
                             }()
                             let timedOut = hasAudioPath && waitedMs >= 1000
 
+                            if timedOut {
+                                print("[DirectPlay] Preroll timeout after \(String(format: "%.0f", waitedMs))ms " +
+                                      "(audioReady=\(audioReady) videoReady=\(videoReady) " +
+                                      "lead=\(String(format: "%.0f", prerollLeadSeconds * 1000))ms " +
+                                      "need=\(String(format: "%.0f", requiredPrerollLeadSeconds * 1000))ms)")
+                            }
                             if (audioReady && videoReady) || timedOut {
                                 let startedRate = await MainActor.run { [weak self] () -> (Float, Double, String)? in
                                     guard let self, self.isPlaying else { return nil }

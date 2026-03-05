@@ -305,61 +305,12 @@ struct SidebarButton: View {
     }
 }
 
-// MARK: - Left Edge Trigger (opens sidebar when focus reaches left edge)
-
-struct LeftEdgeTrigger: View {
-    let action: () -> Void
-    var isDisabled: Bool = false
-    @FocusState private var isFocused: Bool
-
-    var body: some View {
-        Button {
-            action()
-        } label: {
-            Rectangle()
-                .fill(Color.clear)
-                .frame(width: 32)
-                .frame(maxHeight: .infinity)
-        }
-        .buttonStyle(.plain)
-        .focusable(!isDisabled)  // Prevent focus when disabled
-        .focused($isFocused)
-        .onChange(of: isFocused) { _, newValue in
-            if newValue && !isDisabled {
-                action()
-            }
-        }
-    }
-}
-
 // MARK: - Sidebar Container Button Style (no focus highlight)
 
 struct SidebarContainerButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
         // No visual changes on focus or press - we handle highlighting manually via SidebarRow
-    }
-}
-
-// MARK: - Conditional Exit Command Modifier
-
-/// Conditionally attaches onExitCommand only when sidebar is visible
-struct SidebarExitCommand: ViewModifier {
-    let isSidebarVisible: Bool
-    let closeAction: () -> Void
-
-    func body(content: Content) -> some View {
-        if isSidebarVisible {
-            content.onExitCommand(perform: closeAction)
-        } else {
-            content
-        }
-    }
-}
-
-extension View {
-    func ifSidebarVisible(_ isVisible: Bool, close: @escaping () -> Void) -> some View {
-        self.modifier(SidebarExitCommand(isSidebarVisible: isVisible, closeAction: close))
     }
 }
 

@@ -390,9 +390,6 @@ struct MediaRow: View {
     @Environment(\.uiScale) private var scale
 
     #if os(tvOS)
-    @Environment(\.openSidebar) private var openSidebar
-    @Environment(\.isSidebarVisible) private var isSidebarVisible
-
     private var titleSize: CGFloat { ScaledDimensions.sectionTitleSize * scale }
     private var horizontalPadding: CGFloat { ScaledDimensions.rowHorizontalPadding }
     private var itemSpacing: CGFloat { ScaledDimensions.rowItemSpacing * scale }
@@ -430,12 +427,6 @@ struct MediaRow: View {
                         #if os(tvOS)
                         .buttonStyle(CardButtonStyle())
                         .focused($focusedItemId, equals: item.ratingKey)
-                        .onMoveCommand { direction in
-                            guard !isSidebarVisible else { return }
-                            if direction == .left && index == 0 {
-                                openSidebar()
-                            }
-                        }
                         #else
                         .buttonStyle(.plain)
                         #endif

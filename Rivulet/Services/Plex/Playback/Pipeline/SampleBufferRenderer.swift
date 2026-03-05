@@ -68,11 +68,13 @@ final class SampleBufferRenderer {
 
     /// Set synchronizer rate (0 = paused, 1 = normal playback).
     func setRate(_ rate: Float) {
+        print("[Renderer] setRate(\(rate))")
         renderSynchronizer.rate = rate
     }
 
     /// Set synchronizer rate and time simultaneously.
     func setRate(_ rate: Float, time: CMTime) {
+        print("[Renderer] setRate(\(rate), time=\(String(format: "%.3f", CMTimeGetSeconds(time)))s)")
         renderSynchronizer.setRate(rate, time: time)
     }
 

@@ -69,6 +69,12 @@ final class MPVPrewarmService {
     ///
     /// - Parameter forLiveStream: Whether to configure for live stream mode (different GPU settings)
     func prewarmIfNeeded(forLiveStream: Bool = false) {
+        // Don't pre-warm MPV when RivuletPlayer is the active player
+        let useRivuletPlayer = UserDefaults.standard.object(forKey: "useRivuletPlayer") == nil
+            ? true
+            : UserDefaults.standard.bool(forKey: "useRivuletPlayer")
+        guard !useRivuletPlayer || forLiveStream else { return }
+
         // Don't pre-warm if already ready or in use
         guard state == .cold else {
             return

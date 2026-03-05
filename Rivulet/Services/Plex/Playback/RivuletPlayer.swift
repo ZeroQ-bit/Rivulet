@@ -246,6 +246,12 @@ final class RivuletPlayer: ObservableObject {
     }
 
     func stop() {
+        let pipelineName: String = switch activePipeline {
+        case .directPlay: "directPlay"
+        case .hls: "hls"
+        case .none: "none"
+        }
+        print("[RivuletPlayer] stop() pipeline=\(pipelineName)")
         isPlaying = false
         timeObserverTask?.cancel()
         timeObserverTask = nil
@@ -324,7 +330,11 @@ final class RivuletPlayer: ObservableObject {
             let ffmpegStreamIndex = ffmpegAudio[plexIndex].streamIndex
             print("[RivuletPlayer] Mapped Plex audio \(plexTrackId) → FFmpeg stream \(ffmpegStreamIndex)")
             Task {
-                try? await pipeline.selectAudioTrack(streamIndex: ffmpegStreamIndex)
+                do {
+                    try await pipeline.selectAudioTrack(streamIndex: ffmpegStreamIndex)
+                } catch {
+                    print("[RivuletPlayer] ❌ Audio track switch failed: \(error)")
+                }
             }
         }
         // For HLS, audio track switching requires a new HLS stream from Plex

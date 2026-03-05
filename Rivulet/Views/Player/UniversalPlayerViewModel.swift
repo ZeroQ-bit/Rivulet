@@ -567,6 +567,10 @@ final class UniversalPlayerViewModel: ObservableObject {
             return false
         }()
 
+        print("[PlayerSelect] settings: rivulet=\(useRivuletPlayer) avDV=\(useAVPlayerForDV) avAll=\(useAVPlayerForAll) " +
+              "content: DV=\(hasDolbyVision) profile=\(dvProfile ?? -1) blCompat=\(doviBLCompatID ?? -1) " +
+              "container=\(container) airPlay=\(isAirPlayRoute) compatDV=\(isCompatibleDVProfile)")
+
         // Use Rivulet Player if enabled (highest priority — experimental unified player)
         if useRivuletPlayer {
             self.playerType = .rivulet
@@ -578,15 +582,16 @@ final class UniversalPlayerViewModel: ObservableObject {
             // Enable profile conversion for incompatible DV profiles
             if hasDolbyVision && !isCompatibleDVProfile {
                 self.requiresProfileConversion = (dvProfile == 7) || (dvProfile == 8 && doviBLCompatID == 6)
+                print("[PlayerSelect] → RivuletPlayer (DV profile conversion required)")
+            } else {
+                print("[PlayerSelect] → RivuletPlayer")
             }
         }
         // Use AVPlayer if:
         // 1. "Use AVPlayer for All Videos" is enabled, OR
         // 2. "Use AVPlayer for DV" is enabled AND content has compatible DV profile
         else if useAVPlayerForAll || (useAVPlayerForDV && canUseAVPlayerForDV) {
-            if useAVPlayerForAll {
-            } else {
-            }
+            print("[PlayerSelect] → AVPlayer\(useAVPlayerForAll ? " (forced for all)" : " (DV compatible)")")
             self.playerType = .avplayer
             self.avPlayerWrapper = AVPlayerWrapper()
             self.mpvPlayerWrapper = nil
@@ -594,6 +599,7 @@ final class UniversalPlayerViewModel: ObservableObject {
             // Use DVSampleBufferPlayer for DV profiles that AVPlayer rejects
             // This bypasses AVPlayer's HLS parser and feeds dvh1-tagged sample buffers
             // directly to AVSampleBufferDisplayLayer / VideoToolbox
+            print("[PlayerSelect] → DVSampleBuffer (DV P\(dvProfile ?? 0) CompatID \(doviBLCompatID ?? -1))")
             self.playerType = .dvSampleBuffer
             self.dvSampleBufferPlayer = DVSampleBufferPlayer()
             self.mpvPlayerWrapper = nil
@@ -603,6 +609,7 @@ final class UniversalPlayerViewModel: ObservableObject {
             // These profiles need on-the-fly RPU conversion to P8.1 for Apple TV compatibility
             self.requiresProfileConversion = (dvProfile == 7) || (dvProfile == 8 && doviBLCompatID == 6)
         } else {
+            print("[PlayerSelect] → MPV (fallback)")
             self.playerType = .mpv
             self.mpvPlayerWrapper = MPVPlayerWrapper()
             self.avPlayerWrapper = nil

@@ -10,45 +10,16 @@ import Combine
 
 #if os(tvOS)
 
-// MARK: - Navigation Destination
+// MARK: - Sidebar Tab
 
-/// Navigation destination for tvOS
-enum TVDestination: Hashable, CaseIterable {
+/// Tab selection type for the system TabView sidebar
+enum SidebarTab: Hashable {
+    case account
     case search
     case home
-    case liveTV
+    case library(key: String)
+    case liveTV(sourceId: String?)
     case settings
-
-    static var allCases: [TVDestination] { [.search, .home, .liveTV, .settings] }
-}
-
-// MARK: - Environment Keys
-
-/// Environment key for opening sidebar from content views
-struct OpenSidebarAction: EnvironmentKey {
-    static let defaultValue: () -> Void = {}
-}
-
-extension EnvironmentValues {
-    var openSidebar: () -> Void {
-        get { self[OpenSidebarAction.self] }
-        set { self[OpenSidebarAction.self] = newValue }
-    }
-}
-
-// Note: Focus management is now handled by FocusScopeManager in Services/Focus/
-// The isSidebarVisible environment key is kept for backward compatibility during migration
-
-/// Environment key indicating sidebar is visible (derived from FocusScopeManager)
-struct IsSidebarVisibleKey: EnvironmentKey {
-    static let defaultValue: Bool = false
-}
-
-extension EnvironmentValues {
-    var isSidebarVisible: Bool {
-        get { self[IsSidebarVisibleKey.self] }
-        set { self[IsSidebarVisibleKey.self] = newValue }
-    }
 }
 
 // MARK: - Nested Navigation State

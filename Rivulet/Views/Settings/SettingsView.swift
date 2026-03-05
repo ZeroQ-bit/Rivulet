@@ -208,10 +208,6 @@ struct SettingsView: View {
     @AppStorage("posterDepthEffect") private var posterDepthEffect = true
     @Environment(\.focusScopeManager) private var focusScopeManager
     @Environment(\.nestedNavigationState) private var nestedNavState
-    #if os(tvOS)
-    @Environment(\.openSidebar) private var openSidebar
-    @Environment(\.isSidebarVisible) private var isSidebarVisible
-    #endif
     @State private var focusTrigger = 0  // Increment to trigger first row focus
     @State private var showChangelog = false
 
@@ -589,15 +585,6 @@ struct SettingsView: View {
             .fullScreenCover(isPresented: $showChangelog) {
                 WhatsNewView(isPresented: $showChangelog, version: appVersion)
             }
-            #if os(tvOS)
-            .onMoveCommand { direction in
-                // Open sidebar when pressing left at the edge
-                guard !isSidebarVisible else { return }
-                if direction == .left {
-                    openSidebar()
-                }
-            }
-            #endif
             .onAppear {
                 // Set initial focus when view first appears
                 DispatchQueue.main.async {
