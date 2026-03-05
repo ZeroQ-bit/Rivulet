@@ -73,6 +73,11 @@ final class DirectPlayPipeline {
 
     private var audioDecoder: FFmpegAudioDecoder?
 
+    // MARK: - Client-Side Subtitle Decoding (PGS, DVB-SUB)
+
+    private var subtitleDecoder: FFmpegSubtitleDecoder?
+    private var bitmapCueCounter = 0
+
     // MARK: - State
 
     private(set) var state: PipelineState = .idle
@@ -100,6 +105,8 @@ final class DirectPlayPipeline {
     var onEndOfStream: (() -> Void)?
     /// Called with subtitle text, start time, and end time from embedded subtitle packets
     var onSubtitleCue: ((String, TimeInterval, TimeInterval) -> Void)?
+    /// Called with bitmap subtitle cues (PGS, DVB-SUB) from embedded subtitle packets
+    var onBitmapSubtitleCue: ((BitmapSubtitleCue) -> Void)?
 
     // MARK: - Track Info
 
@@ -298,9 +305,17 @@ final class DirectPlayPipeline {
     func resume() {
         guard !isPlaying, state == .paused else { return }
         isPlaying = true
-        renderer.setRate(playbackRate)
         state = .running
         onStateChange?(.running)
+
+        if readTask == nil {
+            // Read loop exited after a paused seek (only a preview frame was shown).
+            // Restart it with preroll so buffers refill before the clock starts.
+            needsRateRestoreAfterSeek = true
+            startReadLoop()
+        } else {
+            renderer.setRate(playbackRate)
+        }
     }
 
     func stop() {
@@ -311,6 +326,8 @@ final class DirectPlayPipeline {
         readTask = nil
         audioDecoder?.close()
         audioDecoder = nil
+        subtitleDecoder?.close()
+        subtitleDecoder = nil
         demuxer.close()
         if let previousMaxVideoLookahead {
             renderer.maxVideoLookahead = previousMaxVideoLookahead
@@ -321,14 +338,37 @@ final class DirectPlayPipeline {
     }
 
     /// Enable embedded subtitle extraction for a specific FFmpeg stream index.
-    /// Subtitle packets will be delivered via the `onSubtitleCue` callback.
+    /// Subtitle packets will be delivered via the `onSubtitleCue` or `onBitmapSubtitleCue` callback.
     func selectSubtitleStream(ffmpegStreamIndex: Int32) {
+        // Close any previous bitmap decoder
+        subtitleDecoder?.close()
+        subtitleDecoder = nil
+
+        // Check if this stream is a bitmap subtitle codec (PGS, DVB-SUB, etc.)
+        if let trackInfo = demuxer.subtitleTracks.first(where: { $0.streamIndex == ffmpegStreamIndex }) {
+            let codec = trackInfo.codecName.lowercased()
+            if FFmpegSubtitleDecoder.supportedCodecs.contains(codec) {
+                // Open bitmap subtitle decoder
+                if let codecpar = demuxer.codecParameters(forStream: ffmpegStreamIndex) {
+                    do {
+                        subtitleDecoder = try FFmpegSubtitleDecoder(codecpar: codecpar)
+                        bitmapCueCounter = 0
+                        print("[DirectPlay] Bitmap subtitle decoder opened for stream \(ffmpegStreamIndex) (\(codec))")
+                    } catch {
+                        print("[DirectPlay] Failed to open bitmap subtitle decoder: \(error)")
+                    }
+                }
+            }
+        }
+
         demuxer.selectSubtitleStream(index: ffmpegStreamIndex)
         print("[DirectPlay] Subtitle stream selected: FFmpeg index \(ffmpegStreamIndex)")
     }
 
     /// Disable subtitle stream reading.
     func deselectSubtitleStream() {
+        subtitleDecoder?.close()
+        subtitleDecoder = nil
         demuxer.selectSubtitleStream(index: -1)
     }
 
@@ -996,15 +1036,37 @@ final class DirectPlayPipeline {
                         }
 
                     case .subtitle:
-                        let rawText = String(data: packet.data, encoding: .utf8) ?? ""
-                        let text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
-                        if !text.isEmpty {
-                            let start = packet.ptsSeconds
-                            let dur = Double(packet.duration) * Double(packet.timebase.value) / Double(packet.timebase.timescale)
-                            let end = start + dur
-                            if dur > 0 {
+                        if let decoder = await MainActor.run(body: { [weak self] in self?.subtitleDecoder }) {
+                            // Bitmap subtitle (PGS, DVB-SUB)
+                            if let frame = decoder.decode(packet) {
+                                let cueId = await MainActor.run { [weak self] () -> Int in
+                                    guard let self else { return 0 }
+                                    let id = self.bitmapCueCounter
+                                    self.bitmapCueCounter += 1
+                                    return id
+                                }
+                                let cue = BitmapSubtitleCue(
+                                    id: cueId,
+                                    startTime: frame.startTime,
+                                    endTime: frame.endTime,
+                                    rects: frame.rects
+                                )
                                 await MainActor.run { [weak self] in
-                                    self?.onSubtitleCue?(text, start, end)
+                                    self?.onBitmapSubtitleCue?(cue)
+                                }
+                            }
+                        } else {
+                            // Text subtitle (SRT, ASS)
+                            let rawText = String(data: packet.data, encoding: .utf8) ?? ""
+                            let text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+                            if !text.isEmpty {
+                                let start = packet.ptsSeconds
+                                let dur = Double(packet.duration) * Double(packet.timebase.value) / Double(packet.timebase.timescale)
+                                let end = start + dur
+                                if dur > 0 {
+                                    await MainActor.run { [weak self] in
+                                        self?.onSubtitleCue?(text, start, end)
+                                    }
                                 }
                             }
                         }
@@ -1064,7 +1126,12 @@ final class DirectPlayPipeline {
                         self.onError?(error)
                     }
                 }
-            case .pausedSeek, .cancelled:
+            case .pausedSeek:
+                // Signal that resume() must restart the read loop
+                await MainActor.run { [weak self] in
+                    self?.readTask = nil
+                }
+            case .cancelled:
                 break
             }
         }

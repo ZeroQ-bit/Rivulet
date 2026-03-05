@@ -15,6 +15,7 @@ final class SubtitleManager: ObservableObject {
     // MARK: - Published State
 
     @Published private(set) var currentCues: [SubtitleCue] = []
+    @Published private(set) var currentBitmapCues: [BitmapSubtitleCue] = []
     @Published private(set) var isLoading = false
     @Published private(set) var error: Error?
     @Published var diagnosticsEnabled = true
@@ -90,6 +91,8 @@ final class SubtitleManager: ObservableObject {
         currentTrack = .empty
         currentCues = []
         accumulatedCues = []
+        currentBitmapCues = []
+        accumulatedBitmapCues = []
         error = nil
         lastUpdateTime = -1
     }
@@ -98,6 +101,9 @@ final class SubtitleManager: ObservableObject {
 
     /// Accumulated cues from inline extraction, sorted on insertion
     private var accumulatedCues: [SubtitleCue] = []
+
+    /// Accumulated bitmap cues from PGS/DVB-SUB subtitle streams
+    private var accumulatedBitmapCues: [BitmapSubtitleCue] = []
 
     /// Add a single subtitle cue from an embedded stream (delivered by FFmpeg read loop).
     /// Rebuilds the subtitle track incrementally. Thread-safe: call from MainActor.
@@ -123,6 +129,34 @@ final class SubtitleManager: ObservableObject {
         currentTrack = SubtitleTrack(cues: accumulatedCues)
     }
 
+    /// Add a bitmap subtitle cue from an embedded PGS/DVB-SUB stream.
+    ///
+    /// PGS subtitles use "display set" semantics: each new cue replaces the previous one.
+    /// Cues with `.infinity` end time are auto-closed when the next cue arrives.
+    /// Cues with empty rects represent "clear screen" events — they close the previous cue
+    /// without adding a new visible entry.
+    func addBitmapCue(_ cue: BitmapSubtitleCue) {
+        // Close any previous open-ended cue (PGS: .infinity sentinel means "until next display set")
+        if let lastIndex = accumulatedBitmapCues.indices.last,
+           accumulatedBitmapCues[lastIndex].endTime.isInfinite {
+            accumulatedBitmapCues[lastIndex].endTime = cue.startTime
+        }
+
+        // Empty rects = PGS "clear screen" — previous cue closed above, nothing more to add
+        guard !cue.rects.isEmpty else {
+            if diagnosticsEnabled {
+                print("🎬 [Subtitles] Bitmap clear at \(String(format: "%.3f", cue.startTime))")
+            }
+            return
+        }
+
+        accumulatedBitmapCues.append(cue)
+        if diagnosticsEnabled {
+            print("🎬 [Subtitles] Bitmap cue \(cue.id): \(cue.rects.count) rect(s) " +
+                  "start=\(String(format: "%.3f", cue.startTime)) end=\(String(format: "%.3f", cue.endTime))")
+        }
+    }
+
     // MARK: - Time Updates
 
     /// Update current cues based on playback time
@@ -132,6 +166,7 @@ final class SubtitleManager: ObservableObject {
         guard abs(time - lastUpdateTime) > updateThreshold else { return }
         lastUpdateTime = time
 
+        // Text cues
         let newCues = currentTrack.activeCues(at: time)
 
         // Only update if cues actually changed
@@ -141,6 +176,18 @@ final class SubtitleManager: ObservableObject {
             if diagnosticsEnabled {
                 logCueTransition(time: time, from: previousCues, to: newCues)
             }
+        }
+
+        // Bitmap cues
+        if !accumulatedBitmapCues.isEmpty {
+            let activeBitmap = accumulatedBitmapCues.filter { $0.isActive(at: time) }
+            if activeBitmap.map(\.id) != currentBitmapCues.map(\.id) {
+                currentBitmapCues = activeBitmap
+            }
+            // Prune old bitmap cues that ended more than 30s ago to avoid unbounded growth
+            accumulatedBitmapCues.removeAll { $0.endTime < time - 30 }
+        } else if !currentBitmapCues.isEmpty {
+            currentBitmapCues = []
         }
     }
 

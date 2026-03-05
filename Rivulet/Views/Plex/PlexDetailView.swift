@@ -52,7 +52,6 @@ struct PlexDetailView: View {
     // Focus state for restoring focus when returning from nested navigation
     @FocusState private var focusedAlbumId: String?
     @FocusState private var focusedTrackId: String?
-    @FocusState private var focusedSeasonId: String?  // Track focused season
     @FocusState private var focusedEpisodeId: String?  // Track focused episode
     @FocusState private var focusedActionButton: String?  // Track focused action button
     @State private var savedAlbumFocus: String?  // Save focus when navigating to album
@@ -1115,36 +1114,22 @@ struct PlexDetailView: View {
                 ProgressView("Loading seasons...")
             } else if !seasons.isEmpty {
                 #if os(tvOS)
-                // tvOS: Split pane for multi-season, flat episode list for single season
+                // tvOS: Horizontal season pills for multi-season, flat episode list for all
                 if seasons.count > 1 {
-                    SeasonEpisodeSplitPane(
+                    SeasonPosterBar(
                         seasons: seasons,
                         selectedSeason: $selectedSeason,
-                        episodes: episodes,
-                        isLoadingEpisodes: isLoadingEpisodes,
-                        currentItemRatingKey: currentItem.ratingKey,
-                        currentItemType: currentItem.type,
                         serverURL: authManager.selectedServerURL ?? "",
                         authToken: authManager.selectedServerToken ?? "",
                         onSeasonSelected: { season in
-                            Task { await loadEpisodes(for: season) }
-                        },
-                        onEpisodePlay: { episode in
-                            selectedEpisode = episode
-                            playFromBeginning = false
-                            showPlayer = true
-                        },
-                        onEpisodeRefresh: { ratingKey in
-                            await refreshEpisodeWatchStatus(ratingKey: ratingKey)
-                        },
-                        onEpisodeShowInfo: { episode in
-                            navigateToEpisode = episode
+                            FocusMemory.shared.forget(key: "detailEpisodes")
+                            Task { await loadEpisodes(for: season, crossfade: true) }
                         }
                     )
-                } else {
-                    // Single season: episode list only
-                    seasonSectionEpisodeList
                 }
+
+                // Episode list (used for both single and multi-season)
+                seasonSectionEpisodeList
                 #else
                 // Non-tvOS: horizontal poster carousel + vertical episode list
                 if seasons.count > 1 {
@@ -2086,12 +2071,17 @@ struct PlexDetailView: View {
         isLoadingSeasons = false
     }
 
-    private func loadEpisodes(for season: PlexMetadata) async {
+    /// Load episodes for a season.
+    /// - Parameter crossfade: When true, keeps old episodes visible and crossfades to new ones
+    ///   instead of showing a loading indicator. Used for season switching.
+    private func loadEpisodes(for season: PlexMetadata, crossfade: Bool = false) async {
         guard let serverURL = authManager.selectedServerURL,
               let token = authManager.selectedServerToken,
               let ratingKey = season.ratingKey else { return }
 
-        isLoadingEpisodes = true
+        if !crossfade {
+            isLoadingEpisodes = true
+        }
 
         do {
             let fetchedEpisodes = try await networkManager.getChildren(
@@ -2099,7 +2089,13 @@ struct PlexDetailView: View {
                 authToken: token,
                 ratingKey: ratingKey
             )
-            episodes = fetchedEpisodes
+            if crossfade {
+                withAnimation(.easeInOut(duration: 0.35)) {
+                    episodes = fetchedEpisodes
+                }
+            } else {
+                episodes = fetchedEpisodes
+            }
             // Note: Full metadata is fetched on-demand when user plays an episode
             // to avoid N+1 API calls (Fixes RIVULET-V)
         } catch {
@@ -2251,22 +2247,28 @@ struct PlexDetailView: View {
     }
 }
 
-// MARK: - Season/Episode Split Pane (tvOS)
+// MARK: - Season Poster Bar (tvOS)
 
 #if os(tvOS)
 
-/// Text-based season row for the left pane of the split layout
-struct SeasonListRow: View {
+/// Season poster card for the horizontal bar. Click selects, focus only highlights.
+struct SeasonBarCard: View {
     let season: PlexMetadata
     let isSelected: Bool
     let serverURL: String
     let authToken: String
-    var onRefreshNeeded: MediaItemRefreshCallback?
-    @FocusState.Binding var focusedSeasonId: String?
+    let onSelect: () -> Void
+
+    @Environment(\.uiScale) private var scale
+
+    private var posterWidth: CGFloat { ScaledDimensions.posterWidth * scale }
+    private var posterHeight: CGFloat { ScaledDimensions.posterHeight * scale }
+    private var cornerRadius: CGFloat { ScaledDimensions.posterCornerRadius }
+    private var titleSize: CGFloat { ScaledDimensions.posterTitleSize * scale }
+    private var subtitleSize: CGFloat { ScaledDimensions.posterSubtitleSize * scale }
 
     @FocusState private var isFocused: Bool
 
-    /// Season is fully watched when all episodes have been viewed
     private var isFullyWatched: Bool {
         guard let leafCount = season.leafCount,
               let viewedLeafCount = season.viewedLeafCount,
@@ -2276,335 +2278,121 @@ struct SeasonListRow: View {
 
     private var seasonLabel: String {
         if let index = season.index {
-            return String(format: "Season %02d", index)
+            if index == 0 { return "Specials" }
+            return "Season \(index)"
         }
         return season.title ?? "Season"
     }
 
     var body: some View {
-        Button {
-            // No-op: selection happens on focus
-        } label: {
-            HStack(spacing: 14) {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(seasonLabel)
-                        .font(.system(size: 30, weight: isSelected ? .semibold : .regular))
-                        .lineLimit(1)
-
-                    if let leafCount = season.leafCount {
-                        Text("\(leafCount) episodes")
-                            .font(.system(size: 24))
-                            .foregroundStyle(.white.opacity(0.5))
+        Button(action: onSelect) {
+            VStack(spacing: 10) {
+                // Season poster
+                posterImage
+                    .frame(width: posterWidth, height: posterHeight)
+                    .overlay(alignment: .topTrailing) {
+                        if isFullyWatched {
+                            WatchedCornerTag()
+                        }
                     }
-                }
-
-                Spacer(minLength: 4)
-
-                // Fully-watched checkmark
-                if isFullyWatched {
-                    Image(systemName: "checkmark.circle.fill")
-                        .foregroundStyle(.green)
-                        .font(.system(size: 22))
-                }
-
-                // Selected indicator dot
-                if isSelected {
-                    Circle()
-                        .fill(.white)
-                        .frame(width: 8, height: 8)
-                }
-            }
-            .foregroundStyle(.white.opacity(isFocused || isSelected ? 1.0 : 0.6))
-            .padding(.horizontal, 18)
-            .padding(.vertical, 18)
-            .background(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .fill(isFocused ? .white.opacity(0.18) : isSelected ? .white.opacity(0.10) : .white.opacity(0.06))
+                    .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
                     .overlay(
-                        RoundedRectangle(cornerRadius: 16, style: .continuous)
-                            .strokeBorder(
-                                isFocused ? .white.opacity(0.25) : .white.opacity(0.06),
-                                lineWidth: 1
-                            )
+                        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                            .strokeBorder(isSelected ? .white : .clear, lineWidth: 3)
                     )
-            )
+
+                // Season label
+                Text(seasonLabel)
+                    .font(.system(size: titleSize, weight: isSelected ? .semibold : .regular))
+                    .foregroundStyle(.white.opacity(isSelected || isFocused ? 1.0 : 0.6))
+                    .lineLimit(1)
+            }
         }
         .buttonStyle(CardButtonStyle())
         .focused($isFocused)
-        .focused($focusedSeasonId, equals: season.ratingKey)
-        .scaleEffect(isFocused ? 1.02 : 1.0)
+        .hoverEffect(.highlight)
+        .scaleEffect(isFocused ? 1.05 : 1.0)
         .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isFocused)
-        .mediaItemContextMenu(
-            item: season,
-            serverURL: serverURL,
-            authToken: authToken,
-            onRefreshNeeded: onRefreshNeeded
-        )
+    }
+
+    private var posterImage: some View {
+        CachedAsyncImage(url: posterURL) { phase in
+            switch phase {
+            case .success(let image):
+                image
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+            case .empty:
+                Rectangle()
+                    .fill(Color(white: 0.15))
+                    .overlay { ProgressView().tint(.white.opacity(0.3)) }
+            case .failure:
+                Rectangle()
+                    .fill(
+                        LinearGradient(
+                            colors: [Color(white: 0.18), Color(white: 0.12)],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                    )
+                    .overlay {
+                        Image(systemName: "number.square")
+                            .font(.system(size: 28, weight: .light))
+                            .foregroundStyle(.white.opacity(0.3))
+                    }
+            }
+        }
+    }
+
+    private var posterURL: URL? {
+        guard let thumb = season.thumb else { return nil }
+        return URL(string: "\(serverURL)\(thumb)?X-Plex-Token=\(authToken)")
     }
 }
 
-/// Split-pane layout: seasons on left, episodes on right (Apple Settings style)
-/// A large season poster is right-aligned and extends above the column.
-struct SeasonEpisodeSplitPane: View {
-    private enum FocusColumn {
-        case seasons
-        case episodes
-    }
-
+/// Horizontal scrollable row of season poster cards. Click-to-select only.
+struct SeasonPosterBar: View {
     let seasons: [PlexMetadata]
     @Binding var selectedSeason: PlexMetadata?
-    let episodes: [PlexMetadata]
-    let isLoadingEpisodes: Bool
-    var currentItemRatingKey: String?
-    var currentItemType: String?
     let serverURL: String
     let authToken: String
     let onSeasonSelected: (PlexMetadata) -> Void
-    let onEpisodePlay: (PlexMetadata) -> Void
-    let onEpisodeRefresh: (String?) async -> Void
-    let onEpisodeShowInfo: (PlexMetadata) -> Void
 
     @FocusState private var focusedSeasonId: String?
-    @FocusState private var focusedEpisodeId: String?
-    @Namespace private var splitPaneNamespace
-
-    /// Tracks the displayed season key for crossfade transitions.
-    /// Updated after fade-out completes so the new content fades in.
-    @State private var displayedSeasonKey: String?
-    @State private var episodeListOpacity: Double = 1
-    @State private var lastFocusedColumn: FocusColumn?
-    @State private var hasHandledEntryFocus = false
-    @State private var hasFocusedEpisodeInCurrentEntry = false
-    @State private var pendingEntryRedirect = false
-    @State private var focusExitResetTask: Task<Void, Never>?
-
-    /// Episode that should receive default focus when entering the split pane.
-    /// Prefer the current episode when visible, otherwise the first episode.
-    private var preferredEpisodeRatingKey: String? {
-        if currentItemType == "episode",
-           let currentItemRatingKey,
-           episodes.contains(where: { $0.ratingKey == currentItemRatingKey }) {
-            return currentItemRatingKey
-        }
-        return episodes.first?.ratingKey
-    }
-
-    /// Entry focus target for split pane navigation.
-    /// Use first episode row because it's guaranteed to be on-screen/materialized
-    /// in the LazyVStack when entering from above.
-    private var entryEpisodeRatingKey: String? {
-        episodes.first?.ratingKey
-    }
-
-    #if DEBUG
-    private func debugFocusLog(_ event: String, extra: String = "") {
-        let columnDescription: String
-        switch lastFocusedColumn {
-        case .seasons: columnDescription = "seasons"
-        case .episodes: columnDescription = "episodes"
-        case nil: columnDescription = "nil"
-        }
-
-        let suffix = extra.isEmpty ? "" : " | \(extra)"
-        print(
-            "🎯 [SplitFocus] \(event) | season=\(focusedSeasonId ?? "nil") episode=\(focusedEpisodeId ?? "nil") selected=\(selectedSeason?.ratingKey ?? "nil") preferred=\(preferredEpisodeRatingKey ?? "nil") entry=\(entryEpisodeRatingKey ?? "nil") handled=\(hasHandledEntryFocus) focusedEpisodeInEntry=\(hasFocusedEpisodeInCurrentEntry) pending=\(pendingEntryRedirect) column=\(columnDescription)\(suffix)"
-        )
-    }
-    #else
-    private func debugFocusLog(_ event: String, extra: String = "") {}
-    #endif
-
-    /// Attempts to route focus to the preferred episode row. Returns true if applied.
-    private func redirectFocusToPreferredEpisodeIfAvailable() -> Bool {
-        guard let defaultEpisodeRatingKey = entryEpisodeRatingKey else {
-            debugFocusLog("redirectSkipped", extra: "reason=noPreferredEpisode")
-            return false
-        }
-        var transaction = Transaction()
-        transaction.disablesAnimations = true
-        withTransaction(transaction) {
-            focusedEpisodeId = defaultEpisodeRatingKey
-        }
-        lastFocusedColumn = .episodes
-        pendingEntryRedirect = false
-        debugFocusLog("redirectApplied", extra: "targetEpisode=\(defaultEpisodeRatingKey)")
-        return true
-    }
-
-    /// Debounced reset to avoid treating transient "both nil" focus transitions as a true exit.
-    private func scheduleSplitFocusResetCheck() {
-        debugFocusLog("resetScheduled")
-        focusExitResetTask?.cancel()
-        focusExitResetTask = Task {
-            try? await Task.sleep(nanoseconds: 150_000_000)
-            guard !Task.isCancelled else { return }
-            await MainActor.run {
-                guard focusedSeasonId == nil, focusedEpisodeId == nil else { return }
-                hasHandledEntryFocus = false
-                hasFocusedEpisodeInCurrentEntry = false
-                pendingEntryRedirect = false
-                lastFocusedColumn = nil
-                debugFocusLog("resetApplied")
-            }
-        }
-    }
 
     var body: some View {
-        HStack(alignment: .top, spacing: 32) {
-            // Left pane: Season list
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Seasons")
-                    .font(.title2)
-                    .fontWeight(.bold)
-                    .padding(.leading, 18)
-                    .padding(.bottom, 4)
-
-                ForEach(seasons, id: \.ratingKey) { season in
-                    SeasonListRow(
-                        season: season,
-                        isSelected: selectedSeason?.ratingKey == season.ratingKey,
-                        serverURL: serverURL,
-                        authToken: authToken,
-                        onRefreshNeeded: { await onEpisodeRefresh(nil) },
-                        focusedSeasonId: $focusedSeasonId
-                    )
+        ScrollViewReader { proxy in
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 20) {
+                    ForEach(seasons, id: \.ratingKey) { season in
+                        SeasonBarCard(
+                            season: season,
+                            isSelected: selectedSeason?.ratingKey == season.ratingKey,
+                            serverURL: serverURL,
+                            authToken: authToken,
+                            onSelect: {
+                                selectedSeason = season
+                                onSeasonSelected(season)
+                            }
+                        )
+                        .focused($focusedSeasonId, equals: season.ratingKey)
+                        .id(season.ratingKey)
+                    }
                 }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 16)
             }
-            .frame(width: 300)
+            .scrollClipDisabled()
             .focusSection()
-            // Keep remembering season focus, but don't restore-on-entry because
-            // entry should route to episodes in this split pane.
-            .remembersFocus(key: "splitSeasons", focusedId: $focusedSeasonId, restoreOnEntry: false)
-
-            // Right pane: Episodes list (preferred default focus)
-            VStack(alignment: .leading, spacing: 0) {
-                episodeListContent
-                    .opacity(episodeListOpacity)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .focusSection()
-            .prefersDefaultFocus(in: splitPaneNamespace)
-        }
-        .focusScope(splitPaneNamespace)
-        .onAppear {
-            displayedSeasonKey = selectedSeason?.ratingKey
-            hasHandledEntryFocus = false
-            hasFocusedEpisodeInCurrentEntry = false
-            pendingEntryRedirect = false
-            lastFocusedColumn = nil
-            focusExitResetTask?.cancel()
-            debugFocusLog("onAppear")
-        }
-        .onChange(of: focusedSeasonId) { oldSeasonId, newSeasonId in
-            debugFocusLog("seasonFocusChanged", extra: "old=\(oldSeasonId ?? "nil") new=\(newSeasonId ?? "nil")")
-            guard let newSeasonId else {
-                scheduleSplitFocusResetCheck()
-                return
-            }
-            focusExitResetTask?.cancel()
-
-            // Route to episodes until we've actually focused an episode in this entry.
-            // Once episode focus has happened, LEFT navigation to seasons stays intact.
-            let shouldRouteToEpisodes = focusedEpisodeId == nil && !hasFocusedEpisodeInCurrentEntry
-            if shouldRouteToEpisodes {
-                hasHandledEntryFocus = true
-                debugFocusLog("entryRoutingAttempt")
-                if redirectFocusToPreferredEpisodeIfAvailable() {
-                    return
+            .remembersFocus(key: "seasonPosters", focusedId: $focusedSeasonId)
+            .onChange(of: selectedSeason?.ratingKey) { _, newKey in
+                guard let key = newKey else { return }
+                withAnimation {
+                    proxy.scrollTo(key, anchor: .center)
                 }
-                // Episodes not ready yet (or empty). Defer a single redirect until they load.
-                pendingEntryRedirect = true
-                debugFocusLog("entryRoutingDeferred")
-            }
-
-            lastFocusedColumn = .seasons
-
-            guard let season = seasons.first(where: { $0.ratingKey == newSeasonId }),
-                  season.ratingKey != selectedSeason?.ratingKey else { return }
-            // Yield to let FocusMemory redirect settle before acting.
-            Task { @MainActor in
-                guard focusedSeasonId == newSeasonId,
-                      season.ratingKey != selectedSeason?.ratingKey else { return }
-                debugFocusLog("seasonSelectionStarted", extra: "season=\(newSeasonId)")
-                FocusMemory.shared.forget(key: "splitEpisodes")
-
-                // Fade out current episode list
-                withAnimation(.easeOut(duration: 0.2)) {
-                    episodeListOpacity = 0
-                }
-
-                selectedSeason = season
-                onSeasonSelected(season)
-                debugFocusLog("seasonSelectionTriggeredLoad", extra: "season=\(newSeasonId)")
-            }
-        }
-        .onChange(of: focusedEpisodeId) { oldEpisodeId, newEpisodeId in
-            debugFocusLog("episodeFocusChanged", extra: "old=\(oldEpisodeId ?? "nil") new=\(newEpisodeId ?? "nil")")
-            if newEpisodeId != nil {
-                focusExitResetTask?.cancel()
-                hasHandledEntryFocus = true
-                hasFocusedEpisodeInCurrentEntry = true
-                pendingEntryRedirect = false
-                lastFocusedColumn = .episodes
-                return
-            }
-            scheduleSplitFocusResetCheck()
-        }
-        .onChange(of: episodes) { _, _ in
-            // New episodes loaded — fade in
-            withAnimation(.easeIn(duration: 0.3)) {
-                episodeListOpacity = 1
-            }
-            displayedSeasonKey = selectedSeason?.ratingKey
-            debugFocusLog("episodesUpdated", extra: "count=\(episodes.count)")
-
-            // If entry landed in seasons before episodes were available, apply deferred redirect now.
-            if pendingEntryRedirect,
-               focusedEpisodeId == nil,
-               focusedSeasonId != nil {
-                debugFocusLog("deferredRoutingAttempt")
-                _ = redirectFocusToPreferredEpisodeIfAvailable()
             }
         }
     }
-
-    @ViewBuilder
-    private var episodeListContent: some View {
-        let episodeCount = selectedSeason?.leafCount ?? 0
-        if isLoadingEpisodes && episodeCount > 0 {
-            LazyVStack(spacing: 16) {
-                ForEach(0..<episodeCount, id: \.self) { index in
-                    SkeletonEpisodeRow(episodeNumber: index + 1)
-                }
-            }
-            .padding(.horizontal, 8)
-        } else if isLoadingEpisodes {
-            ProgressView("Loading episodes...")
-                .padding(.top, 20)
-        } else if !episodes.isEmpty {
-            LazyVStack(spacing: 16) {
-                let defaultEpisodeRatingKey = entryEpisodeRatingKey
-                ForEach(episodes, id: \.ratingKey) { episode in
-                    let isCurrentEpisode = currentItemType == "episode" && episode.ratingKey == currentItemRatingKey
-                    EpisodeRow(
-                        episode: episode,
-                        serverURL: serverURL,
-                        authToken: authToken,
-                        isCurrent: isCurrentEpisode,
-                        focusedEpisodeId: $focusedEpisodeId,
-                        onPlay: { onEpisodePlay(episode) },
-                        onRefreshNeeded: { await onEpisodeRefresh(episode.ratingKey) },
-                        onShowInfo: { onEpisodeShowInfo(episode) }
-                    )
-                    .prefersDefaultFocus(defaultEpisodeRatingKey == episode.ratingKey, in: splitPaneNamespace)
-                }
-            }
-            .padding(.horizontal, 8)
-            .focusSection()
-            .remembersFocus(key: "splitEpisodes", focusedId: $focusedEpisodeId)
-        }
-    }
-
 }
 
 #endif

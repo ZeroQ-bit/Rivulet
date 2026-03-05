@@ -203,7 +203,7 @@ struct SettingsView: View {
     @AppStorage("showMarkersOnScrubber") private var showMarkersOnScrubber = true
     @AppStorage("useAVPlayerForDolbyVision") private var useAVPlayerForDolbyVision = true
     @AppStorage("useAVPlayerForAllVideos") private var useAVPlayerForAllVideos = false
-    @AppStorage("useRivuletPlayer") private var useRivuletPlayer = false
+    @AppStorage("useRivuletPlayer") private var useRivuletPlayer = true
     @AppStorage("displaySize") private var displaySizeRaw = DisplaySize.normal.rawValue
     @AppStorage("posterDepthEffect") private var posterDepthEffect = true
     @Environment(\.focusScopeManager) private var focusScopeManager
@@ -464,7 +464,7 @@ struct SettingsView: View {
                                 icon: "waveform.badge.magnifyingglass",
                                 iconColor: .orange,
                                 title: "Use Rivulet Player",
-                                subtitle: "Experimental native player — direct play via FFmpeg",
+                                subtitle: "Native player — direct play via FFmpeg",
                                 isOn: $useRivuletPlayer,
                                 helpTitle: "Rivulet Player"
                             ) {

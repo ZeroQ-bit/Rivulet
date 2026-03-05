@@ -509,7 +509,9 @@ final class UniversalPlayerViewModel: ObservableObject {
         self.allowAudioDirectStream = UniversalPlayerViewModel.isAudioDirectStreamCapable(metadata)
 
         // Determine which player to use based on content and settings
-        let useRivuletPlayer = UserDefaults.standard.bool(forKey: "useRivuletPlayer")
+        let useRivuletPlayer = UserDefaults.standard.object(forKey: "useRivuletPlayer") == nil
+            ? true
+            : UserDefaults.standard.bool(forKey: "useRivuletPlayer")
         let useAVPlayerForDV = UserDefaults.standard.bool(forKey: "useAVPlayerForDolbyVision")
         let useAVPlayerForAll = UserDefaults.standard.bool(forKey: "useAVPlayerForAllVideos")
         let isAirPlayRoute = Self.isAirPlayOutput()
@@ -2457,6 +2459,7 @@ final class UniversalPlayerViewModel: ObservableObject {
             if let rp = rivuletPlayer {
                 rp.deselectEmbeddedSubtitle()
                 rp.onSubtitleCue = nil
+                rp.onBitmapSubtitleCue = nil
             }
             return
         }
@@ -2470,9 +2473,12 @@ final class UniversalPlayerViewModel: ObservableObject {
                 print("🎬 [Subtitles] Enabling inline embedded subtitle for track \(trackId) (FFmpeg has \(ffmpegSubs.count) sub tracks)")
                 subtitleManager.clear()
 
-                // Wire the subtitle cue callback to build SRT content progressively
+                // Wire subtitle cue callbacks (text and bitmap)
                 rp.onSubtitleCue = { [weak self] text, start, end in
                     self?.subtitleManager.addCue(text: text, startTime: start, endTime: end)
+                }
+                rp.onBitmapSubtitleCue = { [weak self] cue in
+                    self?.subtitleManager.addBitmapCue(cue)
                 }
 
                 // Select the subtitle stream in the demuxer.
@@ -2482,8 +2488,9 @@ final class UniversalPlayerViewModel: ObservableObject {
                     return
                 }
 
-                // Embedded mapping failed — clean up the callback before falling through
+                // Embedded mapping failed — clean up the callbacks before falling through
                 rp.onSubtitleCue = nil
+                rp.onBitmapSubtitleCue = nil
             }
 
             // No embedded match — try Plex URL (external sidecar subs)

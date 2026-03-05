@@ -19,7 +19,8 @@ final class SampleBufferRenderer {
 
     let displayLayer = AVSampleBufferDisplayLayer()
     let audioRenderer = AVSampleBufferAudioRenderer()
-    let renderSynchronizer = AVSampleBufferRenderSynchronizer()
+    /// Thread-safe per Apple docs; nonisolated(unsafe) allows nonisolated currentTime access.
+    nonisolated(unsafe) let renderSynchronizer = AVSampleBufferRenderSynchronizer()
 
     // MARK: - Configuration
 
@@ -53,13 +54,15 @@ final class SampleBufferRenderer {
     // MARK: - Synchronizer Control
 
     /// Current playback position from the synchronizer clock.
-    var currentTime: TimeInterval {
+    /// AVSampleBufferRenderSynchronizer.currentTime() is thread-safe,
+    /// so this can be called from any isolation context without awaiting MainActor.
+    nonisolated var currentTime: TimeInterval {
         let time = CMTimeGetSeconds(renderSynchronizer.currentTime())
         return time.isFinite && time >= 0 ? time : 0
     }
 
     /// Current synchronizer time as CMTime.
-    var currentCMTime: CMTime {
+    nonisolated var currentCMTime: CMTime {
         renderSynchronizer.currentTime()
     }
 
@@ -109,7 +112,7 @@ final class SampleBufferRenderer {
                     jitterStats.recordEnqueueStall(duration: elapsed)
                     return
                 }
-                try? await Task.sleep(nanoseconds: 5_000_000) // 5ms
+                try? await Task.sleep(nanoseconds: 2_000_000) // 2ms
             }
 
             let stallDuration = CFAbsoluteTimeGetCurrent() - stallStart

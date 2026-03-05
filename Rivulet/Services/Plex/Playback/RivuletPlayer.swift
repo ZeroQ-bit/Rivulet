@@ -358,6 +358,13 @@ final class RivuletPlayer: ObservableObject {
         }
     }
 
+    /// Set a callback for bitmap subtitle cues (PGS, DVB-SUB) from the read loop.
+    var onBitmapSubtitleCue: ((BitmapSubtitleCue) -> Void)? {
+        didSet {
+            directPlayPipeline?.onBitmapSubtitleCue = onBitmapSubtitleCue
+        }
+    }
+
     /// Enable embedded subtitle extraction for a Plex track ID.
     /// Matches to FFmpeg stream by codec type to handle Plex lists that include
     /// external/sidecar subs not present in the container.

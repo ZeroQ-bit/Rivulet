@@ -147,16 +147,15 @@ struct TVSidebarView: View {
                 hasCheckedProfilePicker = true
             }
 
-            // Load data optimistically (will use cache first, then background refresh)
-            async let hubsLoad: () = dataStore.loadHubsIfNeeded()
-            async let librariesLoad: () = dataStore.loadLibrariesIfNeeded()
-            _ = await (hubsLoad, librariesLoad)
+            // CRITICAL PATH: Only hubs needed for home screen to render
+            await dataStore.loadHubsIfNeeded()
 
-            // Load library hubs early so Home screen rows are ready from cache
-            await dataStore.loadLibraryHubsIfNeeded()
-
-            // Start background prefetch of library content for faster navigation
-            dataStore.startBackgroundPrefetch(libraries: dataStore.visibleVideoLibraries)
+            // BACKGROUND: Libraries → library hubs → prefetch (chained, not blocking home)
+            Task {
+                await dataStore.loadLibrariesIfNeeded()
+                await dataStore.loadLibraryHubsIfNeeded()
+                dataStore.startBackgroundPrefetch(libraries: dataStore.visibleVideoLibraries)
+            }
         }
         .task {
             // Start background preloading of Live TV data (low priority)
@@ -191,11 +190,15 @@ struct TVSidebarView: View {
                 // Load content if not already loaded (profile switch handles its own reload)
                 Task {
                     if dataStore.hubs.isEmpty {
-                        async let hubsLoad: () = dataStore.loadHubsIfNeeded()
-                        async let librariesLoad: () = dataStore.loadLibrariesIfNeeded()
-                        _ = await (hubsLoad, librariesLoad)
-                        await dataStore.loadLibraryHubsIfNeeded()
-                        dataStore.startBackgroundPrefetch(libraries: dataStore.visibleVideoLibraries)
+                        // CRITICAL PATH: Only hubs needed for home screen to render
+                        await dataStore.loadHubsIfNeeded()
+
+                        // BACKGROUND: Libraries → library hubs → prefetch
+                        Task {
+                            await dataStore.loadLibrariesIfNeeded()
+                            await dataStore.loadLibraryHubsIfNeeded()
+                            dataStore.startBackgroundPrefetch(libraries: dataStore.visibleVideoLibraries)
+                        }
                     }
                 }
 

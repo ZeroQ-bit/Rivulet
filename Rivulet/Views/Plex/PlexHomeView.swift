@@ -170,7 +170,6 @@ struct PlexHomeView: View {
                 // Initialize Home visibility for libraries if not configured
                 guard !dataStore.libraries.isEmpty else { return }
                 dataStore.librarySettings.initializeHomeVisibility(for: dataStore.libraries)
-                await dataStore.loadLibraryHubsIfNeeded()
             }
             .onChange(of: dataStore.hubsVersion) { _, _ in
                 // Recompute cached hubs when global hub data changes (for Continue Watching)
