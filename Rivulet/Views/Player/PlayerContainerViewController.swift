@@ -10,7 +10,6 @@ import SwiftUI
 import UIKit
 import Combine
 
-#if os(tvOS)
 
 /// Container view controller that hosts the SwiftUI player view and intercepts button presses.
 /// This allows us to handle Menu button presses before SwiftUI dismisses the player.
@@ -446,4 +445,3 @@ class PlayerContainerViewController: UIViewController {
     }
 }
 
-#endif

@@ -19,19 +19,11 @@ struct PersonCard: View {
 
     @Environment(\.uiScale) private var scale
 
-    #if os(tvOS)
     private var cardWidth: CGFloat { ScaledDimensions.posterWidth * scale }
     private var cardHeight: CGFloat { ScaledDimensions.posterHeight * scale }
     private var cornerRadius: CGFloat { ScaledDimensions.posterCornerRadius }
     private var nameFont: CGFloat { ScaledDimensions.posterTitleSize * scale }
     private var subtitleFont: CGFloat { ScaledDimensions.posterSubtitleSize * scale }
-    #else
-    private var cardWidth: CGFloat { ScaledDimensions.posterWidth }
-    private var cardHeight: CGFloat { ScaledDimensions.posterHeight }
-    private var cornerRadius: CGFloat { ScaledDimensions.posterCornerRadius }
-    private var nameFont: CGFloat { ScaledDimensions.posterTitleSize }
-    private var subtitleFont: CGFloat { ScaledDimensions.posterSubtitleSize }
-    #endif
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -39,7 +31,6 @@ struct PersonCard: View {
             personImage
                 .frame(width: cardWidth, height: cardHeight)
                 .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
-                #if os(tvOS)
                 .hoverEffect(.highlight)
                 // GPU-accelerated shadow: blur is hardware-accelerated, unlike .shadow() with large radius
                 .background(
@@ -50,7 +41,6 @@ struct PersonCard: View {
                         .opacity(0.4)
                 )
                 .padding(.bottom, 10)  // Space for hover scale effect
-                #endif
 
             // Name and role - below image like MediaPosterCard
             VStack(alignment: .leading, spacing: 6) {
@@ -70,11 +60,7 @@ struct PersonCard: View {
                         .frame(width: cardWidth, alignment: .leading)
                 }
             }
-            #if os(tvOS)
             .frame(height: (nameFont + subtitleFont + 12) * 1.2, alignment: .top)
-            #else
-            .frame(height: 44, alignment: .top)
-            #endif
         }
     }
 
@@ -157,11 +143,7 @@ struct CastCrewRow: View {
                                 authToken: authToken
                             )
                         }
-                        #if os(tvOS)
                         .buttonStyle(CardButtonStyle())
-                        #else
-                        .buttonStyle(.plain)
-                        #endif
                     }
 
                     // Cast members
@@ -175,11 +157,7 @@ struct CastCrewRow: View {
                                 authToken: authToken
                             )
                         }
-                        #if os(tvOS)
                         .buttonStyle(CardButtonStyle())
-                        #else
-                        .buttonStyle(.plain)
-                        #endif
                     }
                 }
                 .padding(.horizontal, ScaledDimensions.rowHorizontalPadding)

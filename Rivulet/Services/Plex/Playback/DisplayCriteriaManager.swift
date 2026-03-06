@@ -10,7 +10,6 @@ import Foundation
 import AVFoundation
 import AVKit
 
-#if os(tvOS)
 
 /// Manages display criteria for HDR content playback
 /// This enables tvOS "Match Content" (Frame Rate and Dynamic Range) for MPV player
@@ -271,4 +270,3 @@ final class DisplayCriteriaManager {
     }
 }
 
-#endif

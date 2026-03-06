@@ -50,7 +50,7 @@ final class SubtitleClockSyncController: NSObject {
         self.displayLink = displayLink
         #endif
 
-        print("🎬 [Subtitles] Clock sync started (\(owner))")
+        // print("🎬 [Subtitles] Clock sync started (\(owner))")
     }
 
     func stop() {
@@ -85,17 +85,17 @@ final class SubtitleClockSyncController: NSObject {
         // Lightweight diagnostics: detect jumps or regressions in playback clock updates.
         if subtitleManager.diagnosticsEnabled, isPlayingProvider(), lastPlaybackTime >= 0 {
             let delta = playbackTime - lastPlaybackTime
-            if delta < -0.35 || delta > 0.8 {
-                print(
-                    "🎬 [Subtitles] Clock jump (\(owner)) prev=\(String(format: "%.3f", lastPlaybackTime)) " +
-                    "now=\(String(format: "%.3f", playbackTime)) Δ=\(String(format: "%.3f", delta))"
-                )
-            } else if tickCount % 300 == 0 {
-                print(
-                    "🎬 [Subtitles] Clock heartbeat (\(owner)) t=\(String(format: "%.3f", playbackTime)) " +
-                    "activeCues=\(subtitleManager.currentCues.count)"
-                )
-            }
+            // if delta < -0.35 || delta > 0.8 {
+            //     print(
+            //         "🎬 [Subtitles] Clock jump (\(owner)) prev=\(String(format: "%.3f", lastPlaybackTime)) " +
+            //         "now=\(String(format: "%.3f", playbackTime)) Δ=\(String(format: "%.3f", delta))"
+            //     )
+            // } else if tickCount % 300 == 0 {
+            //     print(
+            //         "🎬 [Subtitles] Clock heartbeat (\(owner)) t=\(String(format: "%.3f", playbackTime)) " +
+            //         "activeCues=\(subtitleManager.currentCues.count)"
+            //     )
+            // }
         }
 
         lastPlaybackTime = playbackTime

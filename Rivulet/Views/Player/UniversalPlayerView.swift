@@ -7,13 +7,10 @@
 
 import SwiftUI
 import Combine
-#if os(tvOS)
 import GameController
-#endif
 
 // MARK: - Simple Remote Input Handler
 
-#if os(tvOS)
 /// Simplified remote input detection using GameController.
 /// Reads dpad position synchronously when button is pressed to avoid race conditions.
 @MainActor
@@ -448,9 +445,7 @@ final class RemoteInputHandler: ObservableObject {
         accumulatedRotation = 0
     }
 }
-#endif
 
-#if os(tvOS)
 @MainActor
 private final class UniversalPlaybackInputTarget: PlaybackInputTarget {
     weak var viewModel: UniversalPlayerViewModel?
@@ -670,16 +665,13 @@ private final class UniversalPlaybackInputTarget: PlaybackInputTarget {
         }
     }
 }
-#endif
 
 struct UniversalPlayerView: View {
     @StateObject private var viewModel: UniversalPlayerViewModel
     @StateObject private var focusScopeManager = FocusScopeManager()
-    #if os(tvOS)
     @StateObject private var remoteInput = RemoteInputHandler()
     @State private var inputTarget: UniversalPlaybackInputTarget?
     private let inputCoordinator: PlaybackInputCoordinator
-    #endif
     @Environment(\.dismiss) private var dismiss
 
     @State private var hasStartedPlayback = false
@@ -719,9 +711,7 @@ struct UniversalPlayerView: View {
             authToken: authToken,
             startOffset: startOffset
         ))
-        #if os(tvOS)
         self.inputCoordinator = inputCoordinator
-        #endif
     }
 
     /// Initialize with an externally-created viewModel (for UIViewController presentation)
@@ -734,21 +724,30 @@ struct UniversalPlayerView: View {
     @MainActor
     init(viewModel: UniversalPlayerViewModel, inputCoordinator: PlaybackInputCoordinator) {
         _viewModel = StateObject(wrappedValue: viewModel)
-        #if os(tvOS)
         self.inputCoordinator = inputCoordinator
-        #endif
     }
 
     var body: some View {
         ZStack {
-            // Player content layer - handles input when post-video is hidden
-            playerContentLayer
+            // Background
+            Color.black
+                .ignoresSafeArea()
                 .zIndex(0)
+
+            // Video player layer - floats above post-video overlay when shrunk
+            playerLayer
+                .ignoresSafeArea()
+                .allowsHitTesting(false)
+                .zIndex(viewModel.videoFrameState == .shrunk ? 200 : 1)
+
+            // Player controls and overlays (subtitles, loading, controls, etc.)
+            playerContentLayer
+                .zIndex(2)
 
             // Post-Video Summary Overlay - separate layer with its own focus handling
             if viewModel.postVideoState != .hidden {
                 PostVideoSummaryView(viewModel: viewModel)
-                    .zIndex(100)  // Ensure it's above everything
+                    .zIndex(100)
             }
         }
         .environment(\.focusScopeManager, focusScopeManager)
@@ -758,7 +757,6 @@ struct UniversalPlayerView: View {
         .animation(.easeInOut(duration: 0.3), value: viewModel.showSkipButton)
         .animation(.spring(response: 0.2, dampingFraction: 0.7), value: viewModel.seekIndicator)
         .animation(.easeInOut(duration: 0.5), value: viewModel.showPausedPoster)
-        #if os(tvOS)
         .onPlayPauseCommand {
             // Skip button handles its own press via Button action
             guard !isSkipButtonFocused else { return }
@@ -774,14 +772,12 @@ struct UniversalPlayerView: View {
         // to intercept the event before SwiftUI can dismiss the player.
         // Do NOT add onExitCommand here - it would fire after PlayerContainerViewController
         // has already processed the event, causing double-handling.
-        #endif
         .onChange(of: playerController) { _, controller in
             if let controller = controller {
                 viewModel.setPlayerController(controller)
             }
         }
         .onAppear {
-            #if os(tvOS)
             // Wire up remote input callbacks
             let target = UniversalPlaybackInputTarget(viewModel: viewModel)
             target.onResetRemoteInput = { [remoteInput] in
@@ -811,7 +807,6 @@ struct UniversalPlayerView: View {
                 inputCoordinator.handle(action: action, source: source)
             }
             remoteInput.startMonitoring()
-            #endif
         }
         .task {
             guard !hasStartedPlayback else { return }
@@ -822,11 +817,7 @@ struct UniversalPlayerView: View {
             focusScopeManager.activate(.player)
             // Activate audio session BEFORE playback starts
             // This ensures MPV's AudioUnit is created with correct session config
-            #if os(tvOS)
             NowPlayingService.shared.attach(to: viewModel, inputCoordinator: inputCoordinator)
-            #else
-            NowPlayingService.shared.attach(to: viewModel)
-            #endif
             await viewModel.startPlayback()
         }
         .onDisappear {
@@ -837,12 +828,10 @@ struct UniversalPlayerView: View {
             viewModel.stopPlayback()
             NowPlayingService.shared.detach()
             reportFinalProgressAndRefresh()
-            #if os(tvOS)
             remoteInput.stopMonitoring()
             remoteInput.reset()
             inputCoordinator.invalidate()
             inputTarget = nil
-            #endif
             // Deactivate player scope when leaving
             focusScopeManager.deactivate()
             // Release MPV pre-warm service so it can prepare for next use
@@ -910,14 +899,6 @@ struct UniversalPlayerView: View {
     @ViewBuilder
     private var playerContentLayer: some View {
         ZStack {
-            // Background
-            Color.black
-                .ignoresSafeArea()
-
-            // Player Layer
-            playerLayer
-                .ignoresSafeArea()
-
             // Subtitle Overlay (for DVSampleBufferPlayer and RivuletPlayer)
             if viewModel.playerType == .dvSampleBuffer || viewModel.playerType == .rivulet {
                 SubtitleOverlayView(
@@ -1008,7 +989,6 @@ struct UniversalPlayerView: View {
                 }
             }
         }
-        #if os(tvOS)
         .onMoveCommand { direction in
             // When post-video is showing, don't handle - let SwiftUI manage button focus
             guard viewModel.postVideoState == .hidden else { return }
@@ -1036,7 +1016,6 @@ struct UniversalPlayerView: View {
                 handleMoveCommand(direction)
             }
         }
-        #endif
     }
 
     // MARK: - Player Layer
@@ -1295,25 +1274,13 @@ struct UniversalPlayerView: View {
                     Button("Try Again") {
                         Task { await viewModel.retryPlayback() }
                     }
-                    #if os(tvOS)
                     .buttonStyle(AppStoreButtonStyle())
-                    #else
-                    .buttonStyle(.bordered)
-                    #endif
                 }
 
                 Button("Dismiss") {
-                    #if os(tvOS)
                     viewModel.shouldDismiss = true
-                    #else
-                    dismiss()
-                    #endif
                 }
-                #if os(tvOS)
                 .buttonStyle(AppStoreButtonStyle())
-                #else
-                .buttonStyle(.bordered)
-                #endif
             }
             .padding(.top, 20)
         }
@@ -1418,12 +1385,8 @@ struct UniversalPlayerView: View {
                     .scaleEffect(isSkipButtonFocused ? 1.08 : 1.0)
                     .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isSkipButtonFocused)
                 }
-                #if os(tvOS)
                 .buttonStyle(CardButtonStyle())
                 .focused($isSkipButtonFocused)
-                #else
-                .buttonStyle(.plain)
-                #endif
             }
             .padding(.trailing, 80)
             // Move button up when controls are visible to avoid overlap with transport bar
@@ -1434,7 +1397,6 @@ struct UniversalPlayerView: View {
 
     // MARK: - Input Handling
 
-    #if os(tvOS)
     private func handleMoveCommand(_ direction: MoveCommandDirection) {
         // Hide paused poster on any d-pad input
         viewModel.hidePausedPoster()
@@ -1481,7 +1443,6 @@ struct UniversalPlayerView: View {
         }
         inputCoordinator.handle(action: .playPause, source: .swiftUICommand)
     }
-    #endif
 
     // MARK: - Progress Reporting
 

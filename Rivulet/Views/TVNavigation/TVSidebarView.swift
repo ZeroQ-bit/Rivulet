@@ -7,7 +7,6 @@
 
 import SwiftUI
 
-#if os(tvOS)
 
 // MARK: - TVSidebarView
 
@@ -29,7 +28,7 @@ struct TVSidebarView: View {
     @AppStorage("lastSeenBuild") private var lastSeenBuild = ""
     @State private var showWhatsNew = false
     @State private var whatsNewVersion = ""
-    @State private var currentTime = ""
+
     @Namespace private var contentNamespace
     @Environment(\.resetFocus) private var resetFocus
 
@@ -47,16 +46,9 @@ struct TVSidebarView: View {
                 tabContent(for: .account)
             } label: {
                 Label {
-                    HStack {
-                        Text(profileName)
-                        if !currentTime.isEmpty {
-                            Spacer()
-                            Text(currentTime)
-                                .foregroundStyle(.tertiary)
-                        }
-                    }
+                    Text(profileName)
                 } icon: {
-                    SidebarProfileAvatar(user: profileManager.selectedUser, size: 36)
+                    SidebarProfileAvatar(user: profileManager.selectedUser, size: 28)
                 }
             }
 
@@ -131,14 +123,14 @@ struct TVSidebarView: View {
                 }
             }
 
-            TabSection("") {
-                Tab("Settings", systemImage: "gearshape.fill",
-                    value: SidebarTab.settings) {
-                    tabContent(for: .settings)
-                }
+            Tab("Settings", systemImage: "gearshape.fill",
+                value: SidebarTab.settings) {
+                tabContent(for: .settings)
             }
         }
         .tabViewStyle(.sidebarAdaptable)
+        .scrollBounceBehavior(.basedOnSize)
+        .task { await Self.installSidebarFocusGuard() }
         .onExitCommand {
             resetFocus(in: contentNamespace)
         }
@@ -238,15 +230,6 @@ struct TVSidebarView: View {
                 checkAndShowWhatsNew()
             }
         }
-        .task {
-            let formatter = DateFormatter()
-            formatter.dateFormat = "h:mm a"
-            currentTime = formatter.string(from: Date())
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(30))
-                currentTime = formatter.string(from: Date())
-            }
-        }
     }
 
     // MARK: - Tab Content
@@ -255,7 +238,7 @@ struct TVSidebarView: View {
     private func tabContent(for tab: SidebarTab) -> some View {
         Group {
             if isAwaitingProfileSelection {
-                Color.black.ignoresSafeArea()
+                Color.clear.ignoresSafeArea()
             } else {
                 switch tab {
                 case .account:
@@ -385,6 +368,77 @@ struct TVSidebarView: View {
 
     // MARK: - What's New
 
+    // MARK: - Sidebar Focus Containment
+
+    /// Monitors for the sidebar's collection view and installs a UIFocusGuide
+    /// below it to prevent focus from escaping downward.
+    @MainActor
+    private static func installSidebarFocusGuard() async {
+        try? await Task.sleep(for: .seconds(1))
+
+        guard let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+              let window = scene.windows.first else { return }
+
+        // The sidebar's collection view (UpdateCoalescingCollectionView) only exists
+        // when expanded. Poll until we find it, then install a focus guide.
+        // Also re-check periodically in case it gets recreated.
+        var installedGuide: UIFocusGuide?
+        weak var lastCollectionView: UICollectionView?
+
+        while !Task.isCancelled {
+            try? await Task.sleep(for: .milliseconds(500))
+
+            // Find the sidebar collection view (narrow, left-side UICollectionView)
+            let collectionView = Self.findSidebarCollectionView(in: window)
+
+            if let cv = collectionView, cv !== lastCollectionView {
+                // New sidebar collection view found — install focus guide
+                lastCollectionView = cv
+
+                // Remove old guide if any
+                if let old = installedGuide {
+                    old.owningView?.removeLayoutGuide(old)
+                }
+
+                // Add a focus guide to the window below the sidebar area.
+                // When focus tries to move down past the last sidebar item,
+                // the guide catches it and redirects back into the sidebar.
+                let guide = UIFocusGuide()
+                guide.preferredFocusEnvironments = [cv]
+                window.addLayoutGuide(guide)
+
+                // Position the guide in the sidebar column, below the content
+                guide.topAnchor.constraint(equalTo: cv.bottomAnchor).isActive = true
+                guide.leadingAnchor.constraint(equalTo: window.leadingAnchor).isActive = true
+                guide.widthAnchor.constraint(equalToConstant: cv.frame.width).isActive = true
+                guide.heightAnchor.constraint(equalToConstant: 200).isActive = true
+
+                installedGuide = guide
+
+                // Also disable scroll bounce on the sidebar
+                cv.bounces = false
+                cv.alwaysBounceVertical = false
+            }
+        }
+    }
+
+    /// Finds the sidebar's UICollectionView by looking for a narrow, left-aligned collection view
+    private static func findSidebarCollectionView(in view: UIView) -> UICollectionView? {
+        if let cv = view as? UICollectionView {
+            let frame = cv.frame
+            // Sidebar is narrow (< 500pt) and left-aligned
+            if frame.origin.x == 0 && frame.width > 0 && frame.width < 500 {
+                return cv
+            }
+        }
+        for subview in view.subviews {
+            if let found = findSidebarCollectionView(in: subview) {
+                return found
+            }
+        }
+        return nil
+    }
+
     private func checkAndShowWhatsNew() {
         guard !isAwaitingProfileSelection else { return }
 
@@ -408,26 +462,71 @@ struct SidebarProfileAvatar: View {
     let user: PlexHomeUser?
     let size: CGFloat
 
+    @State private var circularImage: UIImage?
+
     var body: some View {
         Group {
-            if let thumbURL = user?.thumb, let url = URL(string: thumbURL) {
-                CachedAsyncImage(url: url) { phase in
-                    switch phase {
-                    case .success(let image):
-                        image.resizable().aspectRatio(contentMode: .fill)
-                    default:
-                        placeholder
-                    }
-                }
+            if let circularImage {
+                Image(uiImage: circularImage)
+                    .resizable()
+                    .renderingMode(.original)
             } else {
                 placeholder
             }
         }
         .frame(width: size, height: size)
-        .clipShape(Circle())
-        .overlay(
-            Circle().strokeBorder(.white.opacity(0.15), lineWidth: 1)
-        )
+        .task(id: user?.thumb) {
+            await loadCircularAvatar()
+        }
+    }
+
+    private func loadCircularAvatar() async {
+        guard let thumbURL = user?.thumb, let url = URL(string: thumbURL) else {
+            circularImage = nil
+            return
+        }
+
+        // Try loading from ImageCacheManager first, then network
+        let image: UIImage?
+        if let cached = await ImageCacheManager.shared.image(for: url) {
+            image = cached
+        } else {
+            guard let (data, _) = try? await URLSession.shared.data(from: url),
+                  let downloaded = UIImage(data: data) else {
+                return
+            }
+            image = downloaded
+        }
+
+        guard let source = image else { return }
+
+        // Render circular image with border
+        let renderer = UIGraphicsImageRenderer(size: CGSize(width: size, height: size))
+        let circular = renderer.image { ctx in
+            let rect = CGRect(origin: .zero, size: CGSize(width: size, height: size))
+            let circlePath = UIBezierPath(ovalIn: rect)
+            circlePath.addClip()
+
+            // Draw image scaled to fill
+            let imageSize = source.size
+            let scale = max(size / imageSize.width, size / imageSize.height)
+            let drawWidth = imageSize.width * scale
+            let drawHeight = imageSize.height * scale
+            let drawRect = CGRect(
+                x: (size - drawWidth) / 2,
+                y: (size - drawHeight) / 2,
+                width: drawWidth,
+                height: drawHeight
+            )
+            source.draw(in: drawRect)
+
+            // Draw subtle border
+            ctx.cgContext.setStrokeColor(UIColor.white.withAlphaComponent(0.15).cgColor)
+            ctx.cgContext.setLineWidth(1)
+            ctx.cgContext.strokeEllipse(in: rect.insetBy(dx: 0.5, dy: 0.5))
+        }
+
+        circularImage = circular
     }
 
     private var placeholder: some View {
@@ -450,4 +549,3 @@ struct SidebarProfileAvatar: View {
     }
 }
 
-#endif

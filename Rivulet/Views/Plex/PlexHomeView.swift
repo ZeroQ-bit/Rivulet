@@ -7,6 +7,9 @@
 
 import SwiftUI
 import Combine
+import os.log
+
+private let homeLog = Logger(subsystem: "com.rivulet.app", category: "PlexHome")
 
 struct PlexHomeView: View {
     @StateObject private var dataStore = PlexDataStore.shared
@@ -132,7 +135,6 @@ struct PlexHomeView: View {
     var body: some View {
         NavigationStack {
             ZStack {
-                let _ = print("[PlexHome] body evaluated, hubs=\(dataStore.hubs.count), focusedItemId=\(focusedItemId ?? "nil")")
                 if !authManager.hasCredentials {
                     notConnectedView
                 } else if dataStore.isLoadingHubs && dataStore.hubs.isEmpty {
@@ -153,9 +155,12 @@ struct PlexHomeView: View {
                 }
             }
             .onAppear {
+                homeLog.info("PlexHomeView onAppear — cachedHubs=\(self.cachedProcessedHubs.count), dataStoreHubs=\(self.dataStore.hubs.count)")
                 // Initial computation of processed hubs
                 if cachedProcessedHubs.isEmpty && !dataStore.hubs.isEmpty {
                     cachedProcessedHubs = computeProcessedHubs(from: dataStore.hubs)
+                    homeLog.info("Computed \(self.cachedProcessedHubs.count) processed hubs on appear, setting isHomeContentReady=\(!self.cachedProcessedHubs.isEmpty)")
+                    dataStore.isHomeContentReady = !cachedProcessedHubs.isEmpty
                 }
                 // Only select hero if we don't have one yet
                 if heroItem == nil {
@@ -187,6 +192,10 @@ struct PlexHomeView: View {
                 // Recompute and reload when Home library selection changes
                 cachedProcessedHubs = computeProcessedHubs(from: dataStore.hubs)
                 Task { await dataStore.loadLibraryHubsIfNeeded() }
+            }
+            .onChange(of: cachedProcessedHubs.isEmpty) { _, isEmpty in
+                homeLog.info("cachedProcessedHubs.isEmpty changed to \(isEmpty) (count: \(self.cachedProcessedHubs.count))")
+                dataStore.isHomeContentReady = !isEmpty
             }
             .onChange(of: enablePersonalizedRecommendations) { _, _ in
                 handleRecommendationsToggle()
@@ -671,18 +680,10 @@ struct HeroView<FocusTarget: Hashable>: View {
     }
 
     var body: some View {
-        #if os(tvOS)
         heroButtonView
             .task(id: artURL) {
                 await loadHeroArt()
             }
-        #else
-        heroContentView
-            .frame(height: 400)
-            .task(id: artURL) {
-                await loadHeroArt()
-            }
-        #endif
     }
 
     /// Load hero art at full size with guaranteed off-main-thread decoding
@@ -767,7 +768,6 @@ struct HeroView<FocusTarget: Hashable>: View {
                             .frame(maxWidth: 800, alignment: .leading)
                     }
 
-                    #if os(tvOS)
                     // More Info indicator
                     HStack(spacing: 10) {
                         Image(systemName: "info.circle.fill")
@@ -784,7 +784,6 @@ struct HeroView<FocusTarget: Hashable>: View {
                     )
                     .opacity(isFocused ? 1 : 0.7)
                     .padding(.top, 8)
-                    #endif
                 }
                 .padding(.horizontal, 80)
                 .padding(.bottom, 70)
@@ -792,7 +791,6 @@ struct HeroView<FocusTarget: Hashable>: View {
         }
     }
 
-    #if os(tvOS)
     @ViewBuilder
     private var heroButtonView: some View {
         switch focusBinding {
@@ -838,7 +836,6 @@ struct HeroView<FocusTarget: Hashable>: View {
             .animation(.easeOut(duration: 0.1), value: isFocused)  // Faster de-focus
         }
     }
-    #endif
 
     private func formatDuration(_ ms: Int) -> String {
         let minutes = ms / 60000
@@ -882,11 +879,7 @@ struct ContentRow: View {
                                 authToken: authToken
                             )
                         }
-                        #if os(tvOS)
                         .buttonStyle(CardButtonStyle())
-                        #else
-                        .buttonStyle(.plain)
-                        #endif
                     }
                 }
                 .padding(.horizontal, ScaledDimensions.rowHorizontalPadding)
@@ -980,12 +973,8 @@ struct InfiniteContentRow: View {
                                 authToken: authToken
                             )
                         }
-                        #if os(tvOS)
                         .buttonStyle(CardButtonStyle())
                         .focused($focusedItemId, equals: focusId(for: item))
-                        #else
-                        .buttonStyle(.plain)
-                        #endif
                         .mediaItemContextMenu(
                             item: item,
                             serverURL: serverURL,
@@ -1043,7 +1032,6 @@ struct InfiniteContentRow: View {
             }
         }
         .focusSection()
-        #if os(tvOS)
         // Save focus when it changes (only when content scope is active)
         .onChange(of: focusedItemId) { _, newValue in
             guard focusScopeManager.isScopeActive(.content) else { return }
@@ -1069,7 +1057,6 @@ struct InfiniteContentRow: View {
                 focusedItemId = "\(title):\(savedItem.itemId)"
             }
         }
-        #endif
     }
 
     /// Skeleton placeholder card shown while loading more items
@@ -1083,11 +1070,7 @@ struct InfiniteContentRow: View {
             // Poster placeholder - square for music, rectangle for video
             RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .fill(.white.opacity(0.08))
-                #if os(tvOS)
                 .frame(width: 220, height: isMusicRow ? 220 : 330)
-                #else
-                .frame(width: 180, height: isMusicRow ? 180 : 270)
-                #endif
 
             // Title placeholder
             VStack(alignment: .leading, spacing: 6) {
@@ -1098,11 +1081,7 @@ struct InfiniteContentRow: View {
                     .fill(.white.opacity(0.04))
                     .frame(width: 100, height: 12)
             }
-            #if os(tvOS)
             .frame(height: 52, alignment: .top)
-            #else
-            .frame(height: 44, alignment: .top)
-            #endif
         }
     }
 

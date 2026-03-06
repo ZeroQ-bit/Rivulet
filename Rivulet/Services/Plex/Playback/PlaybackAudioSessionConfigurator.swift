@@ -7,6 +7,14 @@
 
 import AVFoundation
 
+struct RouteAudioSnapshot: Sendable {
+    let isAirPlay: Bool
+    let maximumOutputChannels: Int
+    let sampleRate: Double
+    let supportsMultichannelContent: Bool
+    let outputPortTypes: [String]
+}
+
 enum PlaybackAudioSessionConfigurator {
     private static var lastActivationTimestamp: CFAbsoluteTime = 0
     private static var lastActivationModeRawValue: String = ""
@@ -32,13 +40,8 @@ enum PlaybackAudioSessionConfigurator {
         }
 
         var usingLongFormPolicy = false
-        #if os(tvOS)
         let preferredPolicy: AVAudioSession.RouteSharingPolicy = .longFormAudio
         let preferredPolicyName = "longFormAudio"
-        #else
-        let preferredPolicy: AVAudioSession.RouteSharingPolicy = .longFormVideo
-        let preferredPolicyName = "longFormVideo"
-        #endif
 
         do {
             try session.setCategory(.playback, mode: mode, policy: preferredPolicy, options: [])
@@ -82,5 +85,33 @@ enum PlaybackAudioSessionConfigurator {
     static func isAirPlayRouteActive() -> Bool {
         let session = AVAudioSession.sharedInstance()
         return session.currentRoute.outputs.contains(where: { $0.portType == .airPlay })
+    }
+
+    static func currentRouteAudioSnapshot(owner: String, reason: String) -> RouteAudioSnapshot {
+        let session = AVAudioSession.sharedInstance()
+        let outputTypes = session.currentRoute.outputs.map(\.portType.rawValue)
+        let supportsMultichannel: Bool
+        if #available(tvOS 15.0, iOS 15.0, *) {
+            supportsMultichannel = session.supportsMultichannelContent
+        } else {
+            supportsMultichannel = false
+        }
+
+        let snapshot = RouteAudioSnapshot(
+            isAirPlay: session.currentRoute.outputs.contains(where: { $0.portType == .airPlay }),
+            maximumOutputChannels: session.maximumOutputNumberOfChannels,
+            sampleRate: session.sampleRate,
+            supportsMultichannelContent: supportsMultichannel,
+            outputPortTypes: outputTypes
+        )
+
+        print(
+            "🎵 [RouteSnapshot] owner=\(owner) reason=\(reason) " +
+            "airPlay=\(snapshot.isAirPlay) maxOutCh=\(snapshot.maximumOutputChannels) " +
+            "sampleRate=\(String(format: "%.0f", snapshot.sampleRate)) " +
+            "supportsMultichannel=\(snapshot.supportsMultichannelContent) " +
+            "outputs=\(snapshot.outputPortTypes.joined(separator: ","))"
+        )
+        return snapshot
     }
 }

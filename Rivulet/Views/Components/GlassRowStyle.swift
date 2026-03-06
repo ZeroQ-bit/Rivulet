@@ -8,7 +8,6 @@
 
 import SwiftUI
 
-#if os(tvOS)
 
 // MARK: - App Store Button Style
 
@@ -197,4 +196,3 @@ extension View {
     }
 }
 
-#endif

@@ -82,10 +82,28 @@ final class RivuletPlayer: ObservableObject {
     private var streamURL: URL?
     private var loadHeaders: [String: String]?
     private var pipelineGeneration: UInt64 = 0
+    private var routeChangeObserver: NSObjectProtocol?
+    private var isAudioRecoveryInFlight = false
+    private var lastAudioRecoveryRequestWallTime: CFAbsoluteTime = 0
+    private var lastRecordedRendererFailureWallTime: CFAbsoluteTime = 0
+    private var autoFlushEventTimes: [CFAbsoluteTime] = []
+    private var outputConfigRecoveryEventTimes: [CFAbsoluteTime] = []
+    private var rendererFailureEventTimes: [CFAbsoluteTime] = []
+    private var hasReportedAirPlayInstability = false
+    private let airPlayInstabilityWindow: CFAbsoluteTime = 20.0
 
     // MARK: - Init
 
-    init() {}
+    init() {
+        configureRendererCallbacks()
+        observeRouteChanges()
+    }
+
+    deinit {
+        if let routeChangeObserver {
+            NotificationCenter.default.removeObserver(routeChangeObserver)
+        }
+    }
 
     // MARK: - Load (PlayerProtocol)
 
@@ -136,6 +154,209 @@ final class RivuletPlayer: ObservableObject {
         }
     }
 
+    // MARK: - Private: Audio Policy + Recovery
+
+    private enum AirPlayInstabilityEvent {
+        case autoFlush
+        case outputRecovery
+        case rendererFailure
+    }
+
+    private func configureRendererCallbacks() {
+        renderer.onAudioRendererFlushedAutomatically = { [weak self] flushTime in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                await self.handleAudioRendererAutoFlush(flushTime: flushTime)
+            }
+        }
+
+        renderer.onAudioOutputConfigurationChanged = { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                await self.handleAudioOutputConfigurationChange()
+            }
+        }
+    }
+
+    private func observeRouteChanges() {
+        guard routeChangeObserver == nil else { return }
+        routeChangeObserver = NotificationCenter.default.addObserver(
+            forName: AVAudioSession.routeChangeNotification,
+            object: AVAudioSession.sharedInstance(),
+            queue: .main
+        ) { [weak self] notification in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                await self.handleSystemRouteChange(notification)
+            }
+        }
+    }
+
+    private func handleSystemRouteChange(_ notification: Notification) async {
+        let reasonValue = notification.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt
+        let reason = reasonValue
+            .flatMap(AVAudioSession.RouteChangeReason.init(rawValue:))
+            .map { "\($0.rawValue)" } ?? "unknown"
+
+        _ = applyCurrentAudioPolicy(reason: "route_change_\(reason)")
+        await recoverAudioFromRendererEvent(afterFlushTime: .invalid, reason: "route_change_\(reason)")
+    }
+
+    private func handleAudioRendererAutoFlush(flushTime: CMTime) async {
+        _ = applyCurrentAudioPolicy(reason: "audio_renderer_auto_flush")
+        recordAirPlayInstabilityEvent(.autoFlush)
+        await recoverAudioFromRendererEvent(afterFlushTime: flushTime, reason: "audio_renderer_auto_flush")
+    }
+
+    private func handleAudioOutputConfigurationChange() async {
+        _ = applyCurrentAudioPolicy(reason: "audio_output_configuration_changed")
+        await recoverAudioFromRendererEvent(afterFlushTime: .invalid, reason: "audio_output_configuration_changed")
+        recordAirPlayInstabilityEvent(.outputRecovery)
+    }
+
+    @discardableResult
+    private func applyCurrentAudioPolicy(reason: String) -> RouteAudioSnapshot {
+        let snapshot = PlaybackAudioSessionConfigurator.currentRouteAudioSnapshot(
+            owner: "RivuletPlayer",
+            reason: reason
+        )
+        applyAudioPolicy(snapshot: snapshot, reason: reason)
+        return snapshot
+    }
+
+    private func applyAudioPolicy(snapshot: RouteAudioSnapshot, reason: String) {
+        // Reliability-first: keep the renderer in pull mode for all routes.
+        renderer.useAudioPullMode = true
+
+        if let directPlayPipeline {
+            if snapshot.isAirPlay && !snapshot.supportsMultichannelContent {
+                // Basic AirPlay (stereo-only speakers): force decode everything + stereo S16
+                directPlayPipeline.forceClientDecodeCodecs = ["aac", "ac3", "eac3"]
+                directPlayPipeline.useSignedInt16Audio = true
+                directPlayPipeline.forceDownmixToStereo = true
+                renderer.audioBackpressureMaxWait = 2.0
+            } else if snapshot.isAirPlay {
+                // Capable AirPlay (HomePod default speaker): compressed passthrough works,
+                // but client-decoded PCM (DTS/TrueHD) must be stereo S16 since maxOutCh=2
+                directPlayPipeline.forceClientDecodeCodecs = []
+                directPlayPipeline.useSignedInt16Audio = true
+                directPlayPipeline.forceDownmixToStereo = true
+                renderer.audioBackpressureMaxWait = 1.0
+            } else {
+                // Local output (TV speakers, HDMI)
+                directPlayPipeline.forceClientDecodeCodecs = []
+                directPlayPipeline.useSignedInt16Audio = false
+                directPlayPipeline.forceDownmixToStereo = false
+                renderer.audioBackpressureMaxWait = 0.75
+            }
+        } else {
+            renderer.audioBackpressureMaxWait = snapshot.isAirPlay ? 2.0 : 0.75
+        }
+
+        print(
+            "[RivuletPlayer] AudioPolicy reason=\(reason) " +
+            "airPlay=\(snapshot.isAirPlay) capableAirPlay=\(snapshot.supportsMultichannelContent) " +
+            "pullMode=\(renderer.useAudioPullMode) " +
+            "backpressure=\(String(format: "%.2f", renderer.audioBackpressureMaxWait))s " +
+            "maxOutCh=\(snapshot.maximumOutputChannels)"
+        )
+    }
+
+    private func recoverAudioFromRendererEvent(afterFlushTime flushTime: CMTime, reason: String) async {
+        guard activePipeline != .none else { return }
+
+        let now = CFAbsoluteTimeGetCurrent()
+        if isAudioRecoveryInFlight {
+            print("[RivuletPlayer] Skipping audio recovery (\(reason)) — already in flight")
+            return
+        }
+        if now - lastAudioRecoveryRequestWallTime < 0.2 {
+            print("[RivuletPlayer] Debouncing audio recovery (\(reason))")
+            return
+        }
+        lastAudioRecoveryRequestWallTime = now
+        isAudioRecoveryInFlight = true
+        defer { isAudioRecoveryInFlight = false }
+
+        do {
+            switch activePipeline {
+            case .directPlay:
+                try await directPlayPipeline?.recoverAudio(afterFlushTime: flushTime, reason: reason)
+            case .hls:
+                await hlsPipeline?.recoverAudio(afterFlushTime: flushTime, reason: reason)
+            case .none:
+                break
+            }
+        } catch {
+            print("[RivuletPlayer] Audio recovery failed (\(reason)): \(error.localizedDescription)")
+            handlePipelineError(error)
+        }
+    }
+
+    private func resetAirPlayInstabilityState() {
+        autoFlushEventTimes.removeAll(keepingCapacity: false)
+        outputConfigRecoveryEventTimes.removeAll(keepingCapacity: false)
+        rendererFailureEventTimes.removeAll(keepingCapacity: false)
+        hasReportedAirPlayInstability = false
+        lastRecordedRendererFailureWallTime = 0
+    }
+
+    private func recordAirPlayInstabilityEvent(_ event: AirPlayInstabilityEvent) {
+        guard PlaybackAudioSessionConfigurator.isAirPlayRouteActive() else { return }
+        let now = CFAbsoluteTimeGetCurrent()
+
+        switch event {
+        case .autoFlush:
+            autoFlushEventTimes.append(now)
+        case .outputRecovery:
+            outputConfigRecoveryEventTimes.append(now)
+        case .rendererFailure:
+            rendererFailureEventTimes.append(now)
+        }
+
+        pruneAirPlayInstabilityEvents(now: now)
+        evaluateAirPlayInstabilityIfNeeded(trigger: event)
+    }
+
+    private func pruneAirPlayInstabilityEvents(now: CFAbsoluteTime) {
+        let cutoff = now - airPlayInstabilityWindow
+        autoFlushEventTimes.removeAll(where: { $0 < cutoff })
+        outputConfigRecoveryEventTimes.removeAll(where: { $0 < cutoff })
+        rendererFailureEventTimes.removeAll(where: { $0 < cutoff })
+    }
+
+    private func evaluateAirPlayInstabilityIfNeeded(trigger: AirPlayInstabilityEvent) {
+        guard !hasReportedAirPlayInstability else { return }
+        guard activePipeline == .directPlay else { return }
+        guard PlaybackAudioSessionConfigurator.isAirPlayRouteActive() else { return }
+
+        let autoFlushCount = autoFlushEventTimes.count
+        let outputRecoveryCount = outputConfigRecoveryEventTimes.count
+        let rendererFailureCount = rendererFailureEventTimes.count
+        let totalCount = autoFlushCount + outputRecoveryCount + rendererFailureCount
+
+        let isUnstable = autoFlushCount >= 3 || outputRecoveryCount >= 3 || rendererFailureCount >= 2 || totalCount >= 5
+        guard isUnstable else { return }
+
+        hasReportedAirPlayInstability = true
+        let error = PlayerError.loadFailed("AirPlay audio unstable")
+        isPlaying = false
+        playbackStateSubject.send(.failed(error))
+        errorSubject.send(error)
+
+        let triggerLabel: String
+        switch trigger {
+        case .autoFlush: triggerLabel = "auto_flush"
+        case .outputRecovery: triggerLabel = "output_recovery"
+        case .rendererFailure: triggerLabel = "renderer_failure"
+        }
+
+        print(
+            "[RivuletPlayer] AirPlay instability detected (trigger=\(triggerLabel), " +
+            "autoFlush=\(autoFlushCount), outputRecoveries=\(outputRecoveryCount), rendererFailures=\(rendererFailureCount))"
+        )
+    }
+
     // MARK: - Private: Load Implementations
 
     private func loadDirectPlay(url: URL, headers: [String: String]?, startTime: TimeInterval?, isDolbyVision: Bool = false, enableDVConversion: Bool) async throws {
@@ -148,6 +369,8 @@ final class RivuletPlayer: ObservableObject {
         self.activePipeline = .directPlay
         self.streamURL = url
         self.loadHeaders = headers
+        resetAirPlayInstabilityState()
+        let routeSnapshot = applyCurrentAudioPolicy(reason: "direct_play_load_preflight")
 
         // Wire callbacks
         pipeline.onStateChange = { [weak self] state in
@@ -170,6 +393,11 @@ final class RivuletPlayer: ObservableObject {
         }
 
         try await pipeline.load(url: url, headers: headers, startTime: startTime, isDolbyVision: isDolbyVision, enableDVConversion: enableDVConversion)
+
+        print(
+            "[RivuletPlayer] DirectPlay startup route: airPlay=\(routeSnapshot.isAirPlay) " +
+            "maxOutCh=\(routeSnapshot.maximumOutputChannels) sampleRate=\(String(format: "%.0f", routeSnapshot.sampleRate))"
+        )
 
         // Update state from pipeline
         self.duration = pipeline.duration
@@ -194,6 +422,8 @@ final class RivuletPlayer: ObservableObject {
         self.hlsPipeline = pipeline
         self.activePipeline = .hls
         self.streamURL = url
+        resetAirPlayInstabilityState()
+        let routeSnapshot = applyCurrentAudioPolicy(reason: "hls_load_preflight")
 
         // Wire callbacks
         pipeline.onStateChange = { [weak self] state in
@@ -216,6 +446,11 @@ final class RivuletPlayer: ObservableObject {
         }
 
         try await pipeline.load(url: url, headers: headers, startTime: startTime, requiresProfileConversion: requiresProfileConversion)
+
+        print(
+            "[RivuletPlayer] HLS startup route: airPlay=\(routeSnapshot.isAirPlay) " +
+            "maxOutCh=\(routeSnapshot.maximumOutputChannels) sampleRate=\(String(format: "%.0f", routeSnapshot.sampleRate))"
+        )
 
         // Update state from pipeline
         self.duration = pipeline.duration
@@ -291,6 +526,7 @@ final class RivuletPlayer: ObservableObject {
 
         renderer.flush()
         renderer.setRate(0)
+        resetAirPlayInstabilityState()
 
         playbackStateSubject.send(.idle)
     }
@@ -488,7 +724,9 @@ final class RivuletPlayer: ObservableObject {
         // Flush the shared renderer so the display layer and audio renderer
         // don't have stale data from a previous pipeline.
         renderer.flush()
+        renderer.disableAudioEngine()
         renderer.setRate(0)
+        resetAirPlayInstabilityState()
     }
 
     private func cleanupPipelinesAsync() async {
@@ -502,7 +740,9 @@ final class RivuletPlayer: ObservableObject {
         await oldHLS?.shutdown()
 
         renderer.flush()
+        renderer.disableAudioEngine()
         renderer.setRate(0)
+        resetAirPlayInstabilityState()
     }
 
     private func invalidatePipelineGeneration() {
@@ -569,7 +809,8 @@ final class RivuletPlayer: ObservableObject {
                 guard let self = self, !Task.isCancelled else { return }
 
                 let time = self.renderer.currentTime
-                let rate = self.renderer.renderSynchronizer.rate
+                let usingEngine = self.renderer.useAudioEngine
+                let rate = usingEngine ? (self.isPlaying ? 1.0 : 0.0) : self.renderer.renderSynchronizer.rate
                 let playing = self.isPlaying
 
                 if time >= 0 {
@@ -590,6 +831,35 @@ final class RivuletPlayer: ObservableObject {
                         self.bufferedTime = self.hlsPipeline?.bufferedTime ?? 0
                     case .none:
                         break
+                    }
+                }
+
+                // Audio renderer failure detection — only relevant for passthrough mode.
+                // When using AVAudioEngine, the audio renderer isn't in the audio path.
+                if !usingEngine {
+                    let shouldHandleRendererFailure = await MainActor.run { [weak self] () -> Bool in
+                        guard let self else { return false }
+                        guard self.renderer.audioRenderer.status == .failed else { return false }
+
+                        let now = CFAbsoluteTimeGetCurrent()
+                        if now - self.lastRecordedRendererFailureWallTime < 0.75 {
+                            return false
+                        }
+
+                        self.lastRecordedRendererFailureWallTime = now
+                        self.recordAirPlayInstabilityEvent(.rendererFailure)
+                        return true
+                    }
+
+                    if shouldHandleRendererFailure {
+                        await MainActor.run { [weak self] in
+                            guard let self else { return }
+                            _ = self.applyCurrentAudioPolicy(reason: "audio_renderer_failed")
+                        }
+                        await self.recoverAudioFromRendererEvent(
+                            afterFlushTime: .invalid,
+                            reason: "audio_renderer_failed"
+                        )
                     }
                 }
             }

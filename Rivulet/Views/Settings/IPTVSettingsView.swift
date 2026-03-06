@@ -202,7 +202,7 @@ struct LiveTVSourceRow: View {
 
             // Chevron
             Image(systemName: "chevron.right")
-                .font(.system(size: 24, weight: .semibold))
+                .font(.system(size: 22, weight: .semibold))
                 .foregroundStyle(.white.opacity(0.4))
         }
         .padding(.horizontal, 24)
@@ -252,7 +252,7 @@ struct AddSourceButton: View {
             Spacer()
 
             Image(systemName: "chevron.right")
-                .font(.system(size: 24, weight: .semibold))
+                .font(.system(size: 22, weight: .semibold))
                 .foregroundStyle(.white.opacity(0.4))
         }
         .padding(.horizontal, 24)
@@ -322,7 +322,7 @@ struct PlexLiveTVHintCard: View {
                 HStack {
                     Spacer()
                     Text("Add Plex Live TV")
-                        .font(.system(size: 24, weight: .semibold))
+                        .font(.system(size: 22, weight: .semibold))
                         .foregroundStyle(.blue)
                     Image(systemName: "arrow.right")
                         .font(.system(size: 20, weight: .bold))

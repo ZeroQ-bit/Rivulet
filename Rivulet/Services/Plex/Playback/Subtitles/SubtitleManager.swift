@@ -254,23 +254,23 @@ final class SubtitleManager: ObservableObject {
         let removed = previous.filter { !currentIDs.contains($0.id) }
 
         if !added.isEmpty {
-            for cue in added {
-                print(
-                    "🎬 [Subtitles] SHOW t=\(String(format: "%.3f", time))s " +
-                    "cue=\(cue.id) start=\(String(format: "%.3f", cue.startTime)) " +
-                    "end=\(String(format: "%.3f", cue.endTime)) text=\"\(cue.logPreview)\""
-                )
-            }
+            // for cue in added {
+            //     print(
+            //         "🎬 [Subtitles] SHOW t=\(String(format: "%.3f", time))s " +
+            //         "cue=\(cue.id) start=\(String(format: "%.3f", cue.startTime)) " +
+            //         "end=\(String(format: "%.3f", cue.endTime)) text=\"\(cue.logPreview)\""
+            //     )
+            // }
         }
 
         if !removed.isEmpty {
-            for cue in removed {
-                print(
-                    "🎬 [Subtitles] HIDE t=\(String(format: "%.3f", time))s " +
-                    "cue=\(cue.id) start=\(String(format: "%.3f", cue.startTime)) " +
-                    "end=\(String(format: "%.3f", cue.endTime))"
-                )
-            }
+            // for cue in removed {
+            //     print(
+            //         "🎬 [Subtitles] HIDE t=\(String(format: "%.3f", time))s " +
+            //         "cue=\(cue.id) start=\(String(format: "%.3f", cue.startTime)) " +
+            //         "end=\(String(format: "%.3f", cue.endTime))"
+            //     )
+            // }
         }
     }
 

@@ -32,11 +32,9 @@ struct EpisodeSummaryOverlay: View {
         return UserDefaults.standard.integer(forKey: "autoplayCountdown") > 0
     }
 
-    #if os(tvOS)
     private func setDefaultFocus() {
         focusedButton = hasNextEpisode ? .playNext : .close
     }
-    #endif
 
     /// Cancel countdown on any user interaction
     private func cancelCountdownOnInteraction() {
@@ -212,7 +210,6 @@ struct EpisodeSummaryOverlay: View {
                 Spacer()
             }
         }
-        #if os(tvOS)
         .focusScope(buttonNamespace)
         .focusSection()
         .onAppear {
@@ -231,7 +228,6 @@ struct EpisodeSummaryOverlay: View {
                 Task { await viewModel.playNextEpisode() }
             }
         }
-        #endif
     }
 }
 
@@ -268,11 +264,7 @@ struct PostVideoButton: View {
             )
             .scaleEffect(isFocused ? 1.08 : 1.0)
         }
-        #if os(tvOS)
         .buttonStyle(CardButtonStyle())
-        #else
-        .buttonStyle(.plain)
-        #endif
         .onChange(of: isFocused) { _, focused in
             if focused {
                 onFocusChange?()

@@ -8,7 +8,6 @@
 import SwiftUI
 import Combine
 
-#if os(tvOS)
 
 // MARK: - Sidebar Tab
 
@@ -57,4 +56,3 @@ extension EnvironmentValues {
     }
 }
 
-#endif

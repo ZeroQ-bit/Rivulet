@@ -13,6 +13,7 @@
 import Foundation
 import AVFoundation
 import CoreMedia
+import Sentry
 
 // MARK: - Decoded Audio Frame
 
@@ -51,6 +52,17 @@ final class FFmpegAudioDecoder: @unchecked Sendable {
     /// Whether FFmpeg audio decoding is available
     static let isAvailable = true
 
+    // MARK: - Configuration
+
+    /// When true, output signed 16-bit integer PCM instead of 32-bit float.
+    /// AirPlay 2 natively supports S16/S24/F24 but NOT float32. Using S16
+    /// avoids a system-side format conversion that can introduce crackling.
+    var useSignedInt16Output = false
+
+    /// When true, downmix multichannel audio to stereo output.
+    /// Used for basic AirPlay speakers that only support 2-channel audio.
+    var forceDownmixToStereo = false
+
     // MARK: - Private State
 
     private var codecContext: UnsafeMutablePointer<AVCodecContext>?
@@ -62,6 +74,15 @@ final class FFmpegAudioDecoder: @unchecked Sendable {
     private var outputSampleRate: Int = 0
     private var outputChannels: Int = 0
     private var outputBitsPerSample: Int = 0
+    /// CoreAudio channel layout tag derived from FFmpeg's channel layout.
+    private var outputChannelLayoutTag: AudioChannelLayoutTag = kAudioChannelLayoutTag_Unknown
+    /// Cached format description — created once, reused for all CMSampleBuffers.
+    /// MPV does the same; recreating per-buffer can cause renderer state resets.
+    private var cachedFormatDescription: CMAudioFormatDescription?
+    private var cachedFDChannels: Int = 0
+    private var cachedFDSampleRate: Int = 0
+    private var cachedFDIsS16: Bool = false
+    private var sampleBufferCount = 0
 
     // Batching state: accumulates tiny decoded frames (e.g., TrueHD's 40-sample frames)
     // into larger chunks to reduce CMSampleBuffer creation and enqueue overhead.
@@ -71,6 +92,9 @@ final class FFmpegAudioDecoder: @unchecked Sendable {
     private var batchSampleRate: Int = 0
     private var batchChannels: Int = 0
     private var batchBitsPerSample: Int = 0
+    private var lastDecodedPTS: CMTime = .invalid
+    private var invalidTimestampCount = 0
+    private var nonMonotonicTimestampCount = 0
 
     /// Minimum samples to accumulate before emitting a batch.
     /// TrueHD = 40 samples/frame, so 960 = 24 frames ≈ 20ms at 48kHz.
@@ -208,7 +232,12 @@ final class FFmpegAudioDecoder: @unchecked Sendable {
                 break
             }
 
-            if let decoded = convertToInterleaved(frame: frame, packetTimebase: packet.timebase) {
+            if let decoded = convertToInterleaved(
+                frame: frame,
+                packetTimebase: packet.timebase,
+                packetPTS: packet.cmPTS.isValid ? packet.cmPTS : packet.cmDTS,
+                packetDuration: packet.cmDuration
+            ) {
                 frames.append(decoded)
             }
         }
@@ -273,6 +302,14 @@ final class FFmpegAudioDecoder: @unchecked Sendable {
         return frame
     }
 
+    /// Reset decoder-side timestamp tracking after timeline discontinuities (seek/recover).
+    func resetTimestampTracking(reason: String) {
+        lastDecodedPTS = .invalid
+        invalidTimestampCount = 0
+        nonMonotonicTimestampCount = 0
+        print("[AudioDecoder] Timestamp tracking reset (\(reason))")
+    }
+
     // MARK: - CMSampleBuffer Creation
 
     /// Create a CMSampleBuffer containing LPCM audio data from a decoded frame.
@@ -280,37 +317,59 @@ final class FFmpegAudioDecoder: @unchecked Sendable {
         let bytesPerSample = frame.bitsPerSample / 8
         let bytesPerFrame = bytesPerSample * frame.channels
 
-        var asbd = AudioStreamBasicDescription(
-            mSampleRate: Float64(frame.sampleRate),
-            mFormatID: kAudioFormatLinearPCM,
-            mFormatFlags: kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked,
-            mBytesPerPacket: UInt32(bytesPerFrame),
-            mFramesPerPacket: 1,
-            mBytesPerFrame: UInt32(bytesPerFrame),
-            mChannelsPerFrame: UInt32(frame.channels),
-            mBitsPerChannel: UInt32(frame.bitsPerSample),
-            mReserved: 0
+        // Cache format description — recreating per-buffer can cause renderer resets.
+        let fd = try getOrCreateFormatDescription(
+            sampleRate: frame.sampleRate, channels: frame.channels,
+            bitsPerSample: frame.bitsPerSample, bytesPerFrame: bytesPerFrame
         )
 
-        var formatDescription: CMAudioFormatDescription?
-        var status = CMAudioFormatDescriptionCreate(
-            allocator: kCFAllocatorDefault,
-            asbd: &asbd,
-            layoutSize: 0,
-            layout: nil,
-            magicCookieSize: 0,
-            magicCookie: nil,
-            extensions: nil,
-            formatDescriptionOut: &formatDescription
-        )
-        guard status == noErr, let fd = formatDescription else {
-            throw FFmpegError.formatDescriptionFailed(status: status)
+        // Validate PCM data on first buffer
+        sampleBufferCount += 1
+        if sampleBufferCount <= 1 {
+            let expectedSize = frame.sampleCount * frame.channels * bytesPerSample
+            frame.data.withUnsafeBytes { rawBuf in
+                if useSignedInt16Output {
+                    let samples = rawBuf.bindMemory(to: Int16.self)
+                    var minVal: Int16 = .max
+                    var maxVal: Int16 = .min
+                    for i in 0..<min(samples.count, frame.sampleCount * frame.channels) {
+                        minVal = min(minVal, samples[i])
+                        maxVal = max(maxVal, samples[i])
+                    }
+                    let first4 = (0..<min(4, samples.count)).map { "\(samples[$0])" }.joined(separator: ", ")
+                    print("[AudioDecoder] PCM validate #\(sampleBufferCount): " +
+                          "samples=\(frame.sampleCount) ch=\(frame.channels) fmt=s16 " +
+                          "dataSize=\(frame.data.count) expected=\(expectedSize) " +
+                          "range=[\(minVal),\(maxVal)] first4=[\(first4)]")
+                } else {
+                    let floats = rawBuf.bindMemory(to: Float.self)
+                    var minVal: Float = .infinity
+                    var maxVal: Float = -.infinity
+                    var nanCount = 0
+                    var infCount = 0
+                    for i in 0..<min(floats.count, frame.sampleCount * frame.channels) {
+                        let v = floats[i]
+                        if v.isNaN { nanCount += 1 }
+                        else if v.isInfinite { infCount += 1 }
+                        else {
+                            minVal = min(minVal, v)
+                            maxVal = max(maxVal, v)
+                        }
+                    }
+                    let first4 = (0..<min(4, floats.count)).map { String(format: "%.6f", floats[$0]) }.joined(separator: ", ")
+                    print("[AudioDecoder] PCM validate #\(sampleBufferCount): " +
+                          "samples=\(frame.sampleCount) ch=\(frame.channels) fmt=f32 " +
+                          "dataSize=\(frame.data.count) expected=\(expectedSize) " +
+                          "range=[\(String(format: "%.4f", minVal)),\(String(format: "%.4f", maxVal))] " +
+                          "nan=\(nanCount) inf=\(infCount) first4=[\(first4)]")
+                }
+            }
         }
 
         var blockBuffer: CMBlockBuffer?
         let dataCount = frame.data.count
 
-        status = frame.data.withUnsafeBytes { rawBuf -> OSStatus in
+        var status = frame.data.withUnsafeBytes { rawBuf -> OSStatus in
             guard let baseAddress = rawBuf.baseAddress else { return -1 }
             var buffer: CMBlockBuffer?
             let s1 = CMBlockBufferCreateWithMemoryBlock(
@@ -355,6 +414,7 @@ final class FFmpegAudioDecoder: @unchecked Sendable {
     func close() {
         guard isOpen else { return }
         isOpen = false
+        resetTimestampTracking(reason: "close")
 
         if swrContext != nil {
             swr_free(&swrContext)
@@ -374,55 +434,139 @@ final class FFmpegAudioDecoder: @unchecked Sendable {
         print("[AudioDecoder] Closed")
     }
 
+    // MARK: - Private: Format Description Cache
+
+    /// Get or create a cached CMAudioFormatDescription.
+    /// MPV creates one at init and reuses it; recreating per-buffer may cause renderer glitches.
+    private func getOrCreateFormatDescription(
+        sampleRate: Int, channels: Int, bitsPerSample: Int, bytesPerFrame: Int
+    ) throws -> CMAudioFormatDescription {
+        if let cached = cachedFormatDescription,
+           cachedFDChannels == channels,
+           cachedFDSampleRate == sampleRate,
+           cachedFDIsS16 == useSignedInt16Output {
+            return cached
+        }
+
+        let formatFlags: AudioFormatFlags
+        if useSignedInt16Output {
+            formatFlags = kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked
+        } else {
+            formatFlags = kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked
+        }
+
+        var asbd = AudioStreamBasicDescription(
+            mSampleRate: Float64(sampleRate),
+            mFormatID: kAudioFormatLinearPCM,
+            mFormatFlags: formatFlags,
+            mBytesPerPacket: UInt32(bytesPerFrame),
+            mFramesPerPacket: 1,
+            mBytesPerFrame: UInt32(bytesPerFrame),
+            mChannelsPerFrame: UInt32(channels),
+            mBitsPerChannel: UInt32(bitsPerSample),
+            mReserved: 0
+        )
+
+        var formatDescription: CMAudioFormatDescription?
+        let status: OSStatus
+        let hasLayout = outputChannelLayoutTag != kAudioChannelLayoutTag_Unknown
+
+        if hasLayout {
+            var layout = AudioChannelLayout()
+            layout.mChannelLayoutTag = outputChannelLayoutTag
+            layout.mChannelBitmap = AudioChannelBitmap(rawValue: 0)
+            layout.mNumberChannelDescriptions = 0
+            let layoutSize = MemoryLayout<AudioChannelLayout>.size
+            status = CMAudioFormatDescriptionCreate(
+                allocator: kCFAllocatorDefault,
+                asbd: &asbd,
+                layoutSize: layoutSize,
+                layout: &layout,
+                magicCookieSize: 0,
+                magicCookie: nil,
+                extensions: nil,
+                formatDescriptionOut: &formatDescription
+            )
+        } else {
+            status = CMAudioFormatDescriptionCreate(
+                allocator: kCFAllocatorDefault,
+                asbd: &asbd,
+                layoutSize: 0,
+                layout: nil,
+                magicCookieSize: 0,
+                magicCookie: nil,
+                extensions: nil,
+                formatDescriptionOut: &formatDescription
+            )
+        }
+
+        guard status == noErr, let fd = formatDescription else {
+            throw FFmpegError.formatDescriptionFailed(status: status)
+        }
+
+        cachedFormatDescription = fd
+        cachedFDChannels = channels
+        cachedFDSampleRate = sampleRate
+        cachedFDIsS16 = useSignedInt16Output
+
+        let formatName = useSignedInt16Output ? "s16" : "float32"
+        print("[AudioDecoder] Created format description: \(channels)ch \(sampleRate)Hz " +
+              "\(formatName) layout=\(outputChannelLayoutTag) flags=\(asbd.mFormatFlags)")
+
+        return fd
+    }
+
     // MARK: - Private: Planar → Interleaved Conversion
 
     /// Convert a decoded AVFrame to interleaved PCM using libswresample.
     private func convertToInterleaved(frame: UnsafeMutablePointer<AVFrame>,
-                                      packetTimebase: CMTime) -> DecodedAudioFrame? {
+                                      packetTimebase: CMTime,
+                                      packetPTS: CMTime,
+                                      packetDuration: CMTime) -> DecodedAudioFrame? {
         let sampleFormat = AVSampleFormat(rawValue: frame.pointee.format)
-        let channels = frame.pointee.ch_layout.nb_channels
+        let inputChannels = frame.pointee.ch_layout.nb_channels
         let sampleRate = frame.pointee.sample_rate
         let nbSamples = frame.pointee.nb_samples
 
-        guard channels > 0, sampleRate > 0, nbSamples > 0 else { return nil }
+        guard inputChannels > 0, sampleRate > 0, nbSamples > 0 else { return nil }
 
-        // Map FFmpeg sample format to interleaved output format
+        // Output format: float32 by default, S16 for AirPlay compatibility.
+        // AirPlay 2 natively supports S16/S24/F24 but NOT float32.
         let outputFormat: AVSampleFormat
         let bitsPerSample: Int
-
-        switch sampleFormat {
-        case AV_SAMPLE_FMT_S16, AV_SAMPLE_FMT_S16P:
+        if useSignedInt16Output {
             outputFormat = AV_SAMPLE_FMT_S16
             bitsPerSample = 16
-        case AV_SAMPLE_FMT_S32, AV_SAMPLE_FMT_S32P:
-            outputFormat = AV_SAMPLE_FMT_S32
-            bitsPerSample = 32
-        case AV_SAMPLE_FMT_FLT, AV_SAMPLE_FMT_FLTP,
-             AV_SAMPLE_FMT_DBL, AV_SAMPLE_FMT_DBLP:
-            outputFormat = AV_SAMPLE_FMT_S32
-            bitsPerSample = 32
-        default:
-            outputFormat = AV_SAMPLE_FMT_S32
+        } else {
+            outputFormat = AV_SAMPLE_FMT_FLT
             bitsPerSample = 32
         }
 
-        let bytesPerSample = bitsPerSample / 8
-        let outputBufferSize = Int(nbSamples) * Int(channels) * bytesPerSample
+        let needsDownmix = forceDownmixToStereo && inputChannels > 2
+        let outChannels = needsDownmix ? Int32(2) : inputChannels
 
-        // Fast path: already interleaved in the target format
-        if sampleFormat == outputFormat, let data = frame.pointee.data.0 {
+        let bytesPerSample = bitsPerSample / 8
+        let outputBufferSize = Int(nbSamples) * Int(outChannels) * bytesPerSample
+
+        // Fast path: already interleaved in the target format and no downmix needed
+        if !needsDownmix && sampleFormat == outputFormat, let data = frame.pointee.data.0 {
+            if outputChannelLayoutTag == kAudioChannelLayoutTag_Unknown {
+                outputChannelLayoutTag = Self.channelLayoutTag(for: Int(inputChannels))
+            }
             let pcmData = Data(bytes: data, count: outputBufferSize)
             return buildDecodedFrame(
                 data: pcmData, sampleCount: Int(nbSamples),
-                sampleRate: Int(sampleRate), channels: Int(channels),
+                sampleRate: Int(sampleRate), channels: Int(outChannels),
                 bitsPerSample: bitsPerSample, framePTS: frame.pointee.pts,
-                packetTimebase: packetTimebase
+                packetTimebase: packetTimebase,
+                packetPTS: packetPTS,
+                packetDuration: packetDuration
             )
         }
 
         // Need conversion: set up or reconfigure swresample
         if swrContext == nil || outputSampleRate != Int(sampleRate) ||
-           outputChannels != Int(channels) || outputBitsPerSample != bitsPerSample {
+           outputChannels != Int(outChannels) || outputBitsPerSample != bitsPerSample {
             setupSwresample(frame: frame, outputFormat: outputFormat)
         }
 
@@ -433,7 +577,7 @@ final class FFmpegAudioDecoder: @unchecked Sendable {
 
         // Allocate output buffer
         var outputBuffer: UnsafeMutablePointer<UInt8>?
-        av_samples_alloc(&outputBuffer, nil, channels, nbSamples, outputFormat, 0)
+        av_samples_alloc(&outputBuffer, nil, outChannels, nbSamples, outputFormat, 0)
         guard let outBuf = outputBuffer else { return nil }
         defer { av_freep(&outputBuffer) }
 
@@ -454,27 +598,95 @@ final class FFmpegAudioDecoder: @unchecked Sendable {
             return nil
         }
 
-        let actualSize = Int(convertedSamples) * Int(channels) * bytesPerSample
+        let actualSize = Int(convertedSamples) * Int(outChannels) * bytesPerSample
         let pcmData = Data(bytes: outBuf, count: actualSize)
 
         return buildDecodedFrame(
             data: pcmData, sampleCount: Int(convertedSamples),
-            sampleRate: Int(sampleRate), channels: Int(channels),
+            sampleRate: Int(sampleRate), channels: Int(outChannels),
             bitsPerSample: bitsPerSample, framePTS: frame.pointee.pts,
-            packetTimebase: packetTimebase
+            packetTimebase: packetTimebase,
+            packetPTS: packetPTS,
+            packetDuration: packetDuration
         )
     }
 
     private func buildDecodedFrame(data: Data, sampleCount: Int, sampleRate: Int,
                                    channels: Int, bitsPerSample: Int,
                                    framePTS: Int64,
-                                   packetTimebase: CMTime) -> DecodedAudioFrame {
-        let pts: CMTime
-        if framePTS != Int64.min && framePTS >= 0 {
-            pts = CMTimeMake(value: framePTS, timescale: packetTimebase.timescale)
-        } else {
-            pts = .invalid
+                                   packetTimebase: CMTime,
+                                   packetPTS: CMTime,
+                                   packetDuration: CMTime) -> DecodedAudioFrame {
+        let frameDuration = CMTime(
+            seconds: Double(sampleCount) / Double(max(sampleRate, 1)),
+            preferredTimescale: 90_000
+        )
+        let durationForFallback: CMTime = {
+            if packetDuration.isValid && packetDuration.isNumeric && packetDuration > .zero {
+                return packetDuration
+            }
+            return frameDuration
+        }()
+
+        let framePTSScaled = cmTimeFromFFmpegTimestamp(framePTS, timebase: packetTimebase)
+        let packetPTSValid = packetPTS.isValid && packetPTS.isNumeric ? packetPTS : nil
+
+        var pts = framePTSScaled ?? packetPTSValid ?? .invalid
+        if !pts.isValid || !pts.isNumeric {
+            if lastDecodedPTS.isValid && lastDecodedPTS.isNumeric {
+                pts = CMTimeAdd(lastDecodedPTS, durationForFallback)
+            } else {
+                pts = .zero
+            }
+
+            invalidTimestampCount += 1
+            if invalidTimestampCount <= 5 || invalidTimestampCount % 100 == 0 {
+                let ptsSeconds = CMTimeGetSeconds(pts)
+                print(
+                    "[AudioDecoder] Invalid decoded PTS fallback (count=\(invalidTimestampCount), " +
+                    "resolved=\(String(format: "%.3f", ptsSeconds)))"
+                )
+            }
+            if invalidTimestampCount <= 5 || invalidTimestampCount % 250 == 0 {
+                let breadcrumb = Breadcrumb(level: .warning, category: "audio.timestamps")
+                breadcrumb.message = "Decoder PTS fallback to monotonic timestamp"
+                breadcrumb.data = [
+                    "count": invalidTimestampCount,
+                    "sample_count": sampleCount,
+                    "sample_rate": sampleRate,
+                    "channels": channels
+                ]
+                SentrySDK.addBreadcrumb(breadcrumb)
+            }
         }
+
+        if lastDecodedPTS.isValid && lastDecodedPTS.isNumeric {
+            let lastSeconds = CMTimeGetSeconds(lastDecodedPTS)
+            let currentSeconds = CMTimeGetSeconds(pts)
+            if currentSeconds.isFinite, lastSeconds.isFinite, currentSeconds + 0.001 < lastSeconds {
+                nonMonotonicTimestampCount += 1
+                if nonMonotonicTimestampCount <= 5 || nonMonotonicTimestampCount % 100 == 0 {
+                    print(
+                        "[AudioDecoder] Non-monotonic decoded PTS (count=\(nonMonotonicTimestampCount)) " +
+                        "current=\(String(format: "%.3f", currentSeconds)) last=\(String(format: "%.3f", lastSeconds))"
+                    )
+                }
+                if nonMonotonicTimestampCount <= 5 || nonMonotonicTimestampCount % 250 == 0 {
+                    let breadcrumb = Breadcrumb(level: .warning, category: "audio.timestamps")
+                    breadcrumb.message = "Decoder produced non-monotonic PTS"
+                    breadcrumb.data = [
+                        "count": nonMonotonicTimestampCount,
+                        "current_pts": currentSeconds,
+                        "last_pts": lastSeconds
+                    ]
+                    SentrySDK.addBreadcrumb(breadcrumb)
+                }
+
+                pts = CMTimeAdd(lastDecodedPTS, durationForFallback)
+            }
+        }
+
+        lastDecodedPTS = pts
 
         return DecodedAudioFrame(
             data: data,
@@ -486,6 +698,37 @@ final class FFmpegAudioDecoder: @unchecked Sendable {
         )
     }
 
+    private func cmTimeFromFFmpegTimestamp(_ rawPTS: Int64, timebase: CMTime) -> CMTime? {
+        guard rawPTS != Int64.min, rawPTS >= 0 else { return nil }
+        guard timebase.timescale != 0, timebase.value != 0 else { return nil }
+        if timebase.value == 1 {
+            return CMTime(value: rawPTS, timescale: timebase.timescale)
+        }
+        let (scaled, overflow) = rawPTS.multipliedReportingOverflow(by: timebase.value)
+        guard !overflow else { return nil }
+        return CMTime(value: scaled, timescale: timebase.timescale)
+    }
+
+    // MARK: - Channel Layout Mapping
+
+    /// Map channel count to a standard CoreAudio channel layout tag.
+    /// Based on MPEG standard layouts matching FFmpeg's default channel orders.
+    private static func channelLayoutTag(for channels: Int) -> AudioChannelLayoutTag {
+        switch channels {
+        case 1:  return kAudioChannelLayoutTag_Mono              // C
+        case 2:  return kAudioChannelLayoutTag_Stereo            // L R
+        case 3:  return kAudioChannelLayoutTag_MPEG_3_0_A        // L R C
+        case 4:  return kAudioChannelLayoutTag_MPEG_4_0_A        // L R C Cs
+        case 5:  return kAudioChannelLayoutTag_MPEG_5_0_A        // L R C Ls Rs
+        case 6:  return kAudioChannelLayoutTag_MPEG_5_1_A        // L R C LFE Ls Rs
+        case 7:  return kAudioChannelLayoutTag_MPEG_6_1_A        // L R C LFE Ls Rs Cs
+        case 8:  return kAudioChannelLayoutTag_MPEG_7_1_A        // L R C LFE Ls Rs Lc Rc
+        default:
+            print("[AudioDecoder] No standard layout for \(channels) channels")
+            return kAudioChannelLayoutTag_Unknown
+        }
+    }
+
     /// Set up libswresample for format/layout conversion.
     private func setupSwresample(frame: UnsafeMutablePointer<AVFrame>,
                                  outputFormat: AVSampleFormat) {
@@ -494,8 +737,9 @@ final class FFmpegAudioDecoder: @unchecked Sendable {
             swrContext = nil
         }
 
-        let channels = frame.pointee.ch_layout.nb_channels
+        let inputChannels = frame.pointee.ch_layout.nb_channels
         let sampleRate = frame.pointee.sample_rate
+        let needsDownmix = forceDownmixToStereo && inputChannels > 2
 
         swrContext = swr_alloc()
         guard swrContext != nil else {
@@ -503,11 +747,18 @@ final class FFmpegAudioDecoder: @unchecked Sendable {
             return
         }
 
-        // Configure: same channel layout, but convert sample format (planar → interleaved)
         var inLayout = frame.pointee.ch_layout
+        var outLayout: AVChannelLayout
+        if needsDownmix {
+            outLayout = AVChannelLayout()
+            av_channel_layout_default(&outLayout, 2)
+        } else {
+            outLayout = inLayout
+        }
+
         swr_alloc_set_opts2(
             &swrContext,
-            &inLayout, outputFormat, sampleRate,       // output
+            &outLayout, outputFormat, sampleRate,       // output
             &inLayout, AVSampleFormat(rawValue: frame.pointee.format), sampleRate,  // input
             0, nil
         )
@@ -520,11 +771,16 @@ final class FFmpegAudioDecoder: @unchecked Sendable {
             return
         }
 
+        let outChannels = needsDownmix ? Int32(2) : inputChannels
         self.outputSampleRate = Int(sampleRate)
-        self.outputChannels = Int(channels)
+        self.outputChannels = Int(outChannels)
         self.outputBitsPerSample = Int(av_get_bytes_per_sample(outputFormat)) * 8
+        self.outputChannelLayoutTag = Self.channelLayoutTag(for: Int(outChannels))
+        // Invalidate cached format description when channel count changes
+        self.cachedFormatDescription = nil
 
-        print("[AudioDecoder] SwrContext initialized: \(channels)ch \(sampleRate)Hz \(outputBitsPerSample)-bit")
+        let downmixLabel = needsDownmix ? " (downmixed from \(inputChannels)ch)" : ""
+        print("[AudioDecoder] SwrContext initialized: \(outChannels)ch \(sampleRate)Hz \(outputBitsPerSample)-bit layout=\(outputChannelLayoutTag)\(downmixLabel)")
     }
 }
 
@@ -562,6 +818,7 @@ final class FFmpegAudioDecoder: @unchecked Sendable {
     func decode(_ packet: DemuxedPacket) -> [DecodedAudioFrame] { [] }
     func decodeAndBatch(_ packet: DemuxedPacket) -> [DecodedAudioFrame] { [] }
     func flushBatch() -> DecodedAudioFrame? { nil }
+    func resetTimestampTracking(reason: String) {}
 
     func createPCMSampleBuffer(from frame: DecodedAudioFrame) throws -> CMSampleBuffer {
         throw FFmpegError.notAvailable

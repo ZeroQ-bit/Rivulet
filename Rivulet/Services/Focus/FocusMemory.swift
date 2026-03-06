@@ -78,7 +78,6 @@ extension EnvironmentValues {
 
 // MARK: - View Modifier
 
-#if os(tvOS)
 
 /// View modifier that remembers and restores focus for a section
 ///
@@ -150,4 +149,3 @@ extension View {
     }
 }
 
-#endif

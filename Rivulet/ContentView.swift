@@ -8,68 +8,64 @@
 import SwiftUI
 import SwiftData
 import Combine
+import os.log
+
+private let splashLog = Logger(subsystem: "com.rivulet.app", category: "Splash")
 
 struct ContentView: View {
     @Environment(\.modelContext) private var modelContext
 
-    #if os(tvOS)
     @StateObject private var dataStore = PlexDataStore.shared
     @StateObject private var authManager = PlexAuthManager.shared
     @State private var showSplash = true
-    #endif
 
     var body: some View {
-        #if os(tvOS)
-        ZStack {
-            TVSidebarView()
-
-            if showSplash {
-                splashOverlay
-                    .transition(.opacity)
+        TVSidebarView()
+            .overlay {
+                if showSplash {
+                    splashOverlay
+                        .transition(.opacity)
+                }
             }
-        }
-        .animation(.easeOut(duration: 0.4), value: showSplash)
+            .animation(.easeOut(duration: 0.4), value: showSplash)
         .onChange(of: authManager.hasCredentials) { _, hasCredentials in
+            splashLog.info("hasCredentials changed to \(hasCredentials)")
             if !hasCredentials {
+                splashLog.info("No credentials — dismissing splash")
                 showSplash = false
             }
         }
-        .onChange(of: dataStore.hubs.isEmpty) { _, isEmpty in
-            if !isEmpty {
-                // Debounce: hubs can briefly appear then reset during profile/reload cycles.
-                // Wait a beat to confirm they're stable before dismissing.
+        .onChange(of: dataStore.isHomeContentReady) { _, isReady in
+            splashLog.info("isHomeContentReady changed to \(isReady), showSplash=\(self.showSplash)")
+            if isReady {
                 Task {
                     try? await Task.sleep(for: .milliseconds(500))
-                    if !dataStore.hubs.isEmpty {
+                    splashLog.info("Debounce complete — isHomeContentReady=\(self.dataStore.isHomeContentReady), showSplash=\(self.showSplash)")
+                    if dataStore.isHomeContentReady {
+                        splashLog.info("Dismissing splash — home content ready")
                         showSplash = false
                     }
                 }
             }
         }
         .task {
-            // Dismiss immediately if not authenticated
+            splashLog.info("Splash task started — hasCredentials=\(self.authManager.hasCredentials)")
             if !authManager.hasCredentials {
+                splashLog.info("No credentials on launch — dismissing splash immediately")
                 showSplash = false
                 return
             }
             // Safety timeout
-            try? await Task.sleep(for: .seconds(8))
+            try? await Task.sleep(for: .seconds(15))
             if showSplash {
+                splashLog.warning("Safety timeout reached (15s) — force dismissing splash")
                 showSplash = false
             }
         }
-        #else
-        NavigationSplitViewContent()
-        #endif
     }
 
-    #if os(tvOS)
     private var splashOverlay: some View {
         ZStack {
-            Rectangle()
-                .fill(.background)
-                .ignoresSafeArea()
-
             VStack(spacing: 24) {
                 Image(systemName: "play.rectangle.fill")
                     .font(.system(size: 80))
@@ -79,9 +75,10 @@ struct ContentView: View {
                     .tint(.white.opacity(0.5))
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(.windowBackground, ignoresSafeAreaEdges: .all)
         .allowsHitTesting(true)
     }
-    #endif
 }
 
 // MARK: - macOS/iOS Split View Navigation

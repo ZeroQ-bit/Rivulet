@@ -50,6 +50,10 @@ final class HLSPipeline {
     private var needsRateRestoreAfterSeek = false
     private var needsInitialSync = false
     private var streamURL: URL?
+    private var lastRequestedSeekTime: TimeInterval = -1
+    private var lastSeekWallTime: CFAbsoluteTime = 0
+    private var isAudioRecoveryInProgress = false
+    private var lastAudioRecoveryWallTime: CFAbsoluteTime = 0
 
     // MARK: - Callbacks
 
@@ -208,9 +212,25 @@ final class HLSPipeline {
 
     // MARK: - Seek
 
-    func seek(to time: TimeInterval, isPlaying: Bool) async {
+    func seek(to time: TimeInterval, isPlaying: Bool, force: Bool = false) async {
         guard let fetcher = fetcher else { return }
 
+        let now = CFAbsoluteTimeGetCurrent()
+        let currentTime = renderer.currentTime
+        let deltaFromCurrent = abs(time - currentTime)
+        let deltaFromLastRequest = lastRequestedSeekTime >= 0 ? abs(time - lastRequestedSeekTime) : .infinity
+
+        if !force, now - lastSeekWallTime < 0.2 && deltaFromLastRequest < 0.25 {
+            print("[HLSPipeline] seek deduped: Δ=\(String(format: "%.0f", deltaFromLastRequest * 1000))ms from last request")
+            return
+        }
+        if !force, deltaFromCurrent < 0.20 {
+            print("[HLSPipeline] seek ignored: Δ=\(String(format: "%.0f", deltaFromCurrent * 1000))ms from current (too small)")
+            return
+        }
+
+        lastSeekWallTime = now
+        lastRequestedSeekTime = time
         isSeeking = true
         renderer.jitterStats.reset()
 
@@ -246,6 +266,44 @@ final class HLSPipeline {
 
         // Restart feeding
         startFeedingLoop()
+    }
+
+    func recoverAudio(afterFlushTime flushTime: CMTime, reason: String) async {
+        guard state != .idle, state != .loading else { return }
+        guard !isSeeking else {
+            print("[HLSPipeline] recoverAudio skipped (\(reason)) — seek already in progress")
+            return
+        }
+
+        let now = CFAbsoluteTimeGetCurrent()
+        if isAudioRecoveryInProgress {
+            print("[HLSPipeline] recoverAudio skipped (\(reason)) — recovery already in progress")
+            return
+        }
+        if now - lastAudioRecoveryWallTime < 0.2 {
+            print("[HLSPipeline] recoverAudio debounced (\(reason))")
+            return
+        }
+
+        lastAudioRecoveryWallTime = now
+        isAudioRecoveryInProgress = true
+        defer { isAudioRecoveryInProgress = false }
+
+        let flushSeconds = CMTimeGetSeconds(flushTime)
+        let syncTime = renderer.currentTime
+        let targetTime = max(
+            0,
+            (flushSeconds.isFinite && flushSeconds >= 0) ? flushSeconds : syncTime
+        )
+        let wasPlaying = isPlaying
+
+        print(
+            "[HLSPipeline] recoverAudio reason=\(reason) target=\(String(format: "%.3f", targetTime))s " +
+            "flush=\(String(format: "%.3f", flushSeconds))s sync=\(String(format: "%.3f", syncTime))s " +
+            "wasPlaying=\(wasPlaying)"
+        )
+
+        await seek(to: targetTime, isPlaying: wasPlaying, force: true)
     }
 
     // MARK: - Private: Feeding Pipeline

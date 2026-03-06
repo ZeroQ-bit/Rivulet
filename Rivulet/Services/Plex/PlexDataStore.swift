@@ -33,6 +33,9 @@ class PlexDataStore: ObservableObject {
     /// Increments when library hubs content changes
     @Published private(set) var libraryHubsVersion: UUID = UUID()
 
+    /// Set by PlexHomeView when processed hubs are ready to display
+    @Published var isHomeContentReady = false
+
     // MARK: - Freshness Tracking
 
     /// Timestamps of last successful network fetch, keyed by resource identifier
@@ -319,6 +322,7 @@ class PlexDataStore: ObservableObject {
         libraryHubs.removeAll()
         hubsVersion = UUID()
         libraryHubsVersion = UUID()
+        isHomeContentReady = false
 
         // Clear on-deck/continue watching cache
         await cacheManager.clearOnDeckCache()
@@ -1060,6 +1064,7 @@ class PlexDataStore: ObservableObject {
         prefetchTask = nil
         hubs = []
         libraries = []
+        isHomeContentReady = false
         hubsError = nil
         librariesError = nil
         isLoadingHubs = false

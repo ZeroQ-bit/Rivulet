@@ -5,7 +5,6 @@
 
 import SwiftUI
 
-#if os(tvOS)
 
 /// Display mode for Live TV player in guide view
 enum LiveTVDisplayMode: Equatable {
@@ -45,7 +44,7 @@ struct GuideLayoutView: View {
         GeometryReader { geo in
             ZStack(alignment: .topLeading) {
                 // Background
-                Color.black.ignoresSafeArea()
+                Rectangle().fill(.background).ignoresSafeArea()
 
                 // Guide content - always rendered but visually hidden when fullscreen
                 if channels.isEmpty {
@@ -572,14 +571,3 @@ private struct TimeLineView: View {
     }
 }
 
-#else
-
-struct GuideLayoutView: View {
-    var sourceIdFilter: String?
-
-    var body: some View {
-        Text("Guide")
-    }
-}
-
-#endif

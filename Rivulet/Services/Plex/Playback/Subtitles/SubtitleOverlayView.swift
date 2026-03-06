@@ -66,11 +66,7 @@ private struct SubtitleTextView: View {
     }
 
     private var subtitleFontSize: CGFloat {
-        #if os(tvOS)
         return 42
-        #else
-        return 24
-        #endif
     }
 }
 

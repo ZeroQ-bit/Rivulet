@@ -15,6 +15,7 @@
 import Foundation
 import AVFoundation
 import CoreMedia
+import Sentry
 
 // MARK: - Track Info
 
@@ -61,25 +62,37 @@ struct DemuxedPacket: Sendable {
     /// PTS as CMTime
     var cmPTS: CMTime {
         if pts == Int64.min { return .invalid }
-        return CMTimeMake(value: pts, timescale: timebase.timescale)
+        guard let scaledValue = scaledTimeValue(for: pts) else { return .invalid }
+        return CMTime(value: scaledValue, timescale: timebase.timescale)
     }
 
     /// DTS as CMTime
     var cmDTS: CMTime {
         if dts == Int64.min { return .invalid }
-        return CMTimeMake(value: dts, timescale: timebase.timescale)
+        guard let scaledValue = scaledTimeValue(for: dts) else { return .invalid }
+        return CMTime(value: scaledValue, timescale: timebase.timescale)
     }
 
     /// Duration as CMTime
     var cmDuration: CMTime {
         if duration <= 0 { return .invalid }
-        return CMTimeMake(value: duration, timescale: timebase.timescale)
+        guard let scaledValue = scaledTimeValue(for: duration) else { return .invalid }
+        return CMTime(value: scaledValue, timescale: timebase.timescale)
     }
 
     /// PTS in seconds
     var ptsSeconds: TimeInterval {
         if pts == Int64.min { return 0 }
         return Double(pts) * Double(timebase.value) / Double(timebase.timescale)
+    }
+
+    private func scaledTimeValue(for rawValue: Int64) -> Int64? {
+        guard timebase.timescale != 0 else { return nil }
+        let numerator = timebase.value
+        if numerator == 0 { return nil }
+        if numerator == 1 { return rawValue }
+        let (scaled, overflow) = rawValue.multipliedReportingOverflow(by: numerator)
+        return overflow ? nil : scaled
     }
 }
 
@@ -169,6 +182,10 @@ final class FFmpegDemuxer: @unchecked Sendable {
     private let lock = NSLock()
     private var hasLoggedADTSStripping = false
     private var hasLoggedAACConfig = false
+    private var synthesizedAudioDurationCount = 0
+    private var invalidAudioTimestampCount = 0
+    private var nonMonotonicAudioTimestampCount = 0
+    private var lastAudioPacketPTSSeconds: Double?
 
     deinit { close() }
 
@@ -213,6 +230,10 @@ final class FFmpegDemuxer: @unchecked Sendable {
         self.dvProfile = nil
         self.dvLevel = nil
         self.dvBLCompatID = nil
+        self.synthesizedAudioDurationCount = 0
+        self.invalidAudioTimestampCount = 0
+        self.nonMonotonicAudioTimestampCount = 0
+        self.lastAudioPacketPTSSeconds = nil
 
         if openCtx.pointee.duration > 0 {
             self.duration = Double(openCtx.pointee.duration) / Double(AV_TIME_BASE)
@@ -292,7 +313,9 @@ final class FFmpegDemuxer: @unchecked Sendable {
             let data = Data(bytes: packetData, count: Int(packet.pointee.size))
             let stream = ctx.pointee.streams[Int(streamIndex)]!
             let tb = stream.pointee.time_base
-            let timebase = CMTimeMake(value: Int64(tb.num), timescale: Int32(tb.den))
+            let tbNum = Int64(tb.num == 0 ? 1 : tb.num)
+            let tbDen = Int32(tb.den == 0 ? 1 : tb.den)
+            let timebase = CMTime(value: tbNum, timescale: tbDen)
             let isKeyframe = (packet.pointee.flags & AV_PKT_FLAG_KEY) != 0
 
             let demuxedPacket = DemuxedPacket(
@@ -389,6 +412,10 @@ final class FFmpegDemuxer: @unchecked Sendable {
         selectedVideoStream = -1
         selectedAudioStream = -1
         selectedSubtitleStream = -1
+        synthesizedAudioDurationCount = 0
+        invalidAudioTimestampCount = 0
+        nonMonotonicAudioTimestampCount = 0
+        lastAudioPacketPTSSeconds = nil
     }
 
     // MARK: - Subtitle Extraction
@@ -514,24 +541,39 @@ final class FFmpegDemuxer: @unchecked Sendable {
             throw FFmpegError.sampleBufferCreationFailed(status: status)
         }
 
-        var timingInfo = CMSampleTimingInfo(
-            duration: packet.cmDuration,
-            presentationTimeStamp: packet.cmPTS,
-            decodeTimeStamp: isVideo ? packet.cmDTS : .invalid
-        )
-        var sampleSize = data.count
-        var sampleBuffer: CMSampleBuffer?
+        let buffer: CMSampleBuffer
+        if isVideo {
+            var timingInfo = CMSampleTimingInfo(
+                duration: packet.cmDuration,
+                presentationTimeStamp: packet.cmPTS,
+                decodeTimeStamp: packet.cmDTS
+            )
+            var sampleSize = data.count
+            var sampleBuffer: CMSampleBuffer?
 
-        status = CMSampleBufferCreateReady(
-            allocator: kCFAllocatorDefault, dataBuffer: block,
-            formatDescription: formatDescription, sampleCount: 1,
-            sampleTimingEntryCount: 1, sampleTimingArray: &timingInfo,
-            sampleSizeEntryCount: 1, sampleSizeArray: &sampleSize,
-            sampleBufferOut: &sampleBuffer
-        )
+            status = CMSampleBufferCreateReady(
+                allocator: kCFAllocatorDefault,
+                dataBuffer: block,
+                formatDescription: formatDescription,
+                sampleCount: 1,
+                sampleTimingEntryCount: 1,
+                sampleTimingArray: &timingInfo,
+                sampleSizeEntryCount: 1,
+                sampleSizeArray: &sampleSize,
+                sampleBufferOut: &sampleBuffer
+            )
 
-        guard status == noErr, let buffer = sampleBuffer else {
-            throw FFmpegError.sampleBufferCreationFailed(status: status)
+            guard status == noErr, let createdBuffer = sampleBuffer else {
+                throw FFmpegError.sampleBufferCreationFailed(status: status)
+            }
+            buffer = createdBuffer
+        } else {
+            buffer = try createCompressedAudioSampleBuffer(
+                from: packet,
+                blockBuffer: block,
+                formatDescription: formatDescription,
+                payloadSize: data.count
+            )
         }
 
         // Mark sync/non-sync for video
@@ -546,6 +588,158 @@ final class FFmpegDemuxer: @unchecked Sendable {
         }
 
         return buffer
+    }
+
+    private func createCompressedAudioSampleBuffer(
+        from packet: DemuxedPacket,
+        blockBuffer: CMBlockBuffer,
+        formatDescription: CMFormatDescription,
+        payloadSize: Int
+    ) throws -> CMSampleBuffer {
+        guard let audioFD = formatDescription as? CMAudioFormatDescription,
+              let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(audioFD)?.pointee else {
+            throw FFmpegError.noCodecParameters
+        }
+
+        var duration = packet.cmDuration
+        if !duration.isValid || !duration.isNumeric || duration <= .zero {
+            let framesPerPacket = Int(asbd.mFramesPerPacket)
+            let sampleRate = asbd.mSampleRate
+            if framesPerPacket > 0, sampleRate > 0 {
+                duration = CMTime(
+                    seconds: Double(framesPerPacket) / sampleRate,
+                    preferredTimescale: 90_000
+                )
+                synthesizedAudioDurationCount += 1
+                if synthesizedAudioDurationCount <= 5 || synthesizedAudioDurationCount % 100 == 0 {
+                    print(
+                        "[FFmpegDemuxer] Synthesized audio packet duration (count=\(synthesizedAudioDurationCount)) " +
+                        "codec=\(fourCCString(asbd.mFormatID)) fpp=\(framesPerPacket) rate=\(Int(sampleRate))"
+                    )
+                }
+                if synthesizedAudioDurationCount <= 5 || synthesizedAudioDurationCount % 250 == 0 {
+                    let breadcrumb = Breadcrumb(level: .info, category: "audio.timestamps")
+                    breadcrumb.message = "Synthesized audio packet duration"
+                    breadcrumb.data = [
+                        "count": synthesizedAudioDurationCount,
+                        "codec": fourCCString(asbd.mFormatID),
+                        "frames_per_packet": framesPerPacket,
+                        "sample_rate": Int(sampleRate)
+                    ]
+                    SentrySDK.addBreadcrumb(breadcrumb)
+                }
+            }
+        }
+
+        let durationSeconds = CMTimeGetSeconds(duration)
+        let fallbackDurationSeconds = (durationSeconds.isFinite && durationSeconds > 0) ? durationSeconds : 0
+
+        let packetPTS = packet.cmPTS
+        let fallbackPTS = packet.cmDTS
+        var presentationTimeStamp: CMTime = packetPTS.isValid ? packetPTS : fallbackPTS
+        if !presentationTimeStamp.isValid || !presentationTimeStamp.isNumeric {
+            let synthesizedPTSSeconds = (lastAudioPacketPTSSeconds ?? 0) + fallbackDurationSeconds
+            presentationTimeStamp = CMTime(seconds: synthesizedPTSSeconds, preferredTimescale: 90_000)
+            invalidAudioTimestampCount += 1
+            if invalidAudioTimestampCount <= 5 || invalidAudioTimestampCount % 100 == 0 {
+                print(
+                    "[FFmpegDemuxer] Audio packet missing valid PTS/DTS " +
+                    "(count=\(invalidAudioTimestampCount), synthesized=\(String(format: "%.3f", synthesizedPTSSeconds)))"
+                )
+            }
+            if invalidAudioTimestampCount <= 5 || invalidAudioTimestampCount % 250 == 0 {
+                let breadcrumb = Breadcrumb(level: .warning, category: "audio.timestamps")
+                breadcrumb.message = "Audio packet missing timestamp"
+                breadcrumb.data = [
+                    "count": invalidAudioTimestampCount,
+                    "sample_rate": Int(asbd.mSampleRate),
+                    "frames_per_packet": Int(asbd.mFramesPerPacket),
+                    "payload_size": payloadSize,
+                    "synthesized_pts": synthesizedPTSSeconds
+                ]
+                SentrySDK.addBreadcrumb(breadcrumb)
+            }
+        }
+
+        let ptsSeconds = CMTimeGetSeconds(presentationTimeStamp)
+        if ptsSeconds.isFinite, let lastPTS = lastAudioPacketPTSSeconds, ptsSeconds + 0.001 < lastPTS {
+            nonMonotonicAudioTimestampCount += 1
+            if nonMonotonicAudioTimestampCount <= 5 || nonMonotonicAudioTimestampCount % 100 == 0 {
+                print(
+                    "[FFmpegDemuxer] Non-monotonic audio PTS (count=\(nonMonotonicAudioTimestampCount)) " +
+                    "current=\(String(format: "%.3f", ptsSeconds)) last=\(String(format: "%.3f", lastPTS))"
+                )
+            }
+            if nonMonotonicAudioTimestampCount <= 5 || nonMonotonicAudioTimestampCount % 250 == 0 {
+                let breadcrumb = Breadcrumb(level: .warning, category: "audio.timestamps")
+                breadcrumb.message = "Non-monotonic audio packet timestamp"
+                breadcrumb.data = [
+                    "count": nonMonotonicAudioTimestampCount,
+                    "current_pts": ptsSeconds,
+                    "last_pts": lastPTS,
+                    "sample_rate": Int(asbd.mSampleRate),
+                    "frames_per_packet": Int(asbd.mFramesPerPacket)
+                ]
+                SentrySDK.addBreadcrumb(breadcrumb)
+            }
+        }
+        if ptsSeconds.isFinite {
+            lastAudioPacketPTSSeconds = ptsSeconds
+        }
+
+        let framesPerPacket = Int(asbd.mFramesPerPacket)
+
+        // Each DemuxedPacket contains exactly one compressed audio packet.
+        // sampleCount = 1 because CMAudioSampleBufferCreateReadyWithPacketDescriptions
+        // expects the number of *packets*, not PCM frames. The packetDescriptions array
+        // must have exactly sampleCount entries — using framesPerPacket (e.g. 1536 for
+        // EAC3) would read past the single description and crash.
+        let sampleCount = 1
+
+        // For VBR formats (mFramesPerPacket == 0), report the actual frame count
+        // so the renderer knows how many PCM frames this packet decodes to.
+        let variableFrames: UInt32 = {
+            guard framesPerPacket == 0 else { return 0 }  // CBR: implicit from ASBD
+            let sampleRate = asbd.mSampleRate
+            guard sampleRate > 0 else { return 0 }
+            let seconds = CMTimeGetSeconds(duration)
+            guard seconds.isFinite, seconds > 0 else { return 0 }
+            return UInt32(max(1, Int((seconds * sampleRate).rounded())))
+        }()
+
+        var packetDescription = AudioStreamPacketDescription(
+            mStartOffset: 0,
+            mVariableFramesInPacket: variableFrames,
+            mDataByteSize: UInt32(payloadSize)
+        )
+
+        var sampleBuffer: CMSampleBuffer?
+        let status = CMAudioSampleBufferCreateReadyWithPacketDescriptions(
+            allocator: kCFAllocatorDefault,
+            dataBuffer: blockBuffer,
+            formatDescription: audioFD,
+            sampleCount: sampleCount,
+            presentationTimeStamp: presentationTimeStamp,
+            packetDescriptions: &packetDescription,
+            sampleBufferOut: &sampleBuffer
+        )
+
+        guard status == noErr, let buffer = sampleBuffer else {
+            throw FFmpegError.sampleBufferCreationFailed(status: status)
+        }
+        return buffer
+    }
+
+    private func fourCCString(_ fourCC: UInt32) -> String {
+        let n = Int(fourCC.bigEndian)
+        let scalars = [
+            UnicodeScalar((n >> 24) & 255),
+            UnicodeScalar((n >> 16) & 255),
+            UnicodeScalar((n >> 8) & 255),
+            UnicodeScalar(n & 255)
+        ]
+        let characters = scalars.compactMap { $0.map(Character.init) }
+        return String(characters)
     }
 
     // MARK: - Private: Track Discovery

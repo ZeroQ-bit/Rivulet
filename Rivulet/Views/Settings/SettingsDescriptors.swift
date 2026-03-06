@@ -230,6 +230,10 @@ enum SettingsDescriptorStore {
         case .libraries: return ("sidebar.squares.left", .purple)
         case .cache: return ("internaldrive", .gray)
         case .userProfiles: return ("person.crop.circle", .cyan)
+        case .displaySizePicker: return ("textformat.size", .orange)
+        case .audioLanguagePicker: return ("waveform", .cyan)
+        case .subtitlesPicker: return ("captions.bubble", .yellow)
+        case .autoplayCountdownPicker: return ("forward.end.alt", .purple)
         }
     }
 }

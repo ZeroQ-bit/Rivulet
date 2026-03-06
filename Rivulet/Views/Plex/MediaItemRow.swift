@@ -19,12 +19,7 @@ struct MediaItemRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text(title)
-                #if os(tvOS)
                 .font(.system(size: ScaledDimensions.sectionTitleSize, weight: .bold))
-                #else
-                .font(.title2)
-                .fontWeight(.bold)
-                #endif
                 .foregroundStyle(.white)
                 .padding(.horizontal, ScaledDimensions.rowHorizontalPadding)
 
@@ -40,11 +35,7 @@ struct MediaItemRow: View {
                                 authToken: authToken
                             )
                         }
-                        #if os(tvOS)
                         .buttonStyle(CardButtonStyle())
-                        #else
-                        .buttonStyle(.plain)
-                        #endif
                     }
                 }
                 .padding(.horizontal, ScaledDimensions.rowHorizontalPadding)

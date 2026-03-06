@@ -21,7 +21,8 @@ struct ProfilePickerOverlay: View {
     var body: some View {
         ZStack {
             // Background
-            Color.black
+            Rectangle()
+                .fill(.background)
                 .ignoresSafeArea()
 
             VStack(spacing: 50) {

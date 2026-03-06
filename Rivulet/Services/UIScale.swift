@@ -60,7 +60,6 @@ extension View {
 
 /// Standard UI dimensions that scale with the display size setting
 enum ScaledDimensions {
-    #if os(tvOS)
     // Poster card dimensions (base sizes - larger for fewer items per row)
     static let posterWidth: CGFloat = 260
     static let posterHeight: CGFloat = 390
@@ -84,27 +83,6 @@ enum ScaledDimensions {
 
     // Corner radii
     static let posterCornerRadius: CGFloat = 16
-    #else
-    // iOS sizes (unchanged)
-    static let posterWidth: CGFloat = 180
-    static let posterHeight: CGFloat = 270
-    static let squarePosterSize: CGFloat = 180
-
-    static let gridMinWidth: CGFloat = 180
-    static let gridMaxWidth: CGFloat = 200
-    static let gridSpacing: CGFloat = 24
-
-    static let posterTitleSize: CGFloat = 15
-    static let posterSubtitleSize: CGFloat = 13
-    static let sectionTitleSize: CGFloat = 20
-    static let heroTitleSize: CGFloat = 32
-
-    static let rowHorizontalPadding: CGFloat = 24
-    static let rowVerticalPadding: CGFloat = 16
-    static let rowItemSpacing: CGFloat = 16
-
-    static let posterCornerRadius: CGFloat = 12
-    #endif
 
     /// Apply scale factor to a dimension
     static func scaled(_ value: CGFloat, by scale: CGFloat) -> CGFloat {

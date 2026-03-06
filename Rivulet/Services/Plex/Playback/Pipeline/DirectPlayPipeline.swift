@@ -107,6 +107,24 @@ final class DirectPlayPipeline {
 
     private var audioDecoder: FFmpegAudioDecoder?
 
+    /// When true, all audio codecs (including AAC) are decoded client-side via FFmpeg.
+    /// Used when the audio route (e.g., AirPlay) doesn't support compressed passthrough
+    /// for certain codecs through AVSampleBufferAudioRenderer.
+    /// Codecs that must be client-decoded even when they have a native format description.
+    /// Used for AirPlay where compressed AAC passthrough jams AVSampleBufferAudioRenderer.
+    var forceClientDecodeCodecs: Set<String> = []
+
+    /// Output signed 16-bit integer PCM instead of 32-bit float for client-decoded audio.
+    /// AirPlay 2 natively supports S16/S24 but not float32 — avoids system-side conversion artifacts.
+    var useSignedInt16Audio = false {
+        didSet { audioDecoder?.useSignedInt16Output = useSignedInt16Audio }
+    }
+
+    /// When true, downmix multichannel audio to stereo for basic AirPlay speakers.
+    var forceDownmixToStereo = false {
+        didSet { audioDecoder?.forceDownmixToStereo = forceDownmixToStereo }
+    }
+
     // MARK: - Client-Side Subtitle Decoding (PGS, DVB-SUB)
 
     private var subtitleDecoder: FFmpegSubtitleDecoder?
@@ -128,6 +146,8 @@ final class DirectPlayPipeline {
     private var lastRequestedSeekTime: TimeInterval = -1
     private var lastSeekWallTime: CFAbsoluteTime = 0
     private var previousMaxVideoLookahead: TimeInterval?
+    private var isAudioRecoveryInProgress = false
+    private var lastAudioRecoveryWallTime: CFAbsoluteTime = 0
 
     // MARK: - Callbacks
 
@@ -250,12 +270,17 @@ final class DirectPlayPipeline {
 
             if let codecpar = demuxer.codecParameters(forStream: selectedAudioTrack.streamIndex) {
                 do {
-                    audioDecoder = try FFmpegAudioDecoder(
+                    let decoder = try FFmpegAudioDecoder(
                         codecpar: codecpar,
                         codecNameHint: selectedAudioTrack.codecName
                     )
+                    decoder.useSignedInt16Output = useSignedInt16Audio
+                    decoder.forceDownmixToStereo = forceDownmixToStereo
+                    audioDecoder = decoder
                     print("[DirectPlay] Client-side audio decoding enabled for " +
-                          "\(selectedAudioTrack.codecName) \(selectedAudioTrack.channels)ch")
+                          "\(selectedAudioTrack.codecName) \(selectedAudioTrack.channels)ch" +
+                          (useSignedInt16Audio ? " (S16 output)" : "") +
+                          (forceDownmixToStereo ? " (stereo downmix)" : ""))
                 } catch {
                     print("[DirectPlay] Failed to init audio decoder for " +
                           "\(selectedAudioTrack.codecName): \(error) — falling back to passthrough")
@@ -268,6 +293,29 @@ final class DirectPlayPipeline {
                   "(\(selectedAudioTrack.codecName) \(selectedAudioTrack.channels)ch); " +
                   "not auto-switching to software-decoded \(clientDecodeTrack.codecName)")
         }
+
+        // Enable AVAudioEngine for client-decoded PCM audio.
+        // The engine handles sample rate conversion and device-specific buffering,
+        // which is critical for AirPlay/HomePod output.
+        if audioDecoder != nil {
+            renderer.enableAudioEngine()
+        } else {
+            renderer.disableAudioEngine()
+        }
+
+        let routeSnapshot = PlaybackAudioSessionConfigurator.currentRouteAudioSnapshot(
+            owner: "DirectPlayPipeline",
+            reason: "load"
+        )
+        let startupCodec = selectedAudioTrack?.codecName ?? "unknown"
+        let startupChannels = selectedAudioTrack.map { Int($0.channels) } ?? 0
+        let startupDecodePath = audioDecoder != nil ? "client_decode" : "passthrough"
+        print(
+            "[DirectPlayAudioStartup] codec=\(startupCodec) decodePath=\(startupDecodePath) " +
+            "streamChannels=\(startupChannels) routeAirPlay=\(routeSnapshot.isAirPlay) " +
+            "maxOutCh=\(routeSnapshot.maximumOutputChannels) " +
+            "audioFD=\(demuxer.audioFormatDescription != nil) tsValidity=runtime_pending"
+        )
 
         // Populate track info
         populateTrackInfo()
@@ -295,7 +343,12 @@ final class DirectPlayPipeline {
             "video_tracks": demuxer.videoTracks.count,
             "audio_tracks": demuxer.audioTracks.count,
             "subtitle_tracks": demuxer.subtitleTracks.count,
-            "dv_conversion": enableDVConversion
+            "dv_conversion": enableDVConversion,
+            "audio_decode_path": audioDecoder != nil ? "client_decode" : "passthrough",
+            "audio_route_airplay": routeSnapshot.isAirPlay,
+            "audio_route_max_out_ch": routeSnapshot.maximumOutputChannels,
+            "audio_selected_codec": startupCodec,
+            "audio_selected_channels": startupChannels
         ]
         SentrySDK.addBreadcrumb(breadcrumb)
     }
@@ -440,19 +493,19 @@ final class DirectPlayPipeline {
 
     // MARK: - Seek
 
-    func seek(to time: TimeInterval, isPlaying: Bool) async throws {
+    func seek(to time: TimeInterval, isPlaying: Bool, force: Bool = false) async throws {
         let now = CFAbsoluteTimeGetCurrent()
         let currentTime = renderer.currentTime
         let deltaFromCurrent = abs(time - currentTime)
         let deltaFromLastRequest = lastRequestedSeekTime >= 0 ? abs(time - lastRequestedSeekTime) : .infinity
 
         // Drop noisy duplicate seek requests that arrive back-to-back with nearly identical targets.
-        if now - lastSeekWallTime < 0.2 && deltaFromLastRequest < 0.25 {
+        if !force, now - lastSeekWallTime < 0.2 && deltaFromLastRequest < 0.25 {
             print("[DirectPlay] seek deduped: Δ=\(String(format: "%.0f", deltaFromLastRequest * 1000))ms from last request")
             return
         }
         // Ignore tiny seeks near current position to avoid unnecessary read-loop churn.
-        if deltaFromCurrent < 0.20 {
+        if !force, deltaFromCurrent < 0.20 {
             print("[DirectPlay] seek ignored: Δ=\(String(format: "%.0f", deltaFromCurrent * 1000))ms from current (too small)")
             return
         }
@@ -480,6 +533,7 @@ final class DirectPlayPipeline {
         // Flush renderer buffers and discard any batched audio
         renderer.flush()
         _ = audioDecoder?.flushBatch()
+        audioDecoder?.resetTimestampTracking(reason: "seek")
 
         // Seek in demuxer
         try demuxer.seek(to: time)
@@ -494,6 +548,40 @@ final class DirectPlayPipeline {
 
         // Restart reading
         startReadLoop()
+    }
+
+    func recoverAudio(afterFlushTime flushTime: CMTime, reason: String) async throws {
+        guard state != .idle, state != .loading else { return }
+
+        let now = CFAbsoluteTimeGetCurrent()
+        if isAudioRecoveryInProgress {
+            print("[DirectPlay] recoverAudio skipped (\(reason)) — recovery already in progress")
+            return
+        }
+        if now - lastAudioRecoveryWallTime < 0.2 {
+            print("[DirectPlay] recoverAudio debounced (\(reason))")
+            return
+        }
+
+        lastAudioRecoveryWallTime = now
+        isAudioRecoveryInProgress = true
+        defer { isAudioRecoveryInProgress = false }
+
+        let flushSeconds = CMTimeGetSeconds(flushTime)
+        let syncTime = renderer.currentTime
+        let targetTime = max(
+            0,
+            (flushSeconds.isFinite && flushSeconds >= 0) ? flushSeconds : syncTime
+        )
+        let wasPlaying = isPlaying
+
+        print(
+            "[DirectPlay] recoverAudio reason=\(reason) target=\(String(format: "%.3f", targetTime))s " +
+            "flush=\(String(format: "%.3f", flushSeconds))s sync=\(String(format: "%.3f", syncTime))s " +
+            "wasPlaying=\(wasPlaying)"
+        )
+
+        try await seek(to: targetTime, isPlaying: wasPlaying, force: true)
     }
 
     // MARK: - Audio Track Selection
@@ -521,9 +609,10 @@ final class DirectPlayPipeline {
         await oldAudioTask?.value
         await oldTask?.value
 
-        // Flush audio renderer and decoder
-        renderer.audioRenderer.flush()
+        // Flush audio and decoder
+        renderer.flush()
         _ = audioDecoder?.flushBatch()
+        audioDecoder?.resetTimestampTracking(reason: "audio_track_switch")
 
         if codecNeedsClientDecode(track.codecName) {
             print("[DirectPlay] Audio switch: \(track.codecName) → client decode path")
@@ -532,14 +621,19 @@ final class DirectPlayPipeline {
                 throw FFmpegError.noCodecParameters
             }
             audioDecoder?.close()
-            audioDecoder = try FFmpegAudioDecoder(
+            let decoder = try FFmpegAudioDecoder(
                 codecpar: codecpar,
                 codecNameHint: track.codecName
             )
+            decoder.useSignedInt16Output = useSignedInt16Audio
+            decoder.forceDownmixToStereo = forceDownmixToStereo
+            audioDecoder = decoder
+            renderer.enableAudioEngine()
         } else {
             print("[DirectPlay] Audio switch: \(track.codecName) → passthrough path")
             audioDecoder?.close()
             audioDecoder = nil
+            renderer.disableAudioEngine()
             try demuxer.selectAudioStream(index: streamIndex)
         }
 
@@ -955,20 +1049,6 @@ final class DirectPlayPipeline {
                         let totalPipelineMs = (enqueueEnd - frameWallStart) * 1000
                         if totalPipelineMs > 120 {
                             slowVideoPipelineCount += 1
-                            if slowVideoPipelineCount <= 10 || slowVideoPipelineCount % 120 == 0 {
-                                let conversionMs = (conversionEnd - conversionStart) * 1000
-                                let sampleCreateMs = (sampleCreateEnd - sampleCreateStart) * 1000
-                                let syncPrepMs = (syncPrepEnd - syncPrepStart) * 1000
-                                let enqueueMs = (enqueueEnd - enqueueStart) * 1000
-                                print(
-                                    "[DirectPlayDiag] Slow video pipeline frame \(videoPacketCount): " +
-                                    "total=\(String(format: "%.0f", totalPipelineMs))ms " +
-                                    "conv=\(String(format: "%.1f", conversionMs))ms " +
-                                    "sample=\(String(format: "%.1f", sampleCreateMs))ms " +
-                                    "sync=\(String(format: "%.1f", syncPrepMs))ms " +
-                                    "enqueue=\(String(format: "%.1f", enqueueMs))ms"
-                                )
-                            }
                         }
 
                         // Video cadence diagnostics (ground truth for jump/stutter analysis).
@@ -981,9 +1061,6 @@ final class DirectPlayPipeline {
                             }
                             if wallGapMs > 120 {
                                 longVideoWallGaps += 1
-                                if longVideoWallGaps <= 5 || longVideoWallGaps % 50 == 0 {
-                                    print("[DirectPlayDiag] Long wall gap: \(String(format: "%.0f", wallGapMs))ms at frame \(videoPacketCount)")
-                                }
                             }
                         }
                         lastVideoWallTime = nowWall
@@ -1095,6 +1172,21 @@ final class DirectPlayPipeline {
                                     print("[DirectPlay] Skipping audio — no format description")
                                 }
                                 continue
+                            }
+                            if audioPacketCount == 1 {
+                                let mediaType = CMFormatDescriptionGetMediaType(audioFD)
+                                let mediaSubType = CMFormatDescriptionGetMediaSubType(audioFD)
+                                let subTypeStr = String(format: "%c%c%c%c",
+                                    (mediaSubType >> 24) & 0xFF, (mediaSubType >> 16) & 0xFF,
+                                    (mediaSubType >> 8) & 0xFF, mediaSubType & 0xFF)
+                                print("[DirectPlay] Audio passthrough FD: mediaType=\(mediaType) subType=\(subTypeStr)(\(mediaSubType))")
+                                if let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(audioFD) {
+                                    let a = asbd.pointee
+                                    print("[DirectPlay] Audio passthrough ASBD: rate=\(Int(a.mSampleRate)) ch=\(a.mChannelsPerFrame) " +
+                                          "bitsPerCh=\(a.mBitsPerChannel) framesPerPkt=\(a.mFramesPerPacket) " +
+                                          "bytesPerFrame=\(a.mBytesPerFrame) bytesPerPkt=\(a.mBytesPerPacket) " +
+                                          "formatID=\(a.mFormatID) formatFlags=\(a.mFormatFlags)")
+                                }
                             }
                             let sampleBuffer = try demuxer.createAudioSampleBuffer(
                                 from: packet, formatDescription: audioFD
@@ -1245,6 +1337,7 @@ final class DirectPlayPipeline {
 
     private func codecNeedsClientDecode(_ codec: String) -> Bool {
         let normalized = codec.lowercased()
+        if forceClientDecodeCodecs.contains(normalized) { return true }
         return FFmpegAudioDecoder.supportedCodecs.contains(where: { supported in
             normalized == supported || normalized.hasPrefix(supported)
         })

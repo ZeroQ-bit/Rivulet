@@ -19,8 +19,7 @@ struct AddLiveTVSourceSheet: View {
 
     var body: some View {
         ZStack {
-            // Solid black background - no blur/material issues
-            Color.black.ignoresSafeArea()
+            Rectangle().fill(.background).ignoresSafeArea()
 
             VStack(spacing: 0) {
                 // Header bar
@@ -36,7 +35,6 @@ struct AddLiveTVSourceSheet: View {
             }
         }
         // Use system appearance
-        #if os(tvOS)
         .onExitCommand {
             // Navigate back within sheet before dismissing
             if selectedSourceType != nil {
@@ -45,7 +43,6 @@ struct AddLiveTVSourceSheet: View {
                 dismiss()
             }
         }
-        #endif
     }
 
     // MARK: - Header Bar
@@ -354,11 +351,9 @@ private struct PlexLiveTVConfigForm: View {
             }
             .padding(.horizontal, 80)
         }
-        #if os(tvOS)
         .onExitCommand {
             onBack()
         }
-        #endif
     }
 
     private func addPlexLiveTV() {
@@ -575,11 +570,9 @@ private struct DispatcharrConfigForm: View {
             .padding(.horizontal, 80)
             .padding(.top, 24)
         }
-        #if os(tvOS)
         .onExitCommand {
             onBack()
         }
-        #endif
     }
 
     @ViewBuilder
@@ -773,11 +766,9 @@ private struct M3UConfigForm: View {
             .padding(.horizontal, 80)
             .padding(.top, 24)
         }
-        #if os(tvOS)
         .onExitCommand {
             onBack()
         }
-        #endif
     }
 
     private func addM3U() {

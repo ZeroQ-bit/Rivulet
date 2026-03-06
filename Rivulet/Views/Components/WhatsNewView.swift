@@ -8,7 +8,6 @@
 
 import SwiftUI
 
-#if os(tvOS)
 
 struct WhatsNewView: View {
     @Binding var isPresented: Bool
@@ -149,4 +148,3 @@ struct WhatsNewView: View {
     }
 }
 
-#endif

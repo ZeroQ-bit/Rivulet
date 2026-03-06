@@ -84,7 +84,6 @@ struct PlayerProgressBar: View {
                 isSeeking = false
             }
         }
-        #if os(tvOS)
         .onMoveCommand { direction in
             guard isFocused else { return }
             isSeeking = true
@@ -113,7 +112,6 @@ struct PlayerProgressBar: View {
                 isSeeking = false
             }
         }
-        #endif
         .animation(.easeOut(duration: 0.15), value: isFocused)
         .animation(.easeOut(duration: 0.1), value: seekPosition)
     }

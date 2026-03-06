@@ -342,7 +342,6 @@ extension EnvironmentValues {
 
 // MARK: - View Modifiers
 
-#if os(tvOS)
 
 /// Modifier that makes a view focusable only when its scope is active.
 struct ScopedFocusModifier: ViewModifier {
@@ -433,4 +432,3 @@ extension View {
     }
 }
 
-#endif

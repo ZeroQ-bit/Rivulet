@@ -45,7 +45,6 @@ struct PlexLibraryView: View {
     @State private var recommendationsError: String?
     @AppStorage("enablePersonalizedRecommendations") private var enablePersonalizedRecommendations = false
 
-    #if os(tvOS)
     @FocusState private var focusedItemId: String?  // Track focused item by "context:itemId" format
     @State private var lastPrefetchIndex: Int = -18  // Track last prefetch position for throttling
     private var firstDisplayedItem: PlexMetadata? {
@@ -56,7 +55,6 @@ struct PlexLibraryView: View {
     private func gridFocusId(for item: PlexMetadata) -> String {
         "libraryGrid:\(item.ratingKey ?? "")"
     }
-    #endif
 
     private let networkManager = PlexNetworkManager.shared
     private let cacheManager = CacheManager.shared
@@ -67,17 +65,11 @@ struct PlexLibraryView: View {
         dataStore.libraries.first(where: { $0.key == libraryKey })?.isMusicLibrary ?? false
     }
 
-    #if os(tvOS)
     private var columns: [GridItem] {
         let minWidth = ScaledDimensions.gridMinWidth * scale
         let maxWidth = ScaledDimensions.gridMaxWidth * scale
         return [GridItem(.adaptive(minimum: minWidth, maximum: maxWidth), spacing: ScaledDimensions.gridSpacing)]
     }
-    #else
-    private let columns = [
-        GridItem(.adaptive(minimum: 180, maximum: 200), spacing: 20)
-    ]
-    #endif
 
     // private let initialVisibleBatch = 36  // Limit first-frame layout work
 
@@ -241,11 +233,9 @@ struct PlexLibraryView: View {
                         // Load sort preference for this library
                         currentSortOption = librarySettings.getSortOption(for: libraryKey)
 
-                        #if os(tvOS)
                         // Ensure we start in content scope with no stale focus when switching libraries
                         focusScopeManager.switchTo(.content, savingCurrent: false)
                         focusedItemId = nil
-                        #endif
 
                         // Load cached hero synchronously (fast, in-memory)
                         heroItem = dataStore.getCachedHero(forLibrary: libraryKey)
@@ -344,7 +334,6 @@ struct PlexLibraryView: View {
                 }
             } else {
                 nestedNavState.goBackAction = nil
-                #if os(tvOS)
                 // Restore focus to the previously selected grid item so the scroll
                 // position returns to where the user was before entering detail view.
                 // Deferred slightly so the NavigationStack pop animation completes
@@ -362,13 +351,11 @@ struct PlexLibraryView: View {
                         focusedItemId = targetId
                     }
                 }
-                #endif
             }
         }
         .onChange(of: enablePersonalizedRecommendations) { _, _ in
             handleRecommendationsToggle()
         }
-        #if os(tvOS)
         // Save focus when it changes (only when content scope is active)
         .onChange(of: focusedItemId) { _, newValue in
             guard focusScopeManager.isScopeActive(.content) else { return }
@@ -400,7 +387,6 @@ struct PlexLibraryView: View {
                 }
             }
         }
-        #endif
     }
 
     // MARK: - Content View
@@ -487,7 +473,6 @@ struct PlexLibraryView: View {
 
     @ViewBuilder
     private var heroSectionView: some View {
-        #if os(tvOS)
         // Only show hero when there are essential rows above it (prevents flash at top during library switch)
         if showLibraryHero, let hero = heroItem, !essentialHubs.isEmpty {
             HeroView(
@@ -502,7 +487,6 @@ struct PlexLibraryView: View {
             .id("hero-\(libraryKey)-\(hero.ratingKey ?? "")")
             .padding(.top, 48)
         }
-        #endif
     }
 
     // MARK: - Essential Rows View (Continue Watching, Recently Added, Recently Released)
@@ -539,13 +523,8 @@ struct PlexLibraryView: View {
                     }
                 }
             }
-            #if os(tvOS)
             .padding(.horizontal, ScaledDimensions.rowHorizontalPadding)
             .padding(.top, 100)  // Extra top padding since essential rows are first
-            #else
-            .padding(.horizontal, 40)
-            .padding(.top, 24)
-            #endif
         }
     }
 
@@ -629,13 +608,8 @@ struct PlexLibraryView: View {
                     }
                 }
             }
-            #if os(tvOS)
             .padding(.horizontal, ScaledDimensions.rowHorizontalPadding)
             .padding(.top, 48)
-            #else
-            .padding(.horizontal, 40)
-            .padding(.top, 24)
-            #endif
         }
     }
 
@@ -660,22 +634,13 @@ struct PlexLibraryView: View {
 
             Spacer()
 
-            #if os(tvOS)
             sortButton
-            #endif
         }
-        #if os(tvOS)
         .padding(.horizontal, ScaledDimensions.rowHorizontalPadding)
         .padding(.top, 60)
         .padding(.bottom, 32)
-        #else
-        .padding(.horizontal, 40)
-        .padding(.top, 40)
-        .padding(.bottom, 24)
-        #endif
     }
 
-    #if os(tvOS)
     // MARK: - Sort Button
 
     @FocusState private var isSortButtonFocused: Bool
@@ -775,7 +740,6 @@ struct PlexLibraryView: View {
             print("Failed to reload with new sort: \(error)")
         }
     }
-    #endif
 
     // MARK: - Library Grid View
 
@@ -791,15 +755,10 @@ struct PlexLibraryView: View {
                 libraryGridItem(item: item, index: index)
             }
         }
-        #if os(tvOS)
         .padding(.horizontal, ScaledDimensions.rowHorizontalPadding)
         .padding(.vertical, 28)
         .padding(.bottom, 60)
         .focusSection()  // Help focus engine navigate the grid efficiently
-        #else
-        .padding(.horizontal, 40)
-        .padding(.bottom, 40)
-        #endif
     }
 
     @ViewBuilder
@@ -814,7 +773,6 @@ struct PlexLibraryView: View {
                 authToken: authManager.selectedServerToken ?? ""
             ))
         }
-        #if os(tvOS)
         .buttonStyle(CardButtonStyle())
         .focused($focusedItemId, equals: gridFocusId(for: item))
         .onAppear {
@@ -828,9 +786,6 @@ struct PlexLibraryView: View {
                 prefetchImagesAhead(from: index)
             }
         }
-        #else
-        .buttonStyle(.plain)
-        #endif
         .mediaItemContextMenu(
             item: item,
             serverURL: authManager.selectedServerURL ?? "",
@@ -856,13 +811,8 @@ struct PlexLibraryView: View {
                         skeletonPosterCard
                     }
                 }
-                #if os(tvOS)
                 .padding(.horizontal, ScaledDimensions.rowHorizontalPadding)
                 .padding(.vertical, 28)
-                #else
-                .padding(.horizontal, 40)
-                .padding(.bottom, 40)
-                #endif
             }
         }
     }
@@ -879,15 +829,9 @@ struct PlexLibraryView: View {
                 .fill(.white.opacity(0.05))
                 .frame(width: 80, height: 17)
         }
-        #if os(tvOS)
         .padding(.horizontal, ScaledDimensions.rowHorizontalPadding)
         .padding(.top, 60)
         .padding(.bottom, 32)
-        #else
-        .padding(.horizontal, 40)
-        .padding(.top, 40)
-        .padding(.bottom, 24)
-        #endif
     }
 
     private var skeletonPosterCard: some View {
@@ -895,11 +839,7 @@ struct PlexLibraryView: View {
             // Poster placeholder - square for music, rectangle for video
             RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .fill(.white.opacity(0.08))
-                #if os(tvOS)
                 .frame(width: 220, height: isMusicLibrary ? 220 : 330)
-                #else
-                .frame(width: 180, height: isMusicLibrary ? 180 : 270)
-                #endif
 
             // Title placeholder
             VStack(alignment: .leading, spacing: 6) {
@@ -910,11 +850,7 @@ struct PlexLibraryView: View {
                     .fill(.white.opacity(0.04))
                     .frame(width: 100, height: 12)
             }
-            #if os(tvOS)
             .frame(height: 52, alignment: .top)
-            #else
-            .frame(height: 44, alignment: .top)
-            #endif
         }
     }
 
@@ -1333,7 +1269,6 @@ struct PlexLibraryView: View {
 
     // MARK: - Focus Management
 
-    #if os(tvOS)
     /// Prefetch poster images for visible and upcoming items
     private func prefetchImages() {
         guard !items.isEmpty,
@@ -1392,7 +1327,6 @@ struct PlexLibraryView: View {
             await ImageCacheManager.shared.prefetch(urls: urlsToPreload)
         }
     }
-    #endif
 
     /// Handle items count change - triggers prefetch on tvOS
     private func handleItemsCountChange(oldCount: Int, newCount: Int) {
@@ -1406,14 +1340,12 @@ struct PlexLibraryView: View {
         //     updateVisibleItems(for: newCount, animated: false)
         // }
 
-        #if os(tvOS)
         if oldCount == 0 && newCount > 0 {
             prefetchImages()
         } else if !hasPrefetched && newCount > 0 {
             prefetchImages()
         }
         ensureInitialFocusIfNeeded()
-        #endif
     }
 
     // Batching disabled — LazyVGrid handles lazy rendering natively.
@@ -1446,7 +1378,6 @@ struct PlexLibraryView: View {
     }
     */
 
-    #if os(tvOS)
     /// Ensure the first grid item receives focus when entering a library
     private func ensureInitialFocusIfNeeded() {
         guard focusScopeManager.isScopeActive(.content) else { return }
@@ -1457,7 +1388,6 @@ struct PlexLibraryView: View {
         focusedItemId = targetId
         focusScopeManager.setFocus(FocusItemId(scope: .content, context: "libraryGrid", itemId: ratingKey))
     }
-    #endif
 
     private func posterThumb(for item: PlexMetadata) -> String? {
         if item.type == "episode" {

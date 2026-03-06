@@ -472,7 +472,6 @@ final class UniversalPlayerViewModel: ObservableObject {
 
     @Published private(set) var streamURL: URL?
     private(set) var streamHeaders: [String: String] = [:]
-    private let allowAudioDirectStream: Bool
     /// Plex transcode session ID, extracted from HLS stream URL for cleanup on stop
     private var plexSessionId: String?
     /// Playback startup/fallback plan for Rivulet direct-play-first policy.
@@ -514,7 +513,6 @@ final class UniversalPlayerViewModel: ObservableObject {
         self.shuffledQueue = shuffledQueue
         self.loadingArtImage = loadingArtImage
         self.loadingThumbImage = loadingThumbImage
-        self.allowAudioDirectStream = UniversalPlayerViewModel.isAudioDirectStreamCapable(metadata)
 
         // Determine which player to use based on content and settings
         let useRivuletPlayer = UserDefaults.standard.object(forKey: "useRivuletPlayer") == nil
@@ -579,7 +577,7 @@ final class UniversalPlayerViewModel: ObservableObject {
               "content: DV=\(hasDolbyVision) profile=\(dvProfile ?? -1) blCompat=\(doviBLCompatID ?? -1) " +
               "container=\(container) airPlay=\(isAirPlayRoute) compatDV=\(isCompatibleDVProfile)")
 
-        // Use Rivulet Player if enabled (highest priority — experimental unified player)
+        // Use Rivulet Player if enabled (highest priority)
         if useRivuletPlayer {
             self.playerType = .rivulet
             self.rivuletPlayer = RivuletPlayer()
@@ -796,7 +794,7 @@ final class UniversalPlayerViewModel: ObservableObject {
                 hasHDR: metadata.hasHDR,
                 useDolbyVision: useDV,
                 forceVideoTranscode: false,  // avoid transcoding; rely on DV remux + codec tag fixes
-                allowAudioDirectStream: allowAudioDirectStream
+                allowAudioDirectStream: allowAudioDirectStreamDecision(reason: "avplayer_hls_initial")
             ) {
                 streamURL = result.url
                 streamHeaders = result.headers
@@ -819,7 +817,7 @@ final class UniversalPlayerViewModel: ObservableObject {
                 hasHDR: metadata.hasHDR,
                 useDolbyVision: true,
                 forceVideoTranscode: false,
-                allowAudioDirectStream: allowAudioDirectStream
+                allowAudioDirectStream: allowAudioDirectStreamDecision(reason: "dv_sample_buffer_initial")
             ) {
                 streamURL = result.url
                 streamHeaders = result.headers
@@ -947,6 +945,26 @@ final class UniversalPlayerViewModel: ObservableObject {
         }
 
         return true
+    }
+
+    /// Route-aware audio direct-stream decision for each HLS URL build path.
+    /// Must be evaluated at runtime (not cached) because AirPlay routes can change.
+    private func allowAudioDirectStreamDecision(reason: String) -> Bool {
+        let allow = Self.isAudioDirectStreamCapable(metadata)
+        let audioStream = metadata.Media?.first?.Part?.first?.Stream?.first(where: { $0.isAudio })
+        let codec = audioStream?.codec?.lowercased() ?? "unknown"
+        let channels = audioStream?.channels ?? 0
+        let routeSnapshot = PlaybackAudioSessionConfigurator.currentRouteAudioSnapshot(
+            owner: "UniversalPlayerViewModel",
+            reason: "hls_audio_policy_\(reason)"
+        )
+
+        print(
+            "[HLSAudioPolicy] reason=\(reason) allowAudioDirectStream=\(allow) " +
+            "codec=\(codec) channels=\(channels) airPlay=\(routeSnapshot.isAirPlay) " +
+            "maxOutCh=\(routeSnapshot.maximumOutputChannels)"
+        )
+        return allow
     }
 
     /// Check if the current audio output is AirPlay (HomePod)
@@ -1207,7 +1225,7 @@ final class UniversalPlayerViewModel: ObservableObject {
             "video_codec": dvStream?.codec ?? "unknown",
             "audio_codec": audioStream?.codec ?? "unknown",
             "container": metadata.Media?.first?.container ?? "unknown",
-            "allow_audio_direct_stream": allowAudioDirectStream
+            "allow_audio_direct_stream": allowAudioDirectStreamDecision(reason: "selection_breadcrumb")
         ]
         SentrySDK.addBreadcrumb(breadcrumb)
     }
@@ -1256,12 +1274,10 @@ final class UniversalPlayerViewModel: ObservableObject {
 
                 // Configure display criteria to enable Match Frame Rate and Match Dynamic Range
                 // For DV content, MPV plays HDR10 fallback (can't decode DV enhancement layer)
-                #if os(tvOS)
                 DisplayCriteriaManager.shared.configureForContent(
                     videoStream: metadata.primaryVideoStream,
                     forceHDR10Fallback: metadata.hasDolbyVision  // MPV can't play DV
                 )
-                #endif
 
                 // Wait for HLS transcode to be ready before loading (same as AVPlayer path)
                 // Without this, MPV may try to load the manifest before Plex starts transcoding
@@ -1285,11 +1301,9 @@ final class UniversalPlayerViewModel: ObservableObject {
 
                 // Configure display criteria for AVPlayer (HDR/DV mode switching)
                 // Unlike MPV, AVPlayer CAN play DV — no need to force HDR10 fallback
-                #if os(tvOS)
                 DisplayCriteriaManager.shared.configureForContent(
                     videoStream: metadata.primaryVideoStream
                 )
-                #endif
 
                 // Set expected aspect ratio from source metadata for verification
                 if let videoStream = metadata.Media?.first?.Part?.first?.Stream?.first(where: { $0.isVideo }),
@@ -1322,11 +1336,9 @@ final class UniversalPlayerViewModel: ObservableObject {
                 guard let dvp = dvSampleBufferPlayer else { return }
 
                 // Configure display criteria for DV (same as AVPlayer DV path)
-                #if os(tvOS)
                 DisplayCriteriaManager.shared.configureForContent(
                     videoStream: metadata.primaryVideoStream
                 )
-                #endif
 
                 // Wait for HLS transcode to be ready
                 let isHLSStream = url.absoluteString.contains(".m3u8")
@@ -1369,7 +1381,7 @@ final class UniversalPlayerViewModel: ObservableObject {
                         hasHDR: metadata.hasHDR,
                         useDolbyVision: true,
                         forceVideoTranscode: false,
-                        allowAudioDirectStream: allowAudioDirectStream
+                        allowAudioDirectStream: allowAudioDirectStreamDecision(reason: "dv_retry_decision_ping")
                     ) {
                         await PlexNetworkManager.shared.startTranscodeDecision(
                             hlsURL: decisionURL.url, headers: decisionURL.headers
@@ -1392,7 +1404,7 @@ final class UniversalPlayerViewModel: ObservableObject {
                         hasHDR: metadata.hasHDR,
                         useDolbyVision: true,
                         forceVideoTranscode: false,
-                        allowAudioDirectStream: allowAudioDirectStream
+                        allowAudioDirectStream: allowAudioDirectStreamDecision(reason: "dv_retry_session_rebuild")
                     ) else {
                         throw PlayerError.loadFailed("Failed to build retry HLS URL")
                     }
@@ -1418,11 +1430,9 @@ final class UniversalPlayerViewModel: ObservableObject {
                 guard let rp = rivuletPlayer else { return }
 
                 // Configure display criteria (supports both DV and HDR)
-                #if os(tvOS)
                 DisplayCriteriaManager.shared.configureForContent(
                     videoStream: metadata.primaryVideoStream
                 )
-                #endif
 
                 // Direct-play-first startup with one-shot HLS fallback.
                 let plan = playbackPlan ?? ContentRouter.plan(for: ContentRoutingContext(
@@ -1517,7 +1527,7 @@ final class UniversalPlayerViewModel: ObservableObject {
             offsetMs: Int((offset ?? 0) * 1000),
             hasHDR: metadata.hasHDR,
             useDolbyVision: metadata.hasDolbyVision,
-            allowAudioDirectStream: allowAudioDirectStream
+            allowAudioDirectStream: allowAudioDirectStreamDecision(reason: "rivulet_hls_fallback_build")
         ) else {
             return nil
         }
@@ -1854,7 +1864,7 @@ final class UniversalPlayerViewModel: ObservableObject {
             hasHDR: metadata.hasHDR,
             // No transcoding — rely on DV remux and codec tag fixes
             forceVideoTranscode: false,
-            allowAudioDirectStream: allowAudioDirectStream
+            allowAudioDirectStream: allowAudioDirectStreamDecision(reason: "avplayer_hls_restart")
         ) {
             streamURL = result.url
             streamHeaders = result.headers
@@ -1936,7 +1946,7 @@ final class UniversalPlayerViewModel: ObservableObject {
             hasHDR: metadata.hasHDR,
             useDolbyVision: false,  // Key difference: no useDoviCodecs=1
             forceVideoTranscode: false,
-            allowAudioDirectStream: allowAudioDirectStream
+            allowAudioDirectStream: allowAudioDirectStreamDecision(reason: "avplayer_hdr10_fallback")
         ) {
             streamURL = result.url
             streamHeaders = result.headers
@@ -2055,12 +2065,10 @@ final class UniversalPlayerViewModel: ObservableObject {
 
         // Configure display criteria to enable Match Frame Rate and Match Dynamic Range
         // For DV content, MPV plays HDR10 fallback (can't decode DV enhancement layer)
-        #if os(tvOS)
         DisplayCriteriaManager.shared.configureForContent(
             videoStream: metadata.primaryVideoStream,
             forceHDR10Fallback: metadata.hasDolbyVision  // MPV can't play DV
         )
-        #endif
 
         try await mpv.load(url: url, headers: streamHeaders, startTime: startOffset)
         mpv.play()
@@ -2119,9 +2127,7 @@ final class UniversalPlayerViewModel: ObservableObject {
         hideCompatibilityNotice()
 
         // Reset display criteria to default (allows TV to return to normal mode)
-        #if os(tvOS)
         DisplayCriteriaManager.shared.reset()
-        #endif
 
         // Re-enable screensaver
         UIApplication.shared.isIdleTimerDisabled = false
@@ -2550,7 +2556,7 @@ final class UniversalPlayerViewModel: ObservableObject {
             offsetMs: Int(resumeTime * 1000),
             hasHDR: metadata.hasHDR,
             useDolbyVision: metadata.hasDolbyVision,
-            allowAudioDirectStream: allowAudioDirectStream
+            allowAudioDirectStream: allowAudioDirectStreamDecision(reason: "rivulet_hls_audio_switch")
         ) else {
             print("🎬 [AudioSwitch] Failed to build HLS URL")
             return

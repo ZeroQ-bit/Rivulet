@@ -37,7 +37,7 @@ struct ChannelListView: View {
 
     var body: some View {
         ZStack {
-            Color.black.ignoresSafeArea()
+            Rectangle().fill(.background).ignoresSafeArea()
 
             if dataStore.isLoadingChannels && sourceChannels.isEmpty {
                 loadingView
