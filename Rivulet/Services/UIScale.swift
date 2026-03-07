@@ -65,6 +65,10 @@ enum ScaledDimensions {
     static let posterHeight: CGFloat = 390
     static let squarePosterSize: CGFloat = 260  // For music items
 
+    // Continue Watching card dimensions (wide landscape, ~7:5)
+    static let continueWatchingWidth: CGFloat = 392
+    static let continueWatchingHeight: CGFloat = 280
+
     // Grid column constraints
     static let gridMinWidth: CGFloat = 260
     static let gridMaxWidth: CGFloat = 300

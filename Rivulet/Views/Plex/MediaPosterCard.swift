@@ -76,8 +76,6 @@ struct MediaPosterCard: View, Equatable {
     private var posterWidth: CGFloat { ScaledDimensions.posterWidth * scale }
     private var defaultPosterHeight: CGFloat { ScaledDimensions.posterHeight * scale }
     private var cornerRadius: CGFloat { ScaledDimensions.posterCornerRadius }
-    private var titleSize: CGFloat { ScaledDimensions.posterTitleSize * scale }
-    private var subtitleSize: CGFloat { ScaledDimensions.posterSubtitleSize * scale }
 
     /// Music items (albums, artists) should display as square posters
     private var posterHeight: CGFloat {
@@ -86,42 +84,17 @@ struct MediaPosterCard: View, Equatable {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            // Poster Image with progress bar
-            posterImage
-                .frame(width: posterWidth, height: posterHeight)
-                .overlay(alignment: .topTrailing) {
-                    unwatchedBadge
-                }
-                .overlay {
-                    progressBarOverlay
-                }
-                .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
-                .hoverEffect(.highlight)  // Native tvOS focus effect on poster
-                // Simple shadow using .shadow() - more efficient than blur during animations
-                .shadow(color: .black.opacity(0.35), radius: 8, x: 0, y: 6)
-                .padding(.bottom, 10)  // Space for hover scale effect
-
-            // Metadata - fixed height ensures grid alignment
-            VStack(alignment: .leading, spacing: 6) {
-                Text(item.title ?? "Unknown")
-                    .font(.system(size: titleSize, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.9))
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                    .frame(width: posterWidth, alignment: .leading)
-
-                if let subtitle = subtitleText {
-                    Text(subtitle)
-                        .font(.system(size: subtitleSize, weight: .regular))
-                        .foregroundStyle(.white.opacity(0.5))
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                        .frame(width: posterWidth, alignment: .leading)
-                }
+        posterImage
+            .frame(width: posterWidth, height: posterHeight)
+            .overlay(alignment: .topTrailing) {
+                unwatchedBadge
             }
-            .frame(height: 56 * scale, alignment: .top)  // Fixed height for consistent grid alignment
-        }
+            .overlay {
+                progressBarOverlay
+            }
+            .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+            .hoverEffect(.highlight)
+            .shadow(color: .black.opacity(0.35), radius: 8, x: 0, y: 6)
     }
 
     // MARK: - Poster Image
@@ -284,39 +257,6 @@ struct MediaPosterCard: View, Equatable {
         }
     }
 
-    private var subtitleText: String? {
-        switch item.type {
-        case "movie":
-            return item.year.map { String($0) }
-        case "show":
-            if let year = item.year {
-                return String(year)
-            }
-            return nil
-        case "episode":
-            // Show series name and episode info (e.g., "Breaking Bad · S1:E3")
-            var parts: [String] = []
-            if let seriesName = item.grandparentTitle {
-                parts.append(seriesName)
-            }
-            if let episodeInfo = item.episodeString {
-                parts.append(episodeInfo)
-            }
-            return parts.isEmpty ? nil : parts.joined(separator: " · ")
-        case "season":
-            return item.title
-        case "artist":
-            return nil  // Artist name is the title
-        case "album":
-            // Show artist name for albums
-            return item.parentTitle ?? item.grandparentTitle
-        case "track":
-            // Show artist name for tracks
-            return item.grandparentTitle ?? item.parentTitle
-        default:
-            return nil
-        }
-    }
 }
 
 // MARK: - Horizontal Scroll Row

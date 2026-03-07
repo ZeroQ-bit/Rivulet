@@ -13,6 +13,7 @@ import Sentry
 struct RivuletApp: App {
 
     init() {
+        #if !DEBUG
         SentrySDK.start { options in
             options.dsn = Secrets.sentryDSN
             options.debug = false
@@ -37,6 +38,7 @@ struct RivuletApp: App {
                 return event
             }
         }
+        #endif
 
         // Initialize Now Playing service early to configure and activate audio session
         // This must be synchronous so audio session is ready before any player views appear

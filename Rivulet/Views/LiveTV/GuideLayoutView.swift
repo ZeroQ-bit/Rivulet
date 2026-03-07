@@ -18,7 +18,6 @@ struct GuideLayoutView: View {
     var sourceIdFilter: String?
 
     @StateObject private var dataStore = LiveTVDataStore.shared
-    @Environment(\.focusScopeManager) private var focusScopeManager
 
     /// Channels filtered by source (if specified)
     private var channels: [UnifiedChannel] {
@@ -64,7 +63,6 @@ struct GuideLayoutView: View {
         }
         .onAppear {
             setupStartTime()
-            focusScopeManager.activate(.guide, savingCurrent: true, pushToStack: true)
         }
         .task {
             if dataStore.channels.isEmpty { await dataStore.loadChannels() }
@@ -82,15 +80,7 @@ struct GuideLayoutView: View {
                 hasFocus = false
             } else if newMode == .hidden {
                 // Player dismissed - focus guide
-                focusScopeManager.activate(.guide, savingCurrent: true, pushToStack: false)
                 hasFocus = true
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                    focusScopeManager.activate(.guide, savingCurrent: true, pushToStack: false)
-                    hasFocus = false
-                    DispatchQueue.main.async {
-                        hasFocus = true
-                    }
-                }
             }
         }
     }
@@ -122,7 +112,6 @@ struct GuideLayoutView: View {
                 displayMode = .hidden
                 activeChannel = nil
                 playerSessionId = UUID()
-                focusScopeManager.activate(.guide, savingCurrent: true, pushToStack: false)
                 hasFocus = false
                 DispatchQueue.main.async {
                     hasFocus = true

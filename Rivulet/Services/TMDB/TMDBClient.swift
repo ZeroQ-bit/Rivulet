@@ -125,9 +125,15 @@ private struct CachedFeatures: Codable {
     let features: TMDBItemFeatures
 }
 
+struct TMDBLogoResult: Codable {
+    let url: URL?
+    let aspectRatio: Double?  // width / height (e.g. 3.5 = very wide, 0.8 = tall)
+}
+
 private struct CachedLogoURL: Codable {
     let generatedAt: Date
     let logoURLString: String?  // nil means "no logo found"
+    let aspectRatio: Double?
 }
 
 final class TMDBClient: @unchecked Sendable {
@@ -179,8 +185,12 @@ final class TMDBClient: @unchecked Sendable {
     /// Fetches the best English logo URL from TMDB images.
     /// Returns a URL to the logo image at w500 resolution, or nil if none found.
     func fetchLogoURL(tmdbId: Int, type: TMDBMediaType) async -> URL? {
-        // Double-optional: nil = not cached, .some(nil) = cached "no logo", .some(url) = cached logo
-        if let cached = loadCachedLogoURL(tmdbId: tmdbId, type: type) {
+        await fetchLogo(tmdbId: tmdbId, type: type)?.url
+    }
+
+    /// Fetches the best English logo URL and its aspect ratio from TMDB images.
+    func fetchLogo(tmdbId: Int, type: TMDBMediaType) async -> TMDBLogoResult? {
+        if let cached = loadCachedLogo(tmdbId: tmdbId, type: type) {
             return cached
         }
 
@@ -209,9 +219,10 @@ final class TMDBClient: @unchecked Sendable {
                 urlString = nil
             }
 
-            saveCachedLogoURL(urlString, tmdbId: tmdbId, type: type)
-            if let urlString { return URL(string: urlString) }
-            return nil
+            saveCachedLogoURL(urlString, aspectRatio: best?.aspectRatio, tmdbId: tmdbId, type: type)
+
+            guard let urlString else { return nil }
+            return TMDBLogoResult(url: URL(string: urlString), aspectRatio: best?.aspectRatio)
         } catch {
             return nil
         }
@@ -292,21 +303,21 @@ final class TMDBClient: @unchecked Sendable {
         cacheDirectory.appendingPathComponent("\(type.rawValue)_\(tmdbId)_logo.json")
     }
 
-    private func loadCachedLogoURL(tmdbId: Int, type: TMDBMediaType) -> URL?? {
+    /// Load cached logo result. Returns nil if not cached, TMDBLogoResult with nil url if cached negative.
+    private func loadCachedLogo(tmdbId: Int, type: TMDBMediaType) -> TMDBLogoResult?? {
         let url = logoCacheURL(tmdbId: tmdbId, type: type)
-        guard let data = try? Data(contentsOf: url) else { return nil }  // No cache file → nil (not cached)
+        guard let data = try? Data(contentsOf: url) else { return nil }
         guard let cached = try? JSONDecoder().decode(CachedLogoURL.self, from: data) else { return nil }
         let age = Date().timeIntervalSince(cached.generatedAt)
         guard age < cacheTTL else { return nil }
-        // Return .some(URL?) — .some(nil) means "cached negative result (no logo)"
         if let urlString = cached.logoURLString {
-            return .some(URL(string: urlString))
+            return .some(TMDBLogoResult(url: URL(string: urlString), aspectRatio: cached.aspectRatio))
         }
-        return .some(nil)
+        return .some(nil)  // Cached negative result
     }
 
-    private func saveCachedLogoURL(_ urlString: String?, tmdbId: Int, type: TMDBMediaType) {
-        let cached = CachedLogoURL(generatedAt: Date(), logoURLString: urlString)
+    private func saveCachedLogoURL(_ urlString: String?, aspectRatio: Double?, tmdbId: Int, type: TMDBMediaType) {
+        let cached = CachedLogoURL(generatedAt: Date(), logoURLString: urlString, aspectRatio: aspectRatio)
         guard let data = try? JSONEncoder().encode(cached) else { return }
         let url = logoCacheURL(tmdbId: tmdbId, type: type)
         try? data.write(to: url, options: [.atomic])

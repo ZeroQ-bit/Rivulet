@@ -5,6 +5,7 @@
 //  Shared audio-session setup for playback paths.
 //
 
+import Foundation
 import AVFoundation
 
 struct RouteAudioSnapshot: Sendable {
@@ -13,12 +14,43 @@ struct RouteAudioSnapshot: Sendable {
     let sampleRate: Double
     let supportsMultichannelContent: Bool
     let outputPortTypes: [String]
+    let outputPortNames: [String]
+
+    var isLikelyMultichannelAirPlay: Bool {
+        isAirPlay && maximumOutputChannels > 2
+    }
+}
+
+enum RouteAudioPolicyProfile: String, Sendable {
+    case local
+    case airPlayStereo
+    case airPlayMultichannel
+}
+
+struct RouteAudioPolicy: Sendable {
+    let profile: RouteAudioPolicyProfile
+    let useAudioPullMode: Bool
+    let audioPullStartBufferDuration: TimeInterval
+    let audioPullResumeBufferDuration: TimeInterval
+    let targetOutputSampleRate: Int
+    let preferAudioEngineForPCM: Bool
+    let forceClientDecodeAllAudio: Bool
+    let forceClientDecodeCodecs: Set<String>
+    let enableSurroundReEncoding: Bool
+    let useSignedInt16Audio: Bool
+    let forceDownmixToStereo: Bool
+    let audioBackpressureMaxWait: TimeInterval
 }
 
 enum PlaybackAudioSessionConfigurator {
     private static var lastActivationTimestamp: CFAbsoluteTime = 0
     private static var lastActivationModeRawValue: String = ""
     private static let minimumReactivationInterval: CFAbsoluteTime = 0.75
+    private static let conservativeAirPlayDecodeCodecs: Set<String> = [
+        "aac", "ac3", "eac3", "ec3",
+        "alac", "flac", "mp3", "mp2",
+        "opus", "pcm"
+    ]
 
     /// Configure and activate a playback session optimized for long-form media.
     /// Uses long-form video routing on iOS and long-form audio on tvOS (video policy
@@ -87,9 +119,79 @@ enum PlaybackAudioSessionConfigurator {
         return session.currentRoute.outputs.contains(where: { $0.portType == .airPlay })
     }
 
+    static func recommendedAudioPolicy(for snapshot: RouteAudioSnapshot) -> RouteAudioPolicy {
+        let hardwareRate = Int(snapshot.sampleRate.rounded())
+        let targetRate = (hardwareRate > 0 && hardwareRate != 48_000) ? hardwareRate : 0
+
+        guard snapshot.isAirPlay else {
+            return RouteAudioPolicy(
+                profile: .local,
+                useAudioPullMode: true,
+                audioPullStartBufferDuration: 0,
+                audioPullResumeBufferDuration: 0,
+                targetOutputSampleRate: 0,
+                preferAudioEngineForPCM: false,
+                forceClientDecodeAllAudio: false,
+                forceClientDecodeCodecs: [],
+                enableSurroundReEncoding: false,
+                useSignedInt16Audio: false,
+                forceDownmixToStereo: false,
+                audioBackpressureMaxWait: 0.75
+            )
+        }
+
+        if snapshot.isLikelyMultichannelAirPlay {
+            return RouteAudioPolicy(
+                profile: .airPlayMultichannel,
+                useAudioPullMode: true,
+                audioPullStartBufferDuration: 0.35,
+                audioPullResumeBufferDuration: 0.15,
+                targetOutputSampleRate: targetRate,
+                preferAudioEngineForPCM: false,
+                forceClientDecodeAllAudio: false,
+                forceClientDecodeCodecs: conservativeAirPlayDecodeCodecs,
+                enableSurroundReEncoding: true,
+                useSignedInt16Audio: true,
+                forceDownmixToStereo: true,
+                audioBackpressureMaxWait: 1.0
+            )
+        }
+
+        return RouteAudioPolicy(
+            profile: .airPlayStereo,
+            useAudioPullMode: true,
+            audioPullStartBufferDuration: 0.16,
+            audioPullResumeBufferDuration: 0.5,
+            targetOutputSampleRate: targetRate,
+            preferAudioEngineForPCM: false,
+            forceClientDecodeAllAudio: true,
+            forceClientDecodeCodecs: conservativeAirPlayDecodeCodecs,
+            enableSurroundReEncoding: false,
+            useSignedInt16Audio: true,
+            forceDownmixToStereo: true,
+            audioBackpressureMaxWait: 2.0
+        )
+    }
+
+    static func policyDecisionReason(for snapshot: RouteAudioSnapshot) -> String {
+        if !snapshot.isAirPlay { return "local_output" }
+
+        if snapshot.supportsMultichannelContent && snapshot.maximumOutputChannels <= 2 {
+            return "airplay_stereo_forced_by_max_output_channels"
+        }
+        if snapshot.supportsMultichannelContent {
+            return "airplay_supports_multichannel_content"
+        }
+        if snapshot.maximumOutputChannels > 2 {
+            return "airplay_max_output_channels_\(snapshot.maximumOutputChannels)"
+        }
+        return "airplay_stereo_only"
+    }
+
     static func currentRouteAudioSnapshot(owner: String, reason: String) -> RouteAudioSnapshot {
         let session = AVAudioSession.sharedInstance()
         let outputTypes = session.currentRoute.outputs.map(\.portType.rawValue)
+        let outputNames = session.currentRoute.outputs.map(\.portName)
         let supportsMultichannel: Bool
         if #available(tvOS 15.0, iOS 15.0, *) {
             supportsMultichannel = session.supportsMultichannelContent
@@ -102,7 +204,8 @@ enum PlaybackAudioSessionConfigurator {
             maximumOutputChannels: session.maximumOutputNumberOfChannels,
             sampleRate: session.sampleRate,
             supportsMultichannelContent: supportsMultichannel,
-            outputPortTypes: outputTypes
+            outputPortTypes: outputTypes,
+            outputPortNames: outputNames
         )
 
         print(
@@ -110,7 +213,9 @@ enum PlaybackAudioSessionConfigurator {
             "airPlay=\(snapshot.isAirPlay) maxOutCh=\(snapshot.maximumOutputChannels) " +
             "sampleRate=\(String(format: "%.0f", snapshot.sampleRate)) " +
             "supportsMultichannel=\(snapshot.supportsMultichannelContent) " +
-            "outputs=\(snapshot.outputPortTypes.joined(separator: ","))"
+            "policyReason=\(policyDecisionReason(for: snapshot)) " +
+            "outputs=\(snapshot.outputPortTypes.joined(separator: ",")) " +
+            "names=\(snapshot.outputPortNames.joined(separator: ","))"
         )
         return snapshot
     }

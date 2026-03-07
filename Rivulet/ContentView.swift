@@ -17,7 +17,11 @@ struct ContentView: View {
 
     @StateObject private var dataStore = PlexDataStore.shared
     @StateObject private var authManager = PlexAuthManager.shared
+    #if DEBUG
+    @State private var showSplash = false
+    #else
     @State private var showSplash = true
+    #endif
 
     var body: some View {
         TVSidebarView()
@@ -76,7 +80,7 @@ struct ContentView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(.windowBackground, ignoresSafeAreaEdges: .all)
+        .background(.regularMaterial, ignoresSafeAreaEdges: .all)
         .allowsHitTesting(true)
     }
 }

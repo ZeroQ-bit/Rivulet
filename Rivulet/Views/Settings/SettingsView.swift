@@ -245,7 +245,6 @@ struct SettingsView: View {
 
 
     // Environment
-    @Environment(\.focusScopeManager) private var focusScopeManager
     @Environment(\.nestedNavigationState) private var nestedNavState
 
     // Audio/Subtitle preference state
@@ -358,9 +357,6 @@ struct SettingsView: View {
             DispatchQueue.main.async {
                 focusTrigger += 1
             }
-        }
-        .onChange(of: focusScopeManager.restoreTrigger) { _, _ in
-            focusTrigger += 1
         }
         .onChange(of: navigationStack) { _, newStack in
             let isNested = newStack.count > 1

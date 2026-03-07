@@ -112,18 +112,55 @@ final class DirectPlayPipeline {
     /// for certain codecs through AVSampleBufferAudioRenderer.
     /// Codecs that must be client-decoded even when they have a native format description.
     /// Used for AirPlay where compressed AAC passthrough jams AVSampleBufferAudioRenderer.
+    var forceClientDecodeAllAudio = false
     var forceClientDecodeCodecs: Set<String> = []
 
     /// Output signed 16-bit integer PCM instead of 32-bit float for client-decoded audio.
     /// AirPlay 2 natively supports S16/S24 but not float32 — avoids system-side conversion artifacts.
+    /// Skips propagation when encoder is active — decoder must output native F32 for the encoder.
     var useSignedInt16Audio = false {
-        didSet { audioDecoder?.useSignedInt16Output = useSignedInt16Audio }
+        didSet {
+            if audioEncoder == nil { audioDecoder?.useSignedInt16Output = useSignedInt16Audio }
+        }
     }
 
     /// When true, downmix multichannel audio to stereo for basic AirPlay speakers.
+    /// Skips propagation when encoder is active — decoder must preserve full channel layout.
     var forceDownmixToStereo = false {
-        didSet { audioDecoder?.forceDownmixToStereo = forceDownmixToStereo }
+        didSet {
+            if audioEncoder == nil { audioDecoder?.forceDownmixToStereo = forceDownmixToStereo }
+        }
     }
+
+    /// Target output sample rate for client-decoded audio.
+    /// When set, swresample resamples to this rate to match the audio hardware.
+    /// Critical for AirPlay (44100Hz) where source audio is typically 48000Hz.
+    /// Skips propagation when encoder is active — decoder must output native rate for the encoder.
+    var targetOutputSampleRate: Int = 0 {
+        didSet {
+            if audioEncoder == nil { audioDecoder?.targetOutputSampleRate = targetOutputSampleRate }
+        }
+    }
+
+    /// When true, decoded PCM audio is routed through AVAudioEngine instead of
+    /// AVSampleBufferAudioRenderer. Used for stereo AirPlay/HomePod routes where
+    /// the engine has proven more tolerant than sample-buffer PCM delivery.
+    var preferAudioEngineForPCM = false {
+        didSet {
+            guard audioDecoder != nil, audioEncoder == nil else { return }
+            if preferAudioEngineForPCM {
+                renderer.enableAudioEngine()
+            } else {
+                renderer.disableAudioEngine()
+            }
+        }
+    }
+
+    /// When true, re-encode client-decoded audio to EAC3 for surround over AirPlay.
+    /// DTS/TrueHD -> PCM (F32, multichannel) -> EAC3 -> HomePods (5.1/7.1 surround).
+    var enableSurroundReEncoding = false
+
+    private var audioEncoder: FFmpegAudioEncoder?
 
     // MARK: - Client-Side Subtitle Decoding (PGS, DVB-SUB)
 
@@ -274,17 +311,48 @@ final class DirectPlayPipeline {
                         codecpar: codecpar,
                         codecNameHint: selectedAudioTrack.codecName
                     )
-                    decoder.useSignedInt16Output = useSignedInt16Audio
-                    decoder.forceDownmixToStereo = forceDownmixToStereo
+                    if enableSurroundReEncoding && selectedAudioTrack.channels > 2 {
+                        // Re-encoding path: decoder outputs native F32 multichannel PCM,
+                        // encoder converts to EAC3 for surround passthrough over AirPlay.
+                        decoder.useSignedInt16Output = false
+                        decoder.forceDownmixToStereo = false
+                        decoder.targetOutputSampleRate = 0
+
+                        do {
+                            let encoder = try FFmpegAudioEncoder(
+                                channels: Int(selectedAudioTrack.channels),
+                                sampleRate: Int(selectedAudioTrack.sampleRate),
+                                bitsPerSample: 32  // F32 from decoder
+                            )
+                            audioEncoder = encoder
+                            print("[DirectPlay] EAC3 re-encoder enabled for " +
+                                  "\(selectedAudioTrack.codecName) \(selectedAudioTrack.channels)ch " +
+                                  "-> EAC3 surround")
+                        } catch {
+                            // Encoder failed — fall back to stereo S16
+                            print("[DirectPlay] EAC3 encoder init failed: \(error) — falling back to stereo PCM")
+                            audioEncoder = nil
+                            decoder.useSignedInt16Output = useSignedInt16Audio
+                            decoder.forceDownmixToStereo = forceDownmixToStereo
+                            decoder.targetOutputSampleRate = targetOutputSampleRate
+                        }
+                    } else {
+                        decoder.useSignedInt16Output = useSignedInt16Audio
+                        decoder.forceDownmixToStereo = forceDownmixToStereo
+                        decoder.targetOutputSampleRate = targetOutputSampleRate
+                    }
                     audioDecoder = decoder
                     print("[DirectPlay] Client-side audio decoding enabled for " +
                           "\(selectedAudioTrack.codecName) \(selectedAudioTrack.channels)ch" +
-                          (useSignedInt16Audio ? " (S16 output)" : "") +
-                          (forceDownmixToStereo ? " (stereo downmix)" : ""))
+                          (audioEncoder != nil ? " (EAC3 re-encode)" : "") +
+                          (useSignedInt16Audio && audioEncoder == nil ? " (S16 output)" : "") +
+                          (forceDownmixToStereo && audioEncoder == nil ? " (stereo downmix)" : "") +
+                          (targetOutputSampleRate > 0 && audioEncoder == nil ? " (resample->\(targetOutputSampleRate)Hz)" : ""))
                 } catch {
                     print("[DirectPlay] Failed to init audio decoder for " +
                           "\(selectedAudioTrack.codecName): \(error) — falling back to passthrough")
                     audioDecoder = nil
+                    audioEncoder = nil
                 }
             }
         } else if let selectedAudioTrack,
@@ -294,10 +362,7 @@ final class DirectPlayPipeline {
                   "not auto-switching to software-decoded \(clientDecodeTrack.codecName)")
         }
 
-        // Enable AVAudioEngine for client-decoded PCM audio.
-        // The engine handles sample rate conversion and device-specific buffering,
-        // which is critical for AirPlay/HomePod output.
-        if audioDecoder != nil {
+        if audioDecoder != nil && audioEncoder == nil && preferAudioEngineForPCM {
             renderer.enableAudioEngine()
         } else {
             renderer.disableAudioEngine()
@@ -307,6 +372,7 @@ final class DirectPlayPipeline {
             owner: "DirectPlayPipeline",
             reason: "load"
         )
+        let routeDecision = PlaybackAudioSessionConfigurator.policyDecisionReason(for: routeSnapshot)
         let startupCodec = selectedAudioTrack?.codecName ?? "unknown"
         let startupChannels = selectedAudioTrack.map { Int($0.channels) } ?? 0
         let startupDecodePath = audioDecoder != nil ? "client_decode" : "passthrough"
@@ -314,7 +380,12 @@ final class DirectPlayPipeline {
             "[DirectPlayAudioStartup] codec=\(startupCodec) decodePath=\(startupDecodePath) " +
             "streamChannels=\(startupChannels) routeAirPlay=\(routeSnapshot.isAirPlay) " +
             "maxOutCh=\(routeSnapshot.maximumOutputChannels) " +
-            "audioFD=\(demuxer.audioFormatDescription != nil) tsValidity=runtime_pending"
+            "supportsMultichannel=\(routeSnapshot.supportsMultichannelContent) " +
+            "routeDecision=\(routeDecision) " +
+            "routeRate=\(String(format: "%.0f", routeSnapshot.sampleRate))Hz " +
+            "pipelineRate=\(targetOutputSampleRate > 0 ? "\(targetOutputSampleRate)" : "native") " +
+            "audioEngine=\(audioDecoder != nil && audioEncoder == nil && preferAudioEngineForPCM) " +
+            "reencode=\(audioEncoder != nil) audioFD=\(demuxer.audioFormatDescription != nil) tsValidity=runtime_pending"
         )
 
         // Populate track info
@@ -413,6 +484,8 @@ final class DirectPlayPipeline {
         audioEnqueueTask = nil
         readTask?.cancel()
         readTask = nil
+        audioEncoder?.close()
+        audioEncoder = nil
         audioDecoder?.close()
         audioDecoder = nil
         subtitleDecoder?.close()
@@ -441,6 +514,8 @@ final class DirectPlayPipeline {
         await oldAudioTask?.value
         await oldReadTask?.value
 
+        audioEncoder?.close()
+        audioEncoder = nil
         audioDecoder?.close()
         audioDecoder = nil
         subtitleDecoder?.close()
@@ -530,10 +605,11 @@ final class DirectPlayPipeline {
         await oldAudioTask?.value
         await oldTask?.value
 
-        // Flush renderer buffers and discard any batched audio
+        // Flush renderer buffers and discard any batched/encoded audio
         renderer.flush()
         _ = audioDecoder?.flushBatch()
         audioDecoder?.resetTimestampTracking(reason: "seek")
+        _ = audioEncoder?.flush()
 
         // Seek in demuxer
         try demuxer.seek(to: time)
@@ -609,13 +685,14 @@ final class DirectPlayPipeline {
         await oldAudioTask?.value
         await oldTask?.value
 
-        // Flush audio and decoder
+        // Flush audio, decoder, and encoder
         renderer.flush()
         _ = audioDecoder?.flushBatch()
         audioDecoder?.resetTimestampTracking(reason: "audio_track_switch")
+        _ = audioEncoder?.flush()
 
         if codecNeedsClientDecode(track.codecName) {
-            print("[DirectPlay] Audio switch: \(track.codecName) → client decode path")
+            print("[DirectPlay] Audio switch: \(track.codecName) -> client decode path")
             try demuxer.selectAudioStreamForClientDecode(index: streamIndex)
             guard let codecpar = demuxer.codecParameters(forStream: streamIndex) else {
                 throw FFmpegError.noCodecParameters
@@ -625,12 +702,43 @@ final class DirectPlayPipeline {
                 codecpar: codecpar,
                 codecNameHint: track.codecName
             )
-            decoder.useSignedInt16Output = useSignedInt16Audio
-            decoder.forceDownmixToStereo = forceDownmixToStereo
+
+            // Close old encoder before potentially creating new one
+            audioEncoder?.close()
+            audioEncoder = nil
+
+            if enableSurroundReEncoding && track.channels > 2 {
+                decoder.useSignedInt16Output = false
+                decoder.forceDownmixToStereo = false
+                decoder.targetOutputSampleRate = 0
+                do {
+                    audioEncoder = try FFmpegAudioEncoder(
+                        channels: Int(track.channels),
+                        sampleRate: Int(track.sampleRate),
+                        bitsPerSample: 32
+                    )
+                    print("[DirectPlay] EAC3 re-encoder enabled for \(track.codecName) \(track.channels)ch")
+                } catch {
+                    print("[DirectPlay] EAC3 encoder init failed on track switch: \(error)")
+                    decoder.useSignedInt16Output = useSignedInt16Audio
+                    decoder.forceDownmixToStereo = forceDownmixToStereo
+                    decoder.targetOutputSampleRate = targetOutputSampleRate
+                }
+            } else {
+                decoder.useSignedInt16Output = useSignedInt16Audio
+                decoder.forceDownmixToStereo = forceDownmixToStereo
+                decoder.targetOutputSampleRate = targetOutputSampleRate
+            }
             audioDecoder = decoder
-            renderer.enableAudioEngine()
+            if audioEncoder == nil && preferAudioEngineForPCM {
+                renderer.enableAudioEngine()
+            } else {
+                renderer.disableAudioEngine()
+            }
         } else {
-            print("[DirectPlay] Audio switch: \(track.codecName) → passthrough path")
+            print("[DirectPlay] Audio switch: \(track.codecName) -> passthrough path")
+            audioEncoder?.close()
+            audioEncoder = nil
             audioDecoder?.close()
             audioDecoder = nil
             renderer.disableAudioEngine()
@@ -652,6 +760,7 @@ final class DirectPlayPipeline {
         audioEnqueueTask?.cancel()
         audioEnqueueTask = nil
         readTask?.cancel()
+        renderer.onAudioPrimedForPlayback = nil
 
         // Capture everything the detached task needs — avoid referencing self directly
         // since self is @MainActor and the task must run off MainActor for FFmpeg I/O.
@@ -660,6 +769,7 @@ final class DirectPlayPipeline {
         let profileConverter = self.profileConverter
         let requiresConversion = self.requiresProfileConversion
         let audioDecoder = self.audioDecoder
+        let audioEncoder = self.audioEncoder
 
         guard let videoFD = demuxer.videoFormatDescription else {
             print("[DirectPlay] No video format description — cannot start read loop")
@@ -668,6 +778,10 @@ final class DirectPlayPipeline {
         }
         let audioFD = demuxer.audioFormatDescription
         let hasDV = demuxer.hasDolbyVision
+        let activeAudioTrack = demuxer.audioTracks.first(where: { $0.streamIndex == demuxer.selectedAudioStream })
+        let activeAudioSampleRate = activeAudioTrack.map { Int($0.sampleRate) } ?? 0
+        let activeAudioChannels = activeAudioTrack.map { Int($0.channels) } ?? 0
+        let activeTargetOutputSampleRate = self.targetOutputSampleRate
 
         var audioContinuation: AsyncStream<CMSampleBuffer>.Continuation?
         var audioGate: AudioBufferGate?
@@ -745,9 +859,173 @@ final class DirectPlayPipeline {
             var waitingForPrerollStart = false
             var prerollWaitStartWall: CFAbsoluteTime?
             var prerollAnchorPTSSeconds: Double?
+            var prerollAnchorTime: CMTime?
             var prerollMaxPTSSeconds: Double?
+            let hasAudioPath = (audioDecoder != nil || audioFD != nil)
+            let prerollStartHostLeadSeconds: TimeInterval = activeTargetOutputSampleRate > 0 ? 0.10 : 0.03
+
+            let maybePrimePrerollTimeline: @Sendable (Double, CMTime, String) async -> Void = { ptsSeconds, ptsTime, source in
+                guard ptsSeconds.isFinite, ptsSeconds >= 0 else { return }
+                guard !waitingForPrerollStart else { return }
+
+                let decision = await MainActor.run { [weak self] () -> (shouldPreroll: Bool, label: String)? in
+                    guard let self else { return nil }
+
+                    if self.needsInitialSync {
+                        self.needsInitialSync = false
+                        renderer.setRate(0, time: ptsTime)
+                        return (self.isPlaying, "Initial sync")
+                    }
+
+                    if self.needsRateRestoreAfterSeek {
+                        self.needsRateRestoreAfterSeek = false
+                        renderer.setRate(0, time: ptsTime)
+                        return (self.isPlaying, "Post-seek sync")
+                    }
+
+                    return nil
+                }
+
+                guard let decision else { return }
+
+                print(
+                    "[DirectPlay] \(decision.label): setting rate=0.0 " +
+                    "time=\(String(format: "%.3f", ptsSeconds))s " +
+                    "(preroll=\(decision.shouldPreroll), source=\(source))"
+                )
+
+                if decision.shouldPreroll {
+                    waitingForPrerollStart = true
+                    prerollWaitStartWall = CFAbsoluteTimeGetCurrent()
+                    prerollAnchorPTSSeconds = ptsSeconds
+                    prerollAnchorTime = ptsTime
+                    prerollMaxPTSSeconds = ptsSeconds
+                }
+            }
+
+            let maybeCompletePrerollStart: @Sendable (Double?, Bool) async -> Bool = { currentPTSSeconds, audioReadyOverride in
+                guard waitingForPrerollStart else { return false }
+
+                let audioPrimed = await MainActor.run {
+                    renderer.isAudioPrimedForPlayback
+                }
+                let audioReliableStart = await MainActor.run {
+                    renderer.hasReliableAudioStart
+                }
+                let audioReady = audioReadyOverride || !hasAudioPath || audioPrimed
+                let prerollLeadSeconds: Double = {
+                    guard let anchor = prerollAnchorPTSSeconds, let maxPTS = prerollMaxPTSSeconds else { return 0 }
+                    return max(0, maxPTS - anchor)
+                }()
+                // Non-conversion streams commonly expose ~200ms reordered lead at startup.
+                // Requiring more can stall preroll on some DV direct-play files.
+                let requiredPrerollLeadSeconds = requiresConversion ? 0.45 : 0.20
+                let videoReady = prerollLeadSeconds >= requiredPrerollLeadSeconds
+                let waitedMs: Double = {
+                    guard let start = prerollWaitStartWall else { return 0 }
+                    return (CFAbsoluteTimeGetCurrent() - start) * 1000
+                }()
+                let timedOut = hasAudioPath && waitedMs >= 1000
+
+                if timedOut {
+                    print("[DirectPlay] Preroll timeout after \(String(format: "%.0f", waitedMs))ms " +
+                          "(audioReady=\(audioReady) reliableStart=\(audioReliableStart) videoReady=\(videoReady) " +
+                          "lead=\(String(format: "%.0f", prerollLeadSeconds * 1000))ms " +
+                          "need=\(String(format: "%.0f", requiredPrerollLeadSeconds * 1000))ms)")
+                }
+
+                guard (audioReady && videoReady) || timedOut else { return false }
+
+                let startedRate = await MainActor.run { [weak self] () -> (Float, Double, Double, String)? in
+                    guard let self else { return nil }
+                    let shouldStartPlayback = (self.state == .running) || self.isPlaying
+                    guard shouldStartPlayback else { return nil }
+                    let rate = self.playbackRate
+                    let anchorTime = prerollAnchorTime ?? CMTime(
+                        seconds: prerollAnchorPTSSeconds ?? renderer.currentTime,
+                        preferredTimescale: 90_000
+                    )
+                    let anchorSeconds = prerollAnchorPTSSeconds ?? CMTimeGetSeconds(anchorTime)
+                    // Start against a short future host-time edge so the first
+                    // enqueued preroll samples define the playback timeline rather
+                    // than being treated as already late.
+                    let hostLead = prerollStartHostLeadSeconds
+                    let hostTime = CMTimeAdd(
+                        CMClockGetTime(CMClockGetHostTimeClock()),
+                        CMTime(seconds: hostLead, preferredTimescale: 90_000)
+                    )
+                    renderer.setRate(rate, time: anchorTime, atHostTime: hostTime)
+                    let reason = timedOut ? "timeout" : "audio+video_primed"
+                    return (rate, anchorSeconds, hostLead, reason)
+                }
+
+                guard let started = startedRate else { return false }
+
+                let (playbackRate, anchorTime, hostLead, reason) = started
+                let packetTime = currentPTSSeconds ?? prerollMaxPTSSeconds ?? anchorTime
+                waitingForPrerollStart = false
+                prerollWaitStartWall = nil
+                prerollAnchorPTSSeconds = nil
+                prerollAnchorTime = nil
+                prerollMaxPTSSeconds = nil
+                print(
+                    "[DirectPlay] Preroll complete: starting clock from anchor=\(String(format: "%.3f", anchorTime))s " +
+                    "packet=\(String(format: "%.3f", packetTime))s rate=\(String(format: "%.2f", playbackRate)) " +
+                    "reason=\(reason) wait=\(String(format: "%.0f", waitedMs))ms " +
+                    "lead=\(String(format: "%.0f", prerollLeadSeconds * 1000))ms " +
+                    "hostLead=\(String(format: "%.0f", hostLead * 1000))ms"
+                )
+
+                return true
+            }
+
+            await MainActor.run {
+                renderer.onAudioPrimedForPlayback = { deliveredPTSSeconds in
+                    Task.detached {
+                        _ = await maybeCompletePrerollStart(deliveredPTSSeconds, true)
+                    }
+                }
+            }
 
             let enqueueAudioBuffer: @Sendable (CMSampleBuffer) async -> Void = { sampleBuffer in
+                let samplePTS = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+                let samplePTSSeconds = CMTimeGetSeconds(samplePTS)
+
+                await maybePrimePrerollTimeline(samplePTSSeconds, samplePTS, "audio")
+
+                if waitingForPrerollStart,
+                   let anchor = prerollAnchorPTSSeconds,
+                   samplePTSSeconds.isFinite,
+                   samplePTSSeconds + 0.05 < anchor {
+                    let previousAnchor = anchor
+                    prerollAnchorPTSSeconds = samplePTSSeconds
+                    prerollAnchorTime = samplePTS
+                    if let maxPTS = prerollMaxPTSSeconds {
+                        prerollMaxPTSSeconds = max(maxPTS, samplePTSSeconds)
+                    }
+                    await MainActor.run {
+                        renderer.setRate(0, time: samplePTS)
+                    }
+                    print(
+                        "[DirectPlay] Preroll anchor adjusted for early audio sample: " +
+                        "old=\(String(format: "%.3f", previousAnchor))s " +
+                        "new=\(String(format: "%.3f", samplePTSSeconds))s " +
+                        "delta=\(String(format: "%.0f", (previousAnchor - samplePTSSeconds) * 1000))ms"
+                    )
+                }
+
+                if waitingForPrerollStart {
+                    if let maxPTS = prerollMaxPTSSeconds {
+                        prerollMaxPTSSeconds = max(maxPTS, samplePTSSeconds)
+                    } else if samplePTSSeconds.isFinite {
+                        prerollMaxPTSSeconds = samplePTSSeconds
+                    }
+
+                    await renderer.enqueueAudio(sampleBuffer)
+                    _ = await maybeCompletePrerollStart(samplePTSSeconds, false)
+                    return
+                }
+
                 if let localAudioContinuation, let localAudioGate {
                     let reservation = localAudioGate.reserveSlot()
                     if !reservation.accepted {
@@ -770,14 +1048,30 @@ final class DirectPlayPipeline {
             if let decoder = audioDecoder,
                let localAudioDecodeStream,
                let localAudioDecodeGate {
+                if audioEncoder != nil {
+                    print("[DirectPlayDiag] Audio transcode path active: decoder->EAC3 encoder " +
+                          "encoderRate=\(activeAudioSampleRate)Hz encoderChannels=\(activeAudioChannels) " +
+                          "routeTargetRate=\(activeTargetOutputSampleRate > 0 ? "\(activeTargetOutputSampleRate)" : "native")")
+                }
                 localAudioDecodeTask = Task.detached {
                     for await compressedPacket in localAudioDecodeStream {
                         guard !Task.isCancelled else { break }
 
                         let batchedFrames = decoder.decodeAndBatch(compressedPacket)
                         for batchedFrame in batchedFrames {
-                            if let sampleBuffer = try? decoder.createPCMSampleBuffer(from: batchedFrame) {
-                                await enqueueAudioBuffer(sampleBuffer)
+                            if let audioEncoder {
+                                // Re-encode path: PCM -> EAC3
+                                let encodedFrames = audioEncoder.encode(batchedFrame)
+                                for encodedFrame in encodedFrames {
+                                    if let sb = try? audioEncoder.createEAC3SampleBuffer(from: encodedFrame) {
+                                        await enqueueAudioBuffer(sb)
+                                    }
+                                }
+                            } else {
+                                // Direct PCM path
+                                if let sampleBuffer = try? decoder.createPCMSampleBuffer(from: batchedFrame) {
+                                    await enqueueAudioBuffer(sampleBuffer)
+                                }
                             }
                         }
 
@@ -785,9 +1079,26 @@ final class DirectPlayPipeline {
                     }
 
                     // Flush residual decoder batch on stream end.
-                    if let remaining = decoder.flushBatch(),
-                       let sampleBuffer = try? decoder.createPCMSampleBuffer(from: remaining) {
-                        await enqueueAudioBuffer(sampleBuffer)
+                    if let remaining = decoder.flushBatch() {
+                        if let audioEncoder {
+                            let encodedFrames = audioEncoder.encode(remaining)
+                            for encodedFrame in encodedFrames {
+                                if let sb = try? audioEncoder.createEAC3SampleBuffer(from: encodedFrame) {
+                                    await enqueueAudioBuffer(sb)
+                                }
+                            }
+                            // Drain encoder's internal buffers
+                            let flushed = audioEncoder.flush()
+                            for encodedFrame in flushed {
+                                if let sb = try? audioEncoder.createEAC3SampleBuffer(from: encodedFrame) {
+                                    await enqueueAudioBuffer(sb)
+                                }
+                            }
+                        } else {
+                            if let sampleBuffer = try? decoder.createPCMSampleBuffer(from: remaining) {
+                                await enqueueAudioBuffer(sampleBuffer)
+                            }
+                        }
                     }
                 }
             }
@@ -942,40 +1253,33 @@ final class DirectPlayPipeline {
                         let ptsSeconds = packet.ptsSeconds
 
                         let syncPrepStart = CFAbsoluteTimeGetCurrent()
-                        let shouldStartPreroll = await MainActor.run { [weak self] () -> Bool in
+                        await MainActor.run {
                             renderer.jitterStats.recordVideoPTS(ptsSeconds)
-                            guard let self else { return false }
-                            if self.needsInitialSync {
-                                self.needsInitialSync = false
-                                let pts = packet.cmPTS
-                                renderer.setRate(0, time: pts)
-                                let shouldPreroll = self.isPlaying
-                                print("[DirectPlay] Initial sync: setting rate=0.0 time=\(CMTimeGetSeconds(pts))s (preroll=\(shouldPreroll))")
-                                return shouldPreroll
-                            } else if self.needsRateRestoreAfterSeek && isFirst {
-                                self.needsRateRestoreAfterSeek = false
-                                let pts = packet.cmPTS
-                                renderer.setRate(0, time: pts)
-                                let shouldPreroll = self.isPlaying
-                                print("[DirectPlay] Post-seek sync: setting rate=0.0 time=\(CMTimeGetSeconds(pts))s (preroll=\(shouldPreroll))")
-                                return shouldPreroll
-                            } else if !self.isPlaying && isFirst {
-                                renderer.setRate(0, time: packet.cmPTS)
-                            }
-                            return false
                         }
-                        if shouldStartPreroll {
-                            waitingForPrerollStart = true
-                            prerollWaitStartWall = CFAbsoluteTimeGetCurrent()
-                            prerollAnchorPTSSeconds = ptsSeconds
-                            prerollMaxPTSSeconds = ptsSeconds
+                        await maybePrimePrerollTimeline(ptsSeconds, packet.cmPTS, "video")
+                        if !waitingForPrerollStart {
+                            await MainActor.run { [weak self] in
+                                guard let self else { return }
+                                if !self.isPlaying && isFirst {
+                                    renderer.setRate(0, time: packet.cmPTS)
+                                }
+                            }
                         }
                         let syncPrepEnd = CFAbsoluteTimeGetCurrent()
+
+                        let prerollBypassLookahead: Bool = {
+                            guard waitingForPrerollStart,
+                                  let anchor = prerollAnchorPTSSeconds else { return false }
+                            let pendingMaxPTS = max(prerollMaxPTSSeconds ?? anchor, ptsSeconds)
+                            let pendingLead = max(0, pendingMaxPTS - anchor)
+                            let leadCap = requiresConversion ? 0.80 : 0.45
+                            return pendingLead < leadCap
+                        }()
 
                         let enqueueStart = CFAbsoluteTimeGetCurrent()
                         await renderer.enqueueVideo(
                             sampleBuffer,
-                            bypassLookahead: waitingForPrerollStart
+                            bypassLookahead: prerollBypassLookahead
                         )
                         let enqueueEnd = CFAbsoluteTimeGetCurrent()
 
@@ -986,60 +1290,30 @@ final class DirectPlayPipeline {
                                 prerollMaxPTSSeconds = ptsSeconds
                             }
 
-                            let audioPrimed = await MainActor.run {
-                                renderer.isAudioPrimedForPlayback
-                            }
-                            let hasAudioPath = (localAudioGate != nil)
-                            let audioReady = !hasAudioPath || audioPrimed
-                            let prerollLeadSeconds: Double = {
-                                guard let anchor = prerollAnchorPTSSeconds, let maxPTS = prerollMaxPTSSeconds else { return 0 }
-                                return max(0, maxPTS - anchor)
-                            }()
-                            // Non-conversion streams commonly expose ~200ms reordered lead at startup.
-                            // Requiring more can stall preroll on some DV direct-play files.
-                            let requiredPrerollLeadSeconds = requiresConversion ? 0.45 : 0.20
-                            let videoReady = prerollLeadSeconds >= requiredPrerollLeadSeconds
-                            let waitedMs: Double = {
-                                guard let start = prerollWaitStartWall else { return 0 }
-                                return (CFAbsoluteTimeGetCurrent() - start) * 1000
-                            }()
-                            let timedOut = hasAudioPath && waitedMs >= 1000
-
-                            if timedOut {
-                                print("[DirectPlay] Preroll timeout after \(String(format: "%.0f", waitedMs))ms " +
-                                      "(audioReady=\(audioReady) videoReady=\(videoReady) " +
-                                      "lead=\(String(format: "%.0f", prerollLeadSeconds * 1000))ms " +
-                                      "need=\(String(format: "%.0f", requiredPrerollLeadSeconds * 1000))ms)")
-                            }
-                            if (audioReady && videoReady) || timedOut {
-                                let startedRate = await MainActor.run { [weak self] () -> (Float, Double, String)? in
-                                    guard let self, self.isPlaying else { return nil }
-                                    let rate = self.playbackRate
-                                    // Keep the preroll anchor time to avoid jumping the clock
-                                    // ahead of already-enqueued B-frame reordered samples.
-                                    let anchorTime = renderer.currentTime
-                                    renderer.setRate(rate)
-                                    let reason = timedOut ? "timeout" : "audio+video_primed"
-                                    return (rate, anchorTime, reason)
+                            let didStartPreroll = await maybeCompletePrerollStart(ptsSeconds, false)
+                            if !didStartPreroll, (videoPacketCount <= 10 || videoPacketCount % 120 == 0) {
+                                let audioPrimed = await MainActor.run {
+                                    renderer.isAudioPrimedForPlayback
                                 }
-                                if let started = startedRate {
-                                    let (startedRate, anchorTime, reason) = started
-                                    waitingForPrerollStart = false
-                                    prerollWaitStartWall = nil
-                                    prerollAnchorPTSSeconds = nil
-                                    prerollMaxPTSSeconds = nil
-                                    print(
-                                        "[DirectPlay] Preroll complete: starting clock from anchor=\(String(format: "%.3f", anchorTime))s " +
-                                        "packet=\(String(format: "%.3f", ptsSeconds))s rate=\(String(format: "%.2f", startedRate)) " +
-                                        "reason=\(reason) wait=\(String(format: "%.0f", waitedMs))ms " +
-                                        "lead=\(String(format: "%.0f", prerollLeadSeconds * 1000))ms"
-                                    )
+                                let audioReliableStart = await MainActor.run {
+                                    renderer.hasReliableAudioStart
                                 }
-                            } else if videoPacketCount <= 10 || videoPacketCount % 120 == 0 {
+                                let audioReady = !hasAudioPath || audioPrimed
+                                let prerollLeadSeconds: Double = {
+                                    guard let anchor = prerollAnchorPTSSeconds, let maxPTS = prerollMaxPTSSeconds else { return 0 }
+                                    return max(0, maxPTS - anchor)
+                                }()
+                                let requiredPrerollLeadSeconds = requiresConversion ? 0.45 : 0.20
+                                let waitedMs: Double = {
+                                    guard let start = prerollWaitStartWall else { return 0 }
+                                    return (CFAbsoluteTimeGetCurrent() - start) * 1000
+                                }()
                                 print(
                                     "[DirectPlayDiag] Waiting for preroll start: frame=\(videoPacketCount) " +
                                     "pts=\(String(format: "%.3f", ptsSeconds))s audioQ=\(localAudioGate?.snapshot().pending ?? -1) " +
-                                    "audioPrimed=\(audioPrimed) videoLead=\(String(format: "%.0f", prerollLeadSeconds * 1000))ms " +
+                                    "audioPrimed=\(audioPrimed) audioReady=\(audioReady) reliableStart=\(audioReliableStart) " +
+                                    "videoLead=\(String(format: "%.0f", prerollLeadSeconds * 1000))ms " +
+                                    "bypass=\(prerollBypassLookahead) " +
                                     "needLead=\(String(format: "%.0f", requiredPrerollLeadSeconds * 1000))ms " +
                                     "wait=\(String(format: "%.0f", waitedMs))ms"
                                 )
@@ -1259,6 +1533,7 @@ final class DirectPlayPipeline {
             await localAudioEnqueueTask?.value
 
             await MainActor.run { [weak self] in
+                renderer.onAudioPrimedForPlayback = nil
                 self?.audioEnqueueTask = nil
             }
 
@@ -1336,11 +1611,11 @@ final class DirectPlayPipeline {
     }
 
     private func codecNeedsClientDecode(_ codec: String) -> Bool {
-        let normalized = codec.lowercased()
-        if forceClientDecodeCodecs.contains(normalized) { return true }
-        return FFmpegAudioDecoder.supportedCodecs.contains(where: { supported in
-            normalized == supported || normalized.hasPrefix(supported)
-        })
+        if forceClientDecodeAllAudio { return true }
+        if Self.codecSet(forceClientDecodeCodecs, matches: codec) {
+            return true
+        }
+        return Self.codecSet(FFmpegAudioDecoder.supportedCodecs, matches: codec)
     }
 
     private func preferredNativeAudioTrack(preferredLanguage: String?) -> FFmpegTrackInfo? {
@@ -1361,9 +1636,7 @@ final class DirectPlayPipeline {
     }
 
     private func codecIsLikelyNative(_ codec: String) -> Bool {
-        let normalized = codec.lowercased()
-            .replacingOccurrences(of: "-", with: "")
-            .replacingOccurrences(of: "_", with: "")
+        let normalized = Self.normalizedCodecIdentifier(codec)
 
         let nativePrefixes = [
             "eac3", "ec3", "ac3",
@@ -1415,9 +1688,7 @@ final class DirectPlayPipeline {
     }
 
     private func nativeTrackScore(_ track: FFmpegTrackInfo) -> Int {
-        let codec = track.codecName.lowercased()
-            .replacingOccurrences(of: "-", with: "")
-            .replacingOccurrences(of: "_", with: "")
+        let codec = Self.normalizedCodecIdentifier(track.codecName)
 
         let codecScore: Int
         if codec.hasPrefix("eac3") || codec.hasPrefix("ec3") {
@@ -1438,5 +1709,20 @@ final class DirectPlayPipeline {
 
         let defaultBonus = track.isDefault ? 30 : 0
         return codecScore + Int(track.channels) * 4 + defaultBonus
+    }
+
+    private static func codecSet(_ candidates: Set<String>, matches codec: String) -> Bool {
+        let normalized = normalizedCodecIdentifier(codec)
+        return candidates.contains { candidate in
+            let candidateKey = normalizedCodecIdentifier(candidate)
+            return normalized == candidateKey || normalized.hasPrefix(candidateKey)
+        }
+    }
+
+    private static func normalizedCodecIdentifier(_ codec: String) -> String {
+        codec.lowercased()
+            .replacingOccurrences(of: "-", with: "")
+            .replacingOccurrences(of: "_", with: "")
+            .replacingOccurrences(of: " ", with: "")
     }
 }

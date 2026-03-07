@@ -12,5 +12,5 @@ enum TMDBConfig {
     static let proxyBaseURL = URL(string: "https://tmdb-proxy.baingurley.workers.dev")!
 
     /// Cache TTL for TMDB responses when stored locally (in seconds).
-    static let localCacheTTL: TimeInterval = 60 * 60 * 24 * 7  // 7 days
+    static let localCacheTTL: TimeInterval = 60 * 60 * 24 * 30  // 30 days
 }

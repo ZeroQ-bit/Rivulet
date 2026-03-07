@@ -225,40 +225,39 @@ final class RivuletPlayer: ObservableObject {
     }
 
     private func applyAudioPolicy(snapshot: RouteAudioSnapshot, reason: String) {
-        // Reliability-first: keep the renderer in pull mode for all routes.
-        renderer.useAudioPullMode = true
+        let policy = PlaybackAudioSessionConfigurator.recommendedAudioPolicy(for: snapshot)
+        let policyReason = PlaybackAudioSessionConfigurator.policyDecisionReason(for: snapshot)
+        renderer.useAudioPullMode = policy.useAudioPullMode
+        renderer.minimumAudioPullStartBuffer = policy.audioPullStartBufferDuration
+        renderer.minimumAudioPullResumeBuffer = policy.audioPullResumeBufferDuration
 
         if let directPlayPipeline {
-            if snapshot.isAirPlay && !snapshot.supportsMultichannelContent {
-                // Basic AirPlay (stereo-only speakers): force decode everything + stereo S16
-                directPlayPipeline.forceClientDecodeCodecs = ["aac", "ac3", "eac3"]
-                directPlayPipeline.useSignedInt16Audio = true
-                directPlayPipeline.forceDownmixToStereo = true
-                renderer.audioBackpressureMaxWait = 2.0
-            } else if snapshot.isAirPlay {
-                // Capable AirPlay (HomePod default speaker): compressed passthrough works,
-                // but client-decoded PCM (DTS/TrueHD) must be stereo S16 since maxOutCh=2
-                directPlayPipeline.forceClientDecodeCodecs = []
-                directPlayPipeline.useSignedInt16Audio = true
-                directPlayPipeline.forceDownmixToStereo = true
-                renderer.audioBackpressureMaxWait = 1.0
-            } else {
-                // Local output (TV speakers, HDMI)
-                directPlayPipeline.forceClientDecodeCodecs = []
-                directPlayPipeline.useSignedInt16Audio = false
-                directPlayPipeline.forceDownmixToStereo = false
-                renderer.audioBackpressureMaxWait = 0.75
-            }
-        } else {
-            renderer.audioBackpressureMaxWait = snapshot.isAirPlay ? 2.0 : 0.75
+            directPlayPipeline.targetOutputSampleRate = policy.targetOutputSampleRate
+            directPlayPipeline.preferAudioEngineForPCM = policy.preferAudioEngineForPCM
+            directPlayPipeline.forceClientDecodeAllAudio = policy.forceClientDecodeAllAudio
+            directPlayPipeline.forceClientDecodeCodecs = policy.forceClientDecodeCodecs
+            directPlayPipeline.enableSurroundReEncoding = policy.enableSurroundReEncoding
+            directPlayPipeline.useSignedInt16Audio = policy.useSignedInt16Audio
+            directPlayPipeline.forceDownmixToStereo = policy.forceDownmixToStereo
         }
+        renderer.audioBackpressureMaxWait = policy.audioBackpressureMaxWait
 
         print(
             "[RivuletPlayer] AudioPolicy reason=\(reason) " +
-            "airPlay=\(snapshot.isAirPlay) capableAirPlay=\(snapshot.supportsMultichannelContent) " +
-            "pullMode=\(renderer.useAudioPullMode) " +
-            "backpressure=\(String(format: "%.2f", renderer.audioBackpressureMaxWait))s " +
-            "maxOutCh=\(snapshot.maximumOutputChannels)"
+            "profile=\(policy.profile.rawValue) airPlay=\(snapshot.isAirPlay) " +
+            "decision=\(policyReason) " +
+            "multichannelAirPlay=\(snapshot.isLikelyMultichannelAirPlay) " +
+            "pullMode=\(policy.useAudioPullMode) " +
+            "pullStart=\(String(format: "%.2f", policy.audioPullStartBufferDuration))s " +
+            "pullResume=\(String(format: "%.2f", policy.audioPullResumeBufferDuration))s " +
+            "audioEngine=\(policy.preferAudioEngineForPCM) " +
+            "forceDecodeAll=\(policy.forceClientDecodeAllAudio) " +
+            "forceDecode=\(policy.forceClientDecodeCodecs.sorted().joined(separator: ",")) " +
+            "reencode=\(policy.enableSurroundReEncoding) " +
+            "downmix=\(policy.forceDownmixToStereo) s16=\(policy.useSignedInt16Audio) " +
+            "backpressure=\(String(format: "%.2f", policy.audioBackpressureMaxWait))s " +
+            "maxOutCh=\(snapshot.maximumOutputChannels) " +
+            "targetRate=\(policy.targetOutputSampleRate > 0 ? "\(policy.targetOutputSampleRate)Hz" : "native")"
         )
     }
 
@@ -525,6 +524,7 @@ final class RivuletPlayer: ObservableObject {
         }
 
         renderer.flush()
+        renderer.disableAudioEngine()
         renderer.setRate(0)
         resetAirPlayInstabilityState()
 
@@ -834,8 +834,6 @@ final class RivuletPlayer: ObservableObject {
                     }
                 }
 
-                // Audio renderer failure detection — only relevant for passthrough mode.
-                // When using AVAudioEngine, the audio renderer isn't in the audio path.
                 if !usingEngine {
                     let shouldHandleRendererFailure = await MainActor.run { [weak self] () -> Bool in
                         guard let self else { return false }

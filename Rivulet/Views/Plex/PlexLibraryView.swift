@@ -13,7 +13,6 @@ struct PlexLibraryView: View {
     let libraryTitle: String
 
     @Environment(\.nestedNavigationState) private var nestedNavState
-    @Environment(\.focusScopeManager) private var focusScopeManager
     @Environment(\.uiScale) private var scale
 
     @StateObject private var authManager = PlexAuthManager.shared
@@ -46,6 +45,9 @@ struct PlexLibraryView: View {
     @AppStorage("enablePersonalizedRecommendations") private var enablePersonalizedRecommendations = false
 
     @FocusState private var focusedItemId: String?  // Track focused item by "context:itemId" format
+    @State private var lastFocusedItemId: String?  // Remembers focus for back-from-detail restore
+    @State private var rowPreviewRequest: PreviewRequest?
+    @State private var previewRestoreTarget: PreviewSourceTarget?
     @State private var lastPrefetchIndex: Int = -18  // Track last prefetch position for throttling
     private var firstDisplayedItem: PlexMetadata? {
         items.first
@@ -197,121 +199,53 @@ struct PlexLibraryView: View {
 
     var body: some View {
         NavigationStack {
-            ZStack {
-                if !authManager.isAuthenticated {
-                    notConnectedView
-                } else if isLoading && items.isEmpty {
-                    loadingView
-                } else if let error = error, items.isEmpty {
-                    errorView(error)
-                } else if items.isEmpty {
-                    emptyView
-                } else {
-                    contentView
-                }
+            navigationContent
+        }
+        // Tell parent we're in nested navigation when viewing detail
+        .onChange(of: selectedItem) { _, newValue in
+            let _ = newValue
+            updateNestedNavigationState()
+        }
+        .onChange(of: rowPreviewRequest?.id) { _, _ in
+            updateNestedNavigationState()
+        }
+        .onChange(of: enablePersonalizedRecommendations) { _, _ in
+            handleRecommendationsToggle()
+        }
+        // Track last focused item for back-from-detail restore
+        .onChange(of: focusedItemId) { _, newValue in
+            if let newValue {
+                lastFocusedItemId = newValue
             }
+        }
+    }
+
+    @ViewBuilder
+    private var libraryStateContent: some View {
+        ZStack {
+            if !authManager.isAuthenticated {
+                notConnectedView
+            } else if isLoading && items.isEmpty {
+                loadingView
+            } else if let error = error, items.isEmpty {
+                errorView(error)
+            } else if items.isEmpty {
+                emptyView
+            } else {
+                contentView
+            }
+        }
+    }
+
+    private var navigationContent: some View {
+        libraryStateContent
             .task(id: libraryKey) {
-                // Cancel any previous loading task - .task(id:) already cancels when id changes
-                loadingTask?.cancel()
-
-                error = nil
-
-                // Check if this is a different library than what's currently loaded
-                let isNewLibrary = lastLoadedLibraryKey != libraryKey
-
-                if authManager.isAuthenticated {
-                    if isNewLibrary {
-                        // IMMEDIATELY clear stale data and show skeleton
-                        items = []
-                        hubs = []
-                        cachedProcessedHubs = []
-                        isLoading = true
-                        // visibleItemCount = 0
-                        // visibleItemExpandTask?.cancel()
-                        lastLoadedLibraryKey = libraryKey
-
-                        // Load sort preference for this library
-                        currentSortOption = librarySettings.getSortOption(for: libraryKey)
-
-                        // Ensure we start in content scope with no stale focus when switching libraries
-                        focusScopeManager.switchTo(.content, savingCurrent: false)
-                        focusedItemId = nil
-
-                        // Load cached hero synchronously (fast, in-memory)
-                        heroItem = dataStore.getCachedHero(forLibrary: libraryKey)
-
-                        // Reset state for new library
-                        hasPrefetched = false
-                        hasMoreItems = true
-                        totalItemCount = 0
-
-                        // Check in-memory hubs from DataStore first (instant, no disk I/O)
-                        let inMemoryHubs = dataStore.libraryHubs[libraryKey]
-
-                        // Load cache in background to avoid main thread JSON decoding jank
-                        let libKey = libraryKey
-                        let (cachedItems, cachedHubs): ([PlexMetadata], [PlexHub]?) = await Task.detached(priority: .userInitiated) {
-                            async let itemsTask = self.getCachedItems()
-                            // Only hit disk cache if DataStore doesn't have hubs in memory
-                            let hubsResult: [PlexHub]?
-                            if inMemoryHubs != nil {
-                                hubsResult = nil  // Skip disk read, we'll use in-memory
-                            } else {
-                                hubsResult = await self.cacheManager.getCachedLibraryHubs(forLibrary: libKey)
-                            }
-                            return await (itemsTask, hubsResult)
-                        }.value
-
-                        // Update UI with cached data — prefer in-memory hubs, fall back to disk cache
-                        let hubsToUse = inMemoryHubs ?? cachedHubs
-                        if let hubsToUse, !hubsToUse.isEmpty {
-                            hubs = hubsToUse
-                            cachedProcessedHubs = computeProcessedHubs(from: hubsToUse)
-                        }
-
-                        if !cachedItems.isEmpty {
-                            items = cachedItems
-                            isLoading = false
-                            // updateVisibleItems(for: cachedItems.count, animated: true)
-
-                            if heroItem == nil {
-                                selectHeroItemFromCurrentData()
-                            }
-
-                            // Refresh in background only if data isn't fresh from a recent prefetch
-                            if !dataStore.isFresh("libraryItems:\(libraryKey)", within: 60) {
-                                await loadItemsInBackground()
-                            }
-                        } else {
-                            // No cache - fetch from server (skeleton still showing)
-                            await loadItems()
-                        }
-
-                        if enablePersonalizedRecommendations {
-                            Task { await refreshRecommendations(force: false) }
-                        }
-                    } else {
-                        // Same library - just refresh in background
-                        await loadItemsInBackground()
-                        if enablePersonalizedRecommendations, recommendations.isEmpty {
-                            Task { await refreshRecommendations(force: false) }
-                        }
-                    }
-                } else {
-                    // Not authenticated - clear everything
-                    items = []
-                    hubs = []
-                    cachedProcessedHubs = []
-                    heroItem = nil
-                    lastLoadedLibraryKey = nil
-                    isLoading = false
-                }
+                await handleLibraryTask()
             }
             .refreshable {
                 await refresh()
             }
             .onReceive(NotificationCenter.default.publisher(for: .plexDataNeedsRefresh)) { _ in
-                // Only refresh hubs (Continue Watching, etc.) - not the full library grid
                 Task {
                     guard let serverURL = authManager.selectedServerURL,
                           let token = authManager.selectedServerToken else { return }
@@ -321,69 +255,135 @@ struct PlexLibraryView: View {
             .navigationDestination(item: $selectedItem) { item in
                 PlexDetailView(item: item)
             }
+            .overlayPreferenceValue(PreviewSourceFramePreferenceKey.self) { anchors in
+                previewOverlay(for: anchors)
+            }
+    }
+
+    @ViewBuilder
+    private func previewOverlay(for anchors: [PreviewSourceTarget: Anchor<CGRect>]) -> some View {
+        GeometryReader { proxy in
+            if let activeRequest = rowPreviewRequest {
+                let resolvedFrames = Dictionary(uniqueKeysWithValues: anchors.map { ($0.key, proxy[$0.value]) })
+                PreviewOverlayHost(
+                    request: activeRequest,
+                    sourceFrames: resolvedFrames,
+                    serverURL: authManager.selectedServerURL ?? "",
+                    authToken: authManager.selectedServerToken ?? "",
+                    onDismiss: { sourceTarget in
+                        previewRestoreTarget = sourceTarget
+                        self.rowPreviewRequest = nil
+                    }
+                )
+            }
         }
-        // Tell parent we're in nested navigation when viewing detail
-        .onChange(of: selectedItem) { _, newValue in
-            let isNested = newValue != nil
-            nestedNavState.isNested = isNested
-            if isNested {
-                // Set the go back action to clear selectedItem
-                nestedNavState.goBackAction = { [weak nestedNavState] in
-                    selectedItem = nil
-                    nestedNavState?.isNested = false
+    }
+
+    private func handleLibraryTask() async {
+        loadingTask?.cancel()
+
+        error = nil
+
+        let isNewLibrary = lastLoadedLibraryKey != libraryKey
+
+        if authManager.isAuthenticated {
+            if isNewLibrary {
+                items = []
+                hubs = []
+                cachedProcessedHubs = []
+                isLoading = true
+                lastLoadedLibraryKey = libraryKey
+
+                currentSortOption = librarySettings.getSortOption(for: libraryKey)
+
+                focusedItemId = nil
+                lastFocusedItemId = nil
+
+                heroItem = dataStore.getCachedHero(forLibrary: libraryKey)
+
+                hasPrefetched = false
+                hasMoreItems = true
+                totalItemCount = 0
+
+                let inMemoryHubs = dataStore.libraryHubs[libraryKey]
+
+                let libKey = libraryKey
+                let (cachedItems, cachedHubs): ([PlexMetadata], [PlexHub]?) = await Task.detached(priority: .userInitiated) {
+                    async let itemsTask = self.getCachedItems()
+                    let hubsResult: [PlexHub]?
+                    if inMemoryHubs != nil {
+                        hubsResult = nil
+                    } else {
+                        hubsResult = await self.cacheManager.getCachedLibraryHubs(forLibrary: libKey)
+                    }
+                    return await (itemsTask, hubsResult)
+                }.value
+
+                let hubsToUse = inMemoryHubs ?? cachedHubs
+                if let hubsToUse, !hubsToUse.isEmpty {
+                    hubs = hubsToUse
+                    cachedProcessedHubs = computeProcessedHubs(from: hubsToUse)
+                }
+
+                if !cachedItems.isEmpty {
+                    items = cachedItems
+                    isLoading = false
+
+                    if heroItem == nil {
+                        selectHeroItemFromCurrentData()
+                    }
+
+                    if !dataStore.isFresh("libraryItems:\(libraryKey)", within: 60) {
+                        await loadItemsInBackground()
+                    }
+                } else {
+                    await loadItems()
+                }
+
+                if enablePersonalizedRecommendations {
+                    Task { await refreshRecommendations(force: false) }
                 }
             } else {
-                nestedNavState.goBackAction = nil
-                // Restore focus to the previously selected grid item so the scroll
-                // position returns to where the user was before entering detail view.
-                // Deferred slightly so the NavigationStack pop animation completes
-                // and the grid items are focusable again.
-                let saved = focusScopeManager.focusedItem
-                if let savedItem = saved {
-                    let targetId: String
-                    if let context = savedItem.context {
-                        targetId = "\(context):\(savedItem.itemId)"
-                    } else {
-                        targetId = savedItem.itemId
-                    }
-                    Task { @MainActor in
-                        try? await Task.sleep(nanoseconds: 150_000_000) // 150ms
-                        focusedItemId = targetId
-                    }
+                await loadItemsInBackground()
+                if enablePersonalizedRecommendations, recommendations.isEmpty {
+                    Task { await refreshRecommendations(force: false) }
                 }
             }
+        } else {
+            items = []
+            hubs = []
+            cachedProcessedHubs = []
+            heroItem = nil
+            lastLoadedLibraryKey = nil
+            isLoading = false
         }
-        .onChange(of: enablePersonalizedRecommendations) { _, _ in
-            handleRecommendationsToggle()
+    }
+
+    private func libraryRowID(for hub: PlexHub, section: String, index: Int) -> String {
+        let identifier = hub.hubIdentifier ?? hub.key ?? hub.hubKey ?? hub.title ?? "row"
+        return "library:\(libraryKey):\(section):\(index):\(identifier)"
+    }
+
+    private func updateNestedNavigationState() {
+        if rowPreviewRequest != nil {
+            nestedNavState.isNested = true
+            nestedNavState.goBackAction = nil
+            return
         }
-        // Save focus when it changes (only when content scope is active)
-        .onChange(of: focusedItemId) { _, newValue in
-            guard focusScopeManager.isScopeActive(.content) else { return }
-            if let newValue {
-                // Library grid items use "libraryGrid:itemId" format
-                let parts = newValue.split(separator: ":", maxSplits: 1)
-                if parts.count == 2 {
-                    focusScopeManager.setFocus(
-                        itemId: String(parts[1]),
-                        context: String(parts[0]),
-                        scope: .content
-                    )
-                } else {
-                    focusScopeManager.setFocus(itemId: newValue, scope: .content)
-                }
+
+        let isNested = selectedItem != nil
+        nestedNavState.isNested = isNested
+        if isNested {
+            nestedNavState.goBackAction = { [weak nestedNavState] in
+                selectedItem = nil
+                nestedNavState?.isNested = false
             }
-        }
-        // Restore focus when scope becomes active
-        .onChange(of: focusScopeManager.restoreTrigger) { _, _ in
-            // Only restore focus if not in nested navigation (detail view)
-            if selectedItem == nil,
-               focusScopeManager.isScopeActive(.content),
-               let savedItem = focusScopeManager.focusedItem {
-                // Reconstruct the composite ID
-                if let context = savedItem.context {
-                    focusedItemId = "\(context):\(savedItem.itemId)"
-                } else {
-                    focusedItemId = savedItem.itemId
+        } else {
+            nestedNavState.goBackAction = nil
+            if let targetId = lastFocusedItemId {
+                Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 150_000_000)
+                    focusedItemId = targetId
                 }
             }
         }
@@ -413,6 +413,10 @@ struct PlexLibraryView: View {
             }
         }
         .id(libraryKey)  // Force fresh ScrollView when library changes - starts at top
+        .opacity(rowPreviewRequest != nil ? 0.12 : 1)
+        .offset(y: rowPreviewRequest != nil ? 20 : 0)
+        .allowsHitTesting(rowPreviewRequest == nil)
+        .animation(previewEntryAnimation, value: rowPreviewRequest?.id)
         .onAppear {
             // Hero will be selected when items load via task handler
             if heroItem == nil && !items.isEmpty {
@@ -500,6 +504,7 @@ struct PlexLibraryView: View {
                     if let hubItems = hub.Metadata, !hubItems.isEmpty {
                         let isContinueWatching = isContinueWatchingHub(hub)
                         InfiniteContentRow(
+                            rowID: libraryRowID(for: hub, section: "essential", index: index),
                             title: hub.title ?? "Untitled",
                             initialItems: hubItems,
                             hubKey: hub.key ?? hub.hubKey,
@@ -512,7 +517,13 @@ struct PlexLibraryView: View {
                             },
                             onRefreshNeeded: {
                                 await refresh()
-                            }
+                            },
+                            onPreviewRequested: isContinueWatching ? nil : { request in
+                                withAnimation(previewEntryAnimation) {
+                                    rowPreviewRequest = request
+                                }
+                            },
+                            restorePreviewFocusTarget: $previewRestoreTarget
                         )
 
                         if enablePersonalizedRecommendations,
@@ -565,6 +576,7 @@ struct PlexLibraryView: View {
             }
         } else if !recommendations.isEmpty {
             InfiniteContentRow(
+                rowID: "library:\(libraryKey):recommendations",
                 title: "Personalized Recommendations",
                 initialItems: recommendations,
                 hubKey: nil,
@@ -577,7 +589,13 @@ struct PlexLibraryView: View {
                 },
                 onRefreshNeeded: {
                     await refreshRecommendations(force: true)
-                }
+                },
+                onPreviewRequested: { request in
+                    withAnimation(previewEntryAnimation) {
+                        rowPreviewRequest = request
+                    }
+                },
+                restorePreviewFocusTarget: $previewRestoreTarget
             )
         }
     }
@@ -591,6 +609,7 @@ struct PlexLibraryView: View {
                 ForEach(discoveryHubs, id: \.hubIdentifier) { hub in
                     if let hubItems = hub.Metadata, !hubItems.isEmpty {
                         InfiniteContentRow(
+                            rowID: libraryRowID(for: hub, section: "discovery", index: discoveryHubs.firstIndex(where: { $0.hubIdentifier == hub.hubIdentifier }) ?? 0),
                             title: hub.title ?? "Untitled",
                             initialItems: hubItems,
                             hubKey: hub.key ?? hub.hubKey,
@@ -603,7 +622,13 @@ struct PlexLibraryView: View {
                             },
                             onRefreshNeeded: {
                                 await refresh()
-                            }
+                            },
+                            onPreviewRequested: { request in
+                                withAnimation(previewEntryAnimation) {
+                                    rowPreviewRequest = request
+                                }
+                            },
+                            restorePreviewFocusTarget: $previewRestoreTarget
                         )
                     }
                 }
@@ -1380,13 +1405,10 @@ struct PlexLibraryView: View {
 
     /// Ensure the first grid item receives focus when entering a library
     private func ensureInitialFocusIfNeeded() {
-        guard focusScopeManager.isScopeActive(.content) else { return }
         guard focusedItemId == nil else { return }
-        guard let first = firstDisplayedItem, let ratingKey = first.ratingKey else { return }
+        guard let first = firstDisplayedItem else { return }
 
-        let targetId = gridFocusId(for: first)
-        focusedItemId = targetId
-        focusScopeManager.setFocus(FocusItemId(scope: .content, context: "libraryGrid", itemId: ratingKey))
+        focusedItemId = gridFocusId(for: first)
     }
 
     private func posterThumb(for item: PlexMetadata) -> String? {

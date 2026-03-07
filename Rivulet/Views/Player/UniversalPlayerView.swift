@@ -668,7 +668,6 @@ private final class UniversalPlaybackInputTarget: PlaybackInputTarget {
 
 struct UniversalPlayerView: View {
     @StateObject private var viewModel: UniversalPlayerViewModel
-    @StateObject private var focusScopeManager = FocusScopeManager()
     @StateObject private var remoteInput = RemoteInputHandler()
     @State private var inputTarget: UniversalPlaybackInputTarget?
     private let inputCoordinator: PlaybackInputCoordinator
@@ -750,7 +749,6 @@ struct UniversalPlayerView: View {
                     .zIndex(100)
             }
         }
-        .environment(\.focusScopeManager, focusScopeManager)
         .animation(.easeInOut(duration: 1.0), value: viewModel.playbackState)
         .animation(.easeInOut(duration: 0.25), value: viewModel.showControls)
         .animation(.spring(response: 0.25, dampingFraction: 0.9), value: viewModel.showInfoPanel)
@@ -813,8 +811,6 @@ struct UniversalPlayerView: View {
             hasStartedPlayback = true
             // Notify that playback is starting (pauses hub polling)
             NotificationCenter.default.post(name: .plexPlaybackStarted, object: nil)
-            // Activate player scope when player starts
-            focusScopeManager.activate(.player)
             // Activate audio session BEFORE playback starts
             // This ensures MPV's AudioUnit is created with correct session config
             NowPlayingService.shared.attach(to: viewModel, inputCoordinator: inputCoordinator)
@@ -832,8 +828,6 @@ struct UniversalPlayerView: View {
             remoteInput.reset()
             inputCoordinator.invalidate()
             inputTarget = nil
-            // Deactivate player scope when leaving
-            focusScopeManager.deactivate()
             // Release MPV pre-warm service so it can prepare for next use
             MPVPrewarmService.shared.releaseController()
         }
@@ -851,9 +845,6 @@ struct UniversalPlayerView: View {
                 // Reset skip button focus when info panel opens (button becomes hidden)
                 isSkipButtonFocused = false
                 viewModel.resetSettingsPanel()
-                focusScopeManager.activate(.playerInfoBar)
-            } else {
-                focusScopeManager.deactivate()
             }
         }
         // Auto-focus skip button when it appears
@@ -875,9 +866,6 @@ struct UniversalPlayerView: View {
             if previous == .hidden && state != .hidden {
                 // Reset skip button focus when post-video opens (button becomes hidden)
                 isSkipButtonFocused = false
-                focusScopeManager.activate(.postVideo)
-            } else if previous != .hidden && state == .hidden {
-                focusScopeManager.deactivate()
             }
         }
         // Auto-focus skip button when controls hide (if skip button is visible)

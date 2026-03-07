@@ -63,6 +63,12 @@ final class FFmpegAudioDecoder: @unchecked Sendable {
     /// Used for basic AirPlay speakers that only support 2-channel audio.
     var forceDownmixToStereo = false
 
+    /// Target output sample rate. When set to a non-zero value, swresample
+    /// resamples audio to this rate. Critical for AirPlay where the hardware
+    /// runs at 44100Hz but source audio is typically 48000Hz — sending
+    /// mismatched rates to AVSampleBufferAudioRenderer causes crackling.
+    var targetOutputSampleRate: Int = 0
+
     // MARK: - Private State
 
     private var codecContext: UnsafeMutablePointer<AVCodecContext>?
@@ -92,14 +98,24 @@ final class FFmpegAudioDecoder: @unchecked Sendable {
     private var batchSampleRate: Int = 0
     private var batchChannels: Int = 0
     private var batchBitsPerSample: Int = 0
+    private var hasLoggedBatchConfig = false
+    private var emittedBatchCount = 0
     private var lastDecodedPTS: CMTime = .invalid
     private var invalidTimestampCount = 0
     private var nonMonotonicTimestampCount = 0
 
+    /// Continuous output PTS tracker — eliminates micro-gaps caused by resampling.
+    /// When resampling (e.g., 48kHz→44.1kHz), the output sample count doesn't exactly
+    /// match the source PTS spacing, creating tiny silence gaps that cause crackling.
+    /// By tracking a running PTS based on actual output samples, each buffer starts
+    /// exactly where the previous one ended.
+    private var continuousOutputPTS: CMTime = .invalid
+    private var continuousOutputTimescale: Int32 = 44100
+
     /// Minimum samples to accumulate before emitting a batch.
-    /// TrueHD = 40 samples/frame, so 960 = 24 frames ≈ 20ms at 48kHz.
-    /// This brings the packet rate from ~1200/sec down to ~50/sec, matching video.
-    private let minBatchSamples = 960
+    /// Default is ~20ms for local/native routes; AirPlay-shaped PCM output uses
+    /// larger batches to reduce CMSampleBuffer churn and pull-callback frequency.
+    private let baseMinBatchSamples = 960
 
     // MARK: - Init
 
@@ -256,6 +272,9 @@ final class FFmpegAudioDecoder: @unchecked Sendable {
         var output: [DecodedAudioFrame] = []
 
         for frame in frames {
+            let minBatchSamples = minimumBatchSamples(for: frame.sampleRate)
+            maybeLogBatchConfig(sampleRate: frame.sampleRate, minBatchSamples: minBatchSamples)
+
             // Start new batch if empty
             if batchSampleCount == 0 {
                 batchPTS = frame.pts
@@ -276,6 +295,15 @@ final class FFmpegAudioDecoder: @unchecked Sendable {
                     bitsPerSample: batchBitsPerSample,
                     pts: batchPTS
                 ))
+                emittedBatchCount += 1
+                if emittedBatchCount <= 4 {
+                    let batchDurationMs = (Double(batchSampleCount) / Double(max(batchSampleRate, 1))) * 1000
+                    print(
+                        "[AudioDecoder] Emitting PCM batch #\(emittedBatchCount): " +
+                        "samples=\(batchSampleCount) rate=\(batchSampleRate)Hz " +
+                        "duration=\(String(format: "%.1f", batchDurationMs))ms ch=\(batchChannels)"
+                    )
+                }
                 batchData = Data()
                 batchSampleCount = 0
                 batchPTS = .invalid
@@ -305,8 +333,11 @@ final class FFmpegAudioDecoder: @unchecked Sendable {
     /// Reset decoder-side timestamp tracking after timeline discontinuities (seek/recover).
     func resetTimestampTracking(reason: String) {
         lastDecodedPTS = .invalid
+        continuousOutputPTS = .invalid
         invalidTimestampCount = 0
         nonMonotonicTimestampCount = 0
+        hasLoggedBatchConfig = false
+        emittedBatchCount = 0
         print("[AudioDecoder] Timestamp tracking reset (\(reason))")
     }
 
@@ -544,15 +575,17 @@ final class FFmpegAudioDecoder: @unchecked Sendable {
 
         let needsDownmix = forceDownmixToStereo && inputChannels > 2
         let outChannels = needsDownmix ? Int32(2) : inputChannels
+        let needsResample = targetOutputSampleRate > 0 && targetOutputSampleRate != Int(sampleRate)
+        let effectiveOutputRate = needsResample ? Int32(targetOutputSampleRate) : sampleRate
 
         let bytesPerSample = bitsPerSample / 8
-        let outputBufferSize = Int(nbSamples) * Int(outChannels) * bytesPerSample
 
-        // Fast path: already interleaved in the target format and no downmix needed
-        if !needsDownmix && sampleFormat == outputFormat, let data = frame.pointee.data.0 {
+        // Fast path: already interleaved in the target format, no downmix, no resample
+        if !needsDownmix && !needsResample && sampleFormat == outputFormat, let data = frame.pointee.data.0 {
             if outputChannelLayoutTag == kAudioChannelLayoutTag_Unknown {
                 outputChannelLayoutTag = Self.channelLayoutTag(for: Int(inputChannels))
             }
+            let outputBufferSize = Int(nbSamples) * Int(outChannels) * bytesPerSample
             let pcmData = Data(bytes: data, count: outputBufferSize)
             return buildDecodedFrame(
                 data: pcmData, sampleCount: Int(nbSamples),
@@ -565,7 +598,7 @@ final class FFmpegAudioDecoder: @unchecked Sendable {
         }
 
         // Need conversion: set up or reconfigure swresample
-        if swrContext == nil || outputSampleRate != Int(sampleRate) ||
+        if swrContext == nil || outputSampleRate != Int(effectiveOutputRate) ||
            outputChannels != Int(outChannels) || outputBitsPerSample != bitsPerSample {
             setupSwresample(frame: frame, outputFormat: outputFormat)
         }
@@ -575,9 +608,15 @@ final class FFmpegAudioDecoder: @unchecked Sendable {
             return nil
         }
 
+        // When resampling, output sample count differs from input.
+        // swr_get_out_samples gives the upper bound for the output.
+        let maxOutSamples = needsResample
+            ? swr_get_out_samples(swrCtx, nbSamples)
+            : nbSamples
+
         // Allocate output buffer
         var outputBuffer: UnsafeMutablePointer<UInt8>?
-        av_samples_alloc(&outputBuffer, nil, outChannels, nbSamples, outputFormat, 0)
+        av_samples_alloc(&outputBuffer, nil, outChannels, maxOutSamples, outputFormat, 0)
         guard let outBuf = outputBuffer else { return nil }
         defer { av_freep(&outputBuffer) }
 
@@ -588,7 +627,7 @@ final class FFmpegAudioDecoder: @unchecked Sendable {
             var outPtr: UnsafeMutablePointer<UInt8>? = outBuf
             return swr_convert(
                 swrCtx,
-                &outPtr, nbSamples,
+                &outPtr, maxOutSamples,
                 UnsafeMutablePointer(mutating: inputPtr), nbSamples
             )
         }
@@ -601,13 +640,33 @@ final class FFmpegAudioDecoder: @unchecked Sendable {
         let actualSize = Int(convertedSamples) * Int(outChannels) * bytesPerSample
         let pcmData = Data(bytes: outBuf, count: actualSize)
 
+        // When resampling, use continuous PTS tracking to eliminate micro-gaps.
+        // The resampler output sample count doesn't exactly match source PTS spacing,
+        // creating ~0.37ms gaps per batch that cause audible crackling. By tracking
+        // a running PTS based on actual output samples, each buffer starts exactly
+        // where the previous one ended.
+        var overridePTS: CMTime?
+        if needsResample {
+            let timescale = Int32(effectiveOutputRate)
+            if continuousOutputPTS.isValid {
+                overridePTS = continuousOutputPTS
+            }
+            // Advance continuous PTS by actual output sample count
+            let outputDuration = CMTime(value: CMTimeValue(convertedSamples), timescale: timescale)
+            if continuousOutputPTS.isValid {
+                continuousOutputPTS = CMTimeAdd(continuousOutputPTS, outputDuration)
+            }
+            // Will be anchored on first valid PTS from buildDecodedFrame
+        }
+
         return buildDecodedFrame(
             data: pcmData, sampleCount: Int(convertedSamples),
-            sampleRate: Int(sampleRate), channels: Int(outChannels),
+            sampleRate: Int(effectiveOutputRate), channels: Int(outChannels),
             bitsPerSample: bitsPerSample, framePTS: frame.pointee.pts,
             packetTimebase: packetTimebase,
             packetPTS: packetPTS,
-            packetDuration: packetDuration
+            packetDuration: packetDuration,
+            continuousPTSOverride: overridePTS
         )
     }
 
@@ -616,7 +675,8 @@ final class FFmpegAudioDecoder: @unchecked Sendable {
                                    framePTS: Int64,
                                    packetTimebase: CMTime,
                                    packetPTS: CMTime,
-                                   packetDuration: CMTime) -> DecodedAudioFrame {
+                                   packetDuration: CMTime,
+                                   continuousPTSOverride: CMTime? = nil) -> DecodedAudioFrame {
         let frameDuration = CMTime(
             seconds: Double(sampleCount) / Double(max(sampleRate, 1)),
             preferredTimescale: 90_000
@@ -627,6 +687,16 @@ final class FFmpegAudioDecoder: @unchecked Sendable {
             }
             return frameDuration
         }()
+
+        // If continuous PTS override is provided (from resampling), use it directly
+        // to eliminate micro-gaps between resampled buffers.
+        if let override = continuousPTSOverride {
+            lastDecodedPTS = override
+            return DecodedAudioFrame(
+                data: data, sampleCount: sampleCount, sampleRate: sampleRate,
+                channels: channels, bitsPerSample: bitsPerSample, pts: override
+            )
+        }
 
         let framePTSScaled = cmTimeFromFFmpegTimestamp(framePTS, timebase: packetTimebase)
         let packetPTSValid = packetPTS.isValid && packetPTS.isNumeric ? packetPTS : nil
@@ -688,6 +758,21 @@ final class FFmpegAudioDecoder: @unchecked Sendable {
 
         lastDecodedPTS = pts
 
+        // Anchor continuous PTS tracking on the first valid resolved PTS.
+        // This is the starting point for gapless resampled output.
+        if !continuousOutputPTS.isValid && pts.isValid && pts.isNumeric {
+            let timescale = Int32(sampleRate)
+            continuousOutputPTS = CMTime(
+                seconds: CMTimeGetSeconds(pts),
+                preferredTimescale: timescale
+            )
+            continuousOutputTimescale = timescale
+            // Advance past this frame's duration so the next resampled buffer
+            // starts right after this one
+            let frameDur = CMTime(value: CMTimeValue(sampleCount), timescale: timescale)
+            continuousOutputPTS = CMTimeAdd(continuousOutputPTS, frameDur)
+        }
+
         return DecodedAudioFrame(
             data: data,
             sampleCount: sampleCount,
@@ -738,8 +823,11 @@ final class FFmpegAudioDecoder: @unchecked Sendable {
         }
 
         let inputChannels = frame.pointee.ch_layout.nb_channels
-        let sampleRate = frame.pointee.sample_rate
+        let inputRate = frame.pointee.sample_rate
         let needsDownmix = forceDownmixToStereo && inputChannels > 2
+
+        // Use target rate if set (e.g. 44100 for AirPlay), otherwise pass through source rate
+        let outRate = (targetOutputSampleRate > 0) ? Int32(targetOutputSampleRate) : inputRate
 
         swrContext = swr_alloc()
         guard swrContext != nil else {
@@ -758,8 +846,8 @@ final class FFmpegAudioDecoder: @unchecked Sendable {
 
         swr_alloc_set_opts2(
             &swrContext,
-            &outLayout, outputFormat, sampleRate,       // output
-            &inLayout, AVSampleFormat(rawValue: frame.pointee.format), sampleRate,  // input
+            &outLayout, outputFormat, outRate,       // output
+            &inLayout, AVSampleFormat(rawValue: frame.pointee.format), inputRate,  // input
             0, nil
         )
 
@@ -772,15 +860,51 @@ final class FFmpegAudioDecoder: @unchecked Sendable {
         }
 
         let outChannels = needsDownmix ? Int32(2) : inputChannels
-        self.outputSampleRate = Int(sampleRate)
+        self.outputSampleRate = Int(outRate)
         self.outputChannels = Int(outChannels)
         self.outputBitsPerSample = Int(av_get_bytes_per_sample(outputFormat)) * 8
         self.outputChannelLayoutTag = Self.channelLayoutTag(for: Int(outChannels))
-        // Invalidate cached format description when channel count changes
+        // Invalidate cached format description when format changes
         self.cachedFormatDescription = nil
 
         let downmixLabel = needsDownmix ? " (downmixed from \(inputChannels)ch)" : ""
-        print("[AudioDecoder] SwrContext initialized: \(outChannels)ch \(sampleRate)Hz \(outputBitsPerSample)-bit layout=\(outputChannelLayoutTag)\(downmixLabel)")
+        let resampleLabel = (outRate != inputRate) ? " (resampled from \(inputRate)Hz)" : ""
+        print("[AudioDecoder] SwrContext initialized: \(outChannels)ch \(outRate)Hz \(outputBitsPerSample)-bit layout=\(outputChannelLayoutTag)\(downmixLabel)\(resampleLabel)")
+    }
+
+    private func minimumBatchSamples(for sampleRate: Int) -> Int {
+        guard sampleRate > 0 else { return baseMinBatchSamples }
+
+        // AirPlay-shaped PCM output is the fragile case: keep fewer, larger buffers
+        // on the renderer boundary instead of many ~20ms chunks. HomePod routes in
+        // particular need noticeably fatter batches so steady-state pull restarts can
+        // rebuild a cushion in a small number of deliveries.
+        if targetOutputSampleRate > 0 || forceDownmixToStereo || useSignedInt16Output {
+            let durationSamples = Int((Double(sampleRate) * 0.16).rounded())
+            return max(baseMinBatchSamples, durationSamples)
+        }
+
+        return baseMinBatchSamples
+    }
+
+    private func maybeLogBatchConfig(sampleRate: Int, minBatchSamples: Int) {
+        guard !hasLoggedBatchConfig else { return }
+        hasLoggedBatchConfig = true
+
+        let durationMs = (Double(minBatchSamples) / Double(max(sampleRate, 1))) * 1000
+        let batchReason: String
+        if targetOutputSampleRate > 0 || forceDownmixToStereo || useSignedInt16Output {
+            batchReason = "airplay_pcm_shaping"
+        } else {
+            batchReason = "default"
+        }
+
+        print(
+            "[AudioDecoder] Batch config: minSamples=\(minBatchSamples) " +
+            "duration=\(String(format: "%.1f", durationMs))ms reason=\(batchReason) " +
+            "targetRate=\(targetOutputSampleRate > 0 ? "\(targetOutputSampleRate)" : "native") " +
+            "downmix=\(forceDownmixToStereo) s16=\(useSignedInt16Output)"
+        )
     }
 }
 

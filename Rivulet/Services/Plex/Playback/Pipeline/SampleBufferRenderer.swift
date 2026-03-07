@@ -4,8 +4,8 @@
 //
 //  Shared rendering layer for video and audio sample buffers.
 //  Owns AVSampleBufferDisplayLayer for video.
-//  Audio output uses AVAudioEngine for PCM (client-decoded) audio, or
-//  AVSampleBufferAudioRenderer for compressed passthrough (AC3/EAC3).
+//  Audio output uses AVAudioEngine for selected PCM routes, or
+//  AVSampleBufferAudioRenderer for compressed passthrough / sample-buffer audio.
 //
 
 import Foundation
@@ -20,27 +20,27 @@ final class SampleBufferRenderer {
 
     let displayLayer = AVSampleBufferDisplayLayer()
 
-    /// Passthrough audio renderer — used for compressed formats (AC3/EAC3) that the
-    /// receiver can decode natively. NOT used for client-decoded PCM audio.
+    /// Audio renderer — used for compressed passthrough and sample-buffer audio.
     nonisolated(unsafe) let audioRenderer = AVSampleBufferAudioRenderer()
 
-    /// Synchronizer for passthrough audio. Drives the video timebase in passthrough mode.
+    /// Render synchronizer — drives A/V sync, handles AirPlay latency compensation,
+    /// and manages the shared timebase for both video and audio.
     nonisolated(unsafe) let renderSynchronizer = AVSampleBufferRenderSynchronizer()
 
     // MARK: - AVAudioEngine (PCM Audio)
 
-    /// When true, client-decoded PCM audio routes through AVAudioEngine instead of
-    /// AVSampleBufferAudioRenderer. The engine handles sample rate conversion and
-    /// device-specific buffering (critical for AirPlay/HomePod).
+    /// When true, decoded PCM audio routes through AVAudioEngine instead of
+    /// AVSampleBufferAudioRenderer. The engine handles route-specific buffering
+    /// and conversion more reliably on stereo AirPlay/HomePod routes.
     nonisolated(unsafe) private(set) var useAudioEngine = false
 
     private var audioEngine: AVAudioEngine?
     private var audioPlayerNode: AVAudioPlayerNode?
     private var pcmAudioFormat: AVAudioFormat?
     private var engineConfigObserver: NSObjectProtocol?
+    private var audioEngineVideoLatency: CMTime = .zero
 
-    /// Our own timebase for video when using AVAudioEngine.
-    /// Advances with the host clock at the set rate. We control it via setRate/setTime.
+    /// Independent video clock used while the audio engine owns audio playback.
     nonisolated(unsafe) private var videoTimebase: CMTimebase?
 
     // MARK: - Configuration
@@ -51,15 +51,35 @@ final class SampleBufferRenderer {
     /// Maximum seconds to wait for audio renderer backpressure before dropping.
     var audioBackpressureMaxWait: TimeInterval = 0.5
 
-    /// Use pull-mode audio delivery for passthrough path.
+    /// Use pull-mode audio delivery.
     var useAudioPullMode = false
 
-    // MARK: - Pull-Mode Audio State (passthrough only)
+    /// Minimum queued audio duration before starting pull-mode delivery after a reset.
+    /// Helps AirPlay routes build a meaningful initial renderer cushion instead of
+    /// draining one PCM buffer at a time.
+    var minimumAudioPullStartBuffer: TimeInterval = 0
+
+    /// Minimum queued audio duration required to restart pull-mode delivery after
+    /// an active request drained completely. Keeps buffered routes from oscillating
+    /// between one-sample requests and empty playback once startup completes.
+    var minimumAudioPullResumeBuffer: TimeInterval = 0
+
+    // MARK: - Pull-Mode Audio State
 
     private let audioPullLock = NSLock()
     private nonisolated(unsafe) var audioPullBuffer: [CMSampleBuffer] = []
+    private nonisolated(unsafe) var audioPullBufferedDuration: TimeInterval = 0
     private nonisolated(unsafe) var audioPullRequesting = false
+    private nonisolated(unsafe) var hasStartedAudioPullSinceReset = false
+    private nonisolated(unsafe) var hasReachedReliableAudioPullStartSinceReset = false
     private let audioPullQueue = DispatchQueue(label: "rivulet.audio-pull", qos: .userInteractive)
+    private nonisolated(unsafe) var audioPullDrainCount = 0
+    private nonisolated(unsafe) var audioPullRequestStartWall: CFAbsoluteTime = 0
+    private nonisolated(unsafe) var audioPullStartCount = 0
+    private nonisolated(unsafe) var audioPullDeliveredCount = 0
+    private nonisolated(unsafe) var audioPullWaitingLogCount = 0
+    private nonisolated(unsafe) var audioPullShouldLogCurrentRequest = false
+    private nonisolated(unsafe) var lastLoggedAudioPullReliableStart: Bool?
 
     // MARK: - Callbacks
 
@@ -68,6 +88,11 @@ final class SampleBufferRenderer {
 
     /// Called when the audio output configuration changes.
     var onAudioOutputConfigurationChanged: (() -> Void)?
+
+    /// Called when audio becomes genuinely primed for playback.
+    /// For pull-mode audio this fires on the first delivered sample PTS, not
+    /// merely when a request starts or data is buffered.
+    var onAudioPrimedForPlayback: ((Double) -> Void)?
 
     // MARK: - Audio State
 
@@ -91,14 +116,14 @@ final class SampleBufferRenderer {
     // MARK: - Init
 
     init() {
-        // Synchronizer manages passthrough audio only.
         renderSynchronizer.addRenderer(audioRenderer)
 
         if #available(tvOS 14.5, *) {
-            renderSynchronizer.delaysRateChangeUntilHasSufficientMediaData = false
+            // Keep the system's reliable-start gate enabled so AirPlay routes can
+            // build the renderer's preroll before playback rate changes take effect.
+            renderSynchronizer.delaysRateChangeUntilHasSufficientMediaData = true
         }
 
-        // Default: video uses the synchronizer's timebase (passthrough mode).
         displayLayer.controlTimebase = renderSynchronizer.timebase
         displayLayer.videoGravity = .resizeAspect
 
@@ -126,28 +151,28 @@ final class SampleBufferRenderer {
 
     // MARK: - AVAudioEngine Setup
 
-    /// Enable AVAudioEngine for PCM audio output. Call before enqueuing any audio.
-    /// The engine is configured lazily from the first CMSampleBuffer's format.
     func enableAudioEngine() {
         guard !useAudioEngine else { return }
 
-        // Create our own timebase for video (decoupled from the synchronizer).
-        var tb: CMTimebase?
+        stopAudioPullMode()
+        audioRenderer.flush()
+
+        var timebase: CMTimebase?
         CMTimebaseCreateWithSourceClock(
             allocator: kCFAllocatorDefault,
             sourceClock: CMClockGetHostTimeClock(),
-            timebaseOut: &tb
+            timebaseOut: &timebase
         )
-        if let tb {
-            videoTimebase = tb
-            displayLayer.controlTimebase = tb
+
+        if let timebase {
+            videoTimebase = timebase
+            displayLayer.controlTimebase = timebase
         }
 
         useAudioEngine = true
         print("[Renderer] Audio engine mode enabled — video uses independent timebase")
     }
 
-    /// Disable AVAudioEngine and revert to passthrough mode.
     func disableAudioEngine() {
         guard useAudioEngine else { return }
 
@@ -156,35 +181,35 @@ final class SampleBufferRenderer {
         audioPlayerNode = nil
         audioEngine = nil
         pcmAudioFormat = nil
+        audioEngineVideoLatency = .zero
 
         if let engineConfigObserver {
             NotificationCenter.default.removeObserver(engineConfigObserver)
             self.engineConfigObserver = nil
         }
 
-        // Revert video to synchronizer's timebase
         displayLayer.controlTimebase = renderSynchronizer.timebase
         videoTimebase = nil
         useAudioEngine = false
-        print("[Renderer] Audio engine mode disabled — reverted to passthrough")
+        audioRenderer.flush()
+        print("[Renderer] Audio engine mode disabled — reverted to sample-buffer audio")
     }
 
-    /// Lazily configure and start the audio engine from the first buffer's format.
     private func configureAudioEngine(from sampleBuffer: CMSampleBuffer) -> Bool {
-        guard let fd = CMSampleBufferGetFormatDescription(sampleBuffer),
-              let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(fd) else {
+        guard let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer),
+              let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(formatDescription) else {
             print("[Renderer] AudioEngine: cannot read format from sample buffer")
             return false
         }
 
-        let a = asbd.pointee
-        let isFloat = (a.mFormatFlags & kAudioFormatFlagIsFloat) != 0
+        let stream = asbd.pointee
+        let isFloat = (stream.mFormatFlags & kAudioFormatFlagIsFloat) != 0
         let commonFormat: AVAudioCommonFormat = isFloat ? .pcmFormatFloat32 : .pcmFormatInt16
 
         guard let format = AVAudioFormat(
             commonFormat: commonFormat,
-            sampleRate: a.mSampleRate,
-            channels: AVAudioChannelCount(a.mChannelsPerFrame),
+            sampleRate: stream.mSampleRate,
+            channels: AVAudioChannelCount(stream.mChannelsPerFrame),
             interleaved: true
         ) else {
             print("[Renderer] AudioEngine: failed to create AVAudioFormat")
@@ -193,7 +218,6 @@ final class SampleBufferRenderer {
 
         let engine = AVAudioEngine()
         let playerNode = AVAudioPlayerNode()
-
         engine.attach(playerNode)
         engine.connect(playerNode, to: engine.mainMixerNode, format: format)
 
@@ -204,7 +228,6 @@ final class SampleBufferRenderer {
             return false
         }
 
-        // Observe engine config changes (route switches, sample rate changes).
         engineConfigObserver = NotificationCenter.default.addObserver(
             forName: .AVAudioEngineConfigurationChange,
             object: engine,
@@ -215,16 +238,18 @@ final class SampleBufferRenderer {
             }
         }
 
-        self.audioEngine = engine
-        self.audioPlayerNode = playerNode
-        self.pcmAudioFormat = format
+        audioEngine = engine
+        audioPlayerNode = playerNode
+        pcmAudioFormat = format
+        let previousLatency = audioEngineVideoLatency
+        refreshAudioEngineLatency(reason: "engine_started")
+        applyAudioEngineLatencyDelta(previousLatency: previousLatency, reason: "engine_started")
 
         let formatName = isFloat ? "float32" : "s16"
-        print("[Renderer] AudioEngine started: \(Int(a.mSampleRate))Hz " +
-              "\(a.mChannelsPerFrame)ch \(formatName) → output \(engine.outputNode.outputFormat(forBus: 0))")
-
-        // Node stays stopped — buffers are queued during preroll.
-        // setRate(rate > 0) calls play() once video is also ready.
+        print(
+            "[Renderer] AudioEngine started: \(Int(stream.mSampleRate))Hz " +
+            "\(stream.mChannelsPerFrame)ch \(formatName) -> output \(engine.outputNode.outputFormat(forBus: 0))"
+        )
         return true
     }
 
@@ -232,12 +257,13 @@ final class SampleBufferRenderer {
         print("[Renderer] AudioEngine config changed — restarting")
         guard let engine = audioEngine, let playerNode = audioPlayerNode else { return }
 
-        // Engine stops itself on config change. Restart it.
+        let previousLatency = audioEngineVideoLatency
+
         do {
             try engine.start()
-            // Only resume the player node if we're actively playing (timebase rate > 0).
-            // If paused, the node stays stopped until setRate(rate > 0) is called.
-            if let tb = videoTimebase, CMTimebaseGetRate(tb) > 0 {
+            refreshAudioEngineLatency(reason: "engine_config_changed")
+            applyAudioEngineLatencyDelta(previousLatency: previousLatency, reason: "engine_config_changed")
+            if let timebase = videoTimebase, CMTimebaseGetRate(timebase) > 0 {
                 playerNode.play()
             }
             print("[Renderer] AudioEngine restarted after config change (playing=\(playerNode.isPlaying))")
@@ -252,8 +278,8 @@ final class SampleBufferRenderer {
 
     /// Current playback position.
     nonisolated var currentTime: TimeInterval {
-        if useAudioEngine, let tb = videoTimebase {
-            let time = CMTimeGetSeconds(CMTimebaseGetTime(tb))
+        if useAudioEngine, let timebase = videoTimebase {
+            let time = CMTimeGetSeconds(CMTimebaseGetTime(timebase))
             return time.isFinite && time >= 0 ? time : 0
         }
         let time = CMTimeGetSeconds(renderSynchronizer.currentTime())
@@ -262,8 +288,8 @@ final class SampleBufferRenderer {
 
     /// Current time as CMTime.
     nonisolated var currentCMTime: CMTime {
-        if useAudioEngine, let tb = videoTimebase {
-            return CMTimebaseGetTime(tb)
+        if useAudioEngine, let timebase = videoTimebase {
+            return CMTimebaseGetTime(timebase)
         }
         return renderSynchronizer.currentTime()
     }
@@ -272,8 +298,8 @@ final class SampleBufferRenderer {
     func setRate(_ rate: Float) {
         print("[Renderer] setRate(\(rate))")
         if useAudioEngine {
-            if let tb = videoTimebase {
-                CMTimebaseSetRate(tb, rate: Float64(rate))
+            if let timebase = videoTimebase {
+                CMTimebaseSetRate(timebase, rate: Float64(rate))
             }
             if rate > 0 {
                 audioPlayerNode?.play()
@@ -289,9 +315,10 @@ final class SampleBufferRenderer {
     func setRate(_ rate: Float, time: CMTime) {
         print("[Renderer] setRate(\(rate), time=\(String(format: "%.3f", CMTimeGetSeconds(time)))s)")
         if useAudioEngine {
-            if let tb = videoTimebase {
-                CMTimebaseSetTime(tb, time: time)
-                CMTimebaseSetRate(tb, rate: Float64(rate))
+            if let timebase = videoTimebase {
+                let displayTime = compensatedVideoTime(forMediaTime: time)
+                CMTimebaseSetTime(timebase, time: displayTime)
+                CMTimebaseSetRate(timebase, rate: Float64(rate))
             }
             if rate > 0 {
                 audioPlayerNode?.play()
@@ -301,6 +328,92 @@ final class SampleBufferRenderer {
         } else {
             renderSynchronizer.setRate(rate, time: time)
         }
+    }
+
+    /// Set playback rate and media time against a future host-time edge.
+    func setRate(_ rate: Float, time: CMTime, atHostTime hostTime: CMTime) {
+        print(
+            "[Renderer] setRate(\(rate), time=\(String(format: "%.3f", CMTimeGetSeconds(time)))s, " +
+            "hostTime=\(String(format: "%.3f", CMTimeGetSeconds(hostTime)))s)"
+        )
+        if useAudioEngine {
+            setRate(rate, time: time)
+        } else if #available(tvOS 14.5, iOS 14.5, macOS 11.3, watchOS 7.4, visionOS 1.0, *) {
+            renderSynchronizer.setRate(rate, time: time, atHostTime: hostTime)
+        } else {
+            renderSynchronizer.setRate(rate, time: time)
+        }
+    }
+
+    private func refreshAudioEngineLatency(reason: String) {
+        guard let engine = audioEngine else {
+            audioEngineVideoLatency = .zero
+            return
+        }
+
+        let session = AVAudioSession.sharedInstance()
+        let sessionOutputLatency = session.outputLatency
+        let ioBufferLatency = session.ioBufferDuration
+        let enginePresentationLatency = engine.outputNode.presentationLatency
+
+        let appliedSeconds = max(
+            sessionOutputLatency + ioBufferLatency,
+            enginePresentationLatency
+        )
+        audioEngineVideoLatency = CMTime(
+            seconds: appliedSeconds,
+            preferredTimescale: 90_000
+        )
+
+        print(
+            "[Renderer] AudioEngine latency: reason=\(reason) " +
+            "sessionOutput=\(String(format: "%.3f", sessionOutputLatency))s " +
+            "ioBuffer=\(String(format: "%.3f", ioBufferLatency))s " +
+            "enginePresentation=\(String(format: "%.3f", enginePresentationLatency))s " +
+            "applied=\(String(format: "%.3f", appliedSeconds))s"
+        )
+    }
+
+    private func applyAudioEngineLatencyDelta(previousLatency: CMTime, reason: String) {
+        guard let timebase = videoTimebase else { return }
+
+        let currentTime = CMTimebaseGetTime(timebase)
+        let delta = CMTimeSubtract(previousLatency, audioEngineVideoLatency)
+        let rebasedTime = CMTimeAdd(currentTime, delta)
+        let clampedTime = rebasedTime < .zero ? .zero : rebasedTime
+        CMTimebaseSetTime(timebase, time: clampedTime)
+
+        print(
+            "[Renderer] AudioEngine timebase rebase: reason=\(reason) " +
+            "previousLatency=\(String(format: "%.3f", CMTimeGetSeconds(previousLatency)))s " +
+            "newLatency=\(String(format: "%.3f", CMTimeGetSeconds(audioEngineVideoLatency)))s " +
+            "oldTime=\(String(format: "%.3f", CMTimeGetSeconds(currentTime)))s " +
+            "newTime=\(String(format: "%.3f", CMTimeGetSeconds(clampedTime)))s"
+        )
+    }
+
+    private func compensatedVideoTime(forMediaTime mediaTime: CMTime) -> CMTime {
+        guard audioEngineVideoLatency.isValid,
+              audioEngineVideoLatency.isNumeric,
+              audioEngineVideoLatency > .zero else {
+            return mediaTime
+        }
+
+        let compensated = CMTimeSubtract(mediaTime, audioEngineVideoLatency)
+        return compensated < .zero ? .zero : compensated
+    }
+
+    private nonisolated var hasReliableAudioStartBuffer: Bool {
+        if #available(tvOS 14.5, iOS 14.5, macOS 11.3, watchOS 7.4, visionOS 1.0, *) {
+            return audioRenderer.hasSufficientMediaDataForReliablePlaybackStart
+        }
+        return false
+    }
+
+    private nonisolated func audioPullDeliveredCountSnapshot() -> Int {
+        audioPullLock.lock()
+        defer { audioPullLock.unlock() }
+        return audioPullDeliveredCount
     }
 
     // MARK: - Enqueue Video
@@ -353,8 +466,7 @@ final class SampleBufferRenderer {
 
     // MARK: - Enqueue Audio
 
-    /// Enqueue an audio sample buffer. Routes to AVAudioEngine (PCM) or
-    /// AVSampleBufferAudioRenderer (passthrough) based on current mode.
+    /// Enqueue an audio sample buffer via the audio renderer.
     func enqueueAudio(_ sampleBuffer: CMSampleBuffer) async {
         if useAudioEngine {
             enqueueAudioViaEngine(sampleBuffer)
@@ -366,7 +478,7 @@ final class SampleBufferRenderer {
             return
         }
 
-        // --- Passthrough push mode ---
+        // --- Push mode ---
 
         let currentStatus = audioRenderer.status
         if lastAudioRendererStatus != currentStatus {
@@ -456,66 +568,91 @@ final class SampleBufferRenderer {
 
     // MARK: - AVAudioEngine Audio Enqueue
 
-    /// Convert a CMSampleBuffer to AVAudioPCMBuffer and schedule on the player node.
     private func enqueueAudioViaEngine(_ sampleBuffer: CMSampleBuffer) {
-        // Lazy setup: configure engine from first buffer's format description.
         if audioEngine == nil {
             guard configureAudioEngine(from: sampleBuffer) else { return }
         }
 
         guard let playerNode = audioPlayerNode,
-              let format = pcmAudioFormat else { return }
+              let format = pcmAudioFormat,
+              let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else {
+            return
+        }
 
-        // Extract raw PCM data from the CMSampleBuffer
-        guard let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else { return }
         var length = 0
         var dataPointer: UnsafeMutablePointer<Int8>?
         let status = CMBlockBufferGetDataPointer(
-            blockBuffer, atOffset: 0, lengthAtOffsetOut: nil,
-            totalLengthOut: &length, dataPointerOut: &dataPointer
+            blockBuffer,
+            atOffset: 0,
+            lengthAtOffsetOut: nil,
+            totalLengthOut: &length,
+            dataPointerOut: &dataPointer
         )
-        guard status == noErr, let data = dataPointer, length > 0 else { return }
+        guard status == noErr, let dataPointer, length > 0 else { return }
 
         let bytesPerFrame = Int(format.streamDescription.pointee.mBytesPerFrame)
         guard bytesPerFrame > 0 else { return }
+
         let frameCount = AVAudioFrameCount(length / bytesPerFrame)
-        guard frameCount > 0 else { return }
+        guard frameCount > 0,
+              let pcmBuffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameCount) else {
+            return
+        }
 
-        guard let pcmBuffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameCount) else { return }
         pcmBuffer.frameLength = frameCount
-
-        // Copy interleaved PCM data into the AVAudioPCMBuffer
-        let dst = pcmBuffer.mutableAudioBufferList.pointee.mBuffers.mData!
-        memcpy(dst, data, length)
+        guard let destination = pcmBuffer.mutableAudioBufferList.pointee.mBuffers.mData else { return }
+        memcpy(destination, dataPointer, length)
 
         playerNode.scheduleBuffer(pcmBuffer)
         audioEnqueueCount += 1
+        audioNotReadyStreak = 0
 
-        // First sample log
         if !hasLoggedFirstAudioSample {
             hasLoggedFirstAudioSample = true
             let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
             let outputFormat = audioEngine?.outputNode.outputFormat(forBus: 0)
-            print("[Renderer] AudioEngine first sample: PTS=\(String(format: "%.3f", CMTimeGetSeconds(pts)))s " +
-                  "inputFormat=\(format) frames=\(frameCount) " +
-                  "outputRate=\(outputFormat.map { String(Int($0.sampleRate)) } ?? "?")")
+            print(
+                "[Renderer] AudioEngine first sample: PTS=\(String(format: "%.3f", CMTimeGetSeconds(pts)))s " +
+                "inputFormat=\(format) frames=\(frameCount) " +
+                "outputRate=\(outputFormat.map { String(Int($0.sampleRate)) } ?? "?")"
+            )
+            logAudioSampleFormat(sampleBuffer)
             AudioRouteDiagnostics.shared.logCurrentRoute(owner: "SampleBufferRenderer", reason: "first_audio_engine")
         }
 
-        // Periodic diagnostics
         let now = CFAbsoluteTimeGetCurrent()
         if now - lastAudioDiagWallTime >= 5.0 {
             lastAudioDiagWallTime = now
-            let tbTime = videoTimebase.map { CMTimeGetSeconds(CMTimebaseGetTime($0)) } ?? 0
+            let timebaseTime = videoTimebase.map { CMTimeGetSeconds(CMTimebaseGetTime($0)) } ?? 0
             let pts = CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
-            print("[Renderer] AudioEngineDiag: enqueued=\(audioEnqueueCount) " +
-                  "tbTime=\(String(format: "%.3f", tbTime))s " +
-                  "audioPTS=\(String(format: "%.3f", pts))s " +
-                  "engineRunning=\(audioEngine?.isRunning ?? false)")
+            print(
+                "[Renderer] AudioEngineDiag: enqueued=\(audioEnqueueCount) " +
+                "tbTime=\(String(format: "%.3f", timebaseTime))s " +
+                "audioPTS=\(String(format: "%.3f", pts))s " +
+                "engineRunning=\(audioEngine?.isRunning ?? false)"
+            )
         }
     }
 
-    // MARK: - Pull-Mode Audio (passthrough only)
+    private nonisolated func sampleBufferDuration(_ sampleBuffer: CMSampleBuffer) -> TimeInterval {
+        let duration = CMSampleBufferGetDuration(sampleBuffer)
+        let durationSeconds = CMTimeGetSeconds(duration)
+        if durationSeconds.isFinite, durationSeconds > 0 {
+            return durationSeconds
+        }
+
+        guard let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer),
+              let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(formatDescription) else {
+            return 0
+        }
+
+        let sampleRate = asbd.pointee.mSampleRate
+        let sampleCount = CMSampleBufferGetNumSamples(sampleBuffer)
+        guard sampleRate > 0, sampleCount > 0 else { return 0 }
+        return Double(sampleCount) / sampleRate
+    }
+
+    // MARK: - Pull-Mode Audio
 
     private func enqueueAudioPullMode(_ sampleBuffer: CMSampleBuffer) {
         if !hasLoggedFirstAudioSample {
@@ -530,10 +667,22 @@ final class SampleBufferRenderer {
             AudioRouteDiagnostics.shared.logCurrentRoute(owner: "SampleBufferRenderer", reason: "first_audio_pull")
         }
 
+        let sampleDuration = sampleBufferDuration(sampleBuffer)
         audioPullLock.lock()
+        let previousBufferedDuration = audioPullBufferedDuration
         audioPullBuffer.append(sampleBuffer)
+        audioPullBufferedDuration += sampleDuration
         let bufferCount = audioPullBuffer.count
+        let bufferedDuration = audioPullBufferedDuration
         let needsRestart = !audioPullRequesting
+        if hasReliableAudioStartBuffer {
+            hasReachedReliableAudioPullStartSinceReset = true
+        }
+        let requiresStartupThreshold = !hasStartedAudioPullSinceReset || !hasReachedReliableAudioPullStartSinceReset
+        let restartThreshold = requiresStartupThreshold
+            ? minimumAudioPullStartBuffer
+            : minimumAudioPullResumeBuffer
+        let shouldStart = restartThreshold <= 0 || bufferedDuration >= restartThreshold
         audioPullLock.unlock()
 
         audioEnqueueCount += 1
@@ -544,21 +693,61 @@ final class SampleBufferRenderer {
             let syncTime = CMTimeGetSeconds(renderSynchronizer.currentTime())
             let pts = CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
             print("[Renderer] AudioPullDiag: buffered=\(bufferCount) enqueued=\(audioEnqueueCount) " +
+                  "bufferedDur=\(String(format: "%.3f", bufferedDuration))s " +
                   "requesting=\(audioPullRequesting) " +
+                  "reliableStart=\(hasReliableAudioStartBuffer) " +
                   "syncTime=\(String(format: "%.3f", syncTime))s " +
                   "audioPTS=\(String(format: "%.3f", pts))s " +
                   "status=\(audioRenderer.status.rawValue)")
         }
 
-        if needsRestart {
+        if needsRestart && shouldStart {
             startAudioPullMode()
+        } else if !needsRestart && shouldStart && previousBufferedDuration < restartThreshold && audioRenderer.isReadyForMoreMediaData {
+            audioPullQueue.async { [weak self] in
+                self?.drainAudioPullBuffer()
+            }
+        } else if needsRestart && restartThreshold > 0 {
+            audioPullWaitingLogCount += 1
+            let waitLogCount = audioPullWaitingLogCount
+            if waitLogCount <= 4 || waitLogCount % 60 == 0 {
+                print(
+                    "[Renderer] Audio pull waiting for cushion: " +
+                    "buffered=\(bufferCount) bufferedDur=\(String(format: "%.3f", bufferedDuration))s " +
+                    "need=\(String(format: "%.3f", restartThreshold))s " +
+                    "phase=\(requiresStartupThreshold ? "startup" : "resume")"
+                )
+            }
         }
     }
 
     private func startAudioPullMode() {
         audioPullLock.lock()
         audioPullRequesting = true
+        let buffered = audioPullBuffer.count
+        let bufferedDuration = audioPullBufferedDuration
         audioPullLock.unlock()
+        hasStartedAudioPullSinceReset = true
+        audioPullRequestStartWall = CFAbsoluteTimeGetCurrent()
+        audioPullStartCount += 1
+        let startCount = audioPullStartCount
+        let reliableStart = hasReliableAudioStartBuffer
+        if reliableStart {
+            hasReachedReliableAudioPullStartSinceReset = true
+        }
+        let reliableStartChanged = lastLoggedAudioPullReliableStart != reliableStart
+        lastLoggedAudioPullReliableStart = reliableStart
+        let shouldLogRequest = reliableStartChanged || startCount <= 4 || startCount % 120 == 0
+        audioPullShouldLogCurrentRequest = shouldLogRequest
+
+        if shouldLogRequest {
+            print(
+                "[Renderer] Audio pull start: buffered=\(buffered) " +
+                "bufferedDur=\(String(format: "%.3f", bufferedDuration))s " +
+                "status=\(audioRenderer.status.rawValue) ready=\(audioRenderer.isReadyForMoreMediaData) " +
+                "reliableStart=\(reliableStart) count=\(startCount)"
+            )
+        }
 
         audioRenderer.requestMediaDataWhenReady(on: audioPullQueue) { [weak self] in
             self?.drainAudioPullBuffer()
@@ -569,15 +758,65 @@ final class SampleBufferRenderer {
         while audioRenderer.isReadyForMoreMediaData {
             audioPullLock.lock()
             guard !audioPullBuffer.isEmpty else {
-                audioPullRequesting = false
                 audioPullLock.unlock()
-                audioRenderer.stopRequestingMediaData()
+                let elapsed = CFAbsoluteTimeGetCurrent() - audioPullRequestStartWall
+                if audioPullDrainCount > 0 && audioPullShouldLogCurrentRequest {
+                    print(
+                        "[Renderer] Audio pull drained: delivered=\(audioPullDrainCount) " +
+                        "elapsed=\(String(format: "%.0f", elapsed * 1000))ms " +
+                        "status=\(audioRenderer.status.rawValue)"
+                    )
+                }
+                audioPullDrainCount = 0
+                audioPullShouldLogCurrentRequest = false
                 return
             }
             let sample = audioPullBuffer.removeFirst()
+            audioPullBufferedDuration = max(0, audioPullBufferedDuration - sampleBufferDuration(sample))
+            let remaining = audioPullBuffer.count
+            let remainingDuration = audioPullBufferedDuration
             audioPullLock.unlock()
 
             audioRenderer.enqueue(sample)
+            audioPullLock.lock()
+            audioPullDrainCount += 1
+            audioPullDeliveredCount += 1
+            let drainCount = audioPullDrainCount
+            let deliveredCount = audioPullDeliveredCount
+            audioPullLock.unlock()
+            let becamePrimed = (deliveredCount == 1)
+            if hasReliableAudioStartBuffer {
+                hasReachedReliableAudioPullStartSinceReset = true
+            }
+            if becamePrimed {
+                let deliveredPTS = CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sample))
+                Task { @MainActor [weak self] in
+                    guard deliveredPTS.isFinite else { return }
+                    self?.onAudioPrimedForPlayback?(deliveredPTS)
+                }
+            }
+            if audioPullShouldLogCurrentRequest && drainCount == 1 {
+                let pts = CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sample))
+                let syncTime = CMTimeGetSeconds(renderSynchronizer.currentTime())
+                print("[Renderer] Audio pull deliver #\(deliveredCount): pts=\(String(format: "%.3f", pts))s " +
+                      "ahead=\(String(format: "%.3f", pts - syncTime))s remaining=\(remaining) " +
+                      "remainingDur=\(String(format: "%.3f", remainingDuration))s " +
+                      "reliableStart=\(hasReliableAudioStartBuffer) status=\(audioRenderer.status.rawValue)")
+            }
+        }
+
+        audioPullLock.lock()
+        let buffered = audioPullBuffer.count
+        let bufferedDuration = audioPullBufferedDuration
+        audioPullLock.unlock()
+        if audioPullShouldLogCurrentRequest {
+            print(
+                "[Renderer] Audio pull paused: buffered=\(buffered) " +
+                "bufferedDur=\(String(format: "%.3f", bufferedDuration))s " +
+                "ready=\(audioRenderer.isReadyForMoreMediaData) " +
+                "reliableStart=\(hasReliableAudioStartBuffer) status=\(audioRenderer.status.rawValue) " +
+                "error=\(audioRenderer.error?.localizedDescription ?? "none")"
+            )
         }
     }
 
@@ -593,7 +832,12 @@ final class SampleBufferRenderer {
 
         audioPullLock.lock()
         audioPullBuffer.removeAll()
+        audioPullBufferedDuration = 0
         audioPullLock.unlock()
+        audioPullDrainCount = 0
+        audioPullShouldLogCurrentRequest = false
+        hasStartedAudioPullSinceReset = false
+        hasReachedReliableAudioPullStartSinceReset = false
     }
 
     /// Reset audio diagnostics and recovery state (call after flush/seek).
@@ -608,7 +852,16 @@ final class SampleBufferRenderer {
 
         audioPullLock.lock()
         audioPullBuffer.removeAll()
+        audioPullBufferedDuration = 0
         audioPullLock.unlock()
+        hasStartedAudioPullSinceReset = false
+        audioPullDrainCount = 0
+        audioPullStartCount = 0
+        audioPullDeliveredCount = 0
+        audioPullWaitingLogCount = 0
+        audioPullShouldLogCurrentRequest = false
+        lastLoggedAudioPullReliableStart = nil
+        hasReachedReliableAudioPullStartSinceReset = false
     }
 
     // MARK: - Flush
@@ -618,8 +871,6 @@ final class SampleBufferRenderer {
         displayLayer.flushAndRemoveImage()
 
         if useAudioEngine {
-            // Stop the player node to clear all scheduled buffers.
-            // Node stays stopped — setRate(rate > 0) will call play() when ready.
             audioPlayerNode?.stop()
             audioEngine?.stop()
             audioPlayerNode = nil
@@ -630,7 +881,6 @@ final class SampleBufferRenderer {
                 self.engineConfigObserver = nil
             }
         } else {
-            // Passthrough: stop pull mode and flush renderer
             audioPullLock.lock()
             let wasPulling = audioPullRequesting
             if wasPulling {
@@ -644,7 +894,6 @@ final class SampleBufferRenderer {
 
             audioRenderer.flush()
         }
-
         resetAudioState()
     }
 
@@ -653,9 +902,18 @@ final class SampleBufferRenderer {
     var audioRendererError: Error? {
         useAudioEngine ? nil : audioRenderer.error
     }
+    var hasReliableAudioStart: Bool {
+        if useAudioEngine {
+            return audioEnqueueCount > 0
+        }
+        return hasReliableAudioStartBuffer
+    }
     var isAudioPrimedForPlayback: Bool {
         if useAudioEngine {
             return audioEnqueueCount > 0
+        }
+        if useAudioPullMode {
+            return audioPullDeliveredCountSnapshot() > 0
         }
         return audioEnqueueCount > 0 || audioRenderer.status == .rendering
     }
@@ -747,7 +1005,6 @@ final class SampleBufferRenderer {
 
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                // Only relevant for passthrough mode
                 guard !self.useAudioEngine else { return }
                 let flushTimeSeconds = CMTimeGetSeconds(flushTime)
                 let syncTime = CMTimeGetSeconds(self.renderSynchronizer.currentTime())
@@ -767,7 +1024,6 @@ final class SampleBufferRenderer {
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                // Only relevant for passthrough mode
                 guard !self.useAudioEngine else { return }
                 let syncTime = CMTimeGetSeconds(self.renderSynchronizer.currentTime())
                 print("[Renderer] Audio output configuration changed (syncTime=\(String(format: "%.3f", syncTime))s)")
