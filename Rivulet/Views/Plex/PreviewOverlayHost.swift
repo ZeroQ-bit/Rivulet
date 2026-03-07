@@ -29,12 +29,9 @@ struct PreviewOverlayHost: View {
     @FocusState private var focusedArea: PreviewFocusArea?
 
     private let topInset: CGFloat = 52
-    private let bottomInset: CGFloat = 128
-    private let cardAspectRatio: CGFloat = 16.0 / 9.0
-    private let cornerRadius: CGFloat = 44
-    private let sidePeek: CGFloat = 160
-    private let sideScale: CGFloat = 0.94
-    private let sideOpacity: Double = 0.55
+    private let cardGap: CGFloat = 16
+    private let cornerRadius: CGFloat = 28
+    private let sidePeek: CGFloat = 80  // How much of side cards shows
     private let parallaxTravel: CGFloat = 36
 
     init(
@@ -67,14 +64,16 @@ struct PreviewOverlayHost: View {
     }
 
     var body: some View {
-        GeometryReader { geo in
-            let centeredWidth = max(0, geo.size.width - (sidePeek * 2))
-            let centeredHeight = max(0, min(centeredWidth / cardAspectRatio, geo.size.height - topInset - bottomInset))
+        NavigationStack {
+            GeometryReader { geo in
+            // Card extends from topInset to below the screen bottom (overflows by cornerRadius to hide bottom corners)
+            let cardWidth = max(0, geo.size.width - (sidePeek * 2) - (cardGap * 2))
+            let cardHeight = geo.size.height - topInset + cornerRadius
             let centeredFrame = CGRect(
-                x: sidePeek,
+                x: (geo.size.width - cardWidth) / 2,
                 y: topInset,
-                width: centeredWidth,
-                height: centeredHeight
+                width: cardWidth,
+                height: cardHeight
             )
             let fullFrame = CGRect(origin: .zero, size: geo.size)
             let entryFrame = sanitizedSourceFrame(
@@ -84,10 +83,10 @@ struct PreviewOverlayHost: View {
             )
 
             ZStack {
-                PreviewOverlayBackdrop(
-                    url: previewArtURL(for: currentItem),
-                    parallaxOffset: currentParallaxOffset
-                )
+                // Blurred material background (not the art image)
+                Rectangle()
+                    .fill(.regularMaterial)
+                    .ignoresSafeArea()
 
                 ForEach(visibleIndices, id: \.self) { index in
                     PreviewCarouselCard(
@@ -109,7 +108,6 @@ struct PreviewOverlayHost: View {
                         backgroundParallaxOffset: index == selectedIndex ? currentParallaxOffset : 0,
                         cornerRadius: cardCornerRadius(for: index),
                         opacity: cardOpacity(for: index),
-                        scale: cardScale(for: index),
                         onPreviewExitRequested: handleExpandedExit
                     )
                     .zIndex(index == selectedIndex ? 2 : 1)
@@ -152,8 +150,9 @@ struct PreviewOverlayHost: View {
                     capturedSourceFrame = newFrame
                 }
             }
-        }
-        .ignoresSafeArea()
+            }
+            .ignoresSafeArea()
+        } // NavigationStack
     }
 
     private func performCarouselMove(_ direction: MoveCommandDirection) {
@@ -323,8 +322,6 @@ struct PreviewOverlayHost: View {
         entryFrame: CGRect,
         containerSize: CGSize
     ) -> CGRect {
-        let scaleCompensation = centeredFrame.width * (1 - sideScale) * 0.5
-
         if index == selectedIndex {
             switch stateMachine.phase {
             case .enteringCarousel:
@@ -336,17 +333,10 @@ struct PreviewOverlayHost: View {
             }
         }
 
-        if index < selectedIndex {
-            return CGRect(
-                x: -centeredFrame.width + sidePeek + scaleCompensation,
-                y: centeredFrame.minY,
-                width: centeredFrame.width,
-                height: centeredFrame.height
-            )
-        }
-
+        // Side cards: same size, positioned inline with a gap
+        let offset = CGFloat(index - selectedIndex) * (centeredFrame.width + cardGap)
         return CGRect(
-            x: containerSize.width - sidePeek - scaleCompensation,
+            x: centeredFrame.minX + offset,
             y: centeredFrame.minY,
             width: centeredFrame.width,
             height: centeredFrame.height
@@ -374,66 +364,12 @@ struct PreviewOverlayHost: View {
         guard index != selectedIndex else { return 1 }
         switch stateMachine.phase {
         case .carousel:
-            return sideOpacity
+            return 1  // Side cards fully visible, same as main
         case .expanding, .enteringCarousel, .expanded:
             return 0
         }
     }
 
-    private func cardScale(for index: Int) -> CGFloat {
-        index == selectedIndex ? 1 : sideScale
-    }
-}
-
-private struct PreviewOverlayBackdrop: View {
-    let url: URL?
-    let parallaxOffset: CGFloat
-
-    var body: some View {
-        ZStack {
-            CachedAsyncImage(url: url) { phase in
-                switch phase {
-                case .success(let image):
-                    image
-                        .resizable()
-                        .aspectRatio(contentMode: .fill)
-                case .empty:
-                    Rectangle()
-                        .fill(Color.black)
-                case .failure:
-                    Rectangle()
-                        .fill(
-                            LinearGradient(
-                                colors: [Color(white: 0.12), Color.black],
-                                startPoint: .top,
-                                endPoint: .bottom
-                            )
-                        )
-                @unknown default:
-                    Rectangle()
-                        .fill(Color.black)
-                }
-            }
-            .scaleEffect(1.06)
-            .offset(x: parallaxOffset * 0.4)
-
-            LinearGradient(
-                colors: [
-                    Color.black.opacity(0.42),
-                    Color.black.opacity(0.18),
-                    Color.black.opacity(0.58),
-                ],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-
-            Rectangle()
-                .fill(.ultraThinMaterial)
-                .opacity(0.16)
-        }
-        .ignoresSafeArea()
-        .allowsHitTesting(false)
-    }
 }
 
 private struct PreviewCarouselCard: View {
@@ -449,7 +385,6 @@ private struct PreviewCarouselCard: View {
     let backgroundParallaxOffset: CGFloat
     let cornerRadius: CGFloat
     let opacity: Double
-    let scale: CGFloat
     let onPreviewExitRequested: () -> Void
 
     var body: some View {
@@ -475,10 +410,16 @@ private struct PreviewCarouselCard: View {
             }
         }
         .frame(width: frame.width, height: frame.height)
-        .scaleEffect(scale)
         .opacity(opacity)
-        .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
-        .shadow(color: .black.opacity(isCurrent && !isExpanded ? 0.35 : 0.18), radius: 28, y: 18)
+        .clipShape(
+            UnevenRoundedRectangle(
+                topLeadingRadius: isExpanded ? 0 : cornerRadius,
+                bottomLeadingRadius: 0,
+                bottomTrailingRadius: 0,
+                topTrailingRadius: isExpanded ? 0 : cornerRadius,
+                style: .continuous
+            )
+        )
         .position(x: frame.midX, y: frame.midY)
         .allowsHitTesting(isCurrent && isExpanded)
     }
@@ -544,7 +485,7 @@ private struct PreviewCarouselSideCard: View {
             .padding(.bottom, 34)
         }
         .overlay {
-            RoundedRectangle(cornerRadius: 44, style: .continuous)
+            UnevenRoundedRectangle(topLeadingRadius: 28, bottomLeadingRadius: 0, bottomTrailingRadius: 0, topTrailingRadius: 28, style: .continuous)
                 .strokeBorder(.white.opacity(0.08), lineWidth: 1)
         }
     }

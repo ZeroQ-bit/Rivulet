@@ -98,11 +98,15 @@ struct ProfileSwitcherPopup: View {
                 }
                 .overlay(alignment: .topTrailing) {
                     if isCurrent && !isLoadingThis {
-                        Image(systemName: "checkmark.circle.fill")
-                            .font(.system(size: 38))
-                            .symbolRenderingMode(.palette)
-                            .foregroundStyle(.white, .green)
-                            .background(Circle().fill(.green).padding(4))
+                        Circle()
+                            .fill(.white)
+                            .frame(width: 34, height: 34)
+                            .overlay {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .font(.system(size: 38))
+                                    .symbolRenderingMode(.palette)
+                                    .foregroundStyle(.white, .green)
+                            }
                             .offset(x: 8, y: -8)
                     } else if user.protected && !isCurrent && !isLoadingThis {
                         Image(systemName: profileManager.usersWithRememberedPins.contains(user.uuid)

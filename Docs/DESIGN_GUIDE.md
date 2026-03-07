@@ -33,7 +33,9 @@ A comprehensive guide to the UI/UX patterns, components, and styling conventions
 
 - **Elegant Restraint**: Use subtle effects rather than flashy ones. A 2% scale is more elegant than 10%. A soft glow is more refined than a harsh border. Let the content be the star.
 
-- **Liquid Glass**: Translucent backgrounds with subtle borders create depth without visual noise. This is the tvOS 26 aesthetic.
+- **Native Components First**: Use system-provided tvOS components (`.glassEffect()`, `.hoverEffect()`, `fullScreenCover`, TabView with `sidebarAdaptable`) whenever possible. Custom implementations should only exist when no native equivalent works. The target aesthetic is Apple TV+ — clean, confident, and platform-native.
+
+- **Liquid Glass**: Use native `.glassEffect()` for translucent containers. Avoid manual material/opacity stacks when the system glass effect is available. This is the tvOS 26 aesthetic.
 
 - **Subtle Motion**: Small scale effects (1.02x) rather than dramatic zooms. Animations should feel natural, not performative.
 
@@ -301,9 +303,11 @@ Located in `Views/Components/GlassRowStyle.swift`:
 
 ### Sidebar Navigation
 
-- Main navigation via sidebar (left side)
-- Sidebar opens with Menu button when not in nested navigation
-- Uses `FocusScopeManager` for focus isolation
+- Main navigation via `TabView` with `.tabViewStyle(.sidebarAdaptable)`
+- Account tab uses a custom `Binding` to intercept selection — never actually navigates to `.account`
+- Profile switcher shown via `fullScreenCover` with `.presentationBackground(.clear)`
+- Sidebar focus containment via UIKit swizzle on the sidebar's `UICollectionView` (blocks downward focus escape)
+- Focus recovery watchdog monitors for lost focus and restores it to the content namespace
 
 ### Detail Navigation
 
@@ -328,26 +332,13 @@ nestedNavState.goBackAction = { [weak nestedNavState] in
 
 ## Focus Management
 
-### FocusScopeManager
+### Approach
 
-Central focus control system in `Services/Focus/FocusScopeManager.swift`:
+Rivulet uses standard SwiftUI focus primitives (`@FocusState`, `.focused()`, `.focusSection()`) combined with `FocusMemory` for section-level focus restoration. There is no custom focus scope manager — focus isolation is handled by system mechanisms:
 
-**Scopes:**
-- `.content` - Main content area
-- `.sidebar` - Navigation sidebar
-- `.player` - Video player controls
-- `.playerInfoBar` - Player info overlay
-- `.modal` - Dialogs and sheets
-- `.settings` - Settings screens
-- `.detail` - Detail views
-- `.channelPicker` - Live TV channel picker
-- `.guide` - TV Guide
-
-**Key Methods:**
-- `activate(_ scope:)` - Switch to a scope, save current focus
-- `deactivate()` - Return to previous scope
-- `setFocus(_ item:)` - Track current focus
-- `requestFocusRestore()` - Trigger focus restoration
+- **`fullScreenCover`** — provides automatic focus isolation. No `@Namespace`, `resetFocus`, `focusScope`, or `prefersDefaultFocus` needed. Just use `@FocusState` with `.onAppear` assignment.
+- **`TabView` with `sidebarAdaptable`** — system manages sidebar/content focus transitions.
+- **Focus recovery watchdog** — background task in `TVSidebarView` monitors for lost focus and restores it to the content namespace.
 
 ### Focus Restoration
 
@@ -414,7 +405,17 @@ Use standard semantic fonts (`.headline`, `.caption`, etc.)
 
 ### Glass Effect
 
-Settings sections use `.glassEffect(.regular, in: RoundedRectangle(...))` for the container background.
+Use native tvOS 26 `.glassEffect()` for container backgrounds instead of manual material/opacity stacks:
+
+```swift
+// Preferred — native liquid glass
+.glassEffect(.regular.interactive(), in: .rect(cornerRadius: 58))
+
+// For non-interactive containers
+.glassEffect(.regular, in: RoundedRectangle(cornerRadius: 32, style: .continuous))
+```
+
+Settings sections, popup cards, and overlays should all use `.glassEffect()` for consistent system-native appearance.
 
 ---
 
@@ -789,6 +790,81 @@ if isLoadingEpisodes && episodeCount > 0 {
 
 ---
 
+## Profile Switcher Popup
+
+The profile switcher uses `fullScreenCover` with a transparent background, triggered from the sidebar account tab via a custom binding that intercepts the tab selection.
+
+### Architecture
+
+The sidebar `TabView` uses a custom `Binding<SidebarTab>` instead of `$selectedTab` directly. When the user selects the account tab, the binding intercepts the value, shows the popup, and never stores `.account` — so the tab never actually changes:
+
+```swift
+private var tabSelection: Binding<SidebarTab> {
+    Binding(
+        get: { selectedTab },
+        set: { newTab in
+            if newTab == .account {
+                if profileManager.hasMultipleProfiles {
+                    showProfileSwitcher = true
+                }
+                return  // Never store .account
+            }
+            selectedTab = newTab
+        }
+    )
+}
+```
+
+This avoids:
+- **Content flash** — no tab switch means no view recreation
+- **Focus conflicts** — `fullScreenCover` provides its own focus hierarchy
+- **Home reload** — the presenting view stays untouched
+
+### Presentation
+
+```swift
+.fullScreenCover(isPresented: $showProfileSwitcher) {
+    ProfileSwitcherPopup(
+        isPresented: $showProfileSwitcher,
+        profileManager: profileManager
+    )
+    .presentationBackground(.clear)
+}
+```
+
+- `.presentationBackground(.clear)` — home content shows through behind the popup
+- `fullScreenCover` — automatic focus isolation, Menu button dismissal
+- No `@Namespace`, `resetFocus`, or `focusScope` needed — the cover handles it
+
+### Popup Styling
+
+- Uses `.glassEffect(.regular.interactive(), in: .rect(cornerRadius: 58))` for native glass
+- Positioned top-left with `.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)`
+- Profile avatars use `@FocusState` with simple `.onAppear` assignment (no `prefersDefaultFocus`)
+
+### Badge Overlays (Checkmark, Lock)
+
+Badge icons on avatar circles must be fully opaque — SF Symbols have inherent transparency. Use a solid backing circle:
+
+```swift
+.overlay(alignment: .topTrailing) {
+    Circle()
+        .fill(.white)
+        .frame(width: 34, height: 34)
+        .overlay {
+            Image(systemName: "checkmark.circle.fill")
+                .font(.system(size: 38))
+                .symbolRenderingMode(.palette)
+                .foregroundStyle(.white, .green)
+        }
+        .offset(x: 8, y: -8)
+}
+```
+
+**Key**: The white `Circle` behind the SF Symbol prevents the avatar from bleeding through the symbol's transparent regions.
+
+---
+
 ## Horizontal Scroll Sections
 
 ### Full-Bleed Scrolling Pattern
@@ -920,12 +996,13 @@ ScrollView(.horizontal) {
 3. **Use unique memory keys** - e.g., "detailSeasons", "librarySortOptions"
 4. **Let focus engine scroll** - don't manually control scroll position; tvOS auto-scrolls to focused items
 
-### When to Use FocusMemory vs FocusScopeManager
+### When to Use FocusMemory
 
 | System | Use Case |
 |--------|----------|
 | FocusMemory | Sections within a view (seasons, episodes, cast) |
-| FocusScopeManager | Isolating focus between views (sidebar, player, overlays) |
+| `fullScreenCover` | Isolating focus for overlays/popups (system-managed) |
+| `@FocusState` + `.onAppear` | Setting initial focus in presented views |
 
 ### Why Not `.scrollPosition()`?
 
@@ -949,7 +1026,6 @@ The FocusMemory pattern is simpler: let tvOS focus engine handle scrolling autom
 | Card button style | `Views/Plex/MediaPosterCard.swift` |
 | Settings button style | `Views/Settings/SettingsComponents.swift` |
 | Focus memory (section focus) | `Services/Focus/FocusMemory.swift` |
-| Focus scope isolation | `Services/Focus/FocusScopeManager.swift` |
 | Image caching | `Views/Components/CachedAsyncImage.swift` |
 
 ---
@@ -996,4 +1072,4 @@ Before shipping any new UI, ask:
 
 ---
 
-*Last updated: February 2026*
+*Last updated: March 2026*

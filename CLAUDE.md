@@ -23,7 +23,7 @@ Rivulet/
 │   ├── LiveTV/         # PlexLiveTVProvider, IPTVProvider, LiveTVDataStore
 │   ├── IPTV/           # M3UParser, XMLTVParser, DispatcharrService
 │   ├── Cache/          # CacheManager, ImageCacheManager
-│   └── Focus/          # FocusScopeManager (tvOS focus isolation)
+│   └── Focus/          # FocusMemory (tvOS section focus restoration)
 ├── Views/
 │   ├── Player/         # UniversalPlayerView, PlayerControlsOverlay
 │   │   ├── MPV/        # MPVPlayerView, MPVMetalViewController
@@ -42,31 +42,21 @@ Rivulet/
 
 ### Focus Management (tvOS)
 
-Uses `FocusScopeManager` for scope-based focus isolation. Critical for overlays and modals.
+Uses standard SwiftUI focus primitives with `FocusMemory` for section-level restoration. No custom focus scope manager — focus isolation is handled by system mechanisms:
 
-**Scopes**: `.content`, `.sidebar`, `.player`, `.playerInfoBar`, `.postVideo`, `.modal`, `.settings`, `.detail`, `.channelPicker`, `.guide`
-
-```swift
-// Activate a scope (saves current focus, pushes to stack)
-focusScopeManager.activate(.postVideo)
-
-// Deactivate (pops stack, restores previous focus)
-focusScopeManager.deactivate()
-
-// Check if scope is active
-focusScopeManager.isScopeActive(.postVideo)
-```
-
-**Important**: `fullScreenCover` does NOT inherit environment values. Views presented this way must create their own `FocusScopeManager` instance:
+- **`fullScreenCover`** — automatic focus isolation for overlays/popups
+- **`TabView` with `sidebarAdaptable`** — system-managed sidebar/content focus
+- **`@FocusState` + `.onAppear`** — setting initial focus in presented views
+- **`FocusMemory`** — remembers and restores focus within scrollable sections
 
 ```swift
-struct UniversalPlayerView: View {
-    @StateObject private var focusScopeManager = FocusScopeManager()
+// Section focus memory
+.focusSection()
+.remembersFocus(key: "uniqueSectionKey", focusedId: $focusedItemId)
 
-    var body: some View {
-        // ... content ...
-        .environment(\.focusScopeManager, focusScopeManager)
-    }
+// Initial focus in fullScreenCover (no Namespace/resetFocus needed)
+.onAppear {
+    focusedUserId = profileManager.selectedUser?.id
 }
 ```
 
@@ -105,25 +95,28 @@ All focusable rows use consistent styling (see `Docs/DESIGN_GUIDE.md`):
 
 ## Common Tasks
 
-### Adding a New Focus Scope
+### Presenting a Focus-Isolated Overlay
 
-1. Add to `FocusScopeManager.swift`:
-   ```swift
-   static let myScope = FocusScope("myScope")
-   ```
+Use `fullScreenCover` — it provides automatic focus isolation without manual scope management:
 
-2. Activate when overlay/view appears:
-   ```swift
-   .onChange(of: showMyOverlay) { _, show in
-       if show { focusScopeManager.activate(.myScope) }
-       else { focusScopeManager.deactivate() }
-   }
-   ```
+```swift
+.fullScreenCover(isPresented: $showOverlay) {
+    MyOverlayView(isPresented: $showOverlay)
+        .presentationBackground(.clear)  // See-through to content behind
+}
+```
 
-3. Make buttons focusable only when scope is active:
-   ```swift
-   .focusable(focusScopeManager.isScopeActive(.myScope))
-   ```
+In the presented view, use `@FocusState` with `.onAppear`:
+```swift
+@FocusState private var focusedItem: String?
+
+.onAppear {
+    focusedItem = defaultItemId
+}
+.onExitCommand {
+    isPresented = false
+}
+```
 
 ### Fetching Next Episode
 
@@ -177,7 +170,7 @@ xcodebuild -scheme Rivulet -destination 'platform=tvOS,name=My Apple TV' build
 | Main player | `Views/Player/UniversalPlayerView.swift` |
 | Player state | `Views/Player/UniversalPlayerViewModel.swift` |
 | MPV integration | `Services/Playback/MPVPlayerWrapper.swift` |
-| Focus management | `Services/Focus/FocusScopeManager.swift` |
+| Focus memory | `Services/Focus/FocusMemory.swift` |
 | Plex API | `Services/Plex/PlexNetworkManager.swift` |
 | Glass row styling | `Views/Components/GlassRowStyle.swift` |
 | Settings components | `Views/Settings/SettingsComponents.swift` |
@@ -202,10 +195,10 @@ From `Docs/DESIGN_GUIDE.md`:
 ## Troubleshooting
 
 ### Focus Not Working in Overlay
-- Check if overlay is in a `fullScreenCover` (environment not inherited)
-- Ensure `focusScopeManager.activate(.scope)` is called when overlay appears
-- Use `@ObservedObject` for focus manager, not `@Environment`
-- Pass `isActive` state to child components as a parameter
+- Use `fullScreenCover` for focus-isolated overlays (provides its own focus hierarchy)
+- Set initial focus via `@FocusState` in `.onAppear`
+- Use `.onExitCommand` for Menu button dismissal
+- For transparent overlays, add `.presentationBackground(.clear)` to the cover content
 
 ### Video Not Shrinking/Positioning
 - Check `VideoFrameState` offset values (positive = padding from top-left with `.topLeading` anchor)

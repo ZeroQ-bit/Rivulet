@@ -26,6 +26,8 @@ struct PlexHomeView: View {
     @FocusState private var focusedItemId: String?  // Tracks focused item by "context:itemId" format
     @State private var rowPreviewRequest: PreviewRequest?
     @State private var previewRestoreTarget: PreviewSourceTarget?
+    @State private var capturedSourceFrames: [PreviewSourceTarget: CGRect] = [:]
+    @State private var showPreviewCover = false
 
     private let recommendationService = PersonalizedRecommendationService.shared
     private let recommendationsContentType: RecommendationContentType = .moviesAndShows
@@ -215,21 +217,35 @@ struct PlexHomeView: View {
                 PlexDetailView(item: item)
             }
             .overlayPreferenceValue(PreviewSourceFramePreferenceKey.self) { anchors in
+                // Resolve anchor frames into CGRects continuously for the fullScreenCover
                 GeometryReader { proxy in
-                    if let activeRequest = rowPreviewRequest {
-                        let resolvedFrames = Dictionary(uniqueKeysWithValues: anchors.map { ($0.key, proxy[$0.value]) })
-                        PreviewOverlayHost(
-                            request: activeRequest,
-                            sourceFrames: resolvedFrames,
-                            serverURL: authManager.selectedServerURL ?? "",
-                            authToken: authManager.selectedServerToken ?? "",
-                            onDismiss: { sourceTarget in
-                                homeLog.info("[Preview] Dismissing row preview")
-                                previewRestoreTarget = sourceTarget
-                                self.rowPreviewRequest = nil
-                            }
-                        )
-                    }
+                    Color.clear
+                        .hidden()
+                        .task(id: anchors.count) {
+                            capturedSourceFrames = Dictionary(uniqueKeysWithValues: anchors.map { ($0.key, proxy[$0.value]) })
+                        }
+                }
+                .allowsHitTesting(false)
+            }
+            .fullScreenCover(isPresented: $showPreviewCover) {
+                if let activeRequest = rowPreviewRequest {
+                    PreviewOverlayHost(
+                        request: activeRequest,
+                        sourceFrames: capturedSourceFrames,
+                        serverURL: authManager.selectedServerURL ?? "",
+                        authToken: authManager.selectedServerToken ?? "",
+                        onDismiss: { sourceTarget in
+                            homeLog.info("[Preview] Dismissing row preview")
+                            previewRestoreTarget = sourceTarget
+                            showPreviewCover = false
+                        }
+                    )
+                    .presentationBackground(.clear)
+                }
+            }
+            .onChange(of: showPreviewCover) { _, isShowing in
+                if !isShowing {
+                    rowPreviewRequest = nil
                 }
             }
         }
@@ -237,7 +253,7 @@ struct PlexHomeView: View {
             print("[PlexHome] selectedItem changed: \(newValue?.title ?? "nil") (ratingKey: \(newValue?.ratingKey ?? "nil"))")
             updateNestedNavigationState()
         }
-        .onChange(of: rowPreviewRequest?.id) { _, _ in
+        .onChange(of: showPreviewCover) { _, _ in
             updateNestedNavigationState()
         }
         // Handle navigation from player (Go to Season / Go to Show)
@@ -396,7 +412,7 @@ struct PlexHomeView: View {
     }
 
     private func updateNestedNavigationState() {
-        if rowPreviewRequest != nil {
+        if showPreviewCover {
             nestedNavState.isNested = true
             nestedNavState.goBackAction = nil
             return
@@ -466,9 +482,8 @@ struct PlexHomeView: View {
                                 },
                                 onPreviewRequested: isContinueWatching ? nil : { request in
                                     homeLog.info("[Preview] Opening carousel: \(request.items.count) items, tapped index=\(request.selectedIndex), title=\(request.items[request.selectedIndex].title ?? "?")")
-                                    withAnimation(previewEntryAnimation) {
-                                        rowPreviewRequest = request
-                                    }
+                                    rowPreviewRequest = request
+                                    showPreviewCover = true
                                 },
                                 restorePreviewFocusTarget: $previewRestoreTarget
                             )
@@ -485,10 +500,6 @@ struct PlexHomeView: View {
             }
         }
         .scrollClipDisabled()  // Allow shadow overflow
-        .opacity(rowPreviewRequest != nil ? 0.12 : 1)
-        .offset(y: rowPreviewRequest != nil ? 20 : 0)
-        .allowsHitTesting(rowPreviewRequest == nil)
-        .animation(previewEntryAnimation, value: rowPreviewRequest?.id)
     }
 
     // MARK: - Connection Error Banner
@@ -606,9 +617,8 @@ struct PlexHomeView: View {
                     await refreshRecommendations(force: true)
                 },
                 onPreviewRequested: { request in
-                    withAnimation(previewEntryAnimation) {
-                        rowPreviewRequest = request
-                    }
+                    rowPreviewRequest = request
+                    showPreviewCover = true
                 },
                 restorePreviewFocusTarget: $previewRestoreTarget
             )

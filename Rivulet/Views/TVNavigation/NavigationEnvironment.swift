@@ -36,9 +36,6 @@ struct IsInNestedNavigationKey: PreferenceKey {
 class NestedNavigationState: ObservableObject {
     @Published var isNested: Bool = false
 
-    /// Global flag readable from the sidebar focus guard swizzle (non-isolated)
-    nonisolated(unsafe) static var isCurrentlyNested: Bool = false
-
     /// Action to go back from nested navigation (set by child views)
     var goBackAction: (() -> Void)?
 

@@ -6,9 +6,7 @@
 //
 
 import SwiftUI
-import os.log
 
-private let sidebarLog = Logger(subsystem: "com.rivulet.app", category: "Sidebar")
 
 // MARK: - TVSidebarView
 
@@ -66,10 +64,6 @@ struct TVSidebarView: View {
         .onExitCommand { }
         .task { await Self.installSidebarFocusGuard() }
         .task { await focusRecoveryWatchdog() }
-        // Sync static flag for sidebar focus guard
-        .onChange(of: nestedNavState.isNested) { _, isNested in
-            NestedNavigationState.isCurrentlyNested = isNested
-        }
         // Handle tab selection
         .onChange(of: selectedTab) { _, newTab in
             nestedNavState.isNested = false
@@ -425,7 +419,7 @@ struct TVSidebarView: View {
     // MARK: - Sidebar Focus Containment
 
     /// Overrides shouldUpdateFocus on the sidebar's collection view class
-    /// and the tab bar controller to prevent focus from escaping.
+    /// to prevent focus from escaping downward (like the Apple TV app).
     @MainActor
     private static func installSidebarFocusGuard() async {
         try? await Task.sleep(for: .seconds(1))
@@ -433,9 +427,7 @@ struct TVSidebarView: View {
         guard let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
               let window = scene.windows.first else { return }
 
-        var hasSwizzledCV = false
-        var hasSwizzledTabBar = false
-        var swizzledTabBarClasses: Set<String> = []
+        var hasSwizzled = false
 
         while !Task.isCancelled {
             try? await Task.sleep(for: .milliseconds(500))
@@ -446,61 +438,18 @@ struct TVSidebarView: View {
                 cv.alwaysBounceVertical = false
 
                 // Swizzle shouldUpdateFocus once on the collection view's class
-                if !hasSwizzledCV {
+                if !hasSwizzled {
                     Self.overrideSidebarFocusBehavior(on: type(of: cv))
-                    hasSwizzledCV = true
+                    hasSwizzled = true
                 }
             }
-
-            // Also guard the tab bar controller (which manages sidebar reveal)
-            if !hasSwizzledTabBar, let rootVC = window.rootViewController {
-                if let tabBarVC = findTabBarController(from: rootVC) {
-                    let tabBarClass = type(of: tabBarVC)
-                    let className = String(describing: tabBarClass)
-                    if !swizzledTabBarClasses.contains(className) {
-                        Self.overrideTabBarFocusBehavior(on: tabBarClass)
-                        swizzledTabBarClasses.insert(className)
-                        hasSwizzledTabBar = true
-                        sidebarLog.info("[FocusGuard] Found tab bar controller: \(className)")
-
-                        // Log hierarchy once for debugging
-                        Self.logViewHierarchy(window, depth: 0, maxDepth: 4)
-                    }
-                }
-            }
-        }
-    }
-
-    /// Find the UITabBarController in the view controller hierarchy
-    private static func findTabBarController(from vc: UIViewController) -> UITabBarController? {
-        if let tabBarVC = vc as? UITabBarController {
-            return tabBarVC
-        }
-        for child in vc.children {
-            if let found = findTabBarController(from: child) {
-                return found
-            }
-        }
-        return nil
-    }
-
-    /// Log the UIKit view hierarchy for debugging sidebar focus issues
-    private static func logViewHierarchy(_ view: UIView, depth: Int, maxDepth: Int) {
-        guard depth < maxDepth else { return }
-        let indent = String(repeating: "  ", count: depth)
-        let frame = view.frame
-        let className = String(describing: type(of: view))
-        sidebarLog.debug("[Hierarchy] \(indent)\(className) frame=\(frame.origin.x),\(frame.origin.y) \(frame.width)x\(frame.height) focusable=\(view.canBecomeFocused)")
-        for subview in view.subviews {
-            logViewHierarchy(subview, depth: depth + 1, maxDepth: maxDepth)
         }
     }
 
     /// Replaces shouldUpdateFocus(in:) on the sidebar collection view class
-    /// to block downward focus escape and block all focus entry while in nested navigation.
+    /// to block downward focus escape while allowing all other focus movement.
     private static func overrideSidebarFocusBehavior(on cvClass: AnyClass) {
         let selector = #selector(UIView.shouldUpdateFocus(in:))
-        sidebarLog.info("[FocusGuard] Swizzling shouldUpdateFocus on \(String(describing: cvClass))")
 
         // Save the original implementation (if any) so we can call it for non-blocked cases
         let originalIMP = class_getMethodImplementation(cvClass, selector)
@@ -516,22 +465,8 @@ struct TVSidebarView: View {
                 return originalFunc(obj, selector, context)
             }
 
-            let heading = context.focusHeading
-            let nextClass = context.nextFocusedView.map { String(describing: type(of: $0)) } ?? "nil"
-            let prevClass = context.previouslyFocusedView.map { String(describing: type(of: $0)) } ?? "nil"
-
-            // Block all focus from entering the sidebar while in nested navigation (carousel/detail)
-            if NestedNavigationState.isCurrentlyNested {
-                sidebarLog.info("[FocusGuard] CV shouldUpdateFocus: heading=\(heading.rawValue) next=\(nextClass) prev=\(prevClass)")
-                if let nextView = context.nextFocusedView,
-                   nextView.isDescendant(of: selfView) {
-                    sidebarLog.info("[FocusGuard] BLOCKED focus entering sidebar CV (nested=true)")
-                    return false
-                }
-            }
-
             // Block focus from leaving the sidebar downward
-            if heading.contains(.down) {
+            if context.focusHeading == .down {
                 if let nextView = context.nextFocusedView,
                    !nextView.isDescendant(of: selfView) {
                     return false
@@ -545,45 +480,6 @@ struct TVSidebarView: View {
         let method = class_getInstanceMethod(UIView.self, selector)!
         let types = method_getTypeEncoding(method)!
         class_replaceMethod(cvClass, selector, imp, types)
-    }
-
-    /// Overrides shouldUpdateFocus on the tab bar controller's view to block sidebar reveal when nested.
-    private static func overrideTabBarFocusBehavior(on tabBarVCClass: AnyClass) {
-        // The tab bar controller's view manages the sidebar reveal.
-        // We override shouldUpdateFocus on its VIEW class to intercept focus moving left into the sidebar.
-        let selector = #selector(UIView.shouldUpdateFocus(in:))
-
-        // We need the view's class, but we'll also try the VC class
-        // Try to install on common UIKit view classes that wrap the tab content
-        sidebarLog.info("[FocusGuard] Overriding tab bar VC focus: \(String(describing: tabBarVCClass))")
-
-        // Override on the UITabBarController itself
-        let vcSelector = #selector(UIViewController.shouldUpdateFocus(in:))
-        let originalIMP = class_getMethodImplementation(tabBarVCClass, vcSelector)
-
-        typealias OriginalFunc = @convention(c) (AnyObject, Selector, UIFocusUpdateContext) -> Bool
-        let originalFunc = unsafeBitCast(originalIMP, to: OriginalFunc.self)
-
-        let block: @convention(block) (AnyObject, UIFocusUpdateContext) -> Bool = { obj, context in
-            let heading = context.focusHeading
-            let nextClass = context.nextFocusedView.map { String(describing: type(of: $0)) } ?? "nil"
-            let prevClass = context.previouslyFocusedView.map { String(describing: type(of: $0)) } ?? "nil"
-
-            if NestedNavigationState.isCurrentlyNested {
-                sidebarLog.info("[FocusGuard] TabBar shouldUpdateFocus: heading=\(heading.rawValue) next=\(nextClass) prev=\(prevClass)")
-                // Block focus from moving left (toward sidebar) when nested
-                if heading.contains(.left) {
-                    sidebarLog.info("[FocusGuard] BLOCKED tab bar left focus (nested=true)")
-                    return false
-                }
-            }
-            return originalFunc(obj, vcSelector, context)
-        }
-
-        let imp = imp_implementationWithBlock(unsafeBitCast(block, to: AnyObject.self))
-        let method = class_getInstanceMethod(UIViewController.self, vcSelector)!
-        let types = method_getTypeEncoding(method)!
-        class_replaceMethod(tabBarVCClass, vcSelector, imp, types)
     }
 
     /// Finds the sidebar's UICollectionView by looking for a narrow, left-aligned collection view
