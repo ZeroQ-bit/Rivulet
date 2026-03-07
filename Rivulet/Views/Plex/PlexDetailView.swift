@@ -180,134 +180,119 @@ struct PlexDetailView: View {
                             .opacity(scrollProgress)
                     }
 
-                // Layer 2: Scrollable content
+                // Fixed vignette for text readability (doesn't scroll)
+                RadialGradient(
+                    colors: [
+                        .clear,
+                        .black.opacity(0.3),
+                        .black.opacity(0.7),
+                    ],
+                    center: .center,
+                    startRadius: geo.size.width * 0.25,
+                    endRadius: geo.size.width * 0.75
+                )
+                .opacity(showMetadata ? 1 : 0)
+                .animation(.easeInOut(duration: 0.7), value: showMetadata)
+                .ignoresSafeArea()
+                .allowsHitTesting(false)
+
+                // Layer 2: All scrollable content in one continuous flow
                 ScrollView(.vertical, showsIndicators: false) {
                     VStack(alignment: .leading, spacing: 0) {
-                        // Hero: gradient + metadata overlay, sized to fill screen
-                        ZStack(alignment: .bottom) {
-                            // Gradient for text readability (only when metadata visible)
-                            heroGradient
-                                .opacity(showMetadata ? 1 : 0)
-
-                            // Vignette: darken edges, clear center
-                            RadialGradient(
-                                colors: [
-                                    .clear,
-                                    .black.opacity(0.3),
-                                    .black.opacity(0.7),
-                                ],
-                                center: .center,
-                                startRadius: geo.size.width * 0.25,
-                                endRadius: geo.size.width * 0.75
-                            )
-                            .opacity(showMetadata ? 1 : 0)
-
-                            // Metadata overlay at bottom
+                        // Metadata pinned near bottom of visible area
+                        VStack(alignment: .leading, spacing: 0) {
+                            Spacer(minLength: 0)
                             heroMetadataOverlay
                                 .padding(.horizontal, 48)
-                                .padding(.bottom, 48)
+                                .padding(.bottom, 16)
                                 .opacity(showMetadata ? 1 : 0)
                         }
-                        .animation(.easeInOut(duration: 0.7), value: showMetadata)
                         .frame(height: heroHeight)
 
-                        if presentationMode == .expandedDetail {
-                            // Scroll offset tracker (at fold boundary)
-                            GeometryReader { proxy in
-                                Color.clear.preference(
-                                    key: ScrollOffsetKey.self,
-                                    value: proxy.frame(in: .named("detailScroll")).minY
-                                )
+                        // Centered title logo (Apple TV+ style, fades in on scroll)
+                        belowFoldTitleLogo
+                            .padding(.top, 8)
+                            .padding(.bottom, 8)
+                            .opacity(scrollProgress)
+
+                        VStack(alignment: .leading, spacing: 32) {
+                            // TV Show specific: Seasons and Episodes
+                            if currentItem.type == "show" || currentItem.type == "episode" {
+                                seasonSection
                             }
-                            .frame(height: 0)
 
-                            // Below-the-fold content (scrolls up over blurred backdrop)
-                            VStack(alignment: .leading, spacing: 0) {
-                                // Centered title logo at top (Apple TV+ style)
-                                belowFoldTitleLogo
-                                    .padding(.top, 40)
-                                    .padding(.bottom, 16)
-                                    .opacity(scrollProgress)
+                            // Season specific: Episodes list (no season picker needed)
+                            if currentItem.type == "season" {
+                                episodeSection
+                            }
 
-                                VStack(alignment: .leading, spacing: 32) {
-                                    // TV Show specific: Seasons and Episodes
-                                    if currentItem.type == "show" || currentItem.type == "episode" {
-                                        seasonSection
-                                    }
+                            // Album specific: Tracks
+                            if currentItem.type == "album" {
+                                trackSection
+                            }
 
-                                    // Season specific: Episodes list (no season picker needed)
-                                    if currentItem.type == "season" {
-                                        episodeSection
-                                    }
-
-                                    // Album specific: Tracks
-                                    if currentItem.type == "album" {
-                                        trackSection
-                                    }
-
-                                    // Artist specific: Albums
-                                    if currentItem.type == "artist" {
-                                        albumSection
-                                    }
-                                }
-                                .padding(.horizontal, 48)
-
-                                // Recommended / Related Section
-                                if !recommendedItems.isEmpty {
-                                    MediaItemRow(
-                                        title: "Related",
-                                        items: recommendedItems,
-                                        serverURL: authManager.selectedServerURL ?? "",
-                                        authToken: authManager.selectedServerToken ?? "",
-                                        onItemSelected: { selectedItem in
-                                            withAnimation(.easeInOut(duration: 0.35)) {
-                                                displayedItem = selectedItem
-                                            }
-                                        }
-                                    )
-                                    .padding(.top, 32)
-                                }
-
-                                // Collection Section (for movies that are part of a collection)
-                                if !collectionItems.isEmpty, let name = collectionName {
-                                    MediaItemRow(
-                                        title: name,
-                                        items: collectionItems,
-                                        serverURL: authManager.selectedServerURL ?? "",
-                                        authToken: authManager.selectedServerToken ?? "",
-                                        onItemSelected: { selectedItem in
-                                            withAnimation(.easeInOut(duration: 0.35)) {
-                                                displayedItem = selectedItem
-                                            }
-                                        }
-                                    )
-                                    .padding(.top, 32)
-                                }
-
-                                // Cast & Crew Section
-                                if let metadata = fullMetadata,
-                                   (!metadata.cast.isEmpty || !(metadata.Director?.isEmpty ?? true)) {
-                                    CastCrewRow(
-                                        cast: metadata.cast,
-                                        directors: metadata.Director ?? [],
-                                        serverURL: authManager.selectedServerURL ?? "",
-                                        authToken: authManager.selectedServerToken ?? ""
-                                    )
-                                    .padding(.top, 32)
-                                }
-
-                                Spacer()
-                                    .frame(height: 60)
+                            // Artist specific: Albums
+                            if currentItem.type == "artist" {
+                                albumSection
                             }
                         }
+                        .padding(.horizontal, 48)
+                        .allowsHitTesting(!isPreviewCarousel)
+
+                        // Recommended / Related Section
+                        if !recommendedItems.isEmpty {
+                            MediaItemRow(
+                                title: "Related",
+                                items: recommendedItems,
+                                serverURL: authManager.selectedServerURL ?? "",
+                                authToken: authManager.selectedServerToken ?? "",
+                                onItemSelected: { selectedItem in
+                                    withAnimation(.easeInOut(duration: 0.35)) {
+                                        displayedItem = selectedItem
+                                    }
+                                }
+                            )
+                            .padding(.top, 32)
+                        }
+
+                        // Collection Section (for movies that are part of a collection)
+                        if !collectionItems.isEmpty, let name = collectionName {
+                            MediaItemRow(
+                                title: name,
+                                items: collectionItems,
+                                serverURL: authManager.selectedServerURL ?? "",
+                                authToken: authManager.selectedServerToken ?? "",
+                                onItemSelected: { selectedItem in
+                                    withAnimation(.easeInOut(duration: 0.35)) {
+                                        displayedItem = selectedItem
+                                    }
+                                }
+                            )
+                            .padding(.top, 32)
+                        }
+
+                        // Cast & Crew Section
+                        if let metadata = fullMetadata,
+                           (!metadata.cast.isEmpty || !(metadata.Director?.isEmpty ?? true)) {
+                            CastCrewRow(
+                                cast: metadata.cast,
+                                directors: metadata.Director ?? [],
+                                serverURL: authManager.selectedServerURL ?? "",
+                                authToken: authManager.selectedServerToken ?? ""
+                            )
+                            .padding(.top, 32)
+                        }
+
+                        Spacer()
+                            .frame(height: 60)
                     }
                 }
-                .coordinateSpace(name: "detailScroll")
-                .onPreferenceChange(ScrollOffsetKey.self) { belowFoldTop in
-                    let peekHeight: CGFloat = 180
-                    let travel = geo.size.height - peekHeight
-                    let moved = travel - belowFoldTop
-                    scrollProgress = max(0, min(1, moved / (travel * 0.4)))
+                .onScrollGeometryChange(for: Bool.self) { geometry in
+                    geometry.contentOffset.y > 10
+                } action: { _, isScrolled in
+                    withAnimation(.easeInOut(duration: 0.7)) {
+                        scrollProgress = isScrolled ? 1 : 0
+                    }
                 }
                 .id(scrollResetID)
                 .scrollDisabled(isPreviewCarousel || !allowVerticalScroll)
@@ -538,10 +523,7 @@ struct PlexDetailView: View {
     }
 
     private func heroContentHeight(for fullHeight: CGFloat) -> CGFloat {
-        if isPreviewCarousel {
-            return fullHeight  // Image-only carousel card, no peek
-        }
-        return max(0, fullHeight - 180)  // 180pt peek for all detail modes
+        return max(0, fullHeight - 250)  // 250pt peek for all modes including carousel
     }
 
     // MARK: - Hero Components (Apple TV+ style — backdrop fixed, content scrolls over)
@@ -680,6 +662,7 @@ struct PlexDetailView: View {
                                 Text("Starring \(topCast.joined(separator: ", "))")
                                     .font(.caption)
                                     .foregroundStyle(.white.opacity(0.6))
+                                    .lineLimit(2)
                                     .multilineTextAlignment(.trailing)
                                     .frame(maxWidth: 350, alignment: .trailing)
                             }

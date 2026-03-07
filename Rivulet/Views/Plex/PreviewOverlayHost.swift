@@ -136,6 +136,9 @@ struct PreviewOverlayHost: View {
                 }
             }
             .ignoresSafeArea()
+            .onExitCommand {
+                handleExit()
+            }
             .onAppear {
                 capturedSourceFrame = sourceFrames[request.sourceTarget]
                 focusedArea = .carousel

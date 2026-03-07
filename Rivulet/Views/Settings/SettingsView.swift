@@ -198,11 +198,15 @@ enum SubtitleOption: Hashable, CaseIterable, CustomStringConvertible {
     }
 }
 
-// MARK: - Focus State (isolated to prevent button re-renders)
+// MARK: - Focus State (uses Combine to avoid triggering SwiftUI re-renders on the button list)
 
-@Observable
+import Combine
+
 final class SettingsFocusState {
-    var focusedSettingId: String?
+    var focusedSettingId: String? {
+        didSet { publisher.send(focusedSettingId) }
+    }
+    let publisher = PassthroughSubject<String?, Never>()
 }
 
 // MARK: - Settings View
@@ -302,6 +306,13 @@ struct SettingsView: View {
         )
     }
 
+    private var focusedSettingIdBinding: Binding<String?> {
+        Binding(
+            get: { focusState.focusedSettingId },
+            set: { focusState.focusedSettingId = $0 }
+        )
+    }
+
     private var appVersion: String {
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0"
         let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "1"
@@ -333,18 +344,17 @@ struct SettingsView: View {
 
                     // Right settings list
                     ZStack {
-                        ScrollView(.vertical, showsIndicators: false) {
+                        List {
                             pageContent(for: currentPage)
-                                .padding(.horizontal, 16)
-                                .padding(.top, 8)
                         }
+                        .listStyle(.grouped)
+                        .scrollClipDisabled()
                         .id(currentPage)
                         .transition(.asymmetric(
                             insertion: .opacity.combined(with: .offset(x: isForward ? 120 : -120)),
                             removal: .opacity.combined(with: .offset(x: isForward ? -60 : 60))
                         ))
                     }
-                    .clipped()
                     .frame(width: geo.size.width * 0.45)
                 }
             }
@@ -399,15 +409,15 @@ struct SettingsView: View {
         case .about:
             aboutSettings
         case .plex:
-            PlexSettingsView(focusedSettingId: $focusState.focusedSettingId)
+            PlexSettingsView(focusedSettingId: focusedSettingIdBinding)
         case .iptv:
-            IPTVSettingsView(focusedSettingId: $focusState.focusedSettingId)
+            IPTVSettingsView(focusedSettingId: focusedSettingIdBinding)
         case .libraries:
-            LibrarySettingsView(focusedSettingId: $focusState.focusedSettingId)
+            LibrarySettingsView(focusedSettingId: focusedSettingIdBinding)
         case .cache:
-            CacheSettingsView(focusedSettingId: $focusState.focusedSettingId)
+            CacheSettingsView(focusedSettingId: focusedSettingIdBinding)
         case .userProfiles:
-            UserProfileSettingsView(focusedSettingId: $focusState.focusedSettingId)
+            UserProfileSettingsView(focusedSettingId: focusedSettingIdBinding)
         case .displaySizePicker:
             displaySizePickerPage
         case .audioLanguagePicker:
@@ -422,7 +432,7 @@ struct SettingsView: View {
     // MARK: - Root Settings List
 
     private var rootSettingsList: some View {
-        VStack(spacing: 14) {
+        Group {
             SettingsRow(
                 title: "Appearance",
                 subtitle: "",
@@ -478,7 +488,7 @@ struct SettingsView: View {
     // MARK: - Appearance Settings
 
     private var appearanceSettings: some View {
-        VStack(spacing: 14) {
+        Group {
             SettingsRow(
                 title: "Sidebar Libraries",
                 subtitle: "",
@@ -534,7 +544,7 @@ struct SettingsView: View {
     // MARK: - Playback Settings
 
     private var playbackSettings: some View {
-        VStack(spacing: 14) {
+        Group {
             SettingsRow(
                 title: "Audio Language",
                 subtitle: audioLanguage.description,
@@ -625,7 +635,7 @@ struct SettingsView: View {
     // MARK: - Live TV Settings
 
     private var liveTVSettings: some View {
-        VStack(spacing: 14) {
+        Group {
             SettingsRow(
                 title: "Live TV Sources",
                 subtitle: "",
@@ -682,7 +692,7 @@ struct SettingsView: View {
     // MARK: - Servers Settings
 
     private var serversSettings: some View {
-        VStack(spacing: 14) {
+        Group {
             SettingsRow(
                 title: "Plex Server",
                 subtitle: "",
@@ -696,7 +706,7 @@ struct SettingsView: View {
     // MARK: - About Settings
 
     private var aboutSettings: some View {
-        VStack(spacing: 14) {
+        Group {
             SettingsInfoRow(title: "App", value: "Rivulet")
             SettingsInfoRow(title: "Version", value: appVersion)
 
@@ -712,7 +722,7 @@ struct SettingsView: View {
     // MARK: - Picker Pages
 
     private var displaySizePickerPage: some View {
-        VStack(spacing: 14) {
+        Group {
             ForEach(DisplaySize.allCases, id: \.self) { option in
                 Button {
                     displaySizeRaw = option.rawValue
@@ -734,7 +744,7 @@ struct SettingsView: View {
     }
 
     private var audioLanguagePickerPage: some View {
-        VStack(spacing: 14) {
+        Group {
             ForEach(LanguageOption.allCases, id: \.self) { option in
                 Button {
                     audioLanguageBinding.wrappedValue = option
@@ -756,7 +766,7 @@ struct SettingsView: View {
     }
 
     private var subtitlesPickerPage: some View {
-        VStack(spacing: 14) {
+        Group {
             ForEach(SubtitleOption.allCases, id: \.self) { option in
                 Button {
                     subtitleOptionBinding.wrappedValue = option
@@ -778,7 +788,7 @@ struct SettingsView: View {
     }
 
     private var autoplayCountdownPickerPage: some View {
-        VStack(spacing: 14) {
+        Group {
             ForEach(AutoplayCountdown.allCases, id: \.self) { option in
                 Button {
                     autoplayCountdownRaw = option.rawValue
@@ -828,8 +838,10 @@ private struct SettingsLeftPanel: View {
     var focusState: SettingsFocusState
     let currentPage: SettingsPage
 
+    @State private var focusedSettingId: String?
+
     var body: some View {
-        let descriptor = focusState.focusedSettingId.flatMap { SettingsDescriptorStore.descriptor(for: $0) }
+        let descriptor = focusedSettingId.flatMap { SettingsDescriptorStore.descriptor(for: $0) }
         let pageInfo = SettingsDescriptorStore.pageInfo(for: currentPage)
         let iconName = pageInfo.icon
         let iconColor = pageInfo.color
@@ -863,7 +875,10 @@ private struct SettingsLeftPanel: View {
 
             Spacer()
         }
-        .animation(.easeInOut(duration: 0.25), value: focusState.focusedSettingId)
+        .onReceive(focusState.publisher) { id in
+            focusedSettingId = id
+        }
+        .animation(.easeInOut(duration: 0.25), value: focusedSettingId)
         .animation(.easeInOut(duration: 0.3), value: currentPage)
     }
 }
