@@ -53,7 +53,7 @@ struct AppStoreActionButtonStyle: ButtonStyle {
             .foregroundStyle(isFocused ? .black : .white)
             .background(
                 RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .fill(isFocused ? .white : (isPrimary ? .white.opacity(0.15) : .white.opacity(0.08)))
+                    .fill(isFocused ? .white : (isPrimary ? .white.opacity(0.25) : .white.opacity(0.15)))
             )
             .overlay(
                 RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)

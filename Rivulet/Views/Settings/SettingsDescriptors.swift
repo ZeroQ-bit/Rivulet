@@ -56,6 +56,16 @@ enum SettingsDescriptorStore {
             iconColor: .purple,
             description: "Choose which libraries appear in the sidebar and set their display order."
         ),
+        "libraryRow": SettingDescriptor(
+            icon: "sidebar.squares.left",
+            iconColor: .purple,
+            description: "Click to toggle sidebar visibility. Press and hold to reorder or configure Home screen visibility."
+        ),
+        "resetLibraries": SettingDescriptor(
+            icon: "arrow.counterclockwise",
+            iconColor: .orange,
+            description: "Reset all library visibility, ordering, and Home screen preferences to their defaults."
+        ),
         "displaySize": SettingDescriptor(
             icon: "textformat.size",
             iconColor: .orange,
@@ -188,6 +198,16 @@ enum SettingsDescriptorStore {
             iconColor: .gray,
             description: "View storage usage and manage cached images, metadata, and other temporary data."
         ),
+        "forceRefresh": SettingDescriptor(
+            icon: "arrow.clockwise",
+            iconColor: .blue,
+            description: "Clear metadata cache and reload all library content from your Plex server. Images will be kept."
+        ),
+        "clearAllCache": SettingDescriptor(
+            icon: "trash",
+            iconColor: .red,
+            description: "Remove all cached images and metadata. Content will be re-downloaded as needed."
+        ),
 
         // MARK: Servers
         "plexServer": SettingDescriptor(
@@ -195,10 +215,30 @@ enum SettingsDescriptorStore {
             iconColor: .orange,
             description: "Manage your Plex server connection, view server details, or sign out."
         ),
+        "signOut": SettingDescriptor(
+            icon: "rectangle.portrait.and.arrow.right",
+            iconColor: .red,
+            description: "Sign out of your Plex server and remove all saved credentials. You'll need to sign in again to access your media."
+        ),
+        "connectPlex": SettingDescriptor(
+            icon: "link",
+            iconColor: .blue,
+            description: "Connect to your Plex server to browse and stream your media library."
+        ),
         "userProfiles": SettingDescriptor(
             icon: "person.crop.circle",
             iconColor: .cyan,
             description: "Switch between Plex Home user profiles. Each profile has its own watch history and preferences."
+        ),
+        "profileRow": SettingDescriptor(
+            icon: "person.crop.circle",
+            iconColor: .cyan,
+            description: "Select this profile to switch to it. PIN-protected profiles will require verification. Press and hold for more options."
+        ),
+        "profilePickerOnLaunch": SettingDescriptor(
+            icon: "person.2.circle",
+            iconColor: .purple,
+            description: "Shows the profile picker each time Rivulet launches, allowing you to choose which profile to use."
         ),
         "liveTVSources": SettingDescriptor(
             icon: "tv.and.mediabox",

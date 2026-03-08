@@ -6,10 +6,40 @@
 //
 
 import SwiftUI
+import Combine
 
 let previewEntryAnimation = Animation.spring(response: 0.46, dampingFraction: 0.86)
 let previewPagingAnimation = Animation.interactiveSpring(response: 0.40, dampingFraction: 0.90)
 let previewExpandAnimation = Animation.spring(response: 0.44, dampingFraction: 0.84)
+
+/// Bridge object that allows PreviewContainerViewController to trigger Menu actions
+/// on the SwiftUI PreviewOverlayHost.
+@MainActor
+class PreviewMenuBridge: ObservableObject {
+    @Published var menuPressCount: Int = 0
+
+    /// Optional intercept handler set by the expanded detail view.
+    /// Returns true if the press was consumed (e.g., popping internal navigation).
+    var interceptHandler: (() -> Bool)?
+
+    func triggerMenu() {
+        if let handler = interceptHandler, handler() {
+            return  // Consumed by detail view's internal nav
+        }
+        menuPressCount += 1
+    }
+}
+
+private struct PreviewMenuBridgeKey: EnvironmentKey {
+    static let defaultValue: PreviewMenuBridge? = nil
+}
+
+extension EnvironmentValues {
+    var previewMenuBridge: PreviewMenuBridge? {
+        get { self[PreviewMenuBridgeKey.self] }
+        set { self[PreviewMenuBridgeKey.self] = newValue }
+    }
+}
 
 struct PreviewOverlayHost: View {
     let request: PreviewRequest
@@ -17,6 +47,7 @@ struct PreviewOverlayHost: View {
     let serverURL: String
     let authToken: String
     let onDismiss: (PreviewSourceTarget) -> Void
+    @ObservedObject var menuBridge: PreviewMenuBridge
 
     @State private var selectedIndex: Int
     @State private var stateMachine = PreviewStateMachine()
@@ -39,13 +70,15 @@ struct PreviewOverlayHost: View {
         sourceFrames: [PreviewSourceTarget: CGRect],
         serverURL: String,
         authToken: String,
-        onDismiss: @escaping (PreviewSourceTarget) -> Void
+        onDismiss: @escaping (PreviewSourceTarget) -> Void,
+        menuBridge: PreviewMenuBridge
     ) {
         self.request = request
         self.sourceFrames = sourceFrames
         self.serverURL = serverURL
         self.authToken = authToken
         self.onDismiss = onDismiss
+        self.menuBridge = menuBridge
         self._selectedIndex = State(initialValue: request.selectedIndex)
     }
 
@@ -64,8 +97,7 @@ struct PreviewOverlayHost: View {
     }
 
     var body: some View {
-        NavigationStack {
-            GeometryReader { geo in
+        GeometryReader { geo in
             // Card extends from topInset to below the screen bottom (overflows by cornerRadius to hide bottom corners)
             let cardWidth = max(0, geo.size.width - (sidePeek * 2) - (cardGap * 2))
             let cardHeight = geo.size.height - topInset + cornerRadius
@@ -130,15 +162,9 @@ struct PreviewOverlayHost: View {
                         .onPlayPauseCommand {
                             expandCurrentCard()
                         }
-                        .onExitCommand {
-                            handleExit()
-                        }
                 }
             }
             .ignoresSafeArea()
-            .onExitCommand {
-                handleExit()
-            }
             .onAppear {
                 capturedSourceFrame = sourceFrames[request.sourceTarget]
                 focusedArea = .carousel
@@ -153,9 +179,12 @@ struct PreviewOverlayHost: View {
                     capturedSourceFrame = newFrame
                 }
             }
+            .onChange(of: menuBridge.menuPressCount) { _, _ in
+                handleExit()
             }
-            .ignoresSafeArea()
-        } // NavigationStack
+        }
+        .environment(\.previewMenuBridge, menuBridge)
+        .ignoresSafeArea()
     }
 
     private func performCarouselMove(_ direction: MoveCommandDirection) {
@@ -413,6 +442,7 @@ private struct PreviewCarouselCard: View {
             }
         }
         .frame(width: frame.width, height: frame.height)
+        .clipped()
         .opacity(opacity)
         .clipShape(
             UnevenRoundedRectangle(

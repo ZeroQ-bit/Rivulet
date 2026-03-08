@@ -48,6 +48,8 @@ struct PlexLibraryView: View {
     @State private var lastFocusedItemId: String?  // Remembers focus for back-from-detail restore
     @State private var rowPreviewRequest: PreviewRequest?
     @State private var previewRestoreTarget: PreviewSourceTarget?
+    @State private var capturedSourceFrames: [PreviewSourceTarget: CGRect] = [:]
+    @State private var showPreviewCover = false
     @State private var lastPrefetchIndex: Int = -18  // Track last prefetch position for throttling
     private var firstDisplayedItem: PlexMetadata? {
         items.first
@@ -206,9 +208,6 @@ struct PlexLibraryView: View {
             let _ = newValue
             updateNestedNavigationState()
         }
-        .onChange(of: rowPreviewRequest?.id) { _, _ in
-            updateNestedNavigationState()
-        }
         .onChange(of: enablePersonalizedRecommendations) { _, _ in
             handleRecommendationsToggle()
         }
@@ -256,26 +255,66 @@ struct PlexLibraryView: View {
                 PlexDetailView(item: item)
             }
             .overlayPreferenceValue(PreviewSourceFramePreferenceKey.self) { anchors in
-                previewOverlay(for: anchors)
+                GeometryReader { proxy in
+                    Color.clear
+                        .hidden()
+                        .task(id: anchors.count) {
+                            capturedSourceFrames = Dictionary(uniqueKeysWithValues: anchors.map { ($0.key, proxy[$0.value]) })
+                        }
+                }
+                .allowsHitTesting(false)
+            }
+            .onChange(of: showPreviewCover) { _, isShowing in
+                if isShowing, let request = rowPreviewRequest {
+                    presentPreview(request: request)
+                }
             }
     }
 
-    @ViewBuilder
-    private func previewOverlay(for anchors: [PreviewSourceTarget: Anchor<CGRect>]) -> some View {
-        GeometryReader { proxy in
-            if let activeRequest = rowPreviewRequest {
-                let resolvedFrames = Dictionary(uniqueKeysWithValues: anchors.map { ($0.key, proxy[$0.value]) })
-                PreviewOverlayHost(
-                    request: activeRequest,
-                    sourceFrames: resolvedFrames,
-                    serverURL: authManager.selectedServerURL ?? "",
-                    authToken: authManager.selectedServerToken ?? "",
-                    onDismiss: { sourceTarget in
-                        previewRestoreTarget = sourceTarget
-                        self.rowPreviewRequest = nil
+    // MARK: - Preview Presentation (UIKit Modal)
+
+    private func presentPreview(request: PreviewRequest) {
+        let menuBridge = PreviewMenuBridge()
+
+        let previewContent = PreviewOverlayHost(
+            request: request,
+            sourceFrames: capturedSourceFrames,
+            serverURL: authManager.selectedServerURL ?? "",
+            authToken: authManager.selectedServerToken ?? "",
+            onDismiss: { sourceTarget in
+                previewRestoreTarget = sourceTarget
+                if let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+                   let rootVC = scene.windows.first?.rootViewController {
+                    var topVC = rootVC
+                    while let presented = topVC.presentedViewController {
+                        topVC = presented
                     }
-                )
+                    if let previewVC = topVC as? PreviewContainerViewController {
+                        previewVC.dismissPreview()
+                    }
+                }
+            },
+            menuBridge: menuBridge
+        )
+
+        let container = PreviewContainerViewController(
+            content: previewContent,
+            menuHandler: {
+                menuBridge.triggerMenu()
             }
+        )
+        container.onDismiss = {
+            showPreviewCover = false
+            rowPreviewRequest = nil
+        }
+
+        if let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+           let rootVC = scene.windows.first?.rootViewController {
+            var topVC = rootVC
+            while let presented = topVC.presentedViewController {
+                topVC = presented
+            }
+            topVC.present(container, animated: false)
         }
     }
 
@@ -365,12 +404,6 @@ struct PlexLibraryView: View {
     }
 
     private func updateNestedNavigationState() {
-        if rowPreviewRequest != nil {
-            nestedNavState.isNested = true
-            nestedNavState.goBackAction = nil
-            return
-        }
-
         let isNested = selectedItem != nil
         nestedNavState.isNested = isNested
         if isNested {
@@ -521,6 +554,7 @@ struct PlexLibraryView: View {
                             onPreviewRequested: isContinueWatching ? nil : { request in
                                 withAnimation(previewEntryAnimation) {
                                     rowPreviewRequest = request
+                                    showPreviewCover = true
                                 }
                             },
                             restorePreviewFocusTarget: $previewRestoreTarget
@@ -593,6 +627,7 @@ struct PlexLibraryView: View {
                 onPreviewRequested: { request in
                     withAnimation(previewEntryAnimation) {
                         rowPreviewRequest = request
+                        showPreviewCover = true
                     }
                 },
                 restorePreviewFocusTarget: $previewRestoreTarget
@@ -626,6 +661,7 @@ struct PlexLibraryView: View {
                             onPreviewRequested: { request in
                                 withAnimation(previewEntryAnimation) {
                                     rowPreviewRequest = request
+                                    showPreviewCover = true
                                 }
                             },
                             restorePreviewFocusTarget: $previewRestoreTarget

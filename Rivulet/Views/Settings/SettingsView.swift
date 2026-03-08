@@ -206,7 +206,11 @@ final class SettingsFocusState {
     var focusedSettingId: String? {
         didSet { publisher.send(focusedSettingId) }
     }
+    var focusedSubtext: String? {
+        didSet { subtextPublisher.send(focusedSubtext) }
+    }
     let publisher = PassthroughSubject<String?, Never>()
+    let subtextPublisher = PassthroughSubject<String?, Never>()
 }
 
 // MARK: - Settings View
@@ -313,6 +317,13 @@ struct SettingsView: View {
         )
     }
 
+    private var focusedSubtextBinding: Binding<String?> {
+        Binding(
+            get: { focusState.focusedSubtext },
+            set: { focusState.focusedSubtext = $0 }
+        )
+    }
+
     private var appVersion: String {
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0"
         let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "1"
@@ -415,7 +426,7 @@ struct SettingsView: View {
         case .libraries:
             LibrarySettingsView(focusedSettingId: focusedSettingIdBinding)
         case .cache:
-            CacheSettingsView(focusedSettingId: focusedSettingIdBinding)
+            CacheSettingsView(focusedSettingId: focusedSettingIdBinding, focusedSubtext: focusedSubtextBinding)
         case .userProfiles:
             UserProfileSettingsView(focusedSettingId: focusedSettingIdBinding)
         case .displaySizePicker:
@@ -813,6 +824,7 @@ struct SettingsView: View {
 
     private func navigate(to page: SettingsPage) {
         focusState.focusedSettingId = nil
+        focusState.focusedSubtext = nil
         isForward = true
         withAnimation(.easeOut(duration: 0.45)) {
             navigationStack.append(page)
@@ -822,6 +834,7 @@ struct SettingsView: View {
     private func goBack() {
         guard navigationStack.count > 1 else { return }
         focusState.focusedSettingId = nil
+        focusState.focusedSubtext = nil
         isForward = false
         withAnimation(.easeOut(duration: 0.45)) {
             navigationStack.removeLast()
@@ -839,6 +852,7 @@ private struct SettingsLeftPanel: View {
     let currentPage: SettingsPage
 
     @State private var focusedSettingId: String?
+    @State private var focusedSubtext: String?
 
     var body: some View {
         let descriptor = focusedSettingId.flatMap { SettingsDescriptorStore.descriptor(for: $0) }
@@ -863,22 +877,35 @@ private struct SettingsLeftPanel: View {
             .frame(height: 320)
 
             // Fixed-height description area — always takes same space
-            Text(descriptor?.description ?? " ")
-                .font(.system(size: 28))
-                .foregroundStyle(.white.opacity(descriptor != nil ? 0.55 : 0))
-                .multilineTextAlignment(.center)
-                .lineSpacing(4)
-                .lineLimit(4)
-                .frame(maxWidth: 700)
-                .frame(height: 160, alignment: .top)
-                .padding(.top, 28)
+            VStack(spacing: 12) {
+                Text(descriptor?.description ?? " ")
+                    .font(.system(size: 28))
+                    .foregroundStyle(.white.opacity(descriptor != nil ? 0.55 : 0))
+                    .multilineTextAlignment(.center)
+                    .lineSpacing(4)
+                    .lineLimit(4)
+                    .frame(maxWidth: 700)
+
+                if let subtext = focusedSubtext {
+                    Text(subtext)
+                        .font(.system(size: 24, weight: .medium, design: .monospaced))
+                        .foregroundStyle(.white.opacity(0.35))
+                        .multilineTextAlignment(.center)
+                }
+            }
+            .frame(height: 190, alignment: .top)
+            .padding(.top, 28)
 
             Spacer()
         }
         .onReceive(focusState.publisher) { id in
             focusedSettingId = id
         }
+        .onReceive(focusState.subtextPublisher) { subtext in
+            focusedSubtext = subtext
+        }
         .animation(.easeInOut(duration: 0.25), value: focusedSettingId)
+        .animation(.easeInOut(duration: 0.25), value: focusedSubtext)
         .animation(.easeInOut(duration: 0.3), value: currentPage)
     }
 }
