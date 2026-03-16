@@ -1591,10 +1591,29 @@ final class UniversalPlayerViewModel: ObservableObject {
                     enableDVConversion: requiresProfileConversion
                 )
             } catch {
+                let failureKind = classifyDirectPlayFailure(error)
+
+                // Retry once for transient network errors before falling back to HLS
+                if failureKind == .network || failureKind == .demuxInit {
+                    print("🎬 [Rivulet] Direct play failed (\(failureKind.rawValue)), retrying in 2s...")
+                    try await Task.sleep(for: .seconds(2))
+                    rp.stop()
+                    do {
+                        try await rp.load(
+                            route: .directPlay(url: directURL, headers: directHeaders),
+                            startTime: startTime,
+                            isDolbyVision: metadata.hasDolbyVision,
+                            enableDVConversion: requiresProfileConversion
+                        )
+                        return  // Retry succeeded
+                    } catch {
+                        print("🎬 [Rivulet] Retry also failed, falling back to HLS")
+                    }
+                }
+
                 guard plan.fallbacks.contains(where: { if case .hls = $0 { return true } else { return false } }) else {
                     throw error
                 }
-                let failureKind = classifyDirectPlayFailure(error)
                 try await attemptRivuletHLSFallback(
                     resumeTime: startTime ?? 0,
                     reason: "startup_directplay_failure",

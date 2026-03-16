@@ -16,78 +16,41 @@ struct UserProfileSettingsView: View {
     @State private var isLoading = false
     @State private var showForgetPinConfirmation = false
     @State private var userToForgetPin: PlexHomeUser?
-    @FocusState private var focusedUserId: Int?
 
     init(focusedSettingId: Binding<String?> = .constant(nil)) {
         self._focusedSettingId = focusedSettingId
     }
 
     var body: some View {
-        VStack(spacing: 24) {
+        Group {
             if profileManager.isLoadingUsers {
-                // Loading state
-                VStack(spacing: 20) {
-                    ProgressView()
-                        .scaleEffect(1.5)
-                    Text("Loading profiles...")
-                        .font(.system(size: 26))
-                        .foregroundStyle(.white.opacity(0.6))
-                }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 60)
+                ProgressView("Loading profiles...")
             } else if profileManager.homeUsers.isEmpty {
-                // No profiles
-                VStack(spacing: 20) {
-                    Image(systemName: "person.crop.circle")
-                        .font(.system(size: 80, weight: .thin))
-                        .foregroundStyle(.white.opacity(0.5))
-
-                    Text("No Plex Home")
-                        .font(.system(size: 32, weight: .semibold))
-                        .foregroundStyle(.white)
-
-                    Text("Plex Home is not set up for this account.\nYou can create managed users on plex.tv.")
-                        .font(.system(size: 24))
-                        .foregroundStyle(.white.opacity(0.6))
-                        .multilineTextAlignment(.center)
-                }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 60)
+                Text("Plex Home is not set up for this account.\nYou can create managed users on plex.tv.")
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
             } else {
-                // Current profile card
-                if let currentUser = profileManager.selectedUser {
-                    SettingsSection(title: "Current Profile") {
-                        CurrentProfileCard(user: currentUser)
-                    }
-                }
-
-                // Available profiles
-                SettingsSection(title: "Available Profiles") {
-                    ForEach(profileManager.homeUsers) { user in
-                        ProfileRow(
-                            user: user,
-                            isSelected: user.id == profileManager.selectedUser?.id,
-                            isLoading: isLoading && selectedUserForPin?.id == user.id,
-                            isFocused: focusedUserId == user.id,
-                            hasRememberedPin: profileManager.usersWithRememberedPins.contains(user.uuid)
-                        ) {
-                            selectProfile(user)
-                        } onForgetPin: {
+                ForEach(profileManager.homeUsers) { user in
+                    ProfileRow(
+                        user: user,
+                        isSelected: user.id == profileManager.selectedUser?.id,
+                        isLoading: isLoading && selectedUserForPin?.id == user.id,
+                        hasRememberedPin: profileManager.usersWithRememberedPins.contains(user.uuid),
+                        onSelect: { selectProfile(user) },
+                        onForgetPin: {
                             userToForgetPin = user
                             showForgetPinConfirmation = true
-                        }
-                        .focused($focusedUserId, equals: user.id)
-                    }
-                }
-
-                // Settings
-                SettingsSection(title: "Behavior") {
-                    SettingsToggleRow(
-                        title: "Profile Picker on Launch",
-                        subtitle: "Choose profile when app opens",
-                        isOn: $profileManager.showProfilePickerOnLaunch
+                        },
+                        onFocusChange: { if $0 { focusedSettingId = "profileRow" } }
                     )
                 }
+
+                SettingsToggleRow(
+                    title: "Profile Picker on Launch",
+                    subtitle: "",
+                    isOn: $profileManager.showProfilePickerOnLaunch,
+                    onFocusChange: { if $0 { focusedSettingId = "profilePickerOnLaunch" } }
+                )
             }
         }
         .sheet(isPresented: $showPinEntry) {
@@ -122,11 +85,6 @@ struct UserProfileSettingsView: View {
             }
         } message: { user in
             Text("You'll need to enter the PIN manually next time you switch to \(user.displayName).")
-        }
-        .onAppear {
-            if focusedUserId == nil, let first = profileManager.homeUsers.first {
-                focusedUserId = first.id
-            }
         }
     }
 
@@ -182,62 +140,18 @@ struct UserProfileSettingsView: View {
     }
 }
 
-// MARK: - Current Profile Card
-
-private struct CurrentProfileCard: View {
-    let user: PlexHomeUser
-
-    var body: some View {
-        HStack(spacing: 20) {
-            ProfileAvatar(user: user, size: 80)
-
-            VStack(alignment: .leading, spacing: 6) {
-                Text(user.displayName)
-                    .font(.system(size: 32, weight: .semibold))
-                    .foregroundStyle(.white)
-
-                HStack(spacing: 8) {
-                    if user.admin {
-                        ProfileBadge(text: "Admin", color: .blue)
-                    }
-                    if user.restricted {
-                        ProfileBadge(text: "Managed", color: .orange)
-                    }
-                    if user.protected {
-                        ProfileBadge(text: "PIN", color: .purple)
-                    }
-                }
-            }
-
-            Spacer()
-
-            Image(systemName: "checkmark.circle.fill")
-                .font(.system(size: 36))
-                .foregroundStyle(.green)
-        }
-        .padding(.horizontal, 24)
-        .padding(.vertical, 24)
-        .background(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(.white.opacity(0.08))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 18, style: .continuous)
-                        .strokeBorder(.white.opacity(0.12), lineWidth: 1)
-                )
-        )
-    }
-}
-
 // MARK: - Profile Row
 
 private struct ProfileRow: View {
     let user: PlexHomeUser
     let isSelected: Bool
     let isLoading: Bool
-    let isFocused: Bool
     let hasRememberedPin: Bool
     let onSelect: () -> Void
     let onForgetPin: () -> Void
+    var onFocusChange: ((Bool) -> Void)? = nil
+
+    @FocusState private var isFocused: Bool
 
     var body: some View {
         Button(action: onSelect) {
@@ -247,29 +161,22 @@ private struct ProfileRow: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(user.displayName)
                         .font(.system(size: 28, weight: .medium))
-                        .foregroundStyle(.white)
 
                     HStack(spacing: 8) {
                         if user.admin {
                             Text("Account Owner")
                                 .font(.system(size: 22))
-                                .foregroundStyle(.white.opacity(0.6))
+                                .foregroundStyle(.secondary)
                         } else if user.restricted {
                             Text("Managed User")
                                 .font(.system(size: 22))
-                                .foregroundStyle(.white.opacity(0.6))
+                                .foregroundStyle(.secondary)
                         }
 
                         if user.protected {
-                            if hasRememberedPin {
-                                Image(systemName: "lock.open.fill")
-                                    .font(.system(size: 18))
-                                    .foregroundStyle(.green)
-                            } else {
-                                Image(systemName: "lock.fill")
-                                    .font(.system(size: 18))
-                                    .foregroundStyle(.white.opacity(0.5))
-                            }
+                            Image(systemName: hasRememberedPin ? "lock.open.fill" : "lock.fill")
+                                .font(.system(size: 18))
+                                .foregroundStyle(hasRememberedPin ? .green : .secondary)
                         }
                     }
                 }
@@ -285,23 +192,11 @@ private struct ProfileRow: View {
                         .foregroundStyle(.green)
                 }
             }
-            .padding(.horizontal, 24)
-            .padding(.vertical, 18)
-            .background(
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .fill(isFocused ? .white.opacity(0.18) : .white.opacity(0.08))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 18, style: .continuous)
-                            .strokeBorder(
-                                isFocused ? .white.opacity(0.25) : .white.opacity(0.08),
-                                lineWidth: 1
-                            )
-                    )
-            )
         }
-        .buttonStyle(SettingsButtonStyle())
-        .scaleEffect(isFocused ? 1.02 : 1.0)
-        .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isFocused)
+        .focused($isFocused)
+        .onChange(of: isFocused) { _, focused in
+            onFocusChange?(focused)
+        }
         .contextMenu {
             if user.protected && hasRememberedPin {
                 Button(role: .destructive) {
@@ -363,25 +258,6 @@ private struct ProfileAvatar: View {
     private var profileColor: Color {
         let colors: [Color] = [.blue, .purple, .pink, .orange, .green, .teal, .indigo]
         return colors[abs(user.id) % colors.count]
-    }
-}
-
-// MARK: - Profile Badge
-
-private struct ProfileBadge: View {
-    let text: String
-    let color: Color
-
-    var body: some View {
-        Text(text)
-            .font(.system(size: 16, weight: .semibold))
-            .foregroundStyle(.white)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 4)
-            .background(
-                Capsule()
-                    .fill(color.opacity(0.8))
-            )
     }
 }
 

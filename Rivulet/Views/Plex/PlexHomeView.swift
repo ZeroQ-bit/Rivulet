@@ -217,7 +217,7 @@ struct PlexHomeView: View {
                 PlexDetailView(item: item)
             }
             .overlayPreferenceValue(PreviewSourceFramePreferenceKey.self) { anchors in
-                // Resolve anchor frames into CGRects continuously for the fullScreenCover
+                // Resolve anchor frames into CGRects
                 GeometryReader { proxy in
                     Color.clear
                         .hidden()
@@ -227,33 +227,14 @@ struct PlexHomeView: View {
                 }
                 .allowsHitTesting(false)
             }
-            .fullScreenCover(isPresented: $showPreviewCover) {
-                if let activeRequest = rowPreviewRequest {
-                    PreviewOverlayHost(
-                        request: activeRequest,
-                        sourceFrames: capturedSourceFrames,
-                        serverURL: authManager.selectedServerURL ?? "",
-                        authToken: authManager.selectedServerToken ?? "",
-                        onDismiss: { sourceTarget in
-                            homeLog.info("[Preview] Dismissing row preview")
-                            previewRestoreTarget = sourceTarget
-                            showPreviewCover = false
-                        }
-                    )
-                    .presentationBackground(.clear)
-                }
-            }
             .onChange(of: showPreviewCover) { _, isShowing in
-                if !isShowing {
-                    rowPreviewRequest = nil
+                if isShowing, let request = rowPreviewRequest {
+                    presentPreview(request: request)
                 }
             }
         }
         .onChange(of: selectedItem) { _, newValue in
             print("[PlexHome] selectedItem changed: \(newValue?.title ?? "nil") (ratingKey: \(newValue?.ratingKey ?? "nil"))")
-            updateNestedNavigationState()
-        }
-        .onChange(of: showPreviewCover) { _, _ in
             updateNestedNavigationState()
         }
         // Handle navigation from player (Go to Season / Go to Show)
@@ -339,6 +320,55 @@ struct PlexHomeView: View {
         return await (artTask, thumbTask)
     }
 
+    // MARK: - Preview Presentation (UIKit Modal)
+
+    private func presentPreview(request: PreviewRequest) {
+        let menuBridge = PreviewMenuBridge()
+
+        let previewContent = PreviewOverlayHost(
+            request: request,
+            sourceFrames: capturedSourceFrames,
+            serverURL: authManager.selectedServerURL ?? "",
+            authToken: authManager.selectedServerToken ?? "",
+            onDismiss: { [weak menuBridge] sourceTarget in
+                _ = menuBridge  // prevent retain cycle warning
+                previewRestoreTarget = sourceTarget
+                // Find and dismiss the preview VC
+                if let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+                   let rootVC = scene.windows.first?.rootViewController {
+                    var topVC = rootVC
+                    while let presented = topVC.presentedViewController {
+                        topVC = presented
+                    }
+                    if let previewVC = topVC as? PreviewContainerViewController {
+                        previewVC.dismissPreview()
+                    }
+                }
+            },
+            menuBridge: menuBridge
+        )
+
+        let container = PreviewContainerViewController(
+            content: previewContent,
+            menuHandler: {
+                menuBridge.triggerMenu()
+            }
+        )
+        container.onDismiss = {
+            showPreviewCover = false
+            rowPreviewRequest = nil
+        }
+
+        if let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+           let rootVC = scene.windows.first?.rootViewController {
+            var topVC = rootVC
+            while let presented = topVC.presentedViewController {
+                topVC = presented
+            }
+            topVC.present(container, animated: false)
+        }
+    }
+
     // MARK: - Hero Selection
 
     private func selectHeroItem() {
@@ -412,12 +442,6 @@ struct PlexHomeView: View {
     }
 
     private func updateNestedNavigationState() {
-        if showPreviewCover {
-            nestedNavState.isNested = true
-            nestedNavState.goBackAction = nil
-            return
-        }
-
         let isNested = selectedItem != nil
         nestedNavState.isNested = isNested
         if isNested {

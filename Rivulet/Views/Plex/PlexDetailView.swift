@@ -12,20 +12,6 @@ enum PlexDetailPresentationMode: Equatable {
     case expandedDetail
 }
 
-private struct PreviewExitCommandModifier: ViewModifier {
-    let isEnabled: Bool
-    let action: () -> Void
-
-    @ViewBuilder
-    func body(content: Content) -> some View {
-        if isEnabled {
-            content.onExitCommand(perform: action)
-        } else {
-            content
-        }
-    }
-}
-
 struct PlexDetailView: View {
     let item: PlexMetadata
     var presentationMode: PlexDetailPresentationMode = .expandedDetail
@@ -47,6 +33,7 @@ struct PlexDetailView: View {
 
     @Environment(\.dismiss) private var dismiss
     @Environment(\.nestedNavigationState) private var nestedNavState
+    @Environment(\.previewMenuBridge) private var menuBridge
     @StateObject private var authManager = PlexAuthManager.shared
     @State private var seasons: [PlexMetadata] = []
     @State private var selectedSeason: PlexMetadata?
@@ -196,6 +183,24 @@ struct PlexDetailView: View {
                 .ignoresSafeArea()
                 .allowsHitTesting(false)
 
+                // Bottom gradient for metadata text readability
+                LinearGradient(
+                    stops: [
+                        .init(color: .clear, location: 0.0),
+                        .init(color: .black.opacity(0.4), location: 0.25),
+                        .init(color: .black.opacity(0.75), location: 0.55),
+                        .init(color: .black.opacity(0.9), location: 1.0),
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .frame(height: geo.size.height * 0.55)
+                .frame(maxHeight: .infinity, alignment: .bottom)
+                .opacity(showMetadata ? 1 : 0)
+                .animation(.easeInOut(duration: 0.7), value: showMetadata)
+                .ignoresSafeArea()
+                .allowsHitTesting(false)
+
                 // Layer 2: All scrollable content in one continuous flow
                 ScrollView(.vertical, showsIndicators: false) {
                     VStack(alignment: .leading, spacing: 0) {
@@ -204,7 +209,6 @@ struct PlexDetailView: View {
                             Spacer(minLength: 0)
                             heroMetadataOverlay
                                 .padding(.horizontal, 48)
-                                .padding(.bottom, 16)
                                 .opacity(showMetadata ? 1 : 0)
                         }
                         .frame(height: heroHeight)
@@ -385,23 +389,29 @@ struct PlexDetailView: View {
                 focusedActionButton = "play"
             }
         }
-        .modifier(PreviewExitCommandModifier(
-            isEnabled: presentationMode == .expandedDetail && onPreviewExitRequested != nil,
-            action: {
-            guard presentationMode == .expandedDetail, let onPreviewExitRequested else { return }
-
-            if navigateToAlbum != nil {
-                navigateToAlbum = nil
-            } else if navigateToSeason != nil {
-                navigateToSeason = nil
-            } else if navigateToShow != nil {
-                navigateToShow = nil
-            } else if navigateToEpisode != nil {
-                navigateToEpisode = nil
-            } else {
-                onPreviewExitRequested()
+        .onAppear {
+            guard isExpandedPreviewFlow, let bridge = menuBridge else { return }
+            bridge.interceptHandler = { [self] in
+                if navigateToAlbum != nil {
+                    navigateToAlbum = nil
+                    return true
+                } else if navigateToSeason != nil {
+                    navigateToSeason = nil
+                    return true
+                } else if navigateToShow != nil {
+                    navigateToShow = nil
+                    return true
+                } else if navigateToEpisode != nil {
+                    navigateToEpisode = nil
+                    return true
+                }
+                return false
             }
-        }))
+        }
+        .onDisappear {
+            guard isExpandedPreviewFlow else { return }
+            menuBridge?.interceptHandler = nil
+        }
         .onChange(of: showPlayer) { _, shouldShow in
             if shouldShow {
                 presentPlayer()
@@ -475,18 +485,14 @@ struct PlexDetailView: View {
                 }
             }
         }
-        .navigationDestination(item: $navigateToAlbum) { album in
-            PlexDetailView(item: album)
-        }
-        .navigationDestination(item: $navigateToSeason) { season in
-            PlexDetailView(item: season)
-        }
-        .navigationDestination(item: $navigateToShow) { show in
-            PlexDetailView(item: show)
-        }
-        .navigationDestination(item: $navigateToEpisode) { episode in
-            PlexDetailView(item: episode)
-        }
+        // Navigation destinations only in standard flow (not preview overlay — no NavigationStack there)
+        .modifier(NavigationDestinationsModifier(
+            navigateToAlbum: $navigateToAlbum,
+            navigateToSeason: $navigateToSeason,
+            navigateToShow: $navigateToShow,
+            navigateToEpisode: $navigateToEpisode,
+            isEnabled: onPreviewExitRequested == nil
+        ))
         // Update goBackAction when viewing nested album
         .onChange(of: navigateToAlbum) { oldAlbum, newAlbum in
             if newAlbum != nil {
@@ -523,7 +529,7 @@ struct PlexDetailView: View {
     }
 
     private func heroContentHeight(for fullHeight: CGFloat) -> CGFloat {
-        return max(0, fullHeight - 250)  // 250pt peek for all modes including carousel
+        return max(0, fullHeight - 250)  // 250pt peek for episode thumbnails
     }
 
     // MARK: - Hero Components (Apple TV+ style — backdrop fixed, content scrolls over)
@@ -574,8 +580,8 @@ struct PlexDetailView: View {
 
                 // Text content capped at 50% of container width
                 VStack(alignment: .leading, spacing: 8) {
-                    // TMDB logo or title (shows for all types except episodes)
-                    if currentItem.type != "episode", let logoURL = showLogoURL {
+                    // TMDB logo or title (show logo for episodes, movie/show logo for others)
+                    if let logoURL = showLogoURL {
                         CachedAsyncImage(url: logoURL) { phase in
                             switch phase {
                             case .success(let image):
@@ -603,8 +609,8 @@ struct PlexDetailView: View {
                             let desc = fullMetadata?.summary ?? currentItem.summary ?? ""
                             (Text(header).bold() + Text(desc.isEmpty ? "" : ":  \(desc)"))
                                 .font(.caption)
-                                .foregroundStyle(.white.opacity(0.8))
-                                .lineLimit(isPreviewCarousel ? 3 : 4)
+                                .foregroundStyle(.white)
+                                .lineLimit(4)
                         }
                     } else if currentItem.type == "show" || currentItem.type == "season" {
                         // Shows: tagline + summary
@@ -612,13 +618,13 @@ struct PlexDetailView: View {
                             Text(tagline)
                                 .font(.caption)
                                 .italic()
-                                .foregroundStyle(.white.opacity(0.7))
+                                .foregroundStyle(.white.opacity(0.9))
                         }
                         if let summary = fullMetadata?.summary ?? currentItem.summary, !summary.isEmpty {
                             Text(summary)
                                 .font(.caption)
-                                .foregroundStyle(.white.opacity(0.6))
-                                .lineLimit(isPreviewCarousel ? 3 : 4)
+                                .foregroundStyle(.white.opacity(0.85))
+                                .lineLimit(4)
                         }
                     } else {
                         // Movies/other: just tagline (short description)
@@ -626,12 +632,12 @@ struct PlexDetailView: View {
                             Text(tagline)
                                 .font(.caption)
                                 .italic()
-                                .foregroundStyle(.white.opacity(0.7))
+                                .foregroundStyle(.white.opacity(0.9))
                         } else if let summary = fullMetadata?.summary ?? currentItem.summary, !summary.isEmpty {
                             Text(summary)
                                 .font(.caption)
-                                .foregroundStyle(.white.opacity(0.6))
-                                .lineLimit(isPreviewCarousel ? 3 : 4)
+                                .foregroundStyle(.white.opacity(0.85))
+                                .lineLimit(4)
                         }
                     }
 
@@ -642,29 +648,36 @@ struct PlexDetailView: View {
                     if let caption = upNextCaption {
                         Text(caption)
                             .font(.caption)
-                            .foregroundStyle(.white.opacity(0.5))
+                            .foregroundStyle(.white.opacity(0.7))
                     }
                 }
-                .frame(maxWidth: metaGeo.size.width * 0.5, alignment: .leading)
+                .frame(maxWidth: 720, alignment: .leading)
 
                 if showMetadata {
                     // Bottom row: buttons (left) + starring (right) — full width
                     // Buttons visible with metadata but only focusable/interactable when expanded
                     HStack(alignment: .bottom, spacing: 0) {
                         actionButtons
+                            .onMoveCommand { direction in
+                                if direction == .up,
+                                   isExpandedPreviewFlow,
+                                   scrollProgress == 0 {
+                                    onPreviewExitRequested?()
+                                }
+                            }
 
                         Spacer(minLength: 40)
 
                         // Starring (comma-separated, right-aligned)
                         if let roles = (fullMetadata ?? currentItem).Role, !roles.isEmpty {
-                            let topCast = roles.prefix(4).compactMap { $0.tag }
+                            let topCast = roles.prefix(5).compactMap { $0.tag }
                             if !topCast.isEmpty {
                                 Text("Starring \(topCast.joined(separator: ", "))")
                                     .font(.caption)
-                                    .foregroundStyle(.white.opacity(0.6))
-                                    .lineLimit(2)
+                                    .foregroundStyle(.white.opacity(0.85))
+                                    .lineLimit(4)
                                     .multilineTextAlignment(.trailing)
-                                    .frame(maxWidth: 350, alignment: .trailing)
+                                    .frame(maxWidth: 500, alignment: .trailing)
                             }
                         }
                     }
@@ -719,7 +732,6 @@ struct PlexDetailView: View {
             // Type label for non-obvious types
             if currentItem.type == "show" {
                 Text("Series")
-                    .foregroundStyle(.white.opacity(0.6))
             }
 
             // Genres (up to 3)
@@ -727,7 +739,6 @@ struct PlexDetailView: View {
                 ForEach(Array(genres), id: \.id) { genre in
                     if let tag = genre.tag {
                         Text(tag)
-                            .foregroundStyle(.white.opacity(0.7))
                     }
                 }
             }
@@ -739,12 +750,12 @@ struct PlexDetailView: View {
                     .padding(.vertical, 2)
                     .overlay {
                         RoundedRectangle(cornerRadius: 4, style: .continuous)
-                            .stroke(Color.white.opacity(0.4), lineWidth: 1)
+                            .stroke(Color.white.opacity(0.5), lineWidth: 1)
                     }
             }
         }
         .font(.caption)
-        .foregroundStyle(.white.opacity(0.6))
+        .foregroundStyle(.white.opacity(0.85))
     }
 
     /// Year, duration, quality badges row
@@ -777,8 +788,8 @@ struct PlexDetailView: View {
                 QualityBadge(text: audioFormat)
             }
         }
-        .font(.caption)
-        .foregroundStyle(.white.opacity(0.6))
+        .font(.caption.bold())
+        .foregroundStyle(.white)
     }
 
     /// Small badge for quality indicators (4K, DV, Atmos, etc.)
@@ -961,7 +972,7 @@ struct PlexDetailView: View {
                     playFromBeginning = false
                     showPlayer = true
                 } label: {
-                    playButtonLabel(text: showPlayButtonLabel)
+                    playButtonLabel(text: showPlayButtonLabel, isFocused: focusedActionButton == "play")
                         .font(.system(size: 18, weight: .semibold))
                         .padding(.horizontal, 28)
                         .frame(height: pillButtonHeight)
@@ -995,7 +1006,7 @@ struct PlexDetailView: View {
                     playFromBeginning = false
                     showPlayer = true
                 } label: {
-                    playButtonLabel(text: effectiveItem.isInProgress ? "Resume" : "Play")
+                    playButtonLabel(text: effectiveItem.isInProgress ? "Resume" : "Play", isFocused: focusedActionButton == "play")
                         .font(.system(size: 18, weight: .semibold))
                         .padding(.horizontal, 28)
                         .frame(height: pillButtonHeight)
@@ -1079,25 +1090,30 @@ struct PlexDetailView: View {
     }
 
     /// Play button label with inline progress bar + time remaining (Apple TV+ style)
-    private func playButtonLabel(text: String) -> some View {
-        HStack(spacing: 10) {
+    private func playButtonLabel(text: String, isFocused: Bool = false) -> some View {
+        let trackColor = isFocused ? Color.black.opacity(0.2) : Color.white.opacity(0.3)
+        let fillColor = isFocused ? Color.black : Color.white
+
+        return HStack(spacing: 10) {
             Image(systemName: "play.fill")
 
-            if effectiveItem.isInProgress, displayedProgress > 0 {
-                // Progress bar
-                ZStack(alignment: .leading) {
+            // Progress bar (always shown — full track for unwatched, partial for in-progress)
+            ZStack(alignment: .leading) {
+                RoundedRectangle(cornerRadius: 3, style: .continuous)
+                    .fill(trackColor)
+                    .frame(width: 80, height: 5)
+                if displayedProgress > 0 {
                     RoundedRectangle(cornerRadius: 3, style: .continuous)
-                        .fill(Color.white.opacity(0.3))
-                        .frame(width: 80, height: 5)
-                    RoundedRectangle(cornerRadius: 3, style: .continuous)
-                        .fill(Color.white)
+                        .fill(fillColor)
                         .frame(width: 80 * displayedProgress, height: 5)
                 }
+            }
 
-                // Time remaining
-                if let remaining = effectiveItem.remainingTimeFormatted {
-                    Text(remaining)
-                }
+            // Time: remaining if in progress, total duration otherwise
+            if effectiveItem.isInProgress, let remaining = effectiveItem.remainingTimeFormatted {
+                Text(remaining)
+            } else if let duration = effectiveItem.durationFormatted {
+                Text(duration)
             } else {
                 Text(text)
             }
@@ -1111,7 +1127,7 @@ struct PlexDetailView: View {
             if isLoadingSeasons {
                 ProgressView("Loading seasons...")
             } else if !seasons.isEmpty {
-                // Season pill bar (only for multi-season)
+                // Season pill bar — hidden at rest so episodes peek, revealed on scroll
                 if seasons.count > 1 {
                     SeasonPillBar(
                         seasons: seasons,
@@ -1122,6 +1138,8 @@ struct PlexDetailView: View {
                         }
                     )
                     .opacity(scrollProgress)
+                    .frame(height: scrollProgress > 0 ? nil : 0)
+                    .clipped()
                 }
 
                 // Horizontal episode cards
@@ -3182,4 +3200,36 @@ private struct BioDoneButton: View {
     )
 
     PlexDetailView(item: sampleMovie)
+}
+
+// MARK: - Navigation Destinations Modifier
+
+/// Conditionally applies .navigationDestination modifiers.
+/// Disabled in preview overlay flow (no NavigationStack ancestor).
+private struct NavigationDestinationsModifier: ViewModifier {
+    @Binding var navigateToAlbum: PlexMetadata?
+    @Binding var navigateToSeason: PlexMetadata?
+    @Binding var navigateToShow: PlexMetadata?
+    @Binding var navigateToEpisode: PlexMetadata?
+    let isEnabled: Bool
+
+    func body(content: Content) -> some View {
+        if isEnabled {
+            content
+                .navigationDestination(item: $navigateToAlbum) { album in
+                    PlexDetailView(item: album)
+                }
+                .navigationDestination(item: $navigateToSeason) { season in
+                    PlexDetailView(item: season)
+                }
+                .navigationDestination(item: $navigateToShow) { show in
+                    PlexDetailView(item: show)
+                }
+                .navigationDestination(item: $navigateToEpisode) { episode in
+                    PlexDetailView(item: episode)
+                }
+        } else {
+            content
+        }
+    }
 }
