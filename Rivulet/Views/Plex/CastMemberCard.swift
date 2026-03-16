@@ -147,7 +147,7 @@ struct CastCrewRow: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 LazyHStack(spacing: ScaledDimensions.rowItemSpacing * scale) {
                     // Directors first
-                    ForEach(directors) { director in
+                    ForEach(directors, id: \.id) { director in
                         Button { } label: {
                             PersonCard(
                                 name: director.tag ?? "Unknown",
@@ -165,7 +165,7 @@ struct CastCrewRow: View {
                     }
 
                     // Cast members
-                    ForEach(cast) { actor in
+                    ForEach(cast, id: \.id) { actor in
                         Button { } label: {
                             PersonCard(
                                 name: actor.tag ?? "Unknown",
