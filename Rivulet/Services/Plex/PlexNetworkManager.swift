@@ -1919,7 +1919,14 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
         }
 
         do {
-            let (data, _) = try await session.data(from: lineupURL)
+            let (data, response) = try await session.data(from: lineupURL)
+
+            // Validate HTTP response before attempting JSON decode
+            if let httpResponse = response as? HTTPURLResponse, !(200...299).contains(httpResponse.statusCode) {
+                print("🌐 PlexNetwork: HDHomeRun lineup returned HTTP \(httpResponse.statusCode)")
+                return [:]
+            }
+
             let channels = try JSONDecoder().decode([HDHomeRunChannel].self, from: data)
 
             var urlMap: [String: String] = [:]
