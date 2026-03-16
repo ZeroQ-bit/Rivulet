@@ -13,7 +13,7 @@ import Foundation
 
 /// Actor/cast member with role information
 struct PlexRole: Codable, Identifiable, Sendable {
-    var id: String { "\(tag ?? "")-\(role ?? "")" }
+    var id: String { "\(tag ?? "unknown")-\(role ?? "unknown")-\(thumb ?? "")" }
     var tag: String?        // Actor name
     var role: String?       // Character name
     var thumb: String?      // Photo URL
@@ -21,7 +21,7 @@ struct PlexRole: Codable, Identifiable, Sendable {
 
 /// Director/Writer/Producer
 struct PlexCrewMember: Codable, Identifiable, Sendable {
-    var id: String { tag ?? UUID().uuidString }
+    var id: String { "\(tag ?? "unknown")-\(thumb ?? "")" }
     var tag: String?
     var thumb: String?
 }
