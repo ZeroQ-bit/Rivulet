@@ -14,12 +14,14 @@ actor DispatcharrService {
     // MARK: - Properties
 
     let baseURL: URL
+    let apiToken: String?
     private let session: URLSession
 
     // MARK: - Initialization
 
-    init(baseURL: URL) {
+    init(baseURL: URL, apiToken: String? = nil) {
         self.baseURL = baseURL
+        self.apiToken = apiToken
 
         // Configure session with reasonable timeouts for potentially large M3U/EPG files
         let config = URLSessionConfiguration.default
@@ -29,7 +31,7 @@ actor DispatcharrService {
     }
 
     /// Create a DispatcharrService from a URL string, cleaning up the URL if needed
-    static func create(from urlString: String) -> DispatcharrService? {
+    static func create(from urlString: String, apiToken: String? = nil) -> DispatcharrService? {
         // Clean up the URL string
         var cleanedURL = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
 
@@ -56,7 +58,7 @@ actor DispatcharrService {
             return nil
         }
 
-        return DispatcharrService(baseURL: url)
+        return DispatcharrService(baseURL: url, apiToken: apiToken)
     }
 
     // MARK: - Public Methods
@@ -65,8 +67,9 @@ actor DispatcharrService {
     /// - Returns: Raw M3U data
     func fetchM3U() async throws -> Data {
         let url = baseURL.appendingPathComponent("output/m3u")
+        let request = authenticatedRequest(for: url)
 
-        let (data, response) = try await session.data(from: url)
+        let (data, response) = try await session.data(for: request)
 
         try validateResponse(response)
 
@@ -77,8 +80,9 @@ actor DispatcharrService {
     /// - Returns: Raw XMLTV data
     func fetchEPG() async throws -> Data {
         let url = baseURL.appendingPathComponent("output/epg")
+        let request = authenticatedRequest(for: url)
 
-        let (data, response) = try await session.data(from: url)
+        let (data, response) = try await session.data(for: request)
 
         try validateResponse(response)
 
@@ -89,8 +93,7 @@ actor DispatcharrService {
     /// - Returns: Status information about the server
     func getStatus() async throws -> DispatcharrStatus {
         // Try to fetch a small portion of the M3U to verify connectivity
-        var request = URLRequest(url: baseURL.appendingPathComponent("output/m3u"))
-        request.httpMethod = "HEAD"
+        let request = authenticatedRequest(for: baseURL.appendingPathComponent("output/m3u"), method: "HEAD")
 
         let (_, response) = try await session.data(for: request)
 
@@ -125,6 +128,15 @@ actor DispatcharrService {
     }
 
     // MARK: - Private Methods
+
+    private func authenticatedRequest(for url: URL, method: String = "GET") -> URLRequest {
+        var request = URLRequest(url: url)
+        request.httpMethod = method
+        if let token = apiToken, !token.isEmpty {
+            request.setValue("Token \(token)", forHTTPHeaderField: "Authorization")
+        }
+        return request
+    }
 
     private func validateResponse(_ response: URLResponse) throws {
         guard let httpResponse = response as? HTTPURLResponse else {
