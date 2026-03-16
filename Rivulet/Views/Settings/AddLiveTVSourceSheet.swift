@@ -401,6 +401,7 @@ private struct DispatcharrConfigForm: View {
     @StateObject private var authManager = PlexAuthManager.shared
     @State private var serverURL = ""
     @State private var displayName = "Live TV"
+    @State private var apiToken = ""
     @State private var isAdding = false
     @State private var isValidating = false
     @State private var errorMessage: String?
@@ -487,6 +488,15 @@ private struct DispatcharrConfigForm: View {
                         title: "Display Name",
                         value: $displayName,
                         placeholder: "Live TV"
+                    )
+
+                    // API Token field (optional)
+                    SettingsTextEntryRow(
+                        icon: "key",
+                        iconColor: .orange,
+                        title: "API Token",
+                        value: $apiToken,
+                        placeholder: "Optional — leave blank if not required"
                     )
                 }
 
@@ -616,7 +626,7 @@ private struct DispatcharrConfigForm: View {
     private func validateServer() {
         // Sanitize URL before validation (fixes common typos like "hhttp://")
         let cleanedURL = sanitizeURL(serverURL)
-        guard let service = DispatcharrService.create(from: cleanedURL) else {
+        guard let service = DispatcharrService.create(from: cleanedURL, apiToken: apiToken.isEmpty ? nil : apiToken) else {
             validationStatus = .invalid("Invalid URL format")
             return
         }
@@ -655,7 +665,8 @@ private struct DispatcharrConfigForm: View {
         Task {
             await dataStore.addDispatcharrSource(
                 baseURL: url,
-                name: displayName.isEmpty ? "Live TV" : displayName
+                name: displayName.isEmpty ? "Live TV" : displayName,
+                apiToken: apiToken.isEmpty ? nil : apiToken
             )
 
             await dataStore.loadChannels()

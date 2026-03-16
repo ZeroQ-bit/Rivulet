@@ -26,6 +26,9 @@ actor IPTVProvider: LiveTVProvider {
     /// EPG/XMLTV URL (optional)
     nonisolated let epgURL: URL?
 
+    /// API token for Dispatcharr authentication (nil if not required)
+    nonisolated let apiToken: String?
+
     private let dispatcharrService: DispatcharrService?
 
     // Cached data
@@ -41,17 +44,18 @@ actor IPTVProvider: LiveTVProvider {
     // MARK: - Initialization
 
     /// Initialize for Dispatcharr source
-    init(dispatcharrURL: URL, sourceId: String, displayName: String) {
+    init(dispatcharrURL: URL, sourceId: String, displayName: String, apiToken: String? = nil) {
         self.sourceType = .dispatcharr
         self.sourceId = sourceId
         self.displayName = displayName
+        self.apiToken = apiToken
 
         // Clean the URL in case it already contains /output/m3u or /output/epg
         // This handles URLs that were saved before the cleanup was added
         let cleanedURL = Self.cleanDispatcharrURL(dispatcharrURL)
 
         self.baseURL = cleanedURL
-        self.dispatcharrService = DispatcharrService(baseURL: cleanedURL)
+        self.dispatcharrService = DispatcharrService(baseURL: cleanedURL, apiToken: apiToken)
         self.m3uURL = cleanedURL.appendingPathComponent("output/m3u")
         self.epgURL = cleanedURL.appendingPathComponent("output/epg")
     }
@@ -75,6 +79,7 @@ actor IPTVProvider: LiveTVProvider {
         self.sourceType = .genericM3U
         self.sourceId = sourceId
         self.displayName = displayName
+        self.apiToken = nil
         self.baseURL = nil
         self.dispatcharrService = nil
         self.m3uURL = m3uURL

@@ -62,6 +62,7 @@ class LiveTVDataStore: ObservableObject {
         let baseURL: String?
         let m3uURL: String?
         let epgURL: String?
+        let apiToken: String?
     }
 
     // MARK: - Source Info
@@ -115,12 +116,13 @@ class LiveTVDataStore: ObservableObject {
     // MARK: - Source Management
 
     /// Add a Dispatcharr source
-    func addDispatcharrSource(baseURL: URL, name: String) async {
+    func addDispatcharrSource(baseURL: URL, name: String, apiToken: String? = nil) async {
         let sourceId = "dispatcharr:\(baseURL.absoluteString)"
         let provider = IPTVProvider(
             dispatcharrURL: baseURL,
             sourceId: sourceId,
-            displayName: name
+            displayName: name,
+            apiToken: apiToken
         )
         providers[sourceId] = provider
         saveSources()
@@ -182,7 +184,8 @@ class LiveTVDataStore: ObservableObject {
                     let provider = IPTVProvider(
                         dispatcharrURL: url,
                         sourceId: config.id,
-                        displayName: config.name
+                        displayName: config.name,
+                        apiToken: config.apiToken
                     )
                     providers[config.id] = provider
                 }
@@ -240,7 +243,8 @@ class LiveTVDataStore: ObservableObject {
                         name: provider.displayName,
                         baseURL: iptvProvider.baseURL?.absoluteString,
                         m3uURL: nil,
-                        epgURL: nil
+                        epgURL: nil,
+                        apiToken: iptvProvider.apiToken
                     ))
                 }
 
@@ -252,7 +256,8 @@ class LiveTVDataStore: ObservableObject {
                         name: provider.displayName,
                         baseURL: nil,
                         m3uURL: iptvProvider.m3uURL?.absoluteString,
-                        epgURL: iptvProvider.epgURL?.absoluteString
+                        epgURL: iptvProvider.epgURL?.absoluteString,
+                        apiToken: nil
                     ))
                 }
 
@@ -264,7 +269,8 @@ class LiveTVDataStore: ObservableObject {
                         name: provider.displayName,
                         baseURL: plexProvider.serverURL,
                         m3uURL: nil,
-                        epgURL: nil
+                        epgURL: nil,
+                        apiToken: nil
                     ))
                 }
             }
