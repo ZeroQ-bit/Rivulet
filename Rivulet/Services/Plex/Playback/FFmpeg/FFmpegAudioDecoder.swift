@@ -83,7 +83,7 @@ final class FFmpegAudioDecoder: @unchecked Sendable {
     /// CoreAudio channel layout tag derived from FFmpeg's channel layout.
     private var outputChannelLayoutTag: AudioChannelLayoutTag = kAudioChannelLayoutTag_Unknown
     /// Cached format description — created once, reused for all CMSampleBuffers.
-    /// MPV does the same; recreating per-buffer can cause renderer state resets.
+    /// Recreating it per buffer can cause renderer state resets.
     private var cachedFormatDescription: CMAudioFormatDescription?
     private var cachedFDChannels: Int = 0
     private var cachedFDSampleRate: Int = 0
@@ -468,7 +468,7 @@ final class FFmpegAudioDecoder: @unchecked Sendable {
     // MARK: - Private: Format Description Cache
 
     /// Get or create a cached CMAudioFormatDescription.
-    /// MPV creates one at init and reuses it; recreating per-buffer may cause renderer glitches.
+    /// Recreating it per buffer may cause renderer glitches.
     private func getOrCreateFormatDescription(
         sampleRate: Int, channels: Int, bitsPerSample: Int, bytesPerFrame: Int
     ) throws -> CMAudioFormatDescription {

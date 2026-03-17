@@ -204,7 +204,7 @@ class PlexAuthManager: ObservableObject {
 
     /// Find the best working connection for a server
     /// Priority depends on server.httpsRequired:
-    /// - If httpsRequired=true + local: plex.direct (valid SSL for AVPlayer) > HTTP > HTTPS
+    /// - If httpsRequired=true + local: plex.direct (valid TLS cert) > HTTP > HTTPS
     /// - If httpsRequired=false + local: HTTP (fastest) > plex.direct
     /// - Remote: current behavior (plex.direct URLs from API)
     private func findBestConnection(for server: PlexDevice) async -> String? {
@@ -224,7 +224,7 @@ class PlexAuthManager: ObservableObject {
         let httpsRequired = server.httpsRequired == true
 
         // If server requires HTTPS and we have a machineIdentifier, try plex.direct FIRST
-        // for local connections. This ensures AVPlayer gets a valid SSL certificate.
+        // for local connections. This gives playback a valid TLS certificate.
         if httpsRequired, let machineId = server.machineIdentifier {
             // Find best local connection to build plex.direct URL from
             if let localConnection = sortedConnections.first(where: { $0.local && !$0.relay }) {
@@ -251,7 +251,7 @@ class PlexAuthManager: ObservableObject {
                 // This handles "Require Secure Connections" setting on Plex servers
                 if connection.protocolType == "http" {
                     // For local connections with httpsRequired, prefer plex.direct over raw HTTPS
-                    // because plex.direct has a valid SSL cert that works with AVPlayer
+                    // because plex.direct gives playback a valid TLS certificate
                     if connection.local, let machineId = server.machineIdentifier {
                         let plexDirectURI = buildPlexDirectURL(
                             address: connection.address,
@@ -265,13 +265,13 @@ class PlexAuthManager: ObservableObject {
                         }
                     }
 
-                    // Try raw HTTPS as last resort for this connection
-                    // Note: This works for API calls (we trust self-signed certs) but NOT for AVPlayer
+                    // Try raw HTTPS as last resort for this connection.
+                    // API calls can trust self-signed certs, but media playback should prefer a valid TLS endpoint.
                     let httpsURI = connection.uri.replacingOccurrences(of: "http://", with: "https://")
                     print("🔐 PlexAuthManager: Trying HTTPS fallback: \(httpsURI)...")
                     let (success, certHash) = await testConnectionWithCertExtraction(httpsURI, serverToken: tokenToUse)
                     if success {
-                        // If we have a cert hash, prefer plex.direct URL for AVPlayer compatibility
+                        // If we have a cert hash, prefer plex.direct for playback compatibility
                         if let hash = certHash {
                             let plexDirectURI = buildPlexDirectURL(
                                 address: connection.address,
@@ -321,7 +321,7 @@ class PlexAuthManager: ObservableObject {
     /// Note: When server.httpsRequired=true, findBestConnection() tries plex.direct first
     /// Priority for initial sorting: Local non-relay > Remote > Relay
     /// - Local prefers HTTP (fastest when secure connections not required)
-    /// - For httpsRequired servers, plex.direct is tried first (valid SSL for AVPlayer)
+    /// - For httpsRequired servers, plex.direct is tried first (valid TLS for playback)
     private func connectionScore(_ connection: PlexConnection) -> Int {
         var score = 0
 

@@ -1,5 +1,47 @@
 # Playback Reliability Worklog (2026-03-02)
 
+## Rivulet-Only Playback Consolidation (2026-03-16)
+
+## Plan
+- [ ] Remove all MPV / AVPlayer / DVSampleBuffer player selection and fallback logic from the main playback flow
+  - Make `UniversalPlayerViewModel` initialize and drive only `RivuletPlayer`.
+  - Remove player-type branches from the main player UI and Now Playing integration.
+- [ ] Move Live TV playback off MPV
+  - Replace multistream slot wrappers/views with `RivuletPlayer` + sample-buffer rendering.
+  - Add any small Rivulet API surface needed for multistream parity (for example mute control).
+- [ ] Remove stale playback code and package dependencies
+  - Delete no-longer-used wrappers/views/services for MPV, AVPlayer, and DVSampleBuffer playback.
+  - Remove the MPVKit package link from the Xcode project if no longer required.
+- [ ] Verify
+  - Run focused build/test verification and record any residual cleanup risk.
+
+## HomePod + DV + Startup Follow-up (2026-03-16)
+
+## Plan
+- [x] Investigate remaining HomePod mini instability path
+  - Confirm where the current AirPlay/HomePod policy still escalates to unstable playback instead of degrading gracefully.
+  - Add a stricter recovery path for repeated AirPlay instability events.
+- [x] Harden routing for DV files that are poor direct-play candidates
+  - Identify a metadata-only heuristic for DV conversion sessions that still force expensive client audio decode.
+  - Route those cases to the shared HLS pipeline up front instead of waiting for a bad DirectPlay session.
+- [x] Reduce Rivulet startup latency
+  - Reuse the existing prewarmed direct-play URL cache for Rivulet, not just MPV.
+  - Keep the change limited to direct-play-safe startup paths.
+- [x] Verify
+  - Add/update focused unit tests for the new routing/policy logic.
+  - Run build/test verification and record results.
+
+## Review
+- Added an AirPlay/HomePod stability fallback that reloads unstable direct-play sessions with a stricter stereo PCM route policy before escalating to a hard failure.
+- Added a DV routing heuristic so profile-conversion sessions with only client-decoded/transcode-required audio prefer HLS immediately instead of starting on a poor direct-play path.
+- Reused the prewarmed direct-play URL cache for Rivulet's direct-play startup path, matching the existing MPV fast path and removing redundant URL rebuild work.
+- Added focused tests in `RivuletTests/Unit/Playback/RouteAudioPolicyTests.swift` and `RivuletTests/Unit/Playback/ContentRouterPlaybackPlanTests.swift`.
+- Verification passed:
+  - `xcodebuild test -project Rivulet.xcodeproj -scheme Rivulet -destination 'platform=tvOS Simulator,id=F34B8F67-7F13-468F-9526-6A38C6B2181B' -only-testing:RivuletTests/RouteAudioPolicyTests -only-testing:RivuletTests/ContentRouterPlaybackPlanTests -derivedDataPath /tmp/rivulet-verify-tests CODE_SIGNING_ALLOWED=NO`
+  - Result: `** TEST SUCCEEDED **`
+- Residual environment caveat:
+  - Xcode still emitted repeated `com.apple.mobile.notification_proxy` warnings for a passcode-protected physical device during the simulator run, but the targeted simulator tests completed successfully.
+
 ## Plan
 - [x] Implement subtitle pipeline improvements
   - Added ASS/SSA parser support for Plex sidecar subtitles.

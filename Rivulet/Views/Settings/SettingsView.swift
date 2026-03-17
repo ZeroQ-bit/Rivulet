@@ -246,9 +246,6 @@ struct SettingsView: View {
     @AppStorage("highQualityScaling") private var highQualityScaling = true
     @AppStorage("autoplayCountdown") private var autoplayCountdownRaw = AutoplayCountdown.fiveSeconds.rawValue
     @AppStorage("showMarkersOnScrubber") private var showMarkersOnScrubber = true
-    @AppStorage("useAVPlayerForDolbyVision") private var useAVPlayerForDolbyVision = true
-    @AppStorage("useAVPlayerForAllVideos") private var useAVPlayerForAllVideos = false
-    @AppStorage("useRivuletPlayer") private var useRivuletPlayer = true
     @AppStorage("displaySize") private var displaySizeRaw = DisplaySize.normal.rawValue
 
 
@@ -618,27 +615,6 @@ struct SettingsView: View {
                 subtitle: "",
                 isOn: $highQualityScaling,
                 onFocusChange: { if $0 { focusState.focusedSettingId = "highQualityScaling" } }
-            )
-
-            SettingsToggleRow(
-                title: "AVPlayer for Dolby Vision",
-                subtitle: "",
-                isOn: $useAVPlayerForDolbyVision,
-                onFocusChange: { if $0 { focusState.focusedSettingId = "avPlayerDV" } }
-            )
-
-            SettingsToggleRow(
-                title: "AVPlayer for All Videos",
-                subtitle: "",
-                isOn: $useAVPlayerForAllVideos,
-                onFocusChange: { if $0 { focusState.focusedSettingId = "avPlayerAll" } }
-            )
-
-            SettingsToggleRow(
-                title: "Rivulet Player",
-                subtitle: "",
-                isOn: $useRivuletPlayer,
-                onFocusChange: { if $0 { focusState.focusedSettingId = "rivuletPlayer" } }
             )
         }
     }

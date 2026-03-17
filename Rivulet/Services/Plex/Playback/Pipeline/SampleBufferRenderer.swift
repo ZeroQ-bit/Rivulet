@@ -103,6 +103,7 @@ final class SampleBufferRenderer {
     private var lastAudioRecoveryWallTime: CFAbsoluteTime = 0
     private var lastAudioDiagWallTime: CFAbsoluteTime = 0
     private var audioNotReadyStreak = 0
+    private var isMuted = false
 
     // MARK: - Notification Observers
 
@@ -128,7 +129,7 @@ final class SampleBufferRenderer {
         displayLayer.videoGravity = .resizeAspect
 
         audioRenderer.volume = 1.0
-        audioRenderer.isMuted = false
+        audioRenderer.isMuted = isMuted
         audioRenderer.allowedAudioSpatializationFormats = []
 
         observeAudioRendererNotifications()
@@ -220,6 +221,7 @@ final class SampleBufferRenderer {
         let playerNode = AVAudioPlayerNode()
         engine.attach(playerNode)
         engine.connect(playerNode, to: engine.mainMixerNode, format: format)
+        engine.mainMixerNode.outputVolume = isMuted ? 0 : 1
 
         do {
             try engine.start()
@@ -251,6 +253,12 @@ final class SampleBufferRenderer {
             "\(stream.mChannelsPerFrame)ch \(formatName) -> output \(engine.outputNode.outputFormat(forBus: 0))"
         )
         return true
+    }
+
+    func setMuted(_ muted: Bool) {
+        isMuted = muted
+        audioRenderer.isMuted = muted
+        audioEngine?.mainMixerNode.outputVolume = muted ? 0 : 1
     }
 
     private func handleEngineConfigChange() {
@@ -865,6 +873,19 @@ final class SampleBufferRenderer {
     }
 
     // MARK: - Flush
+
+    /// Flush audio renderer and pull-mode state without touching video.
+    /// Triggers AirPlay FLUSH so the remote speaker silences immediately
+    /// rather than draining ~2s of buffered audio.
+    func flushAudio() {
+        if useAudioEngine {
+            audioPlayerNode?.stop()
+        } else {
+            stopAudioPullMode()
+            audioRenderer.flush()
+        }
+        resetAudioState()
+    }
 
     /// Flush both video and audio buffers (for seeking).
     func flush() {

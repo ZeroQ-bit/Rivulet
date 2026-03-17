@@ -8,7 +8,7 @@
 //    - Live TV (already HLS from Plex/IPTV)
 //    - Fallback when direct play fails
 //
-//  Evolved from DVSampleBufferPlayer to use shared SampleBufferRenderer.
+//  Shares the same renderer path as direct play so all playback goes through Rivulet.
 //
 
 import Foundation

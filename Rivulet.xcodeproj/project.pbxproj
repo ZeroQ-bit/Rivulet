@@ -9,7 +9,7 @@
 /* Begin PBXBuildFile section */
 		A70B443B2F05AF3200DEF5ED /* TVServices.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A70B443A2F05AF3200DEF5ED /* TVServices.framework */; };
 		A70B44422F05AF3200DEF5ED /* TopShelfExtension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = A70B44392F05AF3200DEF5ED /* TopShelfExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
-		A71F81702EFBA6DD00AAC4F6 /* MPVKit-GPL in Frameworks */ = {isa = PBXBuildFile; productRef = A71F816F2EFBA6DD00AAC4F6 /* MPVKit-GPL */; };
+		A71F81702EFBA6DD00AAC4F6 /* RivuletFFmpeg in Frameworks */ = {isa = PBXBuildFile; productRef = A71F816F2EFBA6DD00AAC4F6 /* RivuletFFmpeg */; };
 		A740D1192F59C56300B9820B /* AVKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A740D1182F59C56300B9820B /* AVKit.framework */; };
 		A7F159552F04124A001B2177 /* Sentry in Frameworks */ = {isa = PBXBuildFile; productRef = A7F159542F04124A001B2177 /* Sentry */; };
 /* End PBXBuildFile section */
@@ -108,7 +108,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				A740D1192F59C56300B9820B /* AVKit.framework in Frameworks */,
-				A71F81702EFBA6DD00AAC4F6 /* MPVKit-GPL in Frameworks */,
+				A71F81702EFBA6DD00AAC4F6 /* RivuletFFmpeg in Frameworks */,
 				A7F159552F04124A001B2177 /* Sentry in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -197,7 +197,7 @@
 			);
 			name = Rivulet;
 			packageProductDependencies = (
-				A71F816F2EFBA6DD00AAC4F6 /* MPVKit-GPL */,
+				A71F816F2EFBA6DD00AAC4F6 /* RivuletFFmpeg */,
 				A7F159542F04124A001B2177 /* Sentry */,
 			);
 			productName = Rivulet;
@@ -726,10 +726,10 @@
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
-		A71F816F2EFBA6DD00AAC4F6 /* MPVKit-GPL */ = {
+		A71F816F2EFBA6DD00AAC4F6 /* RivuletFFmpeg */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = A71F816E2EFBA6DD00AAC4F6 /* XCLocalSwiftPackageReference "../../MPVKit" */;
-			productName = "MPVKit-GPL";
+			productName = RivuletFFmpeg;
 		};
 		A7F159542F04124A001B2177 /* Sentry */ = {
 			isa = XCSwiftPackageProductDependency;

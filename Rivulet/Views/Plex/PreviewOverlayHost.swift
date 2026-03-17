@@ -88,9 +88,12 @@ struct PreviewOverlayHost: View {
 
     private var visibleIndices: [Int] {
         switch stateMachine.phase {
-        case .enteringCarousel, .expanded:
+        case .enteringCarousel:
             return [selectedIndex]
-        case .carousel, .expanding:
+        case .carousel, .expanding, .expanded:
+            // Side cards remain in ForEach during expanded state (opacity 0) to avoid
+            // structural ForEach changes when finishExpand() transitions .expanding → .expanded
+            // without animation, which can reset animation state and flash corner radii.
             return [selectedIndex - 1, selectedIndex, selectedIndex + 1]
                 .filter { request.items.indices.contains($0) }
         }
@@ -446,10 +449,10 @@ private struct PreviewCarouselCard: View {
         .opacity(opacity)
         .clipShape(
             UnevenRoundedRectangle(
-                topLeadingRadius: isExpanded ? 0 : cornerRadius,
+                topLeadingRadius: cornerRadius,
                 bottomLeadingRadius: 0,
                 bottomTrailingRadius: 0,
-                topTrailingRadius: isExpanded ? 0 : cornerRadius,
+                topTrailingRadius: cornerRadius,
                 style: .continuous
             )
         )

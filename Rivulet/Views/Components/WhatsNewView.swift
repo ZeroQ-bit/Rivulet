@@ -111,11 +111,11 @@ struct WhatsNewView: View {
             "General performance and stability improvements",
         ]),
         ("1.0.0 (38)", [
-            "Faster video startup for mpv",
+            "Faster video startup",
             "Default sizing is slightly larger",
             "Display Size setting now affects all sizes",
             "Improved Dolby Vision support for more video formats",
-            "MPV now integrates with Apples Now Playing for control from other apple devices",
+            "Playback now integrates with Apple's Now Playing for control from other Apple devices",
             "Scroll down an episode details page to get to Seasons and episode list",
         ]),
         ("1.0.0 (37)", [
@@ -147,4 +147,3 @@ struct WhatsNewView: View {
         changelogs.first(where: { $0.version == version })?.features
     }
 }
-

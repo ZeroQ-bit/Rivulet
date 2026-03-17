@@ -3,7 +3,7 @@
 //  Rivulet
 //
 //  Manages tvOS display criteria for HDR/Dolby Vision content
-//  Enables Match Frame Rate and Match Dynamic Range for MPV playback
+//  Enables Match Frame Rate and Match Dynamic Range for Rivulet playback
 //
 
 import Foundation
@@ -12,7 +12,7 @@ import AVKit
 
 
 /// Manages display criteria for HDR content playback
-/// This enables tvOS "Match Content" (Frame Rate and Dynamic Range) for MPV player
+/// This enables tvOS "Match Content" (Frame Rate and Dynamic Range) for Rivulet playback
 ///
 /// Note: Apple doesn't provide a public API to create AVDisplayCriteria manually.
 /// The only way to obtain display criteria is from AVAsset.preferredDisplayCriteria.
@@ -31,7 +31,7 @@ final class DisplayCriteriaManager {
 
     /// Configure display criteria by fetching it from the stream URL
     /// This creates a temporary AVURLAsset to extract HDR/frame rate metadata
-    /// Call this before starting MPV playback to trigger Match Content
+    /// Call this before starting playback to trigger Match Content
     /// - Parameters:
     ///   - url: The video stream URL
     ///   - headers: HTTP headers for authentication
@@ -168,7 +168,7 @@ final class DisplayCriteriaManager {
     /// Works for ALL content - SDR gets frame rate matching, HDR/DV gets dynamic range matching too
     /// - Parameters:
     ///   - videoStream: The video stream metadata from Plex
-    ///   - forceHDR10Fallback: If true, treat DV content as HDR10 (for MPV which can't play DV)
+    ///   - forceHDR10Fallback: If true, treat Dolby Vision content as HDR10 instead
     func configureForContent(videoStream: PlexStream?, forceHDR10Fallback: Bool = false) {
         guard let stream = videoStream, stream.isVideo else {
             print("🖥️ DisplayCriteria: No video stream metadata available")
@@ -179,7 +179,7 @@ final class DisplayCriteriaManager {
         let width = Int32(stream.width ?? 1920)
         let height = Int32(stream.height ?? 1080)
 
-        // For MPV playback, DV gets stripped to HDR10 fallback
+        // Optionally strip Dolby Vision to an HDR10 fallback.
         // Check if base layer is HDR10 compatible (BL Compat ID 1 or 4)
         let blCompatID = stream.DOVIBLCompatID
         let hasHDR10Base = blCompatID == 1 || blCompatID == 4
@@ -190,10 +190,10 @@ final class DisplayCriteriaManager {
                     stream.colorTrc?.lowercased().contains("arib-std-b67") == true
 
         if forceHDR10Fallback && stream.isDolbyVision {
-            // MPV can't play DV - use HDR10 if base layer is compatible, otherwise SDR
+            // Use HDR10 if the base layer is compatible, otherwise SDR.
             isDV = false
             isHDR = hasHDR10Base || stream.isHDR
-            print("🖥️ DisplayCriteria: DV content with MPV - using \(isHDR ? "HDR10" : "SDR") fallback (BL CompatID: \(blCompatID ?? -1))")
+            print("🖥️ DisplayCriteria: DV fallback active - using \(isHDR ? "HDR10" : "SDR") (BL CompatID: \(blCompatID ?? -1))")
         } else {
             isDV = stream.isDolbyVision
             isHDR = stream.isHDR && !isDV
@@ -269,4 +269,3 @@ final class DisplayCriteriaManager {
         return window.avDisplayManager
     }
 }
-

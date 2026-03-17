@@ -108,10 +108,9 @@ final class DirectPlayPipeline {
     private var audioDecoder: FFmpegAudioDecoder?
 
     /// When true, all audio codecs (including AAC) are decoded client-side via FFmpeg.
-    /// Used when the audio route (e.g., AirPlay) doesn't support compressed passthrough
-    /// for certain codecs through AVSampleBufferAudioRenderer.
-    /// Codecs that must be client-decoded even when they have a native format description.
-    /// Used for AirPlay where compressed AAC passthrough jams AVSampleBufferAudioRenderer.
+    /// Required for AirPlay routes — compressed passthrough to AVSampleBufferAudioRenderer
+    /// is silently accepted but produces no audible output over AirPlay. Decoded PCM
+    /// is routed through AVAudioEngine when `preferAudioEngineForPCM` is true.
     var forceClientDecodeAllAudio = false
     var forceClientDecodeCodecs: Set<String> = []
 

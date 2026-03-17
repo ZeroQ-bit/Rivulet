@@ -209,86 +209,92 @@ struct PlexDetailView: View {
                             Spacer(minLength: 0)
                             heroMetadataOverlay
                                 .padding(.horizontal, 48)
-                                .opacity(showMetadata ? 1 : 0)
+                                .opacity(showMetadata ? (1 - scrollProgress) : 0)
                         }
                         .frame(height: heroHeight)
 
-                        // Centered title logo (Apple TV+ style, fades in on scroll)
-                        belowFoldTitleLogo
-                            .padding(.top, 8)
-                            .padding(.bottom, 8)
-                            .opacity(scrollProgress)
+                        // Below-fold page: title logo at top, content below, dead space at bottom
+                        // minHeight ensures the logo always scrolls to the upper portion
+                        VStack(alignment: .leading, spacing: 0) {
+                            // Centered title logo (Apple TV+ style, fades in on scroll)
+                            belowFoldTitleLogo
+                                .frame(height: 110)
+                                .padding(.top, 16)
+                                .padding(.bottom, 8)
+                                .opacity(scrollProgress)
 
-                        VStack(alignment: .leading, spacing: 32) {
-                            // TV Show specific: Seasons and Episodes
-                            if currentItem.type == "show" || currentItem.type == "episode" {
-                                seasonSection
-                            }
-
-                            // Season specific: Episodes list (no season picker needed)
-                            if currentItem.type == "season" {
-                                episodeSection
-                            }
-
-                            // Album specific: Tracks
-                            if currentItem.type == "album" {
-                                trackSection
-                            }
-
-                            // Artist specific: Albums
-                            if currentItem.type == "artist" {
-                                albumSection
-                            }
-                        }
-                        .padding(.horizontal, 48)
-                        .allowsHitTesting(!isPreviewCarousel)
-
-                        // Recommended / Related Section
-                        if !recommendedItems.isEmpty {
-                            MediaItemRow(
-                                title: "Related",
-                                items: recommendedItems,
-                                serverURL: authManager.selectedServerURL ?? "",
-                                authToken: authManager.selectedServerToken ?? "",
-                                onItemSelected: { selectedItem in
-                                    withAnimation(.easeInOut(duration: 0.35)) {
-                                        displayedItem = selectedItem
-                                    }
+                            VStack(alignment: .leading, spacing: 32) {
+                                // TV Show specific: Seasons and Episodes
+                                if currentItem.type == "show" || currentItem.type == "episode" {
+                                    seasonSection
                                 }
-                            )
-                            .padding(.top, 32)
-                        }
 
-                        // Collection Section (for movies that are part of a collection)
-                        if !collectionItems.isEmpty, let name = collectionName {
-                            MediaItemRow(
-                                title: name,
-                                items: collectionItems,
-                                serverURL: authManager.selectedServerURL ?? "",
-                                authToken: authManager.selectedServerToken ?? "",
-                                onItemSelected: { selectedItem in
-                                    withAnimation(.easeInOut(duration: 0.35)) {
-                                        displayedItem = selectedItem
-                                    }
+                                // Season specific: Episodes list (no season picker needed)
+                                if currentItem.type == "season" {
+                                    episodeSection
                                 }
-                            )
-                            .padding(.top, 32)
-                        }
 
-                        // Cast & Crew Section
-                        if let metadata = fullMetadata,
-                           (!metadata.cast.isEmpty || !(metadata.Director?.isEmpty ?? true)) {
-                            CastCrewRow(
-                                cast: metadata.cast,
-                                directors: metadata.Director ?? [],
-                                serverURL: authManager.selectedServerURL ?? "",
-                                authToken: authManager.selectedServerToken ?? ""
-                            )
-                            .padding(.top, 32)
-                        }
+                                // Album specific: Tracks
+                                if currentItem.type == "album" {
+                                    trackSection
+                                }
 
-                        Spacer()
-                            .frame(height: 60)
+                                // Artist specific: Albums
+                                if currentItem.type == "artist" {
+                                    albumSection
+                                }
+                            }
+                            .padding(.horizontal, 48)
+                            .allowsHitTesting(!isPreviewCarousel)
+
+                            // Recommended / Related Section
+                            if !recommendedItems.isEmpty {
+                                MediaItemRow(
+                                    title: "Related",
+                                    items: recommendedItems,
+                                    serverURL: authManager.selectedServerURL ?? "",
+                                    authToken: authManager.selectedServerToken ?? "",
+                                    onItemSelected: { selectedItem in
+                                        withAnimation(.easeInOut(duration: 0.35)) {
+                                            displayedItem = selectedItem
+                                        }
+                                    }
+                                )
+                                .padding(.top, 32)
+                            }
+
+                            // Collection Section (for movies that are part of a collection)
+                            if !collectionItems.isEmpty, let name = collectionName {
+                                MediaItemRow(
+                                    title: name,
+                                    items: collectionItems,
+                                    serverURL: authManager.selectedServerURL ?? "",
+                                    authToken: authManager.selectedServerToken ?? "",
+                                    onItemSelected: { selectedItem in
+                                        withAnimation(.easeInOut(duration: 0.35)) {
+                                            displayedItem = selectedItem
+                                        }
+                                    }
+                                )
+                                .padding(.top, 32)
+                            }
+
+                            // Cast & Crew Section
+                            if let metadata = fullMetadata,
+                               (!metadata.cast.isEmpty || !(metadata.Director?.isEmpty ?? true)) {
+                                CastCrewRow(
+                                    cast: metadata.cast,
+                                    directors: metadata.Director ?? [],
+                                    serverURL: authManager.selectedServerURL ?? "",
+                                    authToken: authManager.selectedServerToken ?? ""
+                                )
+                                .padding(.top, 32)
+                            }
+
+                            // Dead space at bottom — pushes logo + content to the top
+                            Spacer(minLength: 60)
+                        }
+                        .frame(minHeight: geo.size.height)
                     }
                 }
                 .onScrollGeometryChange(for: Bool.self) { geometry in
@@ -529,7 +535,7 @@ struct PlexDetailView: View {
     }
 
     private func heroContentHeight(for fullHeight: CGFloat) -> CGFloat {
-        return max(0, fullHeight - 250)  // 250pt peek for episode thumbnails
+        return max(0, fullHeight - 250)  // 250pt peek for title logo + episode thumbnails
     }
 
     // MARK: - Hero Components (Apple TV+ style — backdrop fixed, content scrolls over)
@@ -578,66 +584,71 @@ struct PlexDetailView: View {
             VStack(alignment: .leading, spacing: 8) {
                 Spacer()
 
-                // Text content capped at 50% of container width
+                // Text content — fixed height so buttons/peek distance
+                // stays constant regardless of description length, logo vs title, etc.
                 VStack(alignment: .leading, spacing: 8) {
-                    // TMDB logo or title (show logo for episodes, movie/show logo for others)
-                    if let logoURL = showLogoURL {
-                        CachedAsyncImage(url: logoURL) { phase in
-                            switch phase {
-                            case .success(let image):
-                                image
-                                    .resizable()
-                                    .aspectRatio(contentMode: .fit)
-                                    .shadow(color: .black.opacity(0.8), radius: 20, x: 0, y: 4)
-                            default:
-                                heroTitleText
+                    // TMDB logo or title — fixed height so content below is always
+                    // at the same position regardless of logo aspect ratio
+                    Group {
+                        if let logoURL = showLogoURL {
+                            CachedAsyncImage(url: logoURL) { phase in
+                                switch phase {
+                                case .success(let image):
+                                    image
+                                        .resizable()
+                                        .aspectRatio(contentMode: .fit)
+                                        .shadow(color: .black.opacity(0.8), radius: 20, x: 0, y: 4)
+                                default:
+                                    heroTitleText
+                                }
                             }
+                            .frame(maxWidth: 450, alignment: .leading)
+                        } else {
+                            heroTitleText
                         }
-                        .frame(maxWidth: 450, maxHeight: 140, alignment: .leading)
-                    } else {
-                        heroTitleText
                     }
+                    .frame(height: 100, alignment: .bottomLeading)
 
                     // Genre + content rating row
                     heroMetadataRow
 
-                    // Episode info: S1, E1 · Title: Description
-                    if currentItem.type == "episode" {
-                        if let epString = currentItem.episodeString {
-                            let title = currentItem.title ?? ""
-                            let header = epString + (title.isEmpty ? "" : " · \(title)")
-                            let desc = fullMetadata?.summary ?? currentItem.summary ?? ""
-                            (Text(header).bold() + Text(desc.isEmpty ? "" : ":  \(desc)"))
-                                .font(.caption)
-                                .foregroundStyle(.white)
-                                .lineLimit(4)
-                        }
-                    } else if currentItem.type == "show" || currentItem.type == "season" {
-                        // Shows: tagline + summary
-                        if let tagline = fullMetadata?.tagline ?? currentItem.tagline {
-                            Text(tagline)
-                                .font(.caption)
-                                .italic()
-                                .foregroundStyle(.white.opacity(0.9))
-                        }
-                        if let summary = fullMetadata?.summary ?? currentItem.summary, !summary.isEmpty {
-                            Text(summary)
-                                .font(.caption)
-                                .foregroundStyle(.white.opacity(0.85))
-                                .lineLimit(4)
-                        }
-                    } else {
-                        // Movies/other: just tagline (short description)
-                        if let tagline = fullMetadata?.tagline ?? currentItem.tagline {
-                            Text(tagline)
-                                .font(.caption)
-                                .italic()
-                                .foregroundStyle(.white.opacity(0.9))
-                        } else if let summary = fullMetadata?.summary ?? currentItem.summary, !summary.isEmpty {
-                            Text(summary)
-                                .font(.caption)
-                                .foregroundStyle(.white.opacity(0.85))
-                                .lineLimit(4)
+                    // Description area
+                    VStack(alignment: .leading, spacing: 4) {
+                        if currentItem.type == "episode" {
+                            if let epString = currentItem.episodeString {
+                                let title = currentItem.title ?? ""
+                                let header = epString + (title.isEmpty ? "" : " · \(title)")
+                                let desc = fullMetadata?.summary ?? currentItem.summary ?? ""
+                                (Text(header).bold() + Text(desc.isEmpty ? "" : ":  \(desc)"))
+                                    .font(.caption)
+                                    .foregroundStyle(.white)
+                                    .lineLimit(4)
+                            }
+                        } else if currentItem.type == "show" || currentItem.type == "season" {
+                            if let tagline = fullMetadata?.tagline ?? currentItem.tagline {
+                                Text(tagline)
+                                    .font(.caption)
+                                    .italic()
+                                    .foregroundStyle(.white.opacity(0.9))
+                            }
+                            if let summary = fullMetadata?.summary ?? currentItem.summary, !summary.isEmpty {
+                                Text(summary)
+                                    .font(.caption)
+                                    .foregroundStyle(.white.opacity(0.85))
+                                    .lineLimit(4)
+                            }
+                        } else {
+                            if let tagline = fullMetadata?.tagline ?? currentItem.tagline {
+                                Text(tagline)
+                                    .font(.caption)
+                                    .italic()
+                                    .foregroundStyle(.white.opacity(0.9))
+                            } else if let summary = fullMetadata?.summary ?? currentItem.summary, !summary.isEmpty {
+                                Text(summary)
+                                    .font(.caption)
+                                    .foregroundStyle(.white.opacity(0.85))
+                                    .lineLimit(4)
+                            }
                         }
                     }
 
@@ -651,6 +662,7 @@ struct PlexDetailView: View {
                             .foregroundStyle(.white.opacity(0.7))
                     }
                 }
+                .frame(height: 380, alignment: .bottomLeading)
                 .frame(maxWidth: 720, alignment: .leading)
 
                 if showMetadata {
@@ -675,9 +687,9 @@ struct PlexDetailView: View {
                                 Text("Starring \(topCast.joined(separator: ", "))")
                                     .font(.caption)
                                     .foregroundStyle(.white.opacity(0.85))
-                                    .lineLimit(4)
+                                    .lineLimit(2)
                                     .multilineTextAlignment(.trailing)
-                                    .frame(maxWidth: 500, alignment: .trailing)
+                                    .frame(maxWidth: 700, alignment: .trailing)
                             }
                         }
                     }
@@ -707,11 +719,12 @@ struct PlexDetailView: View {
                             .foregroundStyle(.primary)
                     }
                 }
-                .frame(maxWidth: 500, maxHeight: 150)
+                .frame(maxWidth: 600, maxHeight: 110)
             } else {
                 Text(fullMetadata?.title ?? currentItem.title ?? "")
                     .font(.system(size: 36, weight: .bold))
                     .foregroundStyle(.primary)
+                    .lineLimit(1)
             }
         }
         .frame(maxWidth: .infinity, alignment: .center)
@@ -1127,7 +1140,6 @@ struct PlexDetailView: View {
             if isLoadingSeasons {
                 ProgressView("Loading seasons...")
             } else if !seasons.isEmpty {
-                // Season pill bar — hidden at rest so episodes peek, revealed on scroll
                 if seasons.count > 1 {
                     SeasonPillBar(
                         seasons: seasons,
@@ -1138,8 +1150,6 @@ struct PlexDetailView: View {
                         }
                     )
                     .opacity(scrollProgress)
-                    .frame(height: scrollProgress > 0 ? nil : 0)
-                    .clipped()
                 }
 
                 // Horizontal episode cards
@@ -1422,7 +1432,6 @@ struct PlexDetailView: View {
             // Pre-warm from cached data immediately
             if cached.type == "movie" || cached.type == "episode" {
                 preWarmStreamURL(for: cached, serverURL: serverURL, authToken: token)
-                MPVPrewarmService.shared.prewarmIfNeeded(forLiveStream: false)
             }
 
             // If cache is fresh enough, skip the network request entirely
@@ -1446,10 +1455,6 @@ struct PlexDetailView: View {
             // This reduces startup latency when user presses Play
             if metadata.type == "movie" || metadata.type == "episode" {
                 preWarmStreamURL(for: metadata, serverURL: serverURL, authToken: token)
-
-                // Pre-warm MPV context (mirrors stream URL pattern)
-                // This initializes Vulkan/MoltenVK while user is still on detail view
-                MPVPrewarmService.shared.prewarmIfNeeded(forLiveStream: false)
             }
         } catch {
             print("Failed to load full metadata: \(error)")
@@ -1547,8 +1552,8 @@ struct PlexDetailView: View {
         guard let ratingKey = metadata.ratingKey,
               let partKey = metadata.Media?.first?.Part?.first?.key else { return }
 
-        // Build direct play URL (most common case for MPV)
-        if let url = networkManager.buildVLCDirectPlayURL(
+        // Build direct play URL for playback prewarming
+        if let url = networkManager.buildPlaybackDirectPlayURL(
             serverURL: serverURL,
             authToken: authToken,
             partKey: partKey

@@ -3,7 +3,7 @@
 //  Rivulet
 //
 //  Parses HLS master + variant playlists and downloads fMP4 segments on demand.
-//  Used by DVSampleBufferPlayer to feed segments to AVSampleBufferDisplayLayer.
+//  Used by Rivulet's HLS pipeline to feed AVSampleBufferDisplayLayer.
 //
 
 import Foundation

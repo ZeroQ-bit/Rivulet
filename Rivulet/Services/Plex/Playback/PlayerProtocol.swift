@@ -2,7 +2,7 @@
 //  PlayerProtocol.swift
 //  Rivulet
 //
-//  Unified interface for video player implementations (AVPlayer, VLCKit)
+//  Shared playback contract used by RivuletPlayer and its view model integration.
 //
 
 import Foundation
@@ -106,7 +106,7 @@ enum PlayerError: Error, Equatable, Sendable {
 
 // MARK: - Player Protocol
 
-/// Unified interface for all player implementations
+/// Shared playback interface for the app's video pipeline.
 @MainActor
 protocol PlayerProtocol: AnyObject {
     // MARK: - Playback State

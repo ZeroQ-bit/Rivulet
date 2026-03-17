@@ -338,7 +338,7 @@ struct LiveTVPlayerView: View {
         .disabled(!isInteractive)  // Disable focus capture when in PIP mode
         .animation(.easeInOut(duration: 0.25), value: viewModel.showControls)
         .animation(.easeInOut(duration: 0.25), value: showChannelBadges)
-        // Don't animate stream count changes - causes issues with MPV player resizing
+        // Don't animate stream count changes to keep stream surfaces stable during layout changes.
         .onPlayPauseCommand {
             guard isInteractive else { return }  // Ignore when in PIP mode
             inputCoordinator.handle(action: .playPause, source: .swiftUICommand)
@@ -484,13 +484,7 @@ struct LiveTVPlayerView: View {
                             // Show focus border when: controls are visible OR the timed focus border is showing
                             isFocused: viewModel.focusedSlotIndex == index && (viewModel.showControls || showFocusBorder),
                             showBorder: viewModel.streamCount > 1,
-                            showChannelBadge: showChannelBadges,
-                            // Keep explicit sizing active for multistream and non-interactive
-                            // PiP mode so the same MPV instance can be resized without rebuild.
-                            containerSize: (viewModel.streamCount > 1 || !isInteractive) ? rect.size : .zero,
-                            onControllerReady: { controller in
-                                viewModel.setPlayerController(controller, for: slot.id)
-                            }
+                            showChannelBadge: showChannelBadges
                         )
                         .id(slot.id)
                         .frame(width: rect.width, height: rect.height)
@@ -534,8 +528,7 @@ struct LiveTVPlayerView: View {
     private func layoutFrames(for size: CGSize) -> [UUID: CGRect] {
         var frames: [UUID: CGRect] = [:]
 
-        // Single stream: use full screen, no spacing or aspect ratio constraints
-        // (MPV handles letterboxing internally)
+        // Single stream: use full screen, no spacing or aspect ratio constraints.
         if viewModel.streamCount == 1, let slot = viewModel.streams.first {
             frames[slot.id] = CGRect(x: 0, y: 0, width: size.width, height: size.height)
             return frames
@@ -1213,7 +1206,6 @@ struct LiveTVPlayerView: View {
     private func forceExitPlayer() {
         if !hasStoppedStreams {
             hasStoppedStreams = true
-            // Stop streams - MPV cleanup now runs on background thread
             viewModel.stopAllStreams()
         }
         // Dismiss UI after cleanup request is issued

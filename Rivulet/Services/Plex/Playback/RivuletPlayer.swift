@@ -3,8 +3,7 @@
 //  Rivulet
 //
 //  Unified custom video player built on AVSampleBufferDisplayLayer + VideoToolbox.
-//  Replaces MPVPlayerWrapper, AVPlayerWrapper, and DVSampleBufferPlayer with a single
-//  player that handles all content types through two internal pipelines:
+//  Handles all content types through two internal pipelines:
 //
 //    - DirectPlayPipeline: FFmpeg demuxes containers (MKV/MP4), VideoToolbox decodes
 //    - HLSPipeline: For DTS/TrueHD (server transcodes audio) and live TV
@@ -90,6 +89,10 @@ final class RivuletPlayer: ObservableObject {
     private var outputConfigRecoveryEventTimes: [CFAbsoluteTime] = []
     private var rendererFailureEventTimes: [CFAbsoluteTime] = []
     private var hasReportedAirPlayInstability = false
+    private var airPlayStabilityFallbackToStereo = false
+    private var isAirPlayStabilityFallbackInFlight = false
+    private var loadedDirectPlayIsDolbyVision = false
+    private var loadedDirectPlayEnableDVConversion = false
     private let airPlayInstabilityWindow: CFAbsoluteTime = 20.0
 
     // MARK: - Init
@@ -111,6 +114,7 @@ final class RivuletPlayer: ObservableObject {
     /// For routed playback (direct play vs HLS), use `load(route:...)` instead.
     func load(url: URL, headers: [String: String]?, startTime: TimeInterval?) async throws {
         print("[RivuletPlayer] load(url:) → HLS path: \(url.lastPathComponent)")
+        resetAirPlayRouteOverrides()
         try await loadHLS(url: url, headers: headers, startTime: startTime)
     }
 
@@ -119,6 +123,7 @@ final class RivuletPlayer: ObservableObject {
     func loadHLSWithConversion(url: URL, headers: [String: String]?, startTime: TimeInterval?, requiresProfileConversion: Bool) async throws {
         print("[RivuletPlayer] loadHLS: \(url.lastPathComponent) profileConversion=\(requiresProfileConversion)")
         playbackStateSubject.send(.loading)
+        resetAirPlayRouteOverrides()
         PlaybackAudioSessionConfigurator.activatePlaybackSession(
             mode: .moviePlayback,
             owner: "[RivuletPlayer]"
@@ -136,6 +141,7 @@ final class RivuletPlayer: ObservableObject {
     ///   - enableDVConversion: Enable DV P7/P8.6 → P8.1 conversion
     func load(route: PlaybackRoute, startTime: TimeInterval?, isDolbyVision: Bool = false, enableDVConversion: Bool = false) async throws {
         playbackStateSubject.send(.loading)
+        resetAirPlayRouteOverrides()
 
         // Configure audio session
         PlaybackAudioSessionConfigurator.activatePlaybackSession(
@@ -204,14 +210,16 @@ final class RivuletPlayer: ObservableObject {
 
     private func handleAudioRendererAutoFlush(flushTime: CMTime) async {
         _ = applyCurrentAudioPolicy(reason: "audio_renderer_auto_flush")
-        recordAirPlayInstabilityEvent(.autoFlush)
+        let instabilityHandled = recordAirPlayInstabilityEvent(.autoFlush)
+        if instabilityHandled { return }
         await recoverAudioFromRendererEvent(afterFlushTime: flushTime, reason: "audio_renderer_auto_flush")
     }
 
     private func handleAudioOutputConfigurationChange() async {
         _ = applyCurrentAudioPolicy(reason: "audio_output_configuration_changed")
+        let instabilityHandled = recordAirPlayInstabilityEvent(.outputRecovery)
+        if instabilityHandled { return }
         await recoverAudioFromRendererEvent(afterFlushTime: .invalid, reason: "audio_output_configuration_changed")
-        recordAirPlayInstabilityEvent(.outputRecovery)
     }
 
     @discardableResult
@@ -225,8 +233,14 @@ final class RivuletPlayer: ObservableObject {
     }
 
     private func applyAudioPolicy(snapshot: RouteAudioSnapshot, reason: String) {
-        let policy = PlaybackAudioSessionConfigurator.recommendedAudioPolicy(for: snapshot)
-        let policyReason = PlaybackAudioSessionConfigurator.policyDecisionReason(for: snapshot)
+        let defaultPolicy = PlaybackAudioSessionConfigurator.recommendedAudioPolicy(for: snapshot)
+        let policy = airPlayStabilityFallbackToStereo
+            ? PlaybackAudioSessionConfigurator.stabilityFallbackAudioPolicy(for: snapshot)
+            : defaultPolicy
+        let basePolicyReason = PlaybackAudioSessionConfigurator.policyDecisionReason(for: snapshot)
+        let policyReason = airPlayStabilityFallbackToStereo
+            ? "airplay_stability_fallback:\(basePolicyReason)"
+            : basePolicyReason
         renderer.useAudioPullMode = policy.useAudioPullMode
         renderer.minimumAudioPullStartBuffer = policy.audioPullStartBufferDuration
         renderer.minimumAudioPullResumeBuffer = policy.audioPullResumeBufferDuration
@@ -300,8 +314,16 @@ final class RivuletPlayer: ObservableObject {
         lastRecordedRendererFailureWallTime = 0
     }
 
-    private func recordAirPlayInstabilityEvent(_ event: AirPlayInstabilityEvent) {
-        guard PlaybackAudioSessionConfigurator.isAirPlayRouteActive() else { return }
+    private func resetAirPlayRouteOverrides() {
+        airPlayStabilityFallbackToStereo = false
+        isAirPlayStabilityFallbackInFlight = false
+        loadedDirectPlayIsDolbyVision = false
+        loadedDirectPlayEnableDVConversion = false
+    }
+
+    @discardableResult
+    private func recordAirPlayInstabilityEvent(_ event: AirPlayInstabilityEvent) -> Bool {
+        guard PlaybackAudioSessionConfigurator.isAirPlayRouteActive() else { return false }
         let now = CFAbsoluteTimeGetCurrent()
 
         switch event {
@@ -314,7 +336,7 @@ final class RivuletPlayer: ObservableObject {
         }
 
         pruneAirPlayInstabilityEvents(now: now)
-        evaluateAirPlayInstabilityIfNeeded(trigger: event)
+        return evaluateAirPlayInstabilityIfNeeded(trigger: event)
     }
 
     private func pruneAirPlayInstabilityEvents(now: CFAbsoluteTime) {
@@ -324,18 +346,41 @@ final class RivuletPlayer: ObservableObject {
         rendererFailureEventTimes.removeAll(where: { $0 < cutoff })
     }
 
-    private func evaluateAirPlayInstabilityIfNeeded(trigger: AirPlayInstabilityEvent) {
-        guard !hasReportedAirPlayInstability else { return }
-        guard activePipeline == .directPlay else { return }
-        guard PlaybackAudioSessionConfigurator.isAirPlayRouteActive() else { return }
+    @discardableResult
+    private func evaluateAirPlayInstabilityIfNeeded(trigger: AirPlayInstabilityEvent) -> Bool {
+        guard !hasReportedAirPlayInstability else { return true }
+        guard activePipeline == .directPlay else { return false }
+        guard PlaybackAudioSessionConfigurator.isAirPlayRouteActive() else { return false }
 
         let autoFlushCount = autoFlushEventTimes.count
         let outputRecoveryCount = outputConfigRecoveryEventTimes.count
         let rendererFailureCount = rendererFailureEventTimes.count
         let totalCount = autoFlushCount + outputRecoveryCount + rendererFailureCount
 
+        if shouldAttemptAirPlayStabilityFallback(
+            autoFlushCount: autoFlushCount,
+            outputRecoveryCount: outputRecoveryCount,
+            rendererFailureCount: rendererFailureCount,
+            totalCount: totalCount
+        ) {
+            airPlayStabilityFallbackToStereo = true
+
+            let triggerLabel: String
+            switch trigger {
+            case .autoFlush: triggerLabel = "auto_flush"
+            case .outputRecovery: triggerLabel = "output_recovery"
+            case .rendererFailure: triggerLabel = "renderer_failure"
+            }
+
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                await self.attemptAirPlayStabilityFallback(triggerLabel: triggerLabel)
+            }
+            return true
+        }
+
         let isUnstable = autoFlushCount >= 3 || outputRecoveryCount >= 3 || rendererFailureCount >= 2 || totalCount >= 5
-        guard isUnstable else { return }
+        guard isUnstable else { return false }
 
         hasReportedAirPlayInstability = true
         let error = PlayerError.loadFailed("AirPlay audio unstable")
@@ -354,6 +399,64 @@ final class RivuletPlayer: ObservableObject {
             "[RivuletPlayer] AirPlay instability detected (trigger=\(triggerLabel), " +
             "autoFlush=\(autoFlushCount), outputRecoveries=\(outputRecoveryCount), rendererFailures=\(rendererFailureCount))"
         )
+        return true
+    }
+
+    private func shouldAttemptAirPlayStabilityFallback(
+        autoFlushCount: Int,
+        outputRecoveryCount: Int,
+        rendererFailureCount: Int,
+        totalCount: Int
+    ) -> Bool {
+        guard !airPlayStabilityFallbackToStereo else { return false }
+        guard !isAirPlayStabilityFallbackInFlight else { return false }
+
+        let snapshot = PlaybackAudioSessionConfigurator.currentRouteAudioSnapshot(
+            owner: "RivuletPlayer",
+            reason: "airplay_stability_eval"
+        )
+        let defaultPolicy = PlaybackAudioSessionConfigurator.recommendedAudioPolicy(for: snapshot)
+        let fallbackPolicy = PlaybackAudioSessionConfigurator.stabilityFallbackAudioPolicy(for: snapshot)
+        guard defaultPolicy != fallbackPolicy else { return false }
+
+        return rendererFailureCount >= 1 || autoFlushCount >= 2 || outputRecoveryCount >= 2 || totalCount >= 3
+    }
+
+    private func attemptAirPlayStabilityFallback(triggerLabel: String) async {
+        guard !isAirPlayStabilityFallbackInFlight else { return }
+        guard activePipeline == .directPlay else { return }
+        guard let url = streamURL else { return }
+
+        isAirPlayStabilityFallbackInFlight = true
+        defer { isAirPlayStabilityFallbackInFlight = false }
+
+        let resumeTime = max(0, renderer.currentTime)
+        let shouldResume = isPlaying
+        let headers = loadHeaders
+        isPlaying = false
+        playbackStateSubject.send(.buffering)
+
+        print(
+            "[RivuletPlayer] Attempting AirPlay stability fallback " +
+            "(trigger=\(triggerLabel), resume=\(String(format: "%.3f", resumeTime))s)"
+        )
+
+        do {
+            try await loadDirectPlay(
+                url: url,
+                headers: headers,
+                startTime: resumeTime,
+                isDolbyVision: loadedDirectPlayIsDolbyVision,
+                enableDVConversion: loadedDirectPlayEnableDVConversion
+            )
+            if shouldResume {
+                play()
+            }
+        } catch {
+            airPlayStabilityFallbackToStereo = false
+            print("[RivuletPlayer] AirPlay stability fallback failed: \(error.localizedDescription)")
+            handlePipelineError(error)
+        }
     }
 
     // MARK: - Private: Load Implementations
@@ -368,6 +471,8 @@ final class RivuletPlayer: ObservableObject {
         self.activePipeline = .directPlay
         self.streamURL = url
         self.loadHeaders = headers
+        self.loadedDirectPlayIsDolbyVision = isDolbyVision
+        self.loadedDirectPlayEnableDVConversion = enableDVConversion
         resetAirPlayInstabilityState()
         let routeSnapshot = applyCurrentAudioPolicy(reason: "direct_play_load_preflight")
 
@@ -421,6 +526,9 @@ final class RivuletPlayer: ObservableObject {
         self.hlsPipeline = pipeline
         self.activePipeline = .hls
         self.streamURL = url
+        self.loadHeaders = headers
+        self.loadedDirectPlayIsDolbyVision = false
+        self.loadedDirectPlayEnableDVConversion = false
         resetAirPlayInstabilityState()
         let routeSnapshot = applyCurrentAudioPolicy(reason: "hls_load_preflight")
 
@@ -490,6 +598,10 @@ final class RivuletPlayer: ObservableObject {
         guard isPlaying else { return }
         isPlaying = false
 
+        // Flush audio renderer to immediately silence AirPlay/HomePod.
+        // Without this, ~2s of buffered audio continues playing after pause.
+        renderer.flushAudio()
+
         switch activePipeline {
         case .directPlay:
             directPlayPipeline?.pause()
@@ -500,6 +612,10 @@ final class RivuletPlayer: ObservableObject {
         }
 
         playbackStateSubject.send(.paused)
+    }
+
+    func setMuted(_ muted: Bool) {
+        renderer.setMuted(muted)
     }
 
     func stop() {
@@ -527,6 +643,7 @@ final class RivuletPlayer: ObservableObject {
         renderer.disableAudioEngine()
         renderer.setRate(0)
         resetAirPlayInstabilityState()
+        resetAirPlayRouteOverrides()
 
         playbackStateSubject.send(.idle)
     }
@@ -845,8 +962,8 @@ final class RivuletPlayer: ObservableObject {
                         }
 
                         self.lastRecordedRendererFailureWallTime = now
-                        self.recordAirPlayInstabilityEvent(.rendererFailure)
-                        return true
+                        let instabilityHandled = self.recordAirPlayInstabilityEvent(.rendererFailure)
+                        return !instabilityHandled
                     }
 
                     if shouldHandleRendererFailure {

@@ -2,14 +2,14 @@
 //  CastMemberCard.swift
 //  Rivulet
 //
-//  Cast and crew member cards for detail view - matches MediaPosterCard style
+//  Cast and crew member cards for detail view — circular photo style
 //
 
 import SwiftUI
 
-// MARK: - Person Card
+// MARK: - Person Card (Circle)
 
-/// Card for cast/crew members - matches MediaPosterCard style and scales with display size
+/// Card for cast/crew members with circular photo, name, and role beneath
 struct PersonCard: View {
     let name: String
     let subtitle: String?
@@ -17,50 +17,32 @@ struct PersonCard: View {
     let serverURL: String
     let authToken: String
 
-    @Environment(\.uiScale) private var scale
-
-    private var cardWidth: CGFloat { ScaledDimensions.posterWidth * scale }
-    private var cardHeight: CGFloat { ScaledDimensions.posterHeight * scale }
-    private var cornerRadius: CGFloat { ScaledDimensions.posterCornerRadius }
-    private var nameFont: CGFloat { ScaledDimensions.posterTitleSize * scale }
-    private var subtitleFont: CGFloat { ScaledDimensions.posterSubtitleSize * scale }
+    private let circleSize: CGFloat = 140
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            // Photo - full card is the image
+        VStack(spacing: 10) {
             personImage
-                .frame(width: cardWidth, height: cardHeight)
-                .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
-                .hoverEffect(.highlight)
-                // GPU-accelerated shadow: blur is hardware-accelerated, unlike .shadow() with large radius
-                .background(
-                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                        .fill(.black)
-                        .blur(radius: 12)
-                        .offset(y: 6)
-                        .opacity(0.4)
+                .frame(width: circleSize, height: circleSize)
+                .clipShape(Circle())
+                .overlay(
+                    Circle()
+                        .strokeBorder(.white.opacity(0.15), lineWidth: 1)
                 )
-                .padding(.bottom, 10)  // Space for hover scale effect
 
-            // Name and role - below image like MediaPosterCard
-            VStack(alignment: .leading, spacing: 6) {
+            VStack(spacing: 4) {
                 Text(name)
-                    .font(.system(size: nameFont, weight: .medium))
+                    .font(.system(size: 20, weight: .medium))
                     .foregroundStyle(.white.opacity(0.9))
                     .lineLimit(1)
-                    .truncationMode(.tail)
-                    .frame(width: cardWidth, alignment: .leading)
 
                 if let subtitle = subtitle, !subtitle.isEmpty {
                     Text(subtitle)
-                        .font(.system(size: subtitleFont, weight: .regular))
+                        .font(.system(size: 16, weight: .regular))
                         .foregroundStyle(.white.opacity(0.5))
                         .lineLimit(1)
-                        .truncationMode(.tail)
-                        .frame(width: cardWidth, alignment: .leading)
                 }
             }
-            .frame(height: (nameFont + subtitleFont + 12) * 1.2, alignment: .top)
+            .frame(width: circleSize + 20)
         }
     }
 
@@ -70,7 +52,7 @@ struct PersonCard: View {
         CachedAsyncImage(url: fullThumbURL) { phase in
             switch phase {
             case .empty:
-                Rectangle()
+                Circle()
                     .fill(Color(white: 0.15))
                     .overlay {
                         ProgressView()
@@ -81,7 +63,7 @@ struct PersonCard: View {
                     .resizable()
                     .aspectRatio(contentMode: .fill)
             case .failure:
-                Rectangle()
+                Circle()
                     .fill(
                         LinearGradient(
                             colors: [Color(white: 0.18), Color(white: 0.12)],
@@ -114,24 +96,22 @@ struct PersonCard: View {
 
 // MARK: - Cast & Crew Row
 
-/// Horizontal scrolling row of cast and crew members
+/// Horizontal scrolling row of cast and crew members with circular photos
 struct CastCrewRow: View {
     let cast: [PlexRole]
     let directors: [PlexCrewMember]
     let serverURL: String
     let authToken: String
 
-    @Environment(\.uiScale) private var scale
-
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Cast & Crew")
-                .font(.system(size: ScaledDimensions.sectionTitleSize * scale, weight: .bold))
+                .font(.title3.bold())
                 .foregroundStyle(.white)
-                .padding(.horizontal, ScaledDimensions.rowHorizontalPadding)
+                .padding(.horizontal, 48)
 
             ScrollView(.horizontal, showsIndicators: false) {
-                LazyHStack(spacing: ScaledDimensions.rowItemSpacing * scale) {
+                LazyHStack(spacing: 24) {
                     // Directors first
                     ForEach(directors) { director in
                         Button { } label: {
@@ -143,7 +123,7 @@ struct CastCrewRow: View {
                                 authToken: authToken
                             )
                         }
-                        .buttonStyle(CardButtonStyle())
+                        .buttonStyle(CircleCardButtonStyle())
                     }
 
                     // Cast members
@@ -157,11 +137,11 @@ struct CastCrewRow: View {
                                 authToken: authToken
                             )
                         }
-                        .buttonStyle(CardButtonStyle())
+                        .buttonStyle(CircleCardButtonStyle())
                     }
                 }
-                .padding(.horizontal, ScaledDimensions.rowHorizontalPadding)
-                .padding(.vertical, ScaledDimensions.rowVerticalPadding)
+                .padding(.horizontal, 48)
+                .padding(.vertical, 12)
             }
             .scrollClipDisabled()
         }
@@ -169,16 +149,20 @@ struct CastCrewRow: View {
     }
 }
 
-#Preview {
-    ZStack {
-        Color.black.ignoresSafeArea()
+// MARK: - Circle Card Button Style
 
-        PersonCard(
-            name: "Bryan Cranston",
-            subtitle: "Walter White",
-            thumbURL: nil,
-            serverURL: "http://localhost:32400",
-            authToken: "test"
-        )
+/// Subtle focus style for circular cast/crew cards
+struct CircleCardButtonStyle: ButtonStyle {
+    @FocusState private var isFocused: Bool
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(isFocused ? 1.08 : 1.0)
+            .scaleEffect(configuration.isPressed ? 0.95 : 1.0)
+            .focused($isFocused)
+            .hoverEffectDisabled()
+            .focusEffectDisabled()
+            .animation(.spring(response: 0.25, dampingFraction: 0.8), value: isFocused)
+            .animation(.spring(response: 0.15, dampingFraction: 0.9), value: configuration.isPressed)
     }
 }

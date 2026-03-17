@@ -275,11 +275,11 @@ final class PlexNetworkManagerURLTests: XCTestCase {
         XCTAssertTrue(urlString.contains("videoCodec="))
     }
 
-    // MARK: - VLC Direct Play URL Tests
+    // MARK: - Direct Play URL Tests
 
-    func testBuildVLCDirectPlayURLIncludesPartKey() {
+    func testBuildPlaybackDirectPlayURLIncludesPartKey() {
         let partKey = "/library/parts/67890/0/file.mkv"
-        let url = networkManager.buildVLCDirectPlayURL(
+        let url = networkManager.buildPlaybackDirectPlayURL(
             serverURL: testServerURL,
             authToken: testAuthToken,
             partKey: partKey
@@ -289,8 +289,8 @@ final class PlexNetworkManagerURLTests: XCTestCase {
         XCTAssertTrue(url!.absoluteString.contains(partKey.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? partKey))
     }
 
-    func testBuildVLCDirectPlayURLIncludesAllPlexHeaders() {
-        let url = networkManager.buildVLCDirectPlayURL(
+    func testBuildPlaybackDirectPlayURLIncludesAllPlexHeaders() {
+        let url = networkManager.buildPlaybackDirectPlayURL(
             serverURL: testServerURL,
             authToken: testAuthToken,
             partKey: "/library/parts/67890/0/file.mkv"

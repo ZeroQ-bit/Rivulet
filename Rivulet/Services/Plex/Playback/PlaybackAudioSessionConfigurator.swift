@@ -27,7 +27,7 @@ enum RouteAudioPolicyProfile: String, Sendable {
     case airPlayMultichannel
 }
 
-struct RouteAudioPolicy: Sendable {
+struct RouteAudioPolicy: Sendable, Equatable {
     let profile: RouteAudioPolicyProfile
     let useAudioPullMode: Bool
     let audioPullStartBufferDuration: TimeInterval
@@ -46,11 +46,6 @@ enum PlaybackAudioSessionConfigurator {
     private static var lastActivationTimestamp: CFAbsoluteTime = 0
     private static var lastActivationModeRawValue: String = ""
     private static let minimumReactivationInterval: CFAbsoluteTime = 0.75
-    private static let conservativeAirPlayDecodeCodecs: Set<String> = [
-        "aac", "ac3", "eac3", "ec3",
-        "alac", "flac", "mp3", "mp2",
-        "opus", "pcm"
-    ]
 
     /// Configure and activate a playback session optimized for long-form media.
     /// Uses long-form video routing on iOS and long-form audio on tvOS (video policy
@@ -120,9 +115,6 @@ enum PlaybackAudioSessionConfigurator {
     }
 
     static func recommendedAudioPolicy(for snapshot: RouteAudioSnapshot) -> RouteAudioPolicy {
-        let hardwareRate = Int(snapshot.sampleRate.rounded())
-        let targetRate = (hardwareRate > 0 && hardwareRate != 48_000) ? hardwareRate : 0
-
         guard snapshot.isAirPlay else {
             return RouteAudioPolicy(
                 profile: .local,
@@ -144,15 +136,15 @@ enum PlaybackAudioSessionConfigurator {
             return RouteAudioPolicy(
                 profile: .airPlayMultichannel,
                 useAudioPullMode: true,
-                audioPullStartBufferDuration: 0.35,
-                audioPullResumeBufferDuration: 0.15,
-                targetOutputSampleRate: targetRate,
-                preferAudioEngineForPCM: false,
-                forceClientDecodeAllAudio: false,
-                forceClientDecodeCodecs: conservativeAirPlayDecodeCodecs,
-                enableSurroundReEncoding: true,
+                audioPullStartBufferDuration: 0.5,
+                audioPullResumeBufferDuration: 0.5,
+                targetOutputSampleRate: 0,
+                preferAudioEngineForPCM: true,
+                forceClientDecodeAllAudio: true,
+                forceClientDecodeCodecs: [],
+                enableSurroundReEncoding: false,
                 useSignedInt16Audio: true,
-                forceDownmixToStereo: true,
+                forceDownmixToStereo: false,
                 audioBackpressureMaxWait: 1.0
             )
         }
@@ -160,12 +152,36 @@ enum PlaybackAudioSessionConfigurator {
         return RouteAudioPolicy(
             profile: .airPlayStereo,
             useAudioPullMode: true,
-            audioPullStartBufferDuration: 0.16,
+            audioPullStartBufferDuration: 0.5,
             audioPullResumeBufferDuration: 0.5,
-            targetOutputSampleRate: targetRate,
-            preferAudioEngineForPCM: false,
+            targetOutputSampleRate: 0,
+            preferAudioEngineForPCM: true,
             forceClientDecodeAllAudio: true,
-            forceClientDecodeCodecs: conservativeAirPlayDecodeCodecs,
+            forceClientDecodeCodecs: [],
+            enableSurroundReEncoding: false,
+            useSignedInt16Audio: true,
+            forceDownmixToStereo: true,
+            audioBackpressureMaxWait: 2.0
+        )
+    }
+
+    /// Conservative stereo PCM fallback used after repeated AirPlay instability events.
+    /// This intentionally trades surround preservation for the same decode/buffer shape
+    /// that is already used on stereo AirPlay/HomePod routes.
+    static func stabilityFallbackAudioPolicy(for snapshot: RouteAudioSnapshot) -> RouteAudioPolicy {
+        guard snapshot.isAirPlay else {
+            return recommendedAudioPolicy(for: snapshot)
+        }
+
+        return RouteAudioPolicy(
+            profile: .airPlayStereo,
+            useAudioPullMode: true,
+            audioPullStartBufferDuration: 0.5,
+            audioPullResumeBufferDuration: 0.5,
+            targetOutputSampleRate: 0,
+            preferAudioEngineForPCM: true,
+            forceClientDecodeAllAudio: true,
+            forceClientDecodeCodecs: [],
             enableSurroundReEncoding: false,
             useSignedInt16Audio: true,
             forceDownmixToStereo: true,

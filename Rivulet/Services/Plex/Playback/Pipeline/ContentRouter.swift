@@ -158,6 +158,18 @@ struct ContentRouter {
             )
         }
 
+        if shouldPreferHLSForDVConversion(context: context, primaryAudioCodec: audioCodec) {
+            reasoning.append("dv_conversion_prefers_hls_for_client_decode_only_audio:\(audioCodec)")
+            let hls = buildHLSRoute(context: context)
+            print("[ContentRouter] \(container) | audio=\(audioCodec) → HLS (DV conversion + no native audio fallback)")
+            return PlaybackPlan(
+                policy: context.playbackPolicy,
+                primary: hls,
+                fallbacks: [],
+                reasoning: reasoning
+            )
+        }
+
         // Direct-play-first policy for VOD:
         // if we can build a direct-play URL, try it first regardless of audio codec.
         if let direct = buildDirectPlayRouteIfPossible(context: context) {
@@ -274,6 +286,32 @@ struct ContentRouter {
         ]
 
         return .directPlay(url: url, headers: headers)
+    }
+
+    private static func shouldPreferHLSForDVConversion(
+        context: ContentRoutingContext,
+        primaryAudioCodec: String
+    ) -> Bool {
+        guard context.requiresProfileConversion else { return false }
+        guard isClientDecodable(audioCodec: primaryAudioCodec) || requiresTranscode(audioCodec: primaryAudioCodec) else {
+            return false
+        }
+
+        let audioStreams = context.metadata.Media?
+            .first?
+            .Part?
+            .first?
+            .Stream?
+            .filter(\.isAudio) ?? []
+
+        // Without detailed stream metadata we keep the existing optimistic DirectPlay path.
+        guard !audioStreams.isEmpty else { return false }
+
+        let hasNativeFallback = audioStreams.contains { stream in
+            guard let codec = stream.codec else { return false }
+            return isNativeAudioCodec(codec)
+        }
+        return !hasNativeFallback
     }
 
     private static func buildHLSRoute(context: ContentRoutingContext) -> PlaybackRoute {

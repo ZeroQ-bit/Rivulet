@@ -30,8 +30,6 @@ final class NowPlayingService: ObservableObject {
     private var cachedArtworkURL: String?
     private var interruptionObserver: NSObjectProtocol?
     private var inputCoordinator: PlaybackInputCoordinator?
-    private var nowPlayingSession: MPNowPlayingSession?
-    private var nowPlayingSessionAnchorPlayer: AVPlayer?
     private var lastHandledPlaybackState: UniversalPlaybackState?
     /// Track if we've set Now Playing info with valid duration (> 0)
     /// This prevents the system from ignoring our Now Playing registration
@@ -57,85 +55,21 @@ final class NowPlayingService: ObservableObject {
         )
     }
 
-    private func shouldUseExplicitNowPlayingSession(for playerType: PlayerType) -> Bool {
-        switch playerType {
-        case .avplayer:
-            return false
-        case .mpv, .dvSampleBuffer, .rivulet:
-            return true
-        }
-    }
-
-    /// Custom playback pipelines (MPV/DV sample buffer) don't have a native AVPlayer-backed
-    /// now playing session, so create a lightweight anchor session to improve system discoverability.
-    private func configureNowPlayingSession(for playerType: PlayerType) {
-        guard shouldUseExplicitNowPlayingSession(for: playerType) else {
-            deactivateNowPlayingSession()
-            return
-        }
-
-        guard #available(tvOS 14.0, iOS 16.0, *) else { return }
-
-        if nowPlayingSession == nil {
-            let anchorPlayer = AVPlayer()
-            let session = MPNowPlayingSession(players: [anchorPlayer])
-            session.automaticallyPublishesNowPlayingInfo = false
-            nowPlayingSessionAnchorPlayer = anchorPlayer
-            nowPlayingSession = session
-            // Configure remote commands on the session's command center
-            // This is required on tvOS 14+ for commands from other Apple devices
-            configureRemoteCommands(on: session.remoteCommandCenter)
-        }
-
-        nowPlayingSession?.becomeActiveIfPossible { isActive in
-        }
-    }
-
-    private func deactivateNowPlayingSession() {
-        guard nowPlayingSession != nil || nowPlayingSessionAnchorPlayer != nil else { return }
-        nowPlayingSession = nil
-        nowPlayingSessionAnchorPlayer = nil
-    }
-
-    private var infoCenters: [MPNowPlayingInfoCenter] {
-        var centers: [MPNowPlayingInfoCenter] = []
-        var seen = Set<ObjectIdentifier>()
-
-        func appendUnique(_ center: MPNowPlayingInfoCenter) {
-            let identifier = ObjectIdentifier(center)
-            guard seen.insert(identifier).inserted else { return }
-            centers.append(center)
-        }
-
-        appendUnique(MPNowPlayingInfoCenter.default())
-        if #available(tvOS 14.0, iOS 16.0, *), let nowPlayingSession {
-            appendUnique(nowPlayingSession.nowPlayingInfoCenter)
-        }
-
-        return centers
-    }
-
     private func setNowPlayingInfoOnAllCenters(_ nowPlayingInfo: [String: Any]?) {
-        for center in infoCenters {
-            center.nowPlayingInfo = nowPlayingInfo
-        }
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = nowPlayingInfo
     }
 
     private func withNowPlayingInfoOnAllCenters(_ update: (inout [String: Any]) -> Void) {
-        for center in infoCenters {
-            var nowPlayingInfo = center.nowPlayingInfo ?? [:]
-            update(&nowPlayingInfo)
-            center.nowPlayingInfo = nowPlayingInfo
-        }
+        var nowPlayingInfo = MPNowPlayingInfoCenter.default().nowPlayingInfo ?? [:]
+        update(&nowPlayingInfo)
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = nowPlayingInfo
     }
 
     private func firstAvailableNowPlayingInfo() -> [String: Any]? {
-        for center in infoCenters {
-            if let info = center.nowPlayingInfo, !info.isEmpty {
-                return info
-            }
+        guard let info = MPNowPlayingInfoCenter.default().nowPlayingInfo, !info.isEmpty else {
+            return nil
         }
-        return nil
+        return info
     }
 
     // MARK: - Audio Session Interruption Handling
@@ -202,8 +136,6 @@ final class NowPlayingService: ObservableObject {
         // CRITICAL: Ensure audio session is active BEFORE setting Now Playing info
         // This is required for tvOS to register us as the Now Playing app
         ensureAudioSessionActive()
-        configureNowPlayingSession(for: viewModel.playerType)
-
         // CRITICAL: Set preliminary Now Playing info BEFORE playback starts
         // tvOS only registers apps as "Now Playing" if info is set before play() is called
         setPreliminaryNowPlayingInfo(
@@ -227,10 +159,9 @@ final class NowPlayingService: ObservableObject {
 
                 switch state {
                 case .playing:
-                    // Reassert audio session/now-playing session when active playback starts.
+                    // Reassert the audio session when active playback starts.
                     // Custom playback pipelines can invalidate this state while initializing.
                     self.ensureAudioSessionActive()
-                    self.configureNowPlayingSession(for: viewModel.playerType)
 
                     // ALWAYS update rate and state immediately when playing starts
                     // This is critical for Control Center to show the correct state
@@ -262,15 +193,6 @@ final class NowPlayingService: ObservableObject {
                 default:
                     break
                 }
-            }
-            .store(in: &cancellables)
-
-        // Subscribe to player type updates so fallback transitions (AVPlayer <-> MPV) keep
-        // now-playing registration in sync with the active playback engine.
-        viewModel.$playerType
-            .receive(on: RunLoop.main)
-            .sink { [weak self] playerType in
-                self?.configureNowPlayingSession(for: playerType)
             }
             .store(in: &cancellables)
 
@@ -322,13 +244,11 @@ final class NowPlayingService: ObservableObject {
         hasValidNowPlayingInfo = false
         lastHandledPlaybackState = nil
         clearNowPlayingInfo()
-        deactivateNowPlayingSession()
     }
 
     // MARK: - Remote Command Center Setup
 
-    /// Configure remote commands on a given command center.
-    /// Called for both the shared command center and the session's command center (tvOS 14+).
+    /// Configure remote commands on the shared command center.
     private func configureRemoteCommands(on commandCenter: MPRemoteCommandCenter) {
         // Play command
         commandCenter.playCommand.isEnabled = true
@@ -613,16 +533,6 @@ final class NowPlayingService: ObservableObject {
         }
 
         setNowPlayingInfoOnAllCenters(nowPlayingInfo)
-
-        // Re-assert the session as active when changing playback state
-        // This helps maintain visibility on other devices during pause/resume
-        if #available(tvOS 14.0, iOS 16.0, *) {
-            nowPlayingSession?.becomeActiveIfPossible { isActive in
-                if !isActive {
-                    print("🎵 NowPlaying: Warning - session could not become active")
-                }
-            }
-        }
 
     }
 

@@ -2,7 +2,7 @@
 //  UniversalPlayerView.swift
 //  Rivulet
 //
-//  Universal video player using MPV with HDR passthrough
+//  Universal video player using RivuletPlayer
 //
 
 import SwiftUI
@@ -629,8 +629,6 @@ private final class UniversalPlaybackInputTarget: PlaybackInputTarget {
             }
             if !vm.showInfoPanel {
                 vm.resetSettingsPanel()
-                // Trigger lazy track enumeration when info panel is opened
-                vm.requestTrackEnumeration()
                 withAnimation(.easeOut(duration: 0.3)) {
                     vm.showInfoPanel = true
                 }
@@ -674,7 +672,6 @@ struct UniversalPlayerView: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var hasStartedPlayback = false
-    @State private var playerController: MPVMetalViewController?
     @State private var lastReportedTime: TimeInterval = 0
     @FocusState private var isSkipButtonFocused: Bool
 
@@ -770,11 +767,6 @@ struct UniversalPlayerView: View {
         // to intercept the event before SwiftUI can dismiss the player.
         // Do NOT add onExitCommand here - it would fire after PlayerContainerViewController
         // has already processed the event, causing double-handling.
-        .onChange(of: playerController) { _, controller in
-            if let controller = controller {
-                viewModel.setPlayerController(controller)
-            }
-        }
         .onAppear {
             // Wire up remote input callbacks
             let target = UniversalPlaybackInputTarget(viewModel: viewModel)
@@ -812,7 +804,6 @@ struct UniversalPlayerView: View {
             // Notify that playback is starting (pauses hub polling)
             NotificationCenter.default.post(name: .plexPlaybackStarted, object: nil)
             // Activate audio session BEFORE playback starts
-            // This ensures MPV's AudioUnit is created with correct session config
             NowPlayingService.shared.attach(to: viewModel, inputCoordinator: inputCoordinator)
             await viewModel.startPlayback()
         }
@@ -828,8 +819,6 @@ struct UniversalPlayerView: View {
             remoteInput.reset()
             inputCoordinator.invalidate()
             inputTarget = nil
-            // Release MPV pre-warm service so it can prepare for next use
-            MPVPrewarmService.shared.releaseController()
         }
         .onChange(of: viewModel.currentTime) { _, newTime in
             // Report progress periodically
@@ -887,8 +876,7 @@ struct UniversalPlayerView: View {
     @ViewBuilder
     private var playerContentLayer: some View {
         ZStack {
-            // Subtitle Overlay (for DVSampleBufferPlayer and RivuletPlayer)
-            if viewModel.playerType == .dvSampleBuffer || viewModel.playerType == .rivulet {
+            if viewModel.rivuletPlayer != nil {
                 SubtitleOverlayView(
                     subtitleManager: viewModel.subtitleManager,
                     bottomOffset: viewModel.showControls ? 140 : 60
@@ -1010,43 +998,11 @@ struct UniversalPlayerView: View {
 
     @ViewBuilder
     private var playerLayer: some View {
-        if viewModel.streamURL != nil {
-            switch viewModel.playerType {
-            case .mpv:
-                if let mpv = viewModel.mpvPlayerWrapper {
-                    MPVPlayerView(
-                        url: viewModel.streamURL!,
-                        headers: viewModel.streamHeaders,
-                        startTime: viewModel.startOffset,
-                        delegate: mpv,
-                        playerController: $playerController
-                    )
-                    .scaleEffect(viewModel.videoFrameState.scale, anchor: .topLeading)
-                    .offset(viewModel.videoFrameState.offset)
-                    .animation(.spring(response: 0.5, dampingFraction: 0.85), value: viewModel.videoFrameState)
-                }
-            case .avplayer:
-                if let avp = viewModel.avPlayerWrapper {
-                    AVPlayerView(playerWrapper: avp)
-                        .scaleEffect(viewModel.videoFrameState.scale, anchor: .topLeading)
-                        .offset(viewModel.videoFrameState.offset)
-                        .animation(.spring(response: 0.5, dampingFraction: 0.85), value: viewModel.videoFrameState)
-                }
-            case .dvSampleBuffer:
-                if let dvp = viewModel.dvSampleBufferPlayer {
-                    DVSampleBufferView(player: dvp)
-                        .scaleEffect(viewModel.videoFrameState.scale, anchor: .topLeading)
-                        .offset(viewModel.videoFrameState.offset)
-                        .animation(.spring(response: 0.5, dampingFraction: 0.85), value: viewModel.videoFrameState)
-                }
-            case .rivulet:
-                if let rp = viewModel.rivuletPlayer {
-                    SampleBufferDisplayView(player: rp)
-                        .scaleEffect(viewModel.videoFrameState.scale, anchor: .topLeading)
-                        .offset(viewModel.videoFrameState.offset)
-                        .animation(.spring(response: 0.5, dampingFraction: 0.85), value: viewModel.videoFrameState)
-                }
-            }
+        if let rp = viewModel.rivuletPlayer, viewModel.streamURL != nil {
+            SampleBufferDisplayView(player: rp)
+                .scaleEffect(viewModel.videoFrameState.scale, anchor: .topLeading)
+                .offset(viewModel.videoFrameState.offset)
+                .animation(.spring(response: 0.5, dampingFraction: 0.85), value: viewModel.videoFrameState)
         }
     }
 
