@@ -598,6 +598,11 @@ final class RivuletPlayer: ObservableObject {
         guard isPlaying else { return }
         isPlaying = false
 
+        // Stop pull-mode delivery and clear the internal buffer to prevent
+        // accumulated audio from bursting on resume. Does NOT flush the
+        // renderer — already-delivered audio stays intact for seamless resume.
+        renderer.pauseAudio()
+
         switch activePipeline {
         case .directPlay:
             directPlayPipeline?.pause()

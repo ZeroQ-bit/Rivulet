@@ -296,6 +296,7 @@ struct PlexDetailView: View {
                                     .padding(.top, 32)
                                 }
                             }
+                            .fixedSize(horizontal: false, vertical: true)
                         }
                     }
                 }

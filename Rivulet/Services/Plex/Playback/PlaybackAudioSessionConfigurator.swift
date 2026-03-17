@@ -136,8 +136,8 @@ enum PlaybackAudioSessionConfigurator {
             return RouteAudioPolicy(
                 profile: .airPlayMultichannel,
                 useAudioPullMode: true,
-                audioPullStartBufferDuration: 0.5,
-                audioPullResumeBufferDuration: 0.5,
+                audioPullStartBufferDuration: 0.2,
+                audioPullResumeBufferDuration: 0.1,
                 targetOutputSampleRate: 0,
                 preferAudioEngineForPCM: false,
                 forceClientDecodeAllAudio: true,

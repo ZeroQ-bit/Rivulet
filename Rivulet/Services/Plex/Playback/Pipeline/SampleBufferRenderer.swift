@@ -874,9 +874,20 @@ final class SampleBufferRenderer {
 
     // MARK: - Flush
 
+    /// Stop pull-mode delivery and clear the internal audio buffer without
+    /// flushing the audio renderer. Already-delivered audio stays in the
+    /// renderer so resume is seamless. The pull buffer is cleared to prevent
+    /// accumulated audio from bursting on resume.
+    func pauseAudio() {
+        if useAudioEngine {
+            audioPlayerNode?.pause()
+        } else {
+            stopAudioPullMode()
+        }
+    }
+
     /// Flush audio renderer and pull-mode state without touching video.
-    /// Triggers AirPlay FLUSH so the remote speaker silences immediately
-    /// rather than draining ~2s of buffered audio.
+    /// Used for stop/seek where the timeline changes.
     func flushAudio() {
         if useAudioEngine {
             audioPlayerNode?.stop()

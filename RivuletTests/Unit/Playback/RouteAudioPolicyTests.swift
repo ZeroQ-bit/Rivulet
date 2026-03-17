@@ -39,8 +39,8 @@ final class RouteAudioPolicyTests: XCTestCase {
         let policy = PlaybackAudioSessionConfigurator.recommendedAudioPolicy(for: snapshot)
 
         XCTAssertEqual(policy.profile, .airPlayStereo)
-        XCTAssertEqual(policy.audioPullStartBufferDuration, 0.5)
-        XCTAssertEqual(policy.audioPullResumeBufferDuration, 0.5)
+        XCTAssertEqual(policy.audioPullStartBufferDuration, 0.2)
+        XCTAssertEqual(policy.audioPullResumeBufferDuration, 0.1)
         XCTAssertEqual(policy.targetOutputSampleRate, 0)
         XCTAssertFalse(policy.preferAudioEngineForPCM)
         XCTAssertTrue(policy.forceClientDecodeAllAudio)
@@ -63,8 +63,8 @@ final class RouteAudioPolicyTests: XCTestCase {
         let policy = PlaybackAudioSessionConfigurator.recommendedAudioPolicy(for: snapshot)
 
         XCTAssertEqual(policy.profile, .airPlayStereo)
-        XCTAssertEqual(policy.audioPullStartBufferDuration, 0.5)
-        XCTAssertEqual(policy.audioPullResumeBufferDuration, 0.5)
+        XCTAssertEqual(policy.audioPullStartBufferDuration, 0.2)
+        XCTAssertEqual(policy.audioPullResumeBufferDuration, 0.1)
         XCTAssertFalse(policy.preferAudioEngineForPCM)
         XCTAssertTrue(policy.forceClientDecodeAllAudio)
         XCTAssertFalse(policy.enableSurroundReEncoding)
@@ -88,8 +88,8 @@ final class RouteAudioPolicyTests: XCTestCase {
         let policy = PlaybackAudioSessionConfigurator.recommendedAudioPolicy(for: snapshot)
 
         XCTAssertEqual(policy.profile, .airPlayMultichannel)
-        XCTAssertEqual(policy.audioPullStartBufferDuration, 0.5)
-        XCTAssertEqual(policy.audioPullResumeBufferDuration, 0.5)
+        XCTAssertEqual(policy.audioPullStartBufferDuration, 0.2)
+        XCTAssertEqual(policy.audioPullResumeBufferDuration, 0.1)
         XCTAssertEqual(policy.targetOutputSampleRate, 0)
         XCTAssertFalse(policy.preferAudioEngineForPCM)
         XCTAssertTrue(policy.forceClientDecodeAllAudio)
@@ -112,8 +112,8 @@ final class RouteAudioPolicyTests: XCTestCase {
         let policy = PlaybackAudioSessionConfigurator.stabilityFallbackAudioPolicy(for: snapshot)
 
         XCTAssertEqual(policy.profile, .airPlayStereo)
-        XCTAssertEqual(policy.audioPullStartBufferDuration, 0.5)
-        XCTAssertEqual(policy.audioPullResumeBufferDuration, 0.5)
+        XCTAssertEqual(policy.audioPullStartBufferDuration, 0.2)
+        XCTAssertEqual(policy.audioPullResumeBufferDuration, 0.1)
         XCTAssertEqual(policy.targetOutputSampleRate, 0)
         XCTAssertFalse(policy.preferAudioEngineForPCM)
         XCTAssertTrue(policy.forceClientDecodeAllAudio)
