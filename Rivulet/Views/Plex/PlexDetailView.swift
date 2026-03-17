@@ -213,88 +213,90 @@ struct PlexDetailView: View {
                         }
                         .frame(height: heroHeight)
 
-                        // Below-fold page: title logo at top, content below, dead space at bottom
-                        // minHeight ensures the logo always scrolls to the upper portion
-                        VStack(alignment: .leading, spacing: 0) {
-                            // Centered title logo (Apple TV+ style, fades in on scroll)
-                            belowFoldTitleLogo
-                                .frame(height: 110)
-                                .padding(.top, 16)
-                                .padding(.bottom, 8)
-                                .opacity(scrollProgress)
+                        // Below-fold page: ZStack decouples min height from content layout.
+                        // Color.clear sets the height floor; the VStack sits on top
+                        // at its natural size so no extra space leaks into children.
+                        ZStack(alignment: .topLeading) {
+                            // Invisible rect guarantees at least one screen of scroll room
+                            Color.clear.frame(height: geo.size.height)
 
-                            VStack(alignment: .leading, spacing: 32) {
-                                // TV Show specific: Seasons and Episodes
-                                if currentItem.type == "show" || currentItem.type == "episode" {
-                                    seasonSection
-                                }
+                            VStack(alignment: .leading, spacing: 0) {
+                                // Centered title logo (Apple TV+ style, fades in on scroll)
+                                belowFoldTitleLogo
+                                    .frame(height: 110)
+                                    .padding(.top, 40)
+                                    .padding(.bottom, 8)
+                                    .opacity(scrollProgress)
 
-                                // Season specific: Episodes list (no season picker needed)
-                                if currentItem.type == "season" {
-                                    episodeSection
-                                }
-
-                                // Album specific: Tracks
-                                if currentItem.type == "album" {
-                                    trackSection
-                                }
-
-                                // Artist specific: Albums
-                                if currentItem.type == "artist" {
-                                    albumSection
-                                }
-                            }
-                            .padding(.horizontal, 48)
-                            .allowsHitTesting(!isPreviewCarousel)
-
-                            // Recommended / Related Section
-                            if !recommendedItems.isEmpty {
-                                MediaItemRow(
-                                    title: "Related",
-                                    items: recommendedItems,
-                                    serverURL: authManager.selectedServerURL ?? "",
-                                    authToken: authManager.selectedServerToken ?? "",
-                                    onItemSelected: { selectedItem in
-                                        withAnimation(.easeInOut(duration: 0.35)) {
-                                            displayedItem = selectedItem
-                                        }
+                                VStack(alignment: .leading, spacing: 32) {
+                                    // TV Show specific: Seasons and Episodes
+                                    if currentItem.type == "show" || currentItem.type == "episode" {
+                                        seasonSection
                                     }
-                                )
-                                .padding(.top, 32)
-                            }
 
-                            // Collection Section (for movies that are part of a collection)
-                            if !collectionItems.isEmpty, let name = collectionName {
-                                MediaItemRow(
-                                    title: name,
-                                    items: collectionItems,
-                                    serverURL: authManager.selectedServerURL ?? "",
-                                    authToken: authManager.selectedServerToken ?? "",
-                                    onItemSelected: { selectedItem in
-                                        withAnimation(.easeInOut(duration: 0.35)) {
-                                            displayedItem = selectedItem
-                                        }
+                                    // Season specific: Episodes list (no season picker needed)
+                                    if currentItem.type == "season" {
+                                        episodeSection
                                     }
-                                )
-                                .padding(.top, 32)
-                            }
 
-                            // Cast & Crew Section
-                            if let metadata = fullMetadata,
-                               (!metadata.cast.isEmpty || !(metadata.Director?.isEmpty ?? true)) {
-                                CastCrewRow(
-                                    cast: metadata.cast,
-                                    directors: metadata.Director ?? [],
-                                    serverURL: authManager.selectedServerURL ?? "",
-                                    authToken: authManager.selectedServerToken ?? ""
-                                )
-                                .padding(.top, 32)
-                            }
+                                    // Album specific: Tracks
+                                    if currentItem.type == "album" {
+                                        trackSection
+                                    }
 
-                            // Dead space at bottom — pushes logo + content to the top
-                            Spacer(minLength: 60)
+                                    // Artist specific: Albums
+                                    if currentItem.type == "artist" {
+                                        albumSection
+                                    }
+                                }
+                                .padding(.horizontal, 48)
+                                .allowsHitTesting(!isPreviewCarousel)
+
+                                // Recommended / Related Section
+                                if !recommendedItems.isEmpty {
+                                    MediaItemRow(
+                                        title: "Related",
+                                        items: recommendedItems,
+                                        serverURL: authManager.selectedServerURL ?? "",
+                                        authToken: authManager.selectedServerToken ?? "",
+                                        onItemSelected: { selectedItem in
+                                            withAnimation(.easeInOut(duration: 0.35)) {
+                                                displayedItem = selectedItem
+                                            }
+                                        }
+                                    )
+                                    .padding(.top, 32)
+                                }
+
+                                // Collection Section (for movies that are part of a collection)
+                                if !collectionItems.isEmpty, let name = collectionName {
+                                    MediaItemRow(
+                                        title: name,
+                                        items: collectionItems,
+                                        serverURL: authManager.selectedServerURL ?? "",
+                                        authToken: authManager.selectedServerToken ?? "",
+                                        onItemSelected: { selectedItem in
+                                            withAnimation(.easeInOut(duration: 0.35)) {
+                                                displayedItem = selectedItem
+                                            }
+                                        }
+                                    )
+                                    .padding(.top, 32)
+                                }
+
+                                // Cast & Crew Section
+                                if let metadata = fullMetadata,
+                                   (!metadata.cast.isEmpty || !(metadata.Director?.isEmpty ?? true)) {
+                                    CastCrewRow(
+                                        cast: metadata.cast,
+                                        directors: metadata.Director ?? [],
+                                        serverURL: authManager.selectedServerURL ?? "",
+                                        authToken: authManager.selectedServerToken ?? ""
+                                    )
+                                    .padding(.top, 32)
+                                }
+                            }
                         }
-                        .frame(minHeight: geo.size.height)
                     }
                 }
                 .onScrollGeometryChange(for: Bool.self) { geometry in
@@ -1136,7 +1138,7 @@ struct PlexDetailView: View {
     // MARK: - Season Section (TV Shows)
 
     private var seasonSection: some View {
-        VStack(alignment: .leading, spacing: 24) {
+        VStack(alignment: .leading, spacing: 12) {
             if isLoadingSeasons {
                 ProgressView("Loading seasons...")
             } else if !seasons.isEmpty {

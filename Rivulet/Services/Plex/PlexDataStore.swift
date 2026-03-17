@@ -21,6 +21,7 @@ class PlexDataStore: ObservableObject {
     @Published var isLoadingLibraries = false
     @Published var hubsError: String?
     @Published var librariesError: String?
+    @Published private(set) var hasLoadedLibraries = false
 
     /// Per-library hubs for Home screen (keyed by library key)
     @Published var libraryHubs: [String: [PlexHub]] = [:]
@@ -319,6 +320,7 @@ class PlexDataStore: ObservableObject {
         // Clear in-memory data (libraries may differ per user)
         hubs = []
         libraries = []
+        hasLoadedLibraries = false
         libraryHubs.removeAll()
         hubsVersion = UUID()
         libraryHubsVersion = UUID()
@@ -581,6 +583,7 @@ class PlexDataStore: ObservableObject {
     func loadLibrariesIfNeeded() async {
         // If we already have data, skip
         if !libraries.isEmpty {
+            hasLoadedLibraries = true
             return
         }
 
@@ -616,6 +619,7 @@ class PlexDataStore: ObservableObject {
 
         await librariesLoadTask?.value
         librariesLoadTask = nil
+        hasLoadedLibraries = true
     }
 
     private func fetchLibrariesFromServer(serverURL: String, token: String, updateLoading: Bool) async {

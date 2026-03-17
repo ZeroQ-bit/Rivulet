@@ -26,7 +26,7 @@ final class RouteAudioPolicyTests: XCTestCase {
         XCTAssertEqual(policy.targetOutputSampleRate, 0)
     }
 
-    func testStereoAirPlayRouteDecodesToPCMViaAudioEngine() {
+    func testStereoAirPlayRouteDecodesPCMViaSampleBufferRenderer() {
         let snapshot = RouteAudioSnapshot(
             isAirPlay: true,
             maximumOutputChannels: 2,
@@ -42,7 +42,7 @@ final class RouteAudioPolicyTests: XCTestCase {
         XCTAssertEqual(policy.audioPullStartBufferDuration, 0.5)
         XCTAssertEqual(policy.audioPullResumeBufferDuration, 0.5)
         XCTAssertEqual(policy.targetOutputSampleRate, 0)
-        XCTAssertTrue(policy.preferAudioEngineForPCM)
+        XCTAssertFalse(policy.preferAudioEngineForPCM)
         XCTAssertTrue(policy.forceClientDecodeAllAudio)
         XCTAssertTrue(policy.forceClientDecodeCodecs.isEmpty)
         XCTAssertFalse(policy.enableSurroundReEncoding)
@@ -50,7 +50,7 @@ final class RouteAudioPolicyTests: XCTestCase {
         XCTAssertTrue(policy.useSignedInt16Audio)
     }
 
-    func testStereoReportedAirPlayRouteDecodesToPCMViaAudioEngine() {
+    func testStereoReportedAirPlayRouteDecodesPCMViaSampleBufferRenderer() {
         let snapshot = RouteAudioSnapshot(
             isAirPlay: true,
             maximumOutputChannels: 2,
@@ -65,7 +65,7 @@ final class RouteAudioPolicyTests: XCTestCase {
         XCTAssertEqual(policy.profile, .airPlayStereo)
         XCTAssertEqual(policy.audioPullStartBufferDuration, 0.5)
         XCTAssertEqual(policy.audioPullResumeBufferDuration, 0.5)
-        XCTAssertTrue(policy.preferAudioEngineForPCM)
+        XCTAssertFalse(policy.preferAudioEngineForPCM)
         XCTAssertTrue(policy.forceClientDecodeAllAudio)
         XCTAssertFalse(policy.enableSurroundReEncoding)
         XCTAssertTrue(policy.forceDownmixToStereo)
@@ -75,7 +75,7 @@ final class RouteAudioPolicyTests: XCTestCase {
         )
     }
 
-    func testMultichannelAirPlayRouteDecodesToPCMViaAudioEngine() {
+    func testMultichannelAirPlayRouteDecodesPCMWithSurroundReEncode() {
         let snapshot = RouteAudioSnapshot(
             isAirPlay: true,
             maximumOutputChannels: 8,
@@ -91,15 +91,15 @@ final class RouteAudioPolicyTests: XCTestCase {
         XCTAssertEqual(policy.audioPullStartBufferDuration, 0.5)
         XCTAssertEqual(policy.audioPullResumeBufferDuration, 0.5)
         XCTAssertEqual(policy.targetOutputSampleRate, 0)
-        XCTAssertTrue(policy.preferAudioEngineForPCM)
+        XCTAssertFalse(policy.preferAudioEngineForPCM)
         XCTAssertTrue(policy.forceClientDecodeAllAudio)
         XCTAssertTrue(policy.forceClientDecodeCodecs.isEmpty)
-        XCTAssertFalse(policy.enableSurroundReEncoding)
+        XCTAssertTrue(policy.enableSurroundReEncoding)
         XCTAssertFalse(policy.forceDownmixToStereo)
         XCTAssertTrue(policy.useSignedInt16Audio)
     }
 
-    func testAirPlayStabilityFallbackDecodesToPCMViaAudioEngine() {
+    func testAirPlayStabilityFallbackDecodesPCMViaSampleBufferRenderer() {
         let snapshot = RouteAudioSnapshot(
             isAirPlay: true,
             maximumOutputChannels: 8,
@@ -115,7 +115,7 @@ final class RouteAudioPolicyTests: XCTestCase {
         XCTAssertEqual(policy.audioPullStartBufferDuration, 0.5)
         XCTAssertEqual(policy.audioPullResumeBufferDuration, 0.5)
         XCTAssertEqual(policy.targetOutputSampleRate, 0)
-        XCTAssertTrue(policy.preferAudioEngineForPCM)
+        XCTAssertFalse(policy.preferAudioEngineForPCM)
         XCTAssertTrue(policy.forceClientDecodeAllAudio)
         XCTAssertTrue(policy.forceClientDecodeCodecs.isEmpty)
         XCTAssertFalse(policy.enableSurroundReEncoding)

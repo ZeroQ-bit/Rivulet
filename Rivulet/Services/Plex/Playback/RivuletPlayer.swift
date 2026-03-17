@@ -598,10 +598,6 @@ final class RivuletPlayer: ObservableObject {
         guard isPlaying else { return }
         isPlaying = false
 
-        // Flush audio renderer to immediately silence AirPlay/HomePod.
-        // Without this, ~2s of buffered audio continues playing after pause.
-        renderer.flushAudio()
-
         switch activePipeline {
         case .directPlay:
             directPlayPipeline?.pause()

@@ -109,8 +109,8 @@ final class DirectPlayPipeline {
 
     /// When true, all audio codecs (including AAC) are decoded client-side via FFmpeg.
     /// Required for AirPlay routes — compressed passthrough to AVSampleBufferAudioRenderer
-    /// is silently accepted but produces no audible output over AirPlay. Decoded PCM
-    /// is routed through AVAudioEngine when `preferAudioEngineForPCM` is true.
+    /// is silently accepted but produces no audible output over AirPlay. Decoded PCM S16
+    /// goes through the sample-buffer renderer's pull-mode path with larger AirPlay buffers.
     var forceClientDecodeAllAudio = false
     var forceClientDecodeCodecs: Set<String> = []
 
@@ -1266,14 +1266,11 @@ final class DirectPlayPipeline {
                         }
                         let syncPrepEnd = CFAbsoluteTimeGetCurrent()
 
-                        let prerollBypassLookahead: Bool = {
-                            guard waitingForPrerollStart,
-                                  let anchor = prerollAnchorPTSSeconds else { return false }
-                            let pendingMaxPTS = max(prerollMaxPTSSeconds ?? anchor, ptsSeconds)
-                            let pendingLead = max(0, pendingMaxPTS - anchor)
-                            let leadCap = requiresConversion ? 0.80 : 0.45
-                            return pendingLead < leadCap
-                        }()
+                        // Always bypass the video lookahead during preroll.
+                        // The lookahead sleep loop blocks on currentTime advancing,
+                        // but during preroll rate=0 so time never advances — deadlock.
+                        // The display layer's own isReadyForMoreMediaData prevents overflow.
+                        let prerollBypassLookahead = waitingForPrerollStart
 
                         let enqueueStart = CFAbsoluteTimeGetCurrent()
                         await renderer.enqueueVideo(

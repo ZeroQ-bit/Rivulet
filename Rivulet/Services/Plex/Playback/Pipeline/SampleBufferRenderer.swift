@@ -934,7 +934,15 @@ final class SampleBufferRenderer {
             return audioEnqueueCount > 0
         }
         if useAudioPullMode {
-            return audioPullDeliveredCountSnapshot() > 0
+            // Consider primed once the internal pull buffer has enough data,
+            // even if delivery to the renderer hasn't started yet.
+            // Without this, preroll deadlocks: it waits for delivered audio,
+            // but delivery waits for the startup cushion to fill.
+            if audioPullDeliveredCountSnapshot() > 0 { return true }
+            audioPullLock.lock()
+            let buffered = audioPullBufferedDuration
+            audioPullLock.unlock()
+            return buffered >= minimumAudioPullStartBuffer
         }
         return audioEnqueueCount > 0 || audioRenderer.status == .rendering
     }

@@ -210,8 +210,10 @@ struct TVSidebarView: View {
                 }
             }
 
-            Tab("Settings", systemImage: "gearshape.fill", value: SidebarTab.settings) {
-                tabContent(for: .settings)
+            TabSection("") {
+                Tab("Settings", systemImage: "gearshape.fill", value: SidebarTab.settings) {
+                    tabContent(for: .settings)
+                }
             }
         }
         .tabViewStyle(.sidebarAdaptable)
