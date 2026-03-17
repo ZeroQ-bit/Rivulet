@@ -77,6 +77,24 @@ struct TMDBLogo: Codable {
 
 private struct TMDBImagesResponse: Codable {
     let logos: [TMDBLogo]?
+    let backdrops: [TMDBImage]?
+}
+
+struct TMDBImage: Codable {
+    let filePath: String?
+    let width: Int?
+    let height: Int?
+    let iso6391: String?
+    let voteAverage: Double?
+    let voteCount: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case filePath = "file_path"
+        case width, height
+        case iso6391 = "iso_639_1"
+        case voteAverage = "vote_average"
+        case voteCount = "vote_count"
+    }
 }
 
 private struct TMDBFindResponse: Codable {
@@ -134,6 +152,11 @@ private struct CachedLogoURL: Codable {
     let generatedAt: Date
     let logoURLString: String?  // nil means "no logo found"
     let aspectRatio: Double?
+}
+
+private struct CachedBackdropURL: Codable {
+    let generatedAt: Date
+    let backdropURLString: String?  // nil means "no backdrop found"
 }
 
 final class TMDBClient: @unchecked Sendable {
@@ -223,6 +246,51 @@ final class TMDBClient: @unchecked Sendable {
 
             guard let urlString else { return nil }
             return TMDBLogoResult(url: URL(string: urlString), aspectRatio: best?.aspectRatio)
+        } catch {
+            return nil
+        }
+    }
+
+    /// Fetches the best backdrop URL from TMDB images.
+    /// - Parameter size: Image size tier ("w1280" or "original"). Defaults to "w1280".
+    func fetchBackdropURL(tmdbId: Int, type: TMDBMediaType, size: String = "w1280") async -> URL? {
+        if let cached = loadCachedBackdrop(tmdbId: tmdbId, type: type) {
+            return cached
+        }
+
+        do {
+            let images: TMDBImagesResponse = try await request(endpoint: "tmdb/images/\(tmdbId)", type: type)
+
+            // Prefer no-language backdrops (pure art, no text), then English, sorted by resolution and votes
+            let backdrops = images.backdrops ?? []
+            let best = backdrops
+                .filter { $0.filePath != nil }
+                .sorted { a, b in
+                    let aLang = a.iso6391 ?? ""
+                    let bLang = b.iso6391 ?? ""
+                    // No-language first (pure art), then English, then others
+                    let aScore = aLang.isEmpty ? 0 : (aLang == "en" ? 1 : 2)
+                    let bScore = bLang.isEmpty ? 0 : (bLang == "en" ? 1 : 2)
+                    if aScore != bScore { return aScore < bScore }
+                    // Higher resolution first
+                    let aRes = (a.width ?? 0) * (a.height ?? 0)
+                    let bRes = (b.width ?? 0) * (b.height ?? 0)
+                    if aRes != bRes { return aRes > bRes }
+                    return (a.voteAverage ?? 0) > (b.voteAverage ?? 0)
+                }
+                .first
+
+            let urlString: String?
+            if let filePath = best?.filePath {
+                urlString = "https://image.tmdb.org/t/p/\(size)\(filePath)"
+            } else {
+                urlString = nil
+            }
+
+            saveCachedBackdrop(urlString, tmdbId: tmdbId, type: type)
+
+            guard let urlString else { return nil }
+            return URL(string: urlString)
         } catch {
             return nil
         }
@@ -320,6 +388,32 @@ final class TMDBClient: @unchecked Sendable {
         let cached = CachedLogoURL(generatedAt: Date(), logoURLString: urlString, aspectRatio: aspectRatio)
         guard let data = try? JSONEncoder().encode(cached) else { return }
         let url = logoCacheURL(tmdbId: tmdbId, type: type)
+        try? data.write(to: url, options: [.atomic])
+    }
+
+    // MARK: - Backdrop Cache
+
+    private func backdropCacheURL(tmdbId: Int, type: TMDBMediaType) -> URL {
+        cacheDirectory.appendingPathComponent("\(type.rawValue)_\(tmdbId)_backdrop.json")
+    }
+
+    /// Load cached backdrop result. Returns nil if not cached, .some(nil) if cached negative.
+    private func loadCachedBackdrop(tmdbId: Int, type: TMDBMediaType) -> URL?? {
+        let url = backdropCacheURL(tmdbId: tmdbId, type: type)
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        guard let cached = try? JSONDecoder().decode(CachedBackdropURL.self, from: data) else { return nil }
+        let age = Date().timeIntervalSince(cached.generatedAt)
+        guard age < cacheTTL else { return nil }
+        if let urlString = cached.backdropURLString {
+            return .some(URL(string: urlString))
+        }
+        return .some(nil)  // Cached negative result
+    }
+
+    private func saveCachedBackdrop(_ urlString: String?, tmdbId: Int, type: TMDBMediaType) {
+        let cached = CachedBackdropURL(generatedAt: Date(), backdropURLString: urlString)
+        guard let data = try? JSONEncoder().encode(cached) else { return }
+        let url = backdropCacheURL(tmdbId: tmdbId, type: type)
         try? data.write(to: url, options: [.atomic])
     }
 }

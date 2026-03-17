@@ -210,6 +210,7 @@ final class RivuletPlayer: ObservableObject {
 
     private func handleAudioRendererAutoFlush(flushTime: CMTime) async {
         _ = applyCurrentAudioPolicy(reason: "audio_renderer_auto_flush")
+        guard isPlaying else { return }
         let instabilityHandled = recordAirPlayInstabilityEvent(.autoFlush)
         if instabilityHandled { return }
         await recoverAudioFromRendererEvent(afterFlushTime: flushTime, reason: "audio_renderer_auto_flush")
@@ -217,6 +218,7 @@ final class RivuletPlayer: ObservableObject {
 
     private func handleAudioOutputConfigurationChange() async {
         _ = applyCurrentAudioPolicy(reason: "audio_output_configuration_changed")
+        guard isPlaying else { return }
         let instabilityHandled = recordAirPlayInstabilityEvent(.outputRecovery)
         if instabilityHandled { return }
         await recoverAudioFromRendererEvent(afterFlushTime: .invalid, reason: "audio_output_configuration_changed")
@@ -255,6 +257,13 @@ final class RivuletPlayer: ObservableObject {
             directPlayPipeline.forceDownmixToStereo = policy.forceDownmixToStereo
         }
         renderer.audioBackpressureMaxWait = policy.audioBackpressureMaxWait
+
+        // Enable/disable AirPlay video delay queue based on route
+        if snapshot.isAirPlay && !policy.preferAudioEngineForPCM {
+            renderer.enableAirPlayVideoCompensation()
+        } else {
+            renderer.disableAirPlayVideoCompensation()
+        }
 
         print(
             "[RivuletPlayer] AudioPolicy reason=\(reason) " +
@@ -598,11 +607,6 @@ final class RivuletPlayer: ObservableObject {
         guard isPlaying else { return }
         isPlaying = false
 
-        // Stop pull-mode delivery and clear the internal buffer to prevent
-        // accumulated audio from bursting on resume. Does NOT flush the
-        // renderer — already-delivered audio stays intact for seamless resume.
-        renderer.pauseAudio()
-
         switch activePipeline {
         case .directPlay:
             directPlayPipeline?.pause()
@@ -926,7 +930,7 @@ final class RivuletPlayer: ObservableObject {
 
                 guard let self = self, !Task.isCancelled else { return }
 
-                let time = self.renderer.currentTime
+                let time = self.renderer.displayTime
                 let usingEngine = self.renderer.useAudioEngine
                 let rate = usingEngine ? (self.isPlaying ? 1.0 : 0.0) : self.renderer.renderSynchronizer.rate
                 let playing = self.isPlaying

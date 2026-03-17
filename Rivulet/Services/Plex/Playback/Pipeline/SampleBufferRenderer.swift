@@ -40,6 +40,20 @@ final class SampleBufferRenderer {
     private var engineConfigObserver: NSObjectProtocol?
     private var audioEngineVideoLatency: CMTime = .zero
 
+    // MARK: - AirPlay Video Compensation (Sample-Buffer Audio Path)
+
+    /// When non-zero, video display is delayed by this amount to compensate
+    /// for AirPlay audio transport latency. Video frames are held in a FIFO
+    /// queue and released "just in time" so they appear on screen when the
+    /// corresponding audio arrives at the HomePod.
+    nonisolated(unsafe) private var airPlayVideoDelay: CMTime = .zero
+
+    /// FIFO queue holding video frames for the AirPlay delay period.
+    private var videoDelayQueue: [CMSampleBuffer] = []
+
+    /// Whether the video delay queue is actively buffering frames.
+    nonisolated(unsafe) private(set) var isVideoDelayQueueActive = false
+
     /// Independent video clock used while the audio engine owns audio playback.
     nonisolated(unsafe) private var videoTimebase: CMTimebase?
 
@@ -183,6 +197,7 @@ final class SampleBufferRenderer {
         audioEngine = nil
         pcmAudioFormat = nil
         audioEngineVideoLatency = .zero
+        airPlayVideoDelay = .zero
 
         if let engineConfigObserver {
             NotificationCenter.default.removeObserver(engineConfigObserver)
@@ -194,6 +209,70 @@ final class SampleBufferRenderer {
         useAudioEngine = false
         audioRenderer.flush()
         print("[Renderer] Audio engine mode disabled — reverted to sample-buffer audio")
+    }
+
+    // MARK: - AirPlay Video Delay
+
+    /// Enable AirPlay video compensation when using the sample-buffer audio path.
+    /// Reads output latency from AVAudioSession and activates a video delay queue
+    /// that holds frames for the latency period before feeding them to the display layer.
+    func enableAirPlayVideoCompensation() {
+        guard !useAudioEngine else { return }
+
+        let session = AVAudioSession.sharedInstance()
+        let outputLatency = session.outputLatency
+        guard outputLatency > 0.1 else {
+            disableAirPlayVideoCompensation()
+            return
+        }
+
+        airPlayVideoDelay = CMTime(seconds: outputLatency, preferredTimescale: 90_000)
+        isVideoDelayQueueActive = true
+
+        print(
+            "[Renderer] AirPlay video compensation enabled: delay=\(String(format: "%.3f", outputLatency))s"
+        )
+    }
+
+    func disableAirPlayVideoCompensation() {
+        guard airPlayVideoDelay > .zero || isVideoDelayQueueActive else { return }
+        guard !useAudioEngine else { return }
+
+        airPlayVideoDelay = .zero
+        isVideoDelayQueueActive = false
+
+        // Fast-drain remaining frames to the display layer immediately
+        for frame in videoDelayQueue {
+            if displayLayer.isReadyForMoreMediaData {
+                displayLayer.enqueue(frame)
+            }
+        }
+        videoDelayQueue.removeAll()
+
+        print("[Renderer] AirPlay video compensation disabled")
+    }
+
+    /// Drain frames from the delay queue to the display layer.
+    /// Frames are released 50ms before they're due, giving the display layer
+    /// a tiny buffer (1-2 frames) to smooth delivery jitter. The lead time is
+    /// kept small because the display layer shows late frames immediately —
+    /// a larger lead would cause video to appear early, breaking A/V sync.
+    private func drainVideoDelayQueue() {
+        guard isVideoDelayQueueActive else { return }
+        let syncTime = CMTimeGetSeconds(renderSynchronizer.currentTime())
+        guard syncTime.isFinite && syncTime >= 0 else { return }
+        let delaySeconds = CMTimeGetSeconds(airPlayVideoDelay)
+        let leadTime = 0.05 // 50ms — below lip-sync perception threshold
+
+        while !videoDelayQueue.isEmpty {
+            let framePTS = CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(videoDelayQueue[0]))
+            guard syncTime >= framePTS + delaySeconds - leadTime else { break }
+            guard displayLayer.isReadyForMoreMediaData else { break }
+            let frame = videoDelayQueue.removeFirst()
+            let adjustedPTS = CMTimeAdd(CMSampleBufferGetPresentationTimeStamp(frame), airPlayVideoDelay)
+            CMSampleBufferSetOutputPresentationTimeStamp(frame, newValue: adjustedPTS)
+            displayLayer.enqueue(frame)
+        }
     }
 
     private func configureAudioEngine(from sampleBuffer: CMSampleBuffer) -> Bool {
@@ -286,10 +365,14 @@ final class SampleBufferRenderer {
 
     /// Current playback position.
     nonisolated var currentTime: TimeInterval {
+        // Audio engine mode: the video timebase is the only clock (synchronizer unused).
         if useAudioEngine, let timebase = videoTimebase {
             let time = CMTimeGetSeconds(CMTimebaseGetTime(timebase))
             return time.isFinite && time >= 0 ? time : 0
         }
+        // Sample buffer mode (including AirPlay video compensation):
+        // Always use the synchronizer for pacing, UI, and diagnostics.
+        // The AirPlay-shifted video timebase only affects display layer rendering.
         let time = CMTimeGetSeconds(renderSynchronizer.currentTime())
         return time.isFinite && time >= 0 ? time : 0
     }
@@ -302,13 +385,37 @@ final class SampleBufferRenderer {
         return renderSynchronizer.currentTime()
     }
 
+    /// Media time currently visible on screen. Lags behind `currentTime`
+    /// by the AirPlay delay when the delay queue is active.
+    nonisolated var displayTime: TimeInterval {
+        if isVideoDelayQueueActive && airPlayVideoDelay > .zero {
+            return max(0, currentTime - CMTimeGetSeconds(airPlayVideoDelay))
+        }
+        return currentTime
+    }
+
     /// Set playback rate (0 = paused, 1 = normal).
     func setRate(_ rate: Float) {
-        print("[Renderer] setRate(\(rate))")
+        if rate > 0 && !useAudioEngine {
+            audioPullLock.lock()
+            let pullBuf = audioPullBuffer.count
+            let pullDur = audioPullBufferedDuration
+            let pullReq = audioPullRequesting
+            audioPullLock.unlock()
+            let syncTime = CMTimeGetSeconds(renderSynchronizer.currentTime())
+            print("[Renderer] setRate(\(rate)) syncTime=\(String(format: "%.3f", syncTime))s " +
+                  "pullBuffer=\(pullBuf) pullDur=\(String(format: "%.3f", pullDur))s pullRequesting=\(pullReq) " +
+                  "audioStatus=\(audioRenderer.status.rawValue)")
+        } else {
+            print("[Renderer] setRate(\(rate))")
+        }
+
+        // Update separate video timebase (audio engine only)
+        if useAudioEngine, let timebase = videoTimebase {
+            CMTimebaseSetRate(timebase, rate: Float64(rate))
+        }
+
         if useAudioEngine {
-            if let timebase = videoTimebase {
-                CMTimebaseSetRate(timebase, rate: Float64(rate))
-            }
             if rate > 0 {
                 audioPlayerNode?.play()
             } else {
@@ -322,12 +429,15 @@ final class SampleBufferRenderer {
     /// Set playback rate and time simultaneously.
     func setRate(_ rate: Float, time: CMTime) {
         print("[Renderer] setRate(\(rate), time=\(String(format: "%.3f", CMTimeGetSeconds(time)))s)")
+
+        // Update separate video timebase with latency compensation (audio engine only)
+        if useAudioEngine, let timebase = videoTimebase {
+            let compensated = compensatedVideoTime(forMediaTime: time)
+            CMTimebaseSetTime(timebase, time: compensated)
+            CMTimebaseSetRate(timebase, rate: Float64(rate))
+        }
+
         if useAudioEngine {
-            if let timebase = videoTimebase {
-                let displayTime = compensatedVideoTime(forMediaTime: time)
-                CMTimebaseSetTime(timebase, time: displayTime)
-                CMTimebaseSetRate(timebase, rate: Float64(rate))
-            }
             if rate > 0 {
                 audioPlayerNode?.play()
             } else {
@@ -340,16 +450,25 @@ final class SampleBufferRenderer {
 
     /// Set playback rate and media time against a future host-time edge.
     func setRate(_ rate: Float, time: CMTime, atHostTime hostTime: CMTime) {
+        let session = AVAudioSession.sharedInstance()
+        let outputLatency = session.outputLatency
+        let delaysSufficientData = renderSynchronizer.delaysRateChangeUntilHasSufficientMediaData
         print(
             "[Renderer] setRate(\(rate), time=\(String(format: "%.3f", CMTimeGetSeconds(time)))s, " +
-            "hostTime=\(String(format: "%.3f", CMTimeGetSeconds(hostTime)))s)"
+            "hostTime=\(String(format: "%.3f", CMTimeGetSeconds(hostTime)))s) " +
+            "outputLatency=\(String(format: "%.3f", outputLatency))s " +
+            "delaysSufficientData=\(delaysSufficientData) " +
+            "audioStatus=\(audioRenderer.status.rawValue) " +
+            "pullDelivered=\(audioPullDeliveredCountSnapshot())"
         )
         if useAudioEngine {
             setRate(rate, time: time)
-        } else if #available(tvOS 14.5, iOS 14.5, macOS 11.3, watchOS 7.4, visionOS 1.0, *) {
-            renderSynchronizer.setRate(rate, time: time, atHostTime: hostTime)
         } else {
-            renderSynchronizer.setRate(rate, time: time)
+            if #available(tvOS 14.5, iOS 14.5, macOS 11.3, watchOS 7.4, visionOS 1.0, *) {
+                renderSynchronizer.setRate(rate, time: time, atHostTime: hostTime)
+            } else {
+                renderSynchronizer.setRate(rate, time: time)
+            }
         }
     }
 
@@ -431,18 +550,36 @@ final class SampleBufferRenderer {
         let samplePTS = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
         let sampleTime = CMTimeGetSeconds(samplePTS)
 
+        // Lookahead pacing: limit how far the read loop gets ahead of playback.
+        // When the delay queue is active, increase the lookahead by the delay
+        // so the queue can pre-fill (~2s of frames) without blocking the loop.
         if !bypassLookahead {
+            let effectiveLookahead = isVideoDelayQueueActive
+                ? maxVideoLookahead + CMTimeGetSeconds(airPlayVideoDelay)
+                : maxVideoLookahead
+
             while !Task.isCancelled {
                 let syncTime = currentTime
                 let ahead = sampleTime - syncTime
 
-                if ahead <= maxVideoLookahead || syncTime < 0.1 {
+                if ahead <= effectiveLookahead || syncTime < 0.1 {
                     break
                 }
 
-                let sleepTime = min(ahead - maxVideoLookahead, 0.1)
+                let sleepTime = min(ahead - effectiveLookahead, 0.1)
                 try? await Task.sleep(nanoseconds: UInt64(sleepTime * 1_000_000_000))
             }
+        }
+
+        guard !Task.isCancelled else { return }
+
+        // Delay queue path: skip isReadyForMoreMediaData (display layer isn't
+        // fed directly) and append to the queue. The drain timer releases frames
+        // when syncTime >= framePTS + delay.
+        if isVideoDelayQueueActive && airPlayVideoDelay > .zero {
+            videoDelayQueue.append(sampleBuffer)
+            drainVideoDelayQueue()
+            return
         }
 
         if !displayLayer.isReadyForMoreMediaData {
@@ -700,12 +837,18 @@ final class SampleBufferRenderer {
             lastAudioDiagWallTime = now
             let syncTime = CMTimeGetSeconds(renderSynchronizer.currentTime())
             let pts = CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
+            let session = AVAudioSession.sharedInstance()
+            let outputLatency = session.outputLatency
+            let audioAhead = pts - syncTime
             print("[Renderer] AudioPullDiag: buffered=\(bufferCount) enqueued=\(audioEnqueueCount) " +
                   "bufferedDur=\(String(format: "%.3f", bufferedDuration))s " +
                   "requesting=\(audioPullRequesting) " +
                   "reliableStart=\(hasReliableAudioStartBuffer) " +
                   "syncTime=\(String(format: "%.3f", syncTime))s " +
                   "audioPTS=\(String(format: "%.3f", pts))s " +
+                  "audioAhead=\(String(format: "%.3f", audioAhead))s " +
+                  "outputLatency=\(String(format: "%.3f", outputLatency))s " +
+                  "rate=\(renderSynchronizer.rate) " +
                   "status=\(audioRenderer.status.rawValue)")
         }
 
@@ -900,6 +1043,7 @@ final class SampleBufferRenderer {
 
     /// Flush both video and audio buffers (for seeking).
     func flush() {
+        videoDelayQueue.removeAll()
         displayLayer.flushAndRemoveImage()
 
         if useAudioEngine {
@@ -1048,6 +1192,15 @@ final class SampleBufferRenderer {
                 guard !self.useAudioEngine else { return }
                 let flushTimeSeconds = CMTimeGetSeconds(flushTime)
                 let syncTime = CMTimeGetSeconds(self.renderSynchronizer.currentTime())
+                let rate = self.renderSynchronizer.rate
+
+                if rate == 0 {
+                    // Auto-flush during pause (typically from NowPlaying session re-activation).
+                    // Skip destructive reset — the pull mode will recover naturally on resume.
+                    print("[Renderer] Audio renderer auto-flushed during pause at \(String(format: "%.3f", flushTimeSeconds))s — skipping reset")
+                    return
+                }
+
                 print("[Renderer] Audio renderer auto-flushed at \(String(format: "%.3f", flushTimeSeconds))s " +
                       "(syncTime=\(String(format: "%.3f", syncTime))s, " +
                       "enqueued=\(self.audioEnqueueCount), drops=\(self.audioBackpressureDropCount))")

@@ -1956,7 +1956,7 @@ final class UniversalPlayerViewModel: ObservableObject {
         subtitleClockSync.start(
             owner: "Rivulet",
             subtitleManager: subtitleManager,
-            timeProvider: { rp.renderer.currentTime },
+            timeProvider: { rp.renderer.displayTime },
             isPlayingProvider: { rp.isPlaying }
         )
     }

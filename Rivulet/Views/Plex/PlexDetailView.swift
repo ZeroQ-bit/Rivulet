@@ -83,6 +83,7 @@ struct PlexDetailView: View {
     @State private var isLoadingShufflePlay = false
     @State private var shuffledEpisodeQueue: [PlexMetadata] = []
     @State private var showLogoURL: URL?  // TMDB stylized logo for shows/movies
+    @State private var tmdbArtURL: URL?  // TMDB high-quality backdrop (preferred over Plex art)
     @State private var scrollProgress: CGFloat = 0  // 0 = at rest (peek), 1 = fully scrolled
     @State private var scrollResetID = UUID()
 
@@ -91,6 +92,11 @@ struct PlexDetailView: View {
     @State private var navigateToShow: PlexMetadata?
     @State private var navigateToEpisode: PlexMetadata?
     @State private var isLoadingNavigation = false
+
+    // Unified episode list state (all seasons in one scroll)
+    @State private var unifiedEpisodes: [PlexMetadata] = []
+    @State private var episodeScrollTarget: String? = nil
+    @State private var scrollToTopTrigger = false
 
     private let networkManager = PlexNetworkManager.shared
     private let recommendationService = PersonalizedRecommendationService.shared
@@ -158,7 +164,7 @@ struct PlexDetailView: View {
                 // Layer 1: Fixed backdrop (doesn't scroll, fills screen)
                 heroBackdropImage
                     .offset(x: backgroundParallaxOffset)
-                    .scaleEffect(x: backgroundParallaxOffset != 0 ? 1.15 : 1.0, anchor: .center)
+                    .scaleEffect(1.04)
                     .frame(width: geo.size.width, height: geo.size.height)
                     .clipped()
                     .overlay {
@@ -202,6 +208,7 @@ struct PlexDetailView: View {
                 .allowsHitTesting(false)
 
                 // Layer 2: All scrollable content in one continuous flow
+                ScrollViewReader { verticalProxy in
                 ScrollView(.vertical, showsIndicators: false) {
                     VStack(alignment: .leading, spacing: 0) {
                         // Metadata pinned near bottom of visible area
@@ -212,6 +219,7 @@ struct PlexDetailView: View {
                                 .opacity(showMetadata ? (1 - scrollProgress) : 0)
                         }
                         .frame(height: heroHeight)
+                        .id("scrollTop")
 
                         // Below-fold page: ZStack decouples min height from content layout.
                         // Color.clear sets the height floor; the VStack sits on top
@@ -310,6 +318,12 @@ struct PlexDetailView: View {
                 .id(scrollResetID)
                 .scrollDisabled(isPreviewCarousel || !allowVerticalScroll)
                 .defaultScrollAnchor(.top)
+                .onChange(of: scrollToTopTrigger) { _, _ in
+                    withAnimation(.easeInOut(duration: 0.4)) {
+                        verticalProxy.scrollTo("scrollTop", anchor: .top)
+                    }
+                }
+                } // ScrollViewReader
             }
         }
         .ignoresSafeArea()
@@ -318,12 +332,15 @@ struct PlexDetailView: View {
             seasons = []
             episodes = []
             selectedSeason = nil
+            unifiedEpisodes = []
+            episodeScrollTarget = nil
             fullMetadata = nil
             collectionItems = []
             collectionName = nil
             recommendedItems = []
             nextUpEpisode = nil
             showLogoURL = nil
+            tmdbArtURL = nil
             isSummaryExpanded = false
             scrollProgress = 0
 
@@ -339,8 +356,8 @@ struct PlexDetailView: View {
             // Load full metadata for cast/crew and trailer
             await loadFullMetadata()
 
-            // Fetch TMDB logo for shows, movies, and episodes
-            await loadShowLogo()
+            // Fetch TMDB logo and high-quality backdrop for shows, movies, and episodes
+            await loadTMDBAssets()
 
             // Load collection and recommendations for movies
             if currentItem.type == "movie" {
@@ -358,7 +375,7 @@ struct PlexDetailView: View {
             // Load seasons for TV shows
             if currentItem.type == "show" {
                 await loadSeasons()
-                // Determine the "next up" episode for the Play button
+                await loadAllEpisodes()
                 await loadNextUpEpisode()
             }
 
@@ -372,6 +389,7 @@ struct PlexDetailView: View {
             // Load seasons for episodes (show parent show's seasons inline)
             if currentItem.type == "episode" {
                 await loadSeasonsForEpisode()
+                await loadAllEpisodes()
             }
 
             // Load tracks for albums
@@ -398,6 +416,14 @@ struct PlexDetailView: View {
                 focusedActionButton = "play"
             }
         }
+        .onChange(of: focusedEpisodeId) { _, newId in
+            // Sync season pill when user navigates across season boundary
+            guard let newId,
+                  let episode = unifiedEpisodes.first(where: { $0.ratingKey == newId }),
+                  episode.parentRatingKey != selectedSeason?.ratingKey,
+                  let newSeason = seasons.first(where: { $0.ratingKey == episode.parentRatingKey }) else { return }
+            selectedSeason = newSeason
+        }
         .onAppear {
             guard isExpandedPreviewFlow, let bridge = menuBridge else { return }
             bridge.interceptHandler = { [self] in
@@ -412,6 +438,13 @@ struct PlexDetailView: View {
                     return true
                 } else if navigateToEpisode != nil {
                     navigateToEpisode = nil
+                    return true
+                } else if scrollProgress > 0 || focusedEpisodeId != nil {
+                    scrollToTopTrigger.toggle()
+                    focusedEpisodeId = nil
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                        focusedActionButton = "play"
+                    }
                     return true
                 }
                 return false
@@ -485,10 +518,11 @@ struct PlexDetailView: View {
                     }
 
                     // For show/season detail pages, also refresh episode list and next-up
-                    if currentItem.type == "show" || currentItem.type == "season" {
-                        if let season = selectedSeason {
-                            await loadEpisodes(for: season)
-                        }
+                    if currentItem.type == "show" {
+                        await loadAllEpisodes()
+                        await loadNextUpEpisode()
+                    } else if currentItem.type == "season" {
+                        await loadEpisodesForSeason()
                         await loadNextUpEpisode()
                     }
                 }
@@ -562,8 +596,6 @@ struct PlexDetailView: View {
                     )
             }
         }
-        .id(artURL)
-        .transition(.opacity)
         .animation(.easeInOut(duration: 0.3), value: currentItem.ratingKey)
     }
 
@@ -668,37 +700,35 @@ struct PlexDetailView: View {
                 .frame(height: 380, alignment: .bottomLeading)
                 .frame(maxWidth: 720, alignment: .leading)
 
-                if showMetadata {
-                    // Bottom row: buttons (left) + starring (right) — full width
-                    // Buttons visible with metadata but only focusable/interactable when expanded
-                    HStack(alignment: .bottom, spacing: 0) {
-                        actionButtons
-                            .onMoveCommand { direction in
-                                if direction == .up,
-                                   isExpandedPreviewFlow,
-                                   scrollProgress == 0 {
-                                    onPreviewExitRequested?()
-                                }
-                            }
-
-                        Spacer(minLength: 40)
-
-                        // Starring (comma-separated, right-aligned)
-                        if let roles = (fullMetadata ?? currentItem).Role, !roles.isEmpty {
-                            let topCast = roles.prefix(5).compactMap { $0.tag }
-                            if !topCast.isEmpty {
-                                Text("Starring \(topCast.joined(separator: ", "))")
-                                    .font(.caption)
-                                    .foregroundStyle(.white.opacity(0.85))
-                                    .lineLimit(2)
-                                    .multilineTextAlignment(.trailing)
-                                    .frame(maxWidth: 700, alignment: .trailing)
+                // Bottom row: buttons (left) + starring (right) — full width
+                // Always in tree to avoid layout shift; opacity-controlled
+                HStack(alignment: .bottom, spacing: 0) {
+                    actionButtons
+                        .onMoveCommand { direction in
+                            if direction == .up,
+                               isExpandedPreviewFlow,
+                               scrollProgress == 0 {
+                                onPreviewExitRequested?()
                             }
                         }
+
+                    Spacer(minLength: 40)
+
+                    // Starring (comma-separated, right-aligned)
+                    if let roles = (fullMetadata ?? currentItem).Role, !roles.isEmpty {
+                        let topCast = roles.prefix(5).compactMap { $0.tag }
+                        if !topCast.isEmpty {
+                            Text("Starring \(topCast.joined(separator: ", "))")
+                                .font(.caption)
+                                .foregroundStyle(.white.opacity(0.85))
+                                .lineLimit(2)
+                                .multilineTextAlignment(.trailing)
+                                .frame(maxWidth: 700, alignment: .trailing)
+                        }
                     }
-                    .allowsHitTesting(showExpandedChrome)
-                    .transition(.opacity)
                 }
+                .opacity(showMetadata ? 1 : 0)
+                .allowsHitTesting(showExpandedChrome)
             }
         }
         .animation(.easeInOut(duration: 0.3), value: currentItem.ratingKey)
@@ -1148,54 +1178,86 @@ struct PlexDetailView: View {
                         seasons: seasons,
                         selectedSeason: $selectedSeason,
                         onSeasonSelected: { season in
-                            FocusMemory.shared.forget(key: "detailEpisodes")
-                            Task { await loadEpisodes(for: season, crossfade: true) }
+                            // Scroll episode list to this season's first episode
+                            if let firstEp = unifiedEpisodes.first(where: { $0.parentRatingKey == season.ratingKey }),
+                               let epKey = firstEp.ratingKey {
+                                episodeScrollTarget = epKey
+                            }
                         }
                     )
                     .opacity(scrollProgress)
+                    .onMoveCommand { direction in
+                        if direction == .up {
+                            scrollToTopTrigger.toggle()
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                                focusedActionButton = "play"
+                            }
+                        }
+                    }
                 }
 
-                // Horizontal episode cards
-                seasonSectionEpisodeList
+                // Unified horizontal episode cards across all seasons
+                unifiedEpisodeList
             }
         }
     }
 
-    /// Horizontal episode card row
-    private var seasonSectionEpisodeList: some View {
+    /// Unified horizontal episode card row across all seasons
+    private var unifiedEpisodeList: some View {
         Group {
-            if isLoadingEpisodes {
+            if unifiedEpisodes.isEmpty && isLoadingEpisodes {
                 ProgressView("Loading episodes...")
                     .padding(.top, 20)
-            } else if !episodes.isEmpty {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    LazyHStack(spacing: 24) {
-                        ForEach(episodes, id: \.ratingKey) { episode in
-                            EpisodeCard(
-                                episode: episode,
-                                serverURL: authManager.selectedServerURL ?? "",
-                                authToken: authManager.selectedServerToken ?? "",
-                                focusedEpisodeId: $focusedEpisodeId,
-                                onPlay: {
-                                    selectedEpisode = episode
-                                    playFromBeginning = false
-                                    showPlayer = true
-                                },
-                                onRefreshNeeded: {
-                                    await refreshEpisodeWatchStatus(ratingKey: episode.ratingKey)
-                                },
-                                onShowInfo: {
-                                    navigateToEpisode = episode
-                                }
-                            )
+            } else if !unifiedEpisodes.isEmpty {
+                ScrollViewReader { proxy in
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        LazyHStack(spacing: 0) {
+                            ForEach(Array(unifiedEpisodes.enumerated()), id: \.element.ratingKey) { index, episode in
+                                let isSeasonBoundary = index > 0 && episode.parentRatingKey != unifiedEpisodes[index - 1].parentRatingKey
+                                let leadingPad: CGFloat = index == 0 ? 48 : (isSeasonBoundary ? 56 : 24)
+
+                                EpisodeCard(
+                                    episode: episode,
+                                    serverURL: authManager.selectedServerURL ?? "",
+                                    authToken: authManager.selectedServerToken ?? "",
+                                    focusedEpisodeId: $focusedEpisodeId,
+                                    showSeasonPrefix: seasons.count > 1,
+                                    onPlay: {
+                                        selectedEpisode = episode
+                                        playFromBeginning = false
+                                        showPlayer = true
+                                    },
+                                    onRefreshNeeded: {
+                                        await refreshEpisodeWatchStatus(ratingKey: episode.ratingKey)
+                                    },
+                                    onShowInfo: {
+                                        navigateToEpisode = episode
+                                    }
+                                )
+                                .padding(.leading, leadingPad)
+                                .padding(.trailing, index == unifiedEpisodes.count - 1 ? 48 : 0)
+                                .id(episode.ratingKey)
+                            }
+                        }
+                        .padding(.vertical, 16)
+                    }
+                    .scrollClipDisabled()
+                    .focusSection()
+                    .onMoveCommand { direction in
+                        guard direction == .up, seasons.count <= 1 else { return }
+                        scrollToTopTrigger.toggle()
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                            focusedActionButton = "play"
                         }
                     }
-                    .padding(.horizontal, 48)
-                    .padding(.vertical, 16)
+                    .onChange(of: episodeScrollTarget) { _, target in
+                        guard let target else { return }
+                        withAnimation(.easeInOut(duration: 0.3)) {
+                            proxy.scrollTo(target, anchor: .leading)
+                        }
+                        episodeScrollTarget = nil
+                    }
                 }
-                .scrollClipDisabled()
-                .focusSection()
-                .remembersFocus(key: "detailEpisodes", focusedId: $focusedEpisodeId)
             }
         }
     }
@@ -1466,11 +1528,9 @@ struct PlexDetailView: View {
         isLoadingExtras = false
     }
 
-    /// Fetch the stylized logo image URL from TMDB for the title display
-    private func loadShowLogo() async {
-        // For shows: use the show's TMDB ID directly
-        // For episodes: fetch the parent show's metadata to get its guid/TMDB ID
-        // For movies: use the movie's TMDB ID
+    /// Fetch TMDB logo and high-quality backdrop image
+    private func loadTMDBAssets() async {
+        // Resolve TMDB ID based on item type
         let tmdbId: Int?
         let mediaType: TMDBMediaType
 
@@ -1483,7 +1543,6 @@ struct PlexDetailView: View {
                 tmdbId = await resolveTmdbIdViaTvdb(metadata: fullMetadata ?? currentItem, type: .tv)
             }
         case "episode":
-            // Episode metadata doesn't include grandparentGuid, so fetch the show's metadata
             mediaType = .tv
             tmdbId = await resolveShowTmdbId()
         case "movie":
@@ -1497,12 +1556,44 @@ struct PlexDetailView: View {
             return
         }
 
-        guard let tmdbId else {
-            return
+        guard let tmdbId else { return }
+
+        // Check Plex art quality — skip TMDB backdrop if Plex art is already high-res
+        let needsBackdrop = await plexArtNeedsUpgrade()
+
+        if needsBackdrop {
+            // Fetch logo and backdrop concurrently
+            async let logoTask = TMDBClient.shared.fetchLogoURL(tmdbId: tmdbId, type: mediaType)
+            async let backdropTask = TMDBClient.shared.fetchBackdropURL(
+                tmdbId: tmdbId, type: mediaType,
+                size: "original"
+            )
+            let (logoURL, backdropURL) = await (logoTask, backdropTask)
+            showLogoURL = logoURL
+            if let backdropURL {
+                tmdbArtURL = backdropURL
+            }
+        } else {
+            // Just fetch logo
+            showLogoURL = await TMDBClient.shared.fetchLogoURL(tmdbId: tmdbId, type: mediaType)
+        }
+    }
+
+    /// Check if the Plex art image is below quality threshold (< 1280px wide)
+    private func plexArtNeedsUpgrade() async -> Bool {
+        guard let art = currentItem.bestArt,
+              let serverURL = authManager.selectedServerURL,
+              let token = authManager.selectedServerToken,
+              let plexURL = URL(string: "\(serverURL)\(art)?X-Plex-Token=\(token)") else {
+            return true  // No Plex art at all — definitely need TMDB
         }
 
-        let url = await TMDBClient.shared.fetchLogoURL(tmdbId: tmdbId, type: mediaType)
-        showLogoURL = url
+        // Check if the image is already cached and inspect its size
+        if let image = await ImageCacheManager.shared.imageFullSize(for: plexURL) {
+            return image.size.width * image.scale < 1280
+        }
+
+        return true  // Not cached yet — fetch TMDB as upgrade
     }
 
     /// Resolve the TMDB ID for the parent show of an episode.
@@ -1636,7 +1727,25 @@ struct PlexDetailView: View {
             }
         }
 
-        // No OnDeck episode - search for first in-progress or unwatched episode across all seasons
+        // No OnDeck episode - search unifiedEpisodes if available
+        if !unifiedEpisodes.isEmpty {
+            let candidate = unifiedEpisodes.first(where: { $0.isInProgress })
+                ?? unifiedEpisodes.first(where: { !$0.isWatched })
+                ?? unifiedEpisodes.first
+
+            if let candidate, let ratingKey = candidate.ratingKey {
+                do {
+                    nextUpEpisode = try await networkManager.getFullMetadata(
+                        serverURL: serverURL, authToken: token, ratingKey: ratingKey
+                    )
+                } catch {
+                    nextUpEpisode = candidate
+                }
+            }
+            return
+        }
+
+        // Fallback: per-season API calls (unifiedEpisodes not yet loaded)
         for season in seasons {
             guard let seasonRatingKey = season.ratingKey else { continue }
 
@@ -1912,7 +2021,6 @@ struct PlexDetailView: View {
             // Auto-select first season
             if let first = fetchedSeasons.first {
                 selectedSeason = first
-                await loadEpisodes(for: first)
             }
         } catch {
             print("Failed to load seasons: \(error)")
@@ -1943,17 +2051,47 @@ struct PlexDetailView: View {
             if let currentSeasonKey = currentItem.parentRatingKey,
                let currentSeason = fetchedSeasons.first(where: { $0.ratingKey == currentSeasonKey }) {
                 selectedSeason = currentSeason
-                await loadEpisodes(for: currentSeason)
             } else if let first = fetchedSeasons.first {
                 // Fallback to first season
                 selectedSeason = first
-                await loadEpisodes(for: first)
             }
         } catch {
             print("Failed to load seasons for episode: \(error)")
         }
 
         isLoadingSeasons = false
+    }
+
+    /// Load all episodes across all seasons using getAllLeaves (single API call)
+    private func loadAllEpisodes() async {
+        guard let serverURL = authManager.selectedServerURL,
+              let token = authManager.selectedServerToken else { return }
+
+        let ratingKey: String?
+        if currentItem.type == "show" {
+            ratingKey = currentItem.ratingKey
+        } else if currentItem.type == "episode" {
+            ratingKey = currentItem.grandparentRatingKey
+        } else {
+            return
+        }
+
+        guard let ratingKey else { return }
+
+        isLoadingEpisodes = true
+
+        do {
+            let allEps = try await networkManager.getAllLeaves(
+                serverURL: serverURL,
+                authToken: token,
+                ratingKey: ratingKey
+            )
+            unifiedEpisodes = allEps
+        } catch {
+            print("Failed to load all episodes: \(error)")
+        }
+
+        isLoadingEpisodes = false
     }
 
     /// Load episodes for a season.
@@ -2035,6 +2173,12 @@ struct PlexDetailView: View {
                 episodes[index].viewOffset = updatedMetadata.viewOffset
             }
 
+            // Also update in unified episodes
+            if let index = unifiedEpisodes.firstIndex(where: { $0.ratingKey == ratingKey }) {
+                unifiedEpisodes[index].viewCount = updatedMetadata.viewCount
+                unifiedEpisodes[index].viewOffset = updatedMetadata.viewOffset
+            }
+
             // Also update prefetched metadata
             fullEpisodeMetadata[ratingKey] = updatedMetadata
         } catch {
@@ -2101,6 +2245,9 @@ struct PlexDetailView: View {
     // MARK: - URL Helpers
 
     private var artURL: URL? {
+        // Prefer TMDB high-quality backdrop when available
+        if let tmdbArtURL { return tmdbArtURL }
+        // Fall back to Plex art
         guard let art = currentItem.bestArt,
               let serverURL = authManager.selectedServerURL,
               let token = authManager.selectedServerToken else { return nil }
@@ -2429,7 +2576,6 @@ struct SeasonPillBar: View {
         }
         .scrollClipDisabled()
         .focusSection()
-        .remembersFocus(key: "seasonPills", focusedId: $focusedSeasonId)
     }
 
     private func seasonLabel(for season: PlexMetadata) -> String {
@@ -2482,6 +2628,7 @@ struct EpisodeCard: View {
     let serverURL: String
     let authToken: String
     var focusedEpisodeId: FocusState<String?>.Binding?
+    var showSeasonPrefix: Bool = false
     let onPlay: () -> Void
     var onRefreshNeeded: MediaItemRefreshCallback? = nil
     var onShowInfo: MediaItemNavigationCallback? = nil
@@ -2560,7 +2707,7 @@ struct EpisodeCard: View {
                     // Title
                     Text(episode.title ?? "Episode")
                         .font(.system(size: 20, weight: .bold))
-                        .foregroundStyle(.white)
+                        .foregroundStyle(isFocused ? .black : .white)
                         .lineLimit(1)
 
                     // Summary
@@ -2568,7 +2715,7 @@ struct EpisodeCard: View {
                         Text(summary)
                             .font(.system(size: 16))
                             .foregroundStyle(.secondary)
-                            .lineLimit(2)
+                            .lineLimit(3)
                             .padding(.top, 1)
                     }
 
@@ -2620,6 +2767,9 @@ struct EpisodeCard: View {
     }
 
     private var episodeLabel: String {
+        if showSeasonPrefix, let epString = episode.episodeString {
+            return epString
+        }
         if let index = episode.index {
             return "Episode \(index)"
         }

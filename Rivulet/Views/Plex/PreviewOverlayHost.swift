@@ -9,7 +9,7 @@ import SwiftUI
 import Combine
 
 let previewEntryAnimation = Animation.spring(response: 0.46, dampingFraction: 0.86)
-let previewPagingAnimation = Animation.interactiveSpring(response: 0.40, dampingFraction: 0.90)
+let previewPagingAnimation = Animation.easeInOut(duration: 0.8)
 let previewExpandAnimation = Animation.spring(response: 0.44, dampingFraction: 0.84)
 
 /// Bridge object that allows PreviewContainerViewController to trigger Menu actions
@@ -54,8 +54,8 @@ struct PreviewOverlayHost: View {
     @State private var metadataVisible = false
     @State private var expandedChromeVisible = false
     @State private var verticalScrollEnabled = false
-    @State private var currentParallaxOffset: CGFloat = 0
     @State private var capturedSourceFrame: CGRect?
+    @State private var tmdbBackdropURLs: [String: URL] = [:]
     @State private var metadataGate = PreviewLoadGate()
     @FocusState private var focusedArea: PreviewFocusArea?
 
@@ -63,7 +63,7 @@ struct PreviewOverlayHost: View {
     private let cardGap: CGFloat = 16
     private let cornerRadius: CGFloat = 28
     private let sidePeek: CGFloat = 80  // How much of side cards shows
-    private let parallaxTravel: CGFloat = 36
+    private let cardParallax: CGFloat = 20  // Background offset per card position
 
     init(
         request: PreviewRequest,
@@ -118,16 +118,15 @@ struct PreviewOverlayHost: View {
             )
 
             ZStack {
-                // Blurred material background (not the art image)
-                Rectangle()
-                    .fill(.regularMaterial)
-                    .ignoresSafeArea()
+                // Solid background behind cards
+                Color.black.ignoresSafeArea()
 
                 ForEach(visibleIndices, id: \.self) { index in
                     PreviewCarouselCard(
                         item: request.items[index],
                         serverURL: serverURL,
                         authToken: authToken,
+                        tmdbArtURL: tmdbBackdropURLs[request.items[index].ratingKey ?? ""],
                         frame: frame(
                             for: index,
                             centeredFrame: centeredFrame,
@@ -140,7 +139,7 @@ struct PreviewOverlayHost: View {
                         metadataVisible: index == selectedIndex && metadataVisible,
                         showExpandedChrome: expandedChromeVisible,
                         allowVerticalScroll: verticalScrollEnabled,
-                        backgroundParallaxOffset: index == selectedIndex ? currentParallaxOffset : 0,
+                        backgroundParallaxOffset: CGFloat(selectedIndex - index) * cardParallax,
                         cornerRadius: cardCornerRadius(for: index),
                         opacity: cardOpacity(for: index),
                         onPreviewExitRequested: handleExpandedExit
@@ -229,11 +228,9 @@ struct PreviewOverlayHost: View {
         verticalScrollEnabled = false
 
         let token = metadataGate.begin()
-        currentParallaxOffset = delta > 0 ? -parallaxTravel : parallaxTravel
 
         withAnimation(previewPagingAnimation) {
             selectedIndex = nextIndex
-            currentParallaxOffset = 0
         }
 
         scheduleMetadataReveal(token: token, delayNanoseconds: 120_000_000)
@@ -284,7 +281,6 @@ struct PreviewOverlayHost: View {
 
             withAnimation(previewExpandAnimation) {
                 stateMachine = nextState
-                currentParallaxOffset = 0
             }
 
             Task { @MainActor in
@@ -299,7 +295,7 @@ struct PreviewOverlayHost: View {
         Task { @MainActor in
             try? await Task.sleep(nanoseconds: delayNanoseconds)
             guard metadataGate.isCurrent(token) else { return }
-            withAnimation(.easeInOut(duration: 0.28)) {
+            withAnimation(.easeInOut(duration: 1.0)) {
                 metadataVisible = true
             }
         }
@@ -337,9 +333,15 @@ struct PreviewOverlayHost: View {
             return nil
         }
 
-        Task.detached(priority: .utility) {
-            for logoRequest in logoRequests {
-                _ = await TMDBClient.shared.fetchLogoURL(tmdbId: logoRequest.id, type: logoRequest.type)
+        Task.detached(priority: .utility) { [adjacentItems] in
+            for (idx, req) in logoRequests.enumerated() {
+                _ = await TMDBClient.shared.fetchLogoURL(tmdbId: req.id, type: req.type)
+                if let backdropURL = await TMDBClient.shared.fetchBackdropURL(tmdbId: req.id, type: req.type, size: "original") {
+                    await ImageCacheManager.shared.prefetch(urls: [backdropURL])
+                    if idx < adjacentItems.count, let key = adjacentItems[idx].ratingKey {
+                        await MainActor.run { tmdbBackdropURLs[key] = backdropURL }
+                    }
+                }
             }
         }
     }
@@ -389,9 +391,6 @@ struct PreviewOverlayHost: View {
     }
 
     private func cardCornerRadius(for index: Int) -> CGFloat {
-        if index == selectedIndex && stateMachine.isExpanded {
-            return 0
-        }
         return cornerRadius
     }
 
@@ -411,6 +410,7 @@ private struct PreviewCarouselCard: View {
     let item: PlexMetadata
     let serverURL: String
     let authToken: String
+    var tmdbArtURL: URL? = nil
     let frame: CGRect
     let isCurrent: Bool
     let isExpanded: Bool
@@ -423,8 +423,18 @@ private struct PreviewCarouselCard: View {
     let onPreviewExitRequested: () -> Void
 
     var body: some View {
-        Group {
-            if isCurrent {
+        ZStack {
+            // Side card art — always present, moves with card during paging
+            PreviewCarouselSideCard(
+                item: item,
+                serverURL: serverURL,
+                authToken: authToken,
+                tmdbArtURL: tmdbArtURL,
+                metadataVisible: !isCurrent && metadataVisible
+            )
+
+            // PlexDetailView after paging settles (metadataVisible) or when expanded
+            if isCurrent && (metadataVisible || isExpanded) {
                 PreviewHeroSurface(
                     item: item,
                     serverURL: serverURL,
@@ -436,12 +446,7 @@ private struct PreviewCarouselCard: View {
                     backgroundParallaxOffset: backgroundParallaxOffset,
                     onPreviewExitRequested: onPreviewExitRequested
                 )
-            } else {
-                PreviewCarouselSideCard(
-                    item: item,
-                    serverURL: serverURL,
-                    authToken: authToken
-                )
+                .transition(.identity)
             }
         }
         .frame(width: frame.width, height: frame.height)
@@ -489,6 +494,8 @@ private struct PreviewCarouselSideCard: View {
     let item: PlexMetadata
     let serverURL: String
     let authToken: String
+    var tmdbArtURL: URL? = nil
+    var metadataVisible: Bool = true
 
     var body: some View {
         ZStack(alignment: .bottomLeading) {
@@ -503,6 +510,7 @@ private struct PreviewCarouselSideCard: View {
                 startPoint: .top,
                 endPoint: .bottom
             )
+            .opacity(metadataVisible ? 1 : 0)
 
             VStack(alignment: .leading, spacing: 6) {
                 Text(item.displayTitle)
@@ -519,6 +527,7 @@ private struct PreviewCarouselSideCard: View {
             }
             .padding(.horizontal, 36)
             .padding(.bottom, 34)
+            .opacity(metadataVisible ? 1 : 0)
         }
         .overlay {
             UnevenRoundedRectangle(topLeadingRadius: 28, bottomLeadingRadius: 0, bottomTrailingRadius: 0, topTrailingRadius: 28, style: .continuous)
@@ -567,6 +576,7 @@ private struct PreviewCarouselSideCard: View {
     }
 
     private var artworkURL: URL? {
+        if let tmdbArtURL { return tmdbArtURL }
         let path = item.bestArt ?? item.bestThumb
         guard let path else { return nil }
         return URL(string: "\(serverURL)\(path)?X-Plex-Token=\(authToken)")
