@@ -1,5 +1,33 @@
 # Lessons Learned
 
+## 2026-03-17 - Match Reference Reveals With Geometry Locked
+
+**Mistake**: Left reveal-time motion in the focused title/action block and missed that the remaining single-season `Episodes` label was coming from the season-detail branch, not the show-detail branch.
+**Pattern**: Small UI-fidelity mismatches often survive in adjacent surfaces even after the main flow is corrected, especially when reveal animation and header policy are implemented in separate code paths.
+**Rule**: When matching a reference interaction, keep reveal-time geometry fixed unless the clip clearly shows translation, and trace repeated labels/header chrome across every related detail surface before considering the behavior corrected.
+**Applied**: `Rivulet/Views/Plex/PlexDetailView.swift`, `Docs/PREVIEW_REFERENCE_VIDEO.md`.
+
+## 2026-03-17 - Preserve Hidden-Until-Scroll Chrome
+
+**Mistake**: Brought the season-pill bar into view immediately when switching the episode shelf peek to real below-fold content.
+**Pattern**: When a lower shelf is intentionally teased into a hero, not every element from that shelf should become visible at once; some chrome still belongs to the scrolled state.
+**Rule**: Preserve "hidden until scroll" behavior for below-fold controls even when exposing the real shelf earlier for continuity.
+**Applied**: `Rivulet/Views/Plex/PlexDetailView.swift`.
+
+## 2026-03-17 - Shelf Peek Must Come From Real Content
+
+**Mistake**: Started to solve the expanded-view episode teaser with a synthetic noninteractive peek strip instead of exposing the actual below-fold shelf.
+**Pattern**: When a reference interaction depends on continuity between surfaces, duplicating the next-state content as a preview-only layer breaks that continuity even if it looks similar in isolation.
+**Rule**: If the user calls out a peek from the next state, expose the real next-state content earlier rather than creating a duplicate preview-only strip.
+**Applied**: `Rivulet/Views/Plex/PlexDetailView.swift`.
+
+## 2026-03-17 - UI Fidelity Corrections Need Spec Updates
+
+**Mistake**: Assumed the Apple TV+ carousel should be stacked and art-only after settle, then encoded that assumption into both the implementation and the reference doc.
+**Pattern**: When a visual interaction is being matched to a product reference, a mistaken read of the source clip can propagate into geometry, timing, and future-agent guidance all at once.
+**Rule**: After any user correction on UI fidelity, update the implementation and the canonical reference/lessons docs together so the mistaken interpretation cannot survive as "source of truth."
+**Applied**: `Rivulet/Views/Plex/PreviewOverlayHost.swift`, `Docs/PREVIEW_REFERENCE_VIDEO.md`.
+
 ## 2026-03-03 - Performance
 
 **Mistake**: Added a late-video mitigation that only dropped stale packets without any synchronizer recovery path.

@@ -377,16 +377,11 @@ struct TVSidebarView: View {
         guard let serverURL = authManager.selectedServerURL,
               let token = authManager.selectedServerToken else { return (nil, nil) }
 
-        let art = metadata.bestArt
-        let thumb = metadata.thumb ?? metadata.bestThumb
-
-        let artURL = art.flatMap { URL(string: "\(serverURL)\($0)?X-Plex-Token=\(token)") }
-        let thumbURL = thumb.flatMap { URL(string: "\(serverURL)\($0)?X-Plex-Token=\(token)") }
-
-        async let artTask: UIImage? = artURL != nil ? ImageCacheManager.shared.image(for: artURL!) : nil
-        async let thumbTask: UIImage? = thumbURL != nil ? ImageCacheManager.shared.image(for: thumbURL!) : nil
-
-        return await (artTask, thumbTask)
+        let request = metadata.heroBackdropRequest(
+            serverURL: serverURL,
+            authToken: token
+        )
+        return await HeroBackdropResolver.shared.playerLoadingImages(for: request)
     }
 
     // MARK: - What's New

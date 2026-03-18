@@ -20,10 +20,12 @@ struct PreviewRequest: Identifiable {
 }
 
 enum PreviewPhase: Equatable {
-    case enteringCarousel
-    case carousel
-    case expanding
-    case expanded
+    case entryMorph
+    case carouselStable
+    case expandingHero
+    case expandedHero
+    case detailsStable
+    case exiting
 }
 
 enum PreviewFocusArea: Hashable {
@@ -69,41 +71,70 @@ enum PreviewBackAction: Equatable {
 }
 
 struct PreviewStateMachine {
-    private(set) var phase: PreviewPhase = .enteringCarousel
+    private(set) var phase: PreviewPhase = .entryMorph
+    private(set) var motionLocked = true
 
     var isCarouselInputEnabled: Bool {
-        phase == .enteringCarousel || phase == .carousel
+        phase == .entryMorph || phase == .carouselStable
     }
 
     var isExpanded: Bool {
-        phase == .expanding || phase == .expanded
+        phase == .expandingHero || phase == .expandedHero || phase == .detailsStable
     }
 
-    mutating func completeEntry() {
-        guard phase == .enteringCarousel else { return }
-        phase = .carousel
+    mutating func completeEntryMorph() {
+        guard phase == .entryMorph else { return }
+        phase = .carouselStable
+    }
+
+    mutating func beginPaging() {
+        guard phase == .carouselStable else { return }
+        motionLocked = true
+    }
+
+    mutating func finishPaging() {
+        guard phase == .carouselStable else { return }
+        motionLocked = false
     }
 
     mutating func beginExpand() {
-        guard phase == .carousel || phase == .enteringCarousel else { return }
-        phase = .expanding
+        guard phase == .carouselStable || phase == .entryMorph else { return }
+        phase = .expandingHero
+        motionLocked = true
     }
 
     mutating func finishExpand() {
-        guard phase == .expanding else { return }
-        phase = .expanded
+        guard phase == .expandingHero else { return }
+        phase = .expandedHero
+        motionLocked = false
+    }
+
+    mutating func markDetailsStable() {
+        guard phase == .expandedHero || phase == .detailsStable else { return }
+        phase = .detailsStable
     }
 
     mutating func collapseToCarousel() {
-        phase = .carousel
+        phase = .carouselStable
+        motionLocked = false
+    }
+
+    mutating func setMotionLocked(_ locked: Bool) {
+        motionLocked = locked
+    }
+
+    mutating func beginExit() {
+        phase = .exiting
+        motionLocked = true
     }
 
     mutating func exitAction() -> PreviewBackAction {
         switch phase {
-        case .enteringCarousel, .carousel:
+        case .entryMorph, .carouselStable, .exiting:
             return .dismissOverlay
-        case .expanding, .expanded:
-            phase = .carousel
+        case .expandingHero, .expandedHero, .detailsStable:
+            phase = .carouselStable
+            motionLocked = false
             return .collapseToCarousel
         }
     }

@@ -1,5 +1,118 @@
 # Playback Reliability Worklog (2026-03-02)
 
+## Apple TV+ Fade + Season Header Fidelity (2026-03-17)
+
+## Plan
+- [x] Re-check the reference clip for focused-info reveal behavior and left-column spacing.
+  - Confirm whether the title/action block translates or only fades, and re-read the hero margins against the frame grids.
+- [x] Correct the hero overlay layout.
+  - Remove reveal-time translation from the focused title/action block.
+  - Increase the logo/title slot slightly and tighten the hero inset/baseline spacing toward the reference layout.
+- [x] Remove the remaining single-season `Episodes` header path.
+  - Load season siblings in season detail so single-season shows can stay on the one-pill season header pattern.
+- [x] Verify
+  - Run build-check and focused preview/backdrop tests after the patch.
+
+## Review
+- Re-checked `IMG_4941.MOV` and aligned the focused-info reveal to an opacity-only fade, with the hero title/logo slot and action row held in fixed geometry.
+- Nudged the hero metadata block inward and lowered the action row slightly so the left-column spacing reads closer to the Apple TV+ reference layout.
+- Increased the hero and below-fold title/logo sizing so the focused title treatment better matches the clip.
+- Loaded sibling seasons for season detail and replaced the single-season `Episodes` heading with the one-pill season header pattern.
+- Verification passed:
+  - `xcodebuild -project Rivulet.xcodeproj -scheme Rivulet -destination 'generic/platform=tvOS' build -quiet CODE_SIGNING_ALLOWED=NO`
+  - `xcodebuild test -project Rivulet.xcodeproj -scheme Rivulet -destination 'platform=tvOS Simulator,id=F34B8F67-7F13-468F-9526-6A38C6B2181B' -only-testing:RivuletTests/PreviewFlowStateTests -only-testing:RivuletTests/HeroBackdropSessionTests -quiet CODE_SIGNING_ALLOWED=NO`
+  - Result: build succeeded; both focused test classes passed.
+
+## Apple TV+ Shelf Depth Correction (2026-03-17)
+
+## Plan
+- [x] Restore below-fold visibility rules for show chrome.
+  - Keep season pills visually hidden until scroll while preserving the real shelf continuity.
+- [x] Reduce the at-rest show shelf tease depth.
+  - Lower the visible episode-thumb slice so only a shallow portion peeks into the expanded hero.
+- [x] Verify
+  - Run build-check and focused preview tests after the correction.
+
+## Review
+- Restored the season-pill bar to hidden-until-scroll behavior without breaking the real-shelf peek.
+- Reduced the show hero shelf tease so the episode thumbnails now sit lower and only a shallow top portion is visible at rest.
+- Verification passed:
+  - `xcodebuild -project Rivulet.xcodeproj -scheme Rivulet -destination 'generic/platform=tvOS' build -quiet CODE_SIGNING_ALLOWED=NO`
+  - `xcodebuild test -project Rivulet.xcodeproj -scheme Rivulet -destination 'platform=tvOS Simulator,id=F34B8F67-7F13-468F-9526-6A38C6B2181B' -only-testing:RivuletTests/PreviewFlowStateTests -only-testing:RivuletTests/HeroBackdropSessionTests -quiet CODE_SIGNING_ALLOWED=NO`
+  - Result: build succeeded; both focused test classes passed.
+
+## Apple TV+ Motion + Shelf Peek Follow-up (2026-03-17)
+
+## Plan
+- [x] Match the paged-card motion more closely.
+  - Tighten the page timing and give the hero background a separate, slightly slower motion/fade cadence than the card frame.
+- [x] Move focused action chrome into the info-loaded state.
+  - Show the action row with the focused metadata state while keeping actual button interaction gated to the expanded phase.
+- [x] Make the real below-fold show shelf peek into expanded hero.
+  - Remove the at-rest centered-header reserve so the first shelf can peek naturally.
+  - Keep single-season shows on the season-pill pattern with one pill.
+- [x] Verify
+  - Run build-check and focused preview tests after the follow-up patch.
+
+## Review
+- Tightened the carousel handoff timing and separated the hero backdrop motion from the card frame so the art now lags/crossfades more like the reference clip.
+- Moved the action row into the focused-info state, lowered it slightly, and kept actual interaction gated until the expanded phase.
+- Reworked the below-fold layout so the real show shelf can peek into the expanded hero, and single-season shows now keep the season-pill pattern instead of dropping to an `Episodes` title.
+- Verification passed:
+  - `xcodebuild -project Rivulet.xcodeproj -scheme Rivulet -destination 'generic/platform=tvOS' build -quiet CODE_SIGNING_ALLOWED=NO`
+  - `xcodebuild test -project Rivulet.xcodeproj -scheme Rivulet -destination 'platform=tvOS Simulator,id=F34B8F67-7F13-468F-9526-6A38C6B2181B' -only-testing:RivuletTests/PreviewFlowStateTests -only-testing:RivuletTests/HeroBackdropSessionTests -quiet CODE_SIGNING_ALLOWED=NO`
+  - Result: build succeeded; both focused test classes passed.
+
+## Apple TV+ Preview Carousel Follow-up (2026-03-17)
+
+## Plan
+- [x] Correct carousel geometry to match the user-verified Apple TV+ behavior.
+  - Remove neighbor overlap so cards read as side-by-side surfaces with a gap.
+- [x] Restore focused-card metadata in the settled carousel state.
+  - Fade the centered item's title/meta back in after entry and paging settle.
+  - Keep explicit expand for the extra chrome/details affordance.
+- [x] Update reference material.
+  - Record the corrected carousel behavior in the canonical preview reference and lessons log.
+- [x] Verify
+  - Run build-check and focused preview tests after the follow-up patch.
+
+## Review
+- Corrected the preview carousel so neighboring cards no longer stack behind the centered card; they now sit beside it with a small gap while preserving the dominant center stage.
+- Restored centered-card metadata as part of the stable carousel state, with a settle-then-fade pattern on initial entry, lateral paging, and collapse back from the expanded hero.
+- Updated the canonical Apple TV+ reference doc so future work does not regress back to the old "stacked, art-only carousel" assumption.
+- Verification passed:
+  - `xcodebuild -project Rivulet.xcodeproj -scheme Rivulet -destination 'generic/platform=tvOS' build -quiet CODE_SIGNING_ALLOWED=NO`
+  - `xcodebuild test -project Rivulet.xcodeproj -scheme Rivulet -destination 'platform=tvOS Simulator,id=F34B8F67-7F13-468F-9526-6A38C6B2181B' -only-testing:RivuletTests/PreviewFlowStateTests -only-testing:RivuletTests/HeroBackdropSessionTests -quiet CODE_SIGNING_ALLOWED=NO`
+  - Result: build succeeded; both focused test classes passed.
+
+## Apple TV+ Preview Flow Cleanup (2026-03-17)
+
+## Plan
+- [x] Add shared hero backdrop resolution and deferred-upgrade coordination.
+  - Introduced a shared backdrop request/session/coordinator path for preview, detail, home hero, and player-loading art.
+  - Added focused unit tests for selection, motion-lock gating, and stale-generation invalidation.
+- [x] Refactor preview composition and timing.
+  - Switched preview to an art-only carousel by default, with metadata only on the explicit expand action.
+  - Removed the duplicate selected-card side-art/hero-art composition and updated phase/timing handling.
+- [x] Standardize shared hero surfaces.
+  - Wired the shared backdrop coordinator into `PlexDetailView`, the home hero, and player-loading helpers.
+  - Kept backdrop upgrades deferred until post-settle crossfade.
+- [x] Update canonical reference documentation.
+  - Replaced the old preview reference clip notes with the new `IMG_4941.MOV`-based spec and upgrade policy.
+- [x] Verify
+  - Build-check passed.
+  - Focused simulator tests for preview-state and backdrop-session logic passed.
+
+## Review
+- Added `HeroBackdropSupport.swift` to centralize hero backdrop selection, deferred upgrades, and full-size crossfade rendering.
+- Refactored the preview overlay into an image-led carousel with explicit expand timing, motion locking, tucked side peeks, and no overlapping selected-card artwork layers.
+- Moved `PlexDetailView` off direct TMDB/backdrop replacement state and onto the shared backdrop coordinator, then reused the same resolver for home hero and player-loading art.
+- Updated `Docs/PREVIEW_REFERENCE_VIDEO.md` to make `IMG_4941.MOV` the canonical preview reference and to document the deferred crossfade rule.
+- Verification passed:
+  - `xcodebuild -project Rivulet.xcodeproj -scheme Rivulet -destination 'generic/platform=tvOS' build -quiet CODE_SIGNING_ALLOWED=NO`
+  - `xcodebuild test -project Rivulet.xcodeproj -scheme Rivulet -destination 'platform=tvOS Simulator,id=F34B8F67-7F13-468F-9526-6A38C6B2181B' -only-testing:RivuletTests/PreviewFlowStateTests -only-testing:RivuletTests/HeroBackdropSessionTests -quiet CODE_SIGNING_ALLOWED=NO`
+  - Result: build succeeded; both focused test classes passed.
+
 ## Rivulet-Only Playback Consolidation (2026-03-16)
 
 ## Plan

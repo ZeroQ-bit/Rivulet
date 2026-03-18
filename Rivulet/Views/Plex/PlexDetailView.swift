@@ -19,7 +19,10 @@ struct PlexDetailView: View {
     var showMetadata: Bool = true
     var showExpandedChrome: Bool = true
     var allowVerticalScroll: Bool = true
+    var allowActionRowInteraction: Bool = true
+    var heroBackdropMotionLocked: Bool = false
     var onPreviewExitRequested: (() -> Void)? = nil
+    var onDetailsBecameVisible: (() -> Void)? = nil
 
     /// Tracks the currently displayed item - allows swapping content in place
     /// When set, this overrides `item` so collection/recommended navigation
@@ -82,8 +85,7 @@ struct PlexDetailView: View {
     @State private var playFromBeginning = false  // For "Play from Beginning" button
     @State private var isLoadingShufflePlay = false
     @State private var shuffledEpisodeQueue: [PlexMetadata] = []
-    @State private var showLogoURL: URL?  // TMDB stylized logo for shows/movies
-    @State private var tmdbArtURL: URL?  // TMDB high-quality backdrop (preferred over Plex art)
+    @StateObject private var heroBackdrop = HeroBackdropCoordinator()
     @State private var scrollProgress: CGFloat = 0  // 0 = at rest (peek), 1 = fully scrolled
     @State private var scrollResetID = UUID()
 
@@ -102,6 +104,7 @@ struct PlexDetailView: View {
     private let recommendationService = PersonalizedRecommendationService.shared
     private var isPreviewCarousel: Bool { presentationMode == .previewCarousel }
     private var isExpandedPreviewFlow: Bool { onPreviewExitRequested != nil && presentationMode == .expandedDetail }
+    private let heroOverlayHorizontalInset: CGFloat = 60
 
     /// Effective item data - uses fullMetadata for progress/viewOffset when available
     /// This ensures we have the most up-to-date playback position after returning from the player
@@ -215,7 +218,7 @@ struct PlexDetailView: View {
                         VStack(alignment: .leading, spacing: 0) {
                             Spacer(minLength: 0)
                             heroMetadataOverlay
-                                .padding(.horizontal, 48)
+                                .padding(.horizontal, heroOverlayHorizontalInset)
                                 .opacity(showMetadata ? (1 - scrollProgress) : 0)
                         }
                         .frame(height: heroHeight)
@@ -229,13 +232,6 @@ struct PlexDetailView: View {
                             Color.clear.frame(height: geo.size.height)
 
                             VStack(alignment: .leading, spacing: 0) {
-                                // Centered title logo (Apple TV+ style, fades in on scroll)
-                                belowFoldTitleLogo
-                                    .frame(height: 110)
-                                    .padding(.top, 40)
-                                    .padding(.bottom, 8)
-                                    .opacity(scrollProgress)
-
                                 VStack(alignment: .leading, spacing: 32) {
                                     // TV Show specific: Seasons and Episodes
                                     if currentItem.type == "show" || currentItem.type == "episode" {
@@ -257,6 +253,7 @@ struct PlexDetailView: View {
                                         albumSection
                                     }
                                 }
+                                .padding(.top, belowFoldHeaderReserveHeight)
                                 .padding(.horizontal, 48)
                                 .allowsHitTesting(!isPreviewCarousel)
 
@@ -305,6 +302,13 @@ struct PlexDetailView: View {
                                 }
                             }
                             .fixedSize(horizontal: false, vertical: true)
+
+                            belowFoldTitleLogo
+                                .frame(height: 110)
+                                .padding(.top, 40)
+                                .padding(.bottom, 8)
+                                .opacity(scrollProgress)
+                                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                         }
                     }
                 }
@@ -313,6 +317,9 @@ struct PlexDetailView: View {
                 } action: { _, isScrolled in
                     withAnimation(.easeInOut(duration: 0.7)) {
                         scrollProgress = isScrolled ? 1 : 0
+                    }
+                    if isScrolled {
+                        onDetailsBecameVisible?()
                     }
                 }
                 .id(scrollResetID)
@@ -339,10 +346,9 @@ struct PlexDetailView: View {
             collectionName = nil
             recommendedItems = []
             nextUpEpisode = nil
-            showLogoURL = nil
-            tmdbArtURL = nil
             isSummaryExpanded = false
             scrollProgress = 0
+            syncHeroBackdrop()
 
             // Initialize watched state
             isWatched = currentItem.isWatched
@@ -356,8 +362,8 @@ struct PlexDetailView: View {
             // Load full metadata for cast/crew and trailer
             await loadFullMetadata()
 
-            // Fetch TMDB logo and high-quality backdrop for shows, movies, and episodes
-            await loadTMDBAssets()
+            // Refresh hero art/logo with the best TMDB/TVDB data now that metadata is loaded.
+            await refreshHeroBackdropAssets()
 
             // Load collection and recommendations for movies
             if currentItem.type == "movie" {
@@ -381,6 +387,7 @@ struct PlexDetailView: View {
 
             // Load episodes for seasons
             if currentItem.type == "season" {
+                await loadSeasonsForCurrentSeason()
                 await loadEpisodesForSeason()
                 // Determine the "next up" episode for the Play button
                 await loadNextUpEpisode()
@@ -409,6 +416,9 @@ struct PlexDetailView: View {
                 scrollProgress = 0
                 scrollResetID = UUID()
             }
+        }
+        .onChange(of: heroBackdropMotionLocked) { _, locked in
+            heroBackdrop.setMotionLocked(locked)
         }
         .onChange(of: showExpandedChrome) { _, isVisible in
             guard isVisible, isExpandedPreviewFlow else { return }
@@ -572,31 +582,40 @@ struct PlexDetailView: View {
     }
 
     private func heroContentHeight(for fullHeight: CGFloat) -> CGFloat {
-        return max(0, fullHeight - 250)  // 250pt peek for title logo + episode thumbnails
+        let shelfPeek: CGFloat
+        switch currentItem.type {
+        case "show", "episode":
+            // Keep the real shelf visible, but only as a shallow tease.
+            shelfPeek = 136
+        default:
+            shelfPeek = 220
+        }
+
+        return max(0, fullHeight - shelfPeek)
+    }
+
+    private var belowFoldHeaderReserveHeight: CGFloat {
+        158 * scrollProgress
     }
 
     // MARK: - Hero Components (Apple TV+ style — backdrop fixed, content scrolls over)
 
     /// Fixed backdrop image (behind everything, doesn't scroll)
     private var heroBackdropImage: some View {
-        CachedAsyncImage(url: artURL) { phase in
-            switch phase {
-            case .success(let image):
-                image
-                    .resizable()
-                    .aspectRatio(contentMode: .fill)
-            case .empty, .failure:
-                Rectangle()
-                    .fill(
-                        LinearGradient(
-                            colors: [Color.blue.opacity(0.3), Color.black],
-                            startPoint: .top,
-                            endPoint: .bottom
-                        )
+        HeroBackdropImage(
+            url: heroBackdrop.session.displayedBackdropURL,
+            animationDuration: isPreviewCarousel ? 0.3 : 0.26
+        ) {
+            Rectangle()
+                .fill(
+                    LinearGradient(
+                        colors: [Color.blue.opacity(0.3), Color.black],
+                        startPoint: .top,
+                        endPoint: .bottom
                     )
-            }
+                )
         }
-        .animation(.easeInOut(duration: 0.3), value: currentItem.ratingKey)
+        .animation(.easeOut(duration: isPreviewCarousel ? 0.42 : 0.48), value: backgroundParallaxOffset)
     }
 
     /// Gradient overlay for hero text readability (scrolls with content)
@@ -616,16 +635,16 @@ struct PlexDetailView: View {
     /// Metadata overlay (title, genres, quality, buttons, cast) positioned at bottom of hero
     private var heroMetadataOverlay: some View {
         GeometryReader { metaGeo in
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 10) {
                 Spacer()
 
                 // Text content — fixed height so buttons/peek distance
                 // stays constant regardless of description length, logo vs title, etc.
-                VStack(alignment: .leading, spacing: 8) {
+                VStack(alignment: .leading, spacing: 10) {
                     // TMDB logo or title — fixed height so content below is always
                     // at the same position regardless of logo aspect ratio
                     Group {
-                        if let logoURL = showLogoURL {
+                        if let logoURL = heroBackdrop.session.logoURL {
                             CachedAsyncImage(url: logoURL) { phase in
                                 switch phase {
                                 case .success(let image):
@@ -637,12 +656,12 @@ struct PlexDetailView: View {
                                     heroTitleText
                                 }
                             }
-                            .frame(maxWidth: 450, alignment: .leading)
                         } else {
                             heroTitleText
                         }
                     }
-                    .frame(height: 100, alignment: .bottomLeading)
+                    .frame(maxWidth: 520, alignment: .leading)
+                    .frame(height: 112, alignment: .bottomLeading)
 
                     // Genre + content rating row
                     heroMetadataRow
@@ -697,8 +716,8 @@ struct PlexDetailView: View {
                             .foregroundStyle(.white.opacity(0.7))
                     }
                 }
-                .frame(height: 380, alignment: .bottomLeading)
-                .frame(maxWidth: 720, alignment: .leading)
+                .frame(height: 392, alignment: .bottomLeading)
+                .frame(maxWidth: 760, alignment: .leading)
 
                 // Bottom row: buttons (left) + starring (right) — full width
                 // Always in tree to avoid layout shift; opacity-controlled
@@ -727,19 +746,20 @@ struct PlexDetailView: View {
                         }
                     }
                 }
+                .padding(.top, 24)
                 .opacity(showMetadata ? 1 : 0)
-                .allowsHitTesting(showExpandedChrome)
+                .allowsHitTesting(allowActionRowInteraction)
             }
         }
         .animation(.easeInOut(duration: 0.3), value: currentItem.ratingKey)
-        .animation(.easeInOut(duration: 0.2), value: showExpandedChrome)
+        .animation(.easeInOut(duration: 0.22), value: showMetadata)
     }
 
     // MARK: - Below-fold Title Logo (centered, Apple TV+ style)
 
     private var belowFoldTitleLogo: some View {
         Group {
-            if let logoURL = showLogoURL {
+            if let logoURL = heroBackdrop.session.logoURL {
                 CachedAsyncImage(url: logoURL) { phase in
                     switch phase {
                     case .success(let image):
@@ -748,14 +768,14 @@ struct PlexDetailView: View {
                             .aspectRatio(contentMode: .fit)
                     default:
                         Text(fullMetadata?.title ?? currentItem.title ?? "")
-                            .font(.system(size: 36, weight: .bold))
+                            .font(.system(size: 42, weight: .bold))
                             .foregroundStyle(.primary)
                     }
                 }
-                .frame(maxWidth: 600, maxHeight: 110)
+                .frame(maxWidth: 680, maxHeight: 126)
             } else {
                 Text(fullMetadata?.title ?? currentItem.title ?? "")
-                    .font(.system(size: 36, weight: .bold))
+                    .font(.system(size: 42, weight: .bold))
                     .foregroundStyle(.primary)
                     .lineLimit(1)
             }
@@ -767,7 +787,7 @@ struct PlexDetailView: View {
 
     private var heroTitleText: some View {
         Text(fullMetadata?.title ?? currentItem.title ?? "Unknown Title")
-            .font(.system(size: 40, weight: .bold))
+            .font(.system(size: 44, weight: .bold))
             .foregroundStyle(.white)
             .shadow(color: .black.opacity(0.5), radius: 10, x: 0, y: 4)
     }
@@ -1131,7 +1151,7 @@ struct PlexDetailView: View {
                 .focused($focusedActionButton, equals: "trailer")
             }
         }
-        .disabled(isPreviewCarousel)
+        .disabled(!allowActionRowInteraction)
         .focusSection()
     }
 
@@ -1173,25 +1193,23 @@ struct PlexDetailView: View {
             if isLoadingSeasons {
                 ProgressView("Loading seasons...")
             } else if !seasons.isEmpty {
-                if seasons.count > 1 {
-                    SeasonPillBar(
-                        seasons: seasons,
-                        selectedSeason: $selectedSeason,
-                        onSeasonSelected: { season in
-                            // Scroll episode list to this season's first episode
-                            if let firstEp = unifiedEpisodes.first(where: { $0.parentRatingKey == season.ratingKey }),
-                               let epKey = firstEp.ratingKey {
-                                episodeScrollTarget = epKey
-                            }
+                SeasonPillBar(
+                    seasons: seasons,
+                    selectedSeason: $selectedSeason,
+                    onSeasonSelected: { season in
+                        // Scroll episode list to this season's first episode
+                        if let firstEp = unifiedEpisodes.first(where: { $0.parentRatingKey == season.ratingKey }),
+                           let epKey = firstEp.ratingKey {
+                            episodeScrollTarget = epKey
                         }
-                    )
-                    .opacity(scrollProgress)
-                    .onMoveCommand { direction in
-                        if direction == .up {
-                            scrollToTopTrigger.toggle()
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                                focusedActionButton = "play"
-                            }
+                    }
+                )
+                .opacity(scrollProgress)
+                .onMoveCommand { direction in
+                    if direction == .up {
+                        scrollToTopTrigger.toggle()
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                            focusedActionButton = "play"
                         }
                     }
                 }
@@ -1200,6 +1218,18 @@ struct PlexDetailView: View {
                 unifiedEpisodeList
             }
         }
+    }
+
+    private var shouldUseSingleSeasonPillHeaderInSeasonDetail: Bool {
+        currentItem.type == "season" && seasons.count == 1
+    }
+
+    private var seasonDetailHeaderPills: [PlexMetadata] {
+        let matchingSeason = seasons.filter { $0.ratingKey == currentItem.ratingKey }
+        if !matchingSeason.isEmpty {
+            return matchingSeason
+        }
+        return [selectedSeason ?? currentItem]
     }
 
     /// Unified horizontal episode card row across all seasons
@@ -1266,13 +1296,21 @@ struct PlexDetailView: View {
 
     private var episodeSection: some View {
         VStack(alignment: .leading, spacing: 24) {
-            if isLoadingEpisodes {
+            if isLoadingEpisodes || isLoadingSeasons {
                 ProgressView("Loading episodes...")
             } else if !episodes.isEmpty {
-                Text("Episodes")
-                    .font(.title2)
-                    .fontWeight(.bold)
-                    .padding(.leading, 48)
+                if shouldUseSingleSeasonPillHeaderInSeasonDetail {
+                    SeasonPillBar(
+                        seasons: seasonDetailHeaderPills,
+                        selectedSeason: $selectedSeason,
+                        onSeasonSelected: { _ in }
+                    )
+                } else {
+                    Text("Episodes")
+                        .font(.title2)
+                        .fontWeight(.bold)
+                        .padding(.leading, 48)
+                }
 
                 ScrollView(.horizontal, showsIndicators: false) {
                     LazyHStack(spacing: 24) {
@@ -1463,22 +1501,11 @@ struct PlexDetailView: View {
 
     /// Get art and poster images for the player loading screen (from cache or fetch)
     private func getPlayerImages(for metadata: PlexMetadata) async -> (UIImage?, UIImage?) {
-        guard let serverURL = authManager.selectedServerURL,
-              let token = authManager.selectedServerToken else { return (nil, nil) }
+        guard let request = playerHeroBackdropRequest(for: metadata) else {
+            return (nil, nil)
+        }
 
-        // For episodes, use the show's art (displayed on detail page)
-        let art = (metadata.type == "episode" && selectedEpisode != nil) ? currentItem.bestArt : metadata.bestArt
-        let thumb = metadata.thumb ?? metadata.bestThumb
-
-        // Build URLs
-        let artURL = art.flatMap { URL(string: "\(serverURL)\($0)?X-Plex-Token=\(token)") }
-        let thumbURL = thumb.flatMap { URL(string: "\(serverURL)\($0)?X-Plex-Token=\(token)") }
-
-        // Fetch both images concurrently (from cache or network)
-        async let artTask: UIImage? = artURL != nil ? ImageCacheManager.shared.image(for: artURL!) : nil
-        async let thumbTask: UIImage? = thumbURL != nil ? ImageCacheManager.shared.image(for: thumbURL!) : nil
-
-        return await (artTask, thumbTask)
+        return await HeroBackdropResolver.shared.playerLoadingImages(for: request)
     }
 
     // MARK: - Data Loading
@@ -1528,72 +1555,91 @@ struct PlexDetailView: View {
         isLoadingExtras = false
     }
 
-    /// Fetch TMDB logo and high-quality backdrop image
-    private func loadTMDBAssets() async {
-        // Resolve TMDB ID based on item type
-        let tmdbId: Int?
-        let mediaType: TMDBMediaType
+    private func syncHeroBackdrop(tmdbIdOverride: Int? = nil, tvdbIdOverride: Int? = nil) {
+        let request = currentHeroBackdropRequest(
+            tmdbIdOverride: tmdbIdOverride,
+            tvdbIdOverride: tvdbIdOverride
+        )
+        heroBackdrop.load(request: request, motionLocked: heroBackdropMotionLocked)
+    }
 
+    private func refreshHeroBackdropAssets() async {
         switch currentItem.type {
         case "show":
-            mediaType = .tv
-            if let id = fullMetadata?.tmdbId ?? currentItem.tmdbId {
-                tmdbId = id
+            if let tmdbId = fullMetadata?.tmdbId ?? currentItem.tmdbId {
+                syncHeroBackdrop(tmdbIdOverride: tmdbId)
+            } else if let tvdbId = fullMetadata?.tvdbId ?? currentItem.tvdbId {
+                syncHeroBackdrop(tvdbIdOverride: tvdbId)
             } else {
-                tmdbId = await resolveTmdbIdViaTvdb(metadata: fullMetadata ?? currentItem, type: .tv)
+                syncHeroBackdrop()
+            }
+        case "movie":
+            if let tmdbId = fullMetadata?.tmdbId ?? currentItem.tmdbId {
+                syncHeroBackdrop(tmdbIdOverride: tmdbId)
+            } else if let tvdbId = fullMetadata?.tvdbId ?? currentItem.tvdbId {
+                syncHeroBackdrop(tvdbIdOverride: tvdbId)
+            } else {
+                syncHeroBackdrop()
             }
         case "episode":
-            mediaType = .tv
-            tmdbId = await resolveShowTmdbId()
-        case "movie":
-            mediaType = .movie
-            if let id = fullMetadata?.tmdbId ?? currentItem.tmdbId {
-                tmdbId = id
+            if let tmdbId = await resolveShowTmdbId() {
+                syncHeroBackdrop(tmdbIdOverride: tmdbId)
             } else {
-                tmdbId = await resolveTmdbIdViaTvdb(metadata: fullMetadata ?? currentItem, type: .movie)
+                syncHeroBackdrop()
             }
         default:
-            return
-        }
-
-        guard let tmdbId else { return }
-
-        // Check Plex art quality — skip TMDB backdrop if Plex art is already high-res
-        let needsBackdrop = await plexArtNeedsUpgrade()
-
-        if needsBackdrop {
-            // Fetch logo and backdrop concurrently
-            async let logoTask = TMDBClient.shared.fetchLogoURL(tmdbId: tmdbId, type: mediaType)
-            async let backdropTask = TMDBClient.shared.fetchBackdropURL(
-                tmdbId: tmdbId, type: mediaType,
-                size: "original"
-            )
-            let (logoURL, backdropURL) = await (logoTask, backdropTask)
-            showLogoURL = logoURL
-            if let backdropURL {
-                tmdbArtURL = backdropURL
-            }
-        } else {
-            // Just fetch logo
-            showLogoURL = await TMDBClient.shared.fetchLogoURL(tmdbId: tmdbId, type: mediaType)
+            syncHeroBackdrop()
         }
     }
 
-    /// Check if the Plex art image is below quality threshold (< 1280px wide)
-    private func plexArtNeedsUpgrade() async -> Bool {
-        guard let art = currentItem.bestArt,
-              let serverURL = authManager.selectedServerURL,
-              let token = authManager.selectedServerToken,
-              let plexURL = URL(string: "\(serverURL)\(art)?X-Plex-Token=\(token)") else {
-            return true  // No Plex art at all — definitely need TMDB
+    private func currentHeroBackdropRequest(
+        tmdbIdOverride: Int? = nil,
+        tvdbIdOverride: Int? = nil
+    ) -> HeroBackdropRequest? {
+        guard let serverURL = authManager.selectedServerURL,
+              let token = authManager.selectedServerToken else { return nil }
+
+        let mediaTypeOverride: TMDBMediaType?
+        switch currentItem.type {
+        case "movie":
+            mediaTypeOverride = .movie
+        case "show", "episode":
+            mediaTypeOverride = .tv
+        default:
+            mediaTypeOverride = nil
         }
 
-        // Check if the image is already cached and inspect its size
-        if let image = await ImageCacheManager.shared.imageFullSize(for: plexURL) {
-            return image.size.width * image.scale < 1280
-        }
+        return currentItem.heroBackdropRequest(
+            serverURL: serverURL,
+            authToken: token,
+            tmdbIdOverride: tmdbIdOverride,
+            tvdbIdOverride: tvdbIdOverride,
+            mediaTypeOverride: mediaTypeOverride
+        )
+    }
 
-        return true  // Not cached yet — fetch TMDB as upgrade
+    private func playerHeroBackdropRequest(for metadata: PlexMetadata) -> HeroBackdropRequest? {
+        guard let serverURL = authManager.selectedServerURL,
+              let token = authManager.selectedServerToken else { return nil }
+
+        let backdropSource = (metadata.type == "episode" && selectedEpisode != nil) ? currentItem : metadata
+        let baseRequest = backdropSource.heroBackdropRequest(
+            serverURL: serverURL,
+            authToken: token
+        )
+
+        let thumbPath = metadata.thumb ?? metadata.bestThumb
+        let thumbURL = thumbPath.flatMap { URL(string: "\(serverURL)\($0)?X-Plex-Token=\(token)") }
+
+        return HeroBackdropRequest(
+            cacheKey: metadata.ratingKey ?? baseRequest.cacheKey,
+            plexBackdropURL: baseRequest.plexBackdropURL,
+            plexThumbnailURL: thumbURL,
+            tmdbId: baseRequest.tmdbId,
+            tvdbId: baseRequest.tvdbId,
+            mediaType: baseRequest.mediaType,
+            preferredBackdropSize: baseRequest.preferredBackdropSize
+        )
     }
 
     /// Resolve the TMDB ID for the parent show of an episode.
@@ -1633,12 +1679,6 @@ struct PlexDetailView: View {
             print("🎨 [Logo] Failed to fetch show metadata: \(error)")
             return nil
         }
-    }
-
-    /// Convert a TVDB ID to TMDB ID for items using legacy Plex agents
-    private func resolveTmdbIdViaTvdb(metadata: PlexMetadata, type: TMDBMediaType) async -> Int? {
-        guard let tvdbId = metadata.tvdbId else { return nil }
-        return await TMDBClient.shared.findTmdbId(tvdbId: tvdbId, type: type)
     }
 
     /// Pre-compute and cache stream URL to reduce player startup latency
@@ -2062,6 +2102,36 @@ struct PlexDetailView: View {
         isLoadingSeasons = false
     }
 
+    /// Load sibling seasons when viewing a season so single-season shows can
+    /// keep the season-pill header pattern instead of falling back to `Episodes`.
+    private func loadSeasonsForCurrentSeason() async {
+        guard let serverURL = authManager.selectedServerURL,
+              let token = authManager.selectedServerToken,
+              let showRatingKey = currentItem.parentRatingKey else { return }
+
+        isLoadingSeasons = true
+
+        do {
+            let fetchedSeasons = try await networkManager.getChildren(
+                serverURL: serverURL,
+                authToken: token,
+                ratingKey: showRatingKey
+            )
+            seasons = fetchedSeasons
+
+            if let currentSeasonKey = currentItem.ratingKey,
+               let currentSeason = fetchedSeasons.first(where: { $0.ratingKey == currentSeasonKey }) {
+                selectedSeason = currentSeason
+            } else if let first = fetchedSeasons.first {
+                selectedSeason = first
+            }
+        } catch {
+            print("Failed to load sibling seasons for season detail: \(error)")
+        }
+
+        isLoadingSeasons = false
+    }
+
     /// Load all episodes across all seasons using getAllLeaves (single API call)
     private func loadAllEpisodes() async {
         guard let serverURL = authManager.selectedServerURL,
@@ -2243,16 +2313,6 @@ struct PlexDetailView: View {
 
 
     // MARK: - URL Helpers
-
-    private var artURL: URL? {
-        // Prefer TMDB high-quality backdrop when available
-        if let tmdbArtURL { return tmdbArtURL }
-        // Fall back to Plex art
-        guard let art = currentItem.bestArt,
-              let serverURL = authManager.selectedServerURL,
-              let token = authManager.selectedServerToken else { return nil }
-        return URL(string: "\(serverURL)\(art)?X-Plex-Token=\(token)")
-    }
 
     /// Poster URL - uses grandparent poster for episodes (series poster)
     private var posterURL: URL? {

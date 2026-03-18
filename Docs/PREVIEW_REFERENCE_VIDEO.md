@@ -1,257 +1,170 @@
 # Apple TV Preview Reference Video Notes
 
-This document captures the visual target from the sample clip, not the current Rivulet implementation.
+This document is the canonical visual and motion reference for the hub-row preview flow. It describes the target experience, not the current implementation.
 
-Use this as the source-of-truth reference for future preview-flow iterations. `Docs/PREVIEW_CARD_CAROUSEL.md` describes implementation history/status. This file describes what the target experience should look like.
+Use this before changing the preview carousel, expanded hero, details fold, or backdrop-upgrade behavior. `Docs/PREVIEW_CARD_CAROUSEL.md` remains the implementation-history/status doc; this file is the fidelity spec.
 
 ## Source
 
-- Primary reference: `/Users/bain/Downloads/IMG_4815.MOV`
-- Supplemental references: the still images provided with the same request
-- Clip metadata: `1920x1080`, `30 fps`, `7.13s`
-- Analysis method: manual review plus still extraction at `0.5s` and `0.25s` intervals
+- Primary reference: `/Users/bain/Downloads/IMG_4941.MOV`
+- Clip metadata: `1920x1080`, `30 fps`, `24.46s`
+- Analysis method: manual review plus still extraction across the first `0-7s` entry/paging segment and the later `10-17s` details segment
+- Important note: the long holds/swells in the clip are manual pauses from the user and must not be treated as animation dwell time
 
-## Confidence Levels
+## Core Phase Model
 
-- `Observed`: directly visible in the sample clip
-- `User clarified`: explicitly provided by the user to disambiguate interactions that are not fully recoverable from the clip alone
-- `Inferred`: not directly shown end-to-end in the clip, but consistent with the clip, the still images, and the user description
+Future agents should model the preview flow as these distinct states:
 
-## Primary Phase Model
-
-This is the corrected high-level phase sequence for the sample:
-
-1. `Home screen`
+1. `Home row`
 2. `Poster selected`
-3. `Poster expands into carousel view`
-4. `Carousel expands on user interaction`
-5. `Details view opens on user interaction`
+3. `Carousel with focused metadata`
+4. `Expanded hero card`
+5. `Details fold`
+6. `Paged hero / repeated cycle`
 
-Future agents should use this sequence instead of collapsing the clip into only "entry" and "details".
+This clip shows more than one title transition, so do not treat it as a single straight-line “home -> detail” example.
 
-## Timeline
+## Timing Targets
 
-| Time | State | Notes |
-|------|-------|-------|
-| `0.0s` | Home row | Focus is on a landscape poster inside a standard browse row. No preview is active. |
-| `0.0s` | Poster selected | `User clarified`: the transition begins because the user selects the poster. |
-| `0.0s - 0.9s` | Poster to carousel | The selected poster rapidly grows into a dominant centered card. The browse surface recedes and the sidebar no longer reads as part of the interactive stage. |
-| `0.9s - 2.5s` | Carousel settled | `Observed`: the carousel state is image-led. The centered card has rounded top corners, no visible bottom corners, and narrow neighboring cards visible at left and right. No metadata chrome is present yet. |
-| `~2.5s` | Carousel expand input | `User clarified`: the next transition is triggered by another user interaction, not by passive autoplay. |
-| `2.5s - 5.1s` | Expanded carousel card | Metadata, actions, and cast text appear over the same dominant card. The card still reads as the same rounded-top surface rather than a new full-screen page. A teaser of below-fold content remains visible at the bottom edge. |
-| `~5.1s` | Details input | `User clarified`: the move into details is triggered by another user interaction. |
-| `5.1s - 5.6s` | Transition to details | The composition moves downward into the attached details content. The motion reads as continuous vertical travel from the expanded card surface. |
-| `5.6s - 6.5s` | Details stable | Season tabs, episode cards, and trailer rows are visible over the same art direction with heavier dimming/blur. |
+These are implementation targets derived from the clip’s continuous motion, not the user’s pauses.
 
-## Frame-by-Frame Notes
+| Motion | Target |
+|--------|--------|
+| Poster morph to centered card | `~0.45s`, spring/ease-out, no bounce |
+| Carousel paging | `~0.30s`, interactive spring, image-led |
+| Focused-card metadata after settle | `~0.18s - 0.22s` opacity-only fade once centered motion finishes |
+| Background art during paging | fades/slides on a slightly slower cadence than the card frame |
+| Actions + cast reveal after focused info loads | present with the focused metadata state and fade in-place with the title/meta; expand mainly unlocks deeper continuity into details |
+| Expanded hero to details fold | `~0.35s`, one continuous vertical move |
+| Backdrop quality upgrade | only after `>=150ms` stable, `~0.22s` opacity crossfade |
 
-These are the most useful checkpoints for future agents comparing implementation footage against the target clip.
-
-| Time | What is visible | Why it matters |
-|------|------------------|----------------|
-| `0.00s` | Standard browse grid with the Monarch row item focused | Starting state is a normal hub row, not a pre-expanded hero. |
-| `0.25s` | Browse view still mostly intact | Entry animation has not yet completed by the first quarter second. |
-| `0.50s` | The selected item is already scaling into a large landscape surface | The home-to-preview move is fast and decisive. |
-| `0.75s` | Dominant rounded-top card is nearly settled | By this point the poster has become the carousel’s centered card. |
-| `1.00s` | Large image-only card with thin side neighbors visible | This is the clearest sampled frame for carousel geometry: rounded top corners, no visible bottom corners, narrow left/right peeks. |
-| `1.00s - 2.25s` | Carousel art only, no metadata yet | The image is allowed to breathe before user-triggered expansion. |
-| `2.50s` | Transition into expanded card state is beginning | This is the handoff between carousel-only and metadata-rich expanded card. |
-| `2.67s` | Full title/metadata/action layout is visible over the same rounded-top card | This is the first clear expanded-card reference frame in the sampled set. |
-| `3.00s - 5.00s` | Stable expanded card | This is the reference composition for title block, badges, controls, cast text, and bottom teaser content. |
-| `5.25s` | Transition frame between expanded card and details | The details content is attached below the card surface and moves upward as one continuous sheet. |
-| `5.50s - 6.50s` | Stable details layout | This is the reference composition for season tabs, episode row, and trailers row. |
-
-## Visual Rules
-
-### Stage Ownership
-
-- `Observed`: once preview starts, the experience owns the full content stage.
-- `Observed`: the left tvOS sidebar is not part of the preview composition.
-- `Observed`: the preview states read as a dedicated scene, not as a small overlay floating above still-focusable browse content.
-
-### Carousel Card Layout
-
-- `Observed`: the selected card is very large and centered.
-- `Observed`: only the top corners are clearly visible and rounded.
-- `Observed`: the bottom corners are not visible because the card continues below the bottom edge of the visible stage.
-- `Observed`: the card image is the first thing the user sees after the entry motion.
-- `Observed`: narrow neighboring items are visible at the far left and right edges.
-- `Inferred`: adjacent cards should read as edge peeks, not as full same-size sibling cards separated by obvious horizontal gaps.
-- `Inferred`: the side peeks should share the same top alignment as the centered card and feel tucked behind it.
-- `Observed`: the centered card has a large rounded radius on the top edge before the next interaction.
-
-### Expanded Card Layout
-
-- `User clarified`: this state is triggered by a second user interaction from the carousel.
-- `Observed`: the same first image remains the dominant background during the expanded state.
-- `Observed`: the expanded state still reads as the same rounded-top card stage, not as a separate zero-radius full-screen page.
-- `Observed`: metadata is anchored in the lower-left quadrant.
-- `Observed`: the lower-right area carries cast/starring text.
-- `Observed`: the bottom edge shows a teaser of the content below the fold.
-- `Observed`: the expanded card is still image-led. Text and actions are layered on top, not separated into a different panel.
-
-### Details Layout
-
-- `User clarified`: this state is triggered by another user interaction after the expanded card state.
-- `Observed`: the details state keeps the same show art behind a heavier blur/gradient treatment.
-- `Observed`: a centered show title/logo appears at the top of the details state.
-- `Observed`: season tabs sit below that header.
-- `Observed`: the first detail row is an episode row with landscape thumbnails.
-- `Observed`: the selected episode includes an attached text block under its thumbnail.
-- `Observed`: trailers appear as another row below the episode row.
-- `Observed`: this is not a different detail page background. It is the same scene with the fold moved upward.
-
-## Motion Notes
+## Observed Sequence
 
 ### 1. Home to Carousel
 
-- `User clarified`: this move begins when the user selects the poster.
-- `Observed`: the selected poster scales up into the preview card very quickly.
-- `Observed`: the transition reads as a zoom/morph into the centered stage, not a hard cut to a new screen.
-- `Observed`: the card art settles before metadata appears.
-- `Inferred`: the underlying rows should fade and recede during the move so the card becomes the only clear focal plane.
+- The selected poster scales into a dominant centered card very quickly.
+- The browse surface visually recedes and stops reading as the active stage.
+- Once the centered item settles, its title/meta information fades in.
+- The centered card keeps top-only rounded corners and extends below the visible bottom edge.
+- Side neighbors sit beside the centered card rather than stacking behind it.
+- The centered card remains dominant, but the neighboring cards should read as separate side-by-side surfaces.
 
-#### Animation Breakdown
+### 2. Carousel Paging
 
-- `Observed`: the clip reaches a mostly-settled hero image by about `0.75s`.
-- `Observed`: the move has no visible hard stop, snap, or black-frame interruption.
-- `Observed`: the composition moves from "many small browse items" to "one dominant hero surface" in a single motion.
-- `Observed`: by the settled carousel frame, thin neighboring cards are still visible at both edges.
-- `Inferred`: the motion likely uses an ease-out or spring-like settle rather than a rigid linear slide. The clip does not show a large overshoot or bounce.
-- `Inferred`: the source poster should visually own the transition. The result should feel like the selected poster has grown into the carousel’s dominant center card.
+- The user can page laterally while staying in the same carousel stage.
+- The next item takes over the same dominant centered stage.
+- Its metadata fades back in once the new item reaches focus.
+- The background art handoff is layered: it lags slightly and fades on a different cadence than the card frame movement.
+- The stage remains calm and image-led between lateral moves, with focused metadata only after settle.
 
-### 2. Carousel to Expanded Card
+### 3. Expanded Hero
 
-- `User clarified`: this move is triggered by user interaction.
-- `Observed`: the clip shows an art-only carousel state followed by a metadata-rich expanded-card state.
-- `Observed`: title, badges, summary, and controls arrive after the image-only carousel has settled.
-- `Observed`: the state keeps the same rounded-top card silhouette and bottom teaser behavior.
-- `Inferred`: this interaction should preserve the same image/card and unlock chrome over it, not swap to a different page composition.
+- A second user interaction unlocks the expanded chrome over the same card.
+- The card silhouette stays the same rounded-top stage; this is not a hard cut to a different page.
+- Title/logo, metadata rows, and summary are already present from carousel focus.
+- Buttons and cast treatment are already present with the focused info state.
+- The title/logo block and the action row fade in where they live; they do not slide up or laterally on reveal.
+- Expanded mode mainly deepens the connection to the fold and the below-fold content.
+- The left column sits in the lower-left quadrant.
+- Cast/starring text anchors in the lower-right quadrant.
+- A teaser of the real below-fold shelves remains visible at the bottom edge.
+- The shelf tease should be shallow; only the upper portion of the episode thumbnails should show before scroll.
+- For shows, the same episode shelf the user will scroll into should be the one peeking into the expanded hero.
 
-#### Animation Breakdown
+### 4. Details Fold
 
-- `Observed`: there is a visible separation between image settle and metadata reveal.
-- `Observed`: the title block, badges, summary, and buttons appear as chrome over the same card surface, not as a new page.
-- `Observed`: the art does not jump or reframe aggressively during this reveal phase.
-- `Observed`: bottom teaser content remains visible while the metadata settles in.
-- `Inferred`: metadata likely fades in with a short stagger or delayed opacity ramp. The clip does not provide enough precision to recover exact per-element timings.
-- `Inferred`: any geometry change during this phase should be subtle compared with the initial poster-to-carousel move.
+- A further user interaction moves the composition downward into the details content.
+- The move reads as one continuous vertical fold, not a route push or page replacement.
+- The same show art remains behind the details surface with heavier blur/dimming.
+- The details state introduces a centered title/logo at the top, then shelves/rows below.
+- Episode/trailer rows feel attached below the hero rather than injected over a blank background.
 
-### 3. Expanded Card to Details
+## Layout Rules
 
-- `User clarified`: this move is triggered by a further user interaction.
-- `Observed`: the move into details is vertical and continuous.
-- `Observed`: the same art persists behind the lower content.
-- `Observed`: the details content appears attached below the expanded card, not pushed from a separate route.
-- `Inferred`: the first downward move after card expansion should shift focus into the season picker or first detail row while scrolling the fold upward.
+### Stage Ownership
 
-#### Animation Breakdown
+- Once preview starts, it owns the full stage.
+- The tvOS sidebar must not remain visually active or focusable.
+- The preview should not feel like a floating overlay above live browse content.
 
-- `Observed`: the transition happens quickly between `5.0s` and `5.5s` in the sampled clip.
-- `Observed`: the composition keeps the same palette and same background art during the move.
-- `Observed`: the centered show title/logo at the top of the details state fades or scrolls into place as the fold comes up.
-- `Observed`: the details rows do not pop in over a blank background. They are already attached below the fold and become visible by scrolling upward.
-- `Inferred`: this move should be driven by one vertical content translation/scroll animation, not by a crossfade between separate views.
+### Carousel Geometry
 
-### 4. Details Idle State
+- The centered card is large, high, and visually dominant.
+- Only the top corners should be clearly visible and rounded.
+- The bottom corners should not read as exposed in the settled carousel state.
+- Side cards should share the same top alignment as the centered card.
+- Side cards should sit next to the centered card with a clear gap, not overlap it.
+- The visible portions of the neighboring cards can be narrow, but they must still read as separate adjacent cards rather than stacked layers.
 
-- `Observed`: once the details state settles, there is no visible residual motion.
-- `Observed`: episode cards and trailer cards sit on a darker, more diffused version of the same art.
-- `Inferred`: any remaining motion in this state should be limited to focus effects, not layout shifts.
+### Expanded Hero Layout
 
-## Animation Constraints
+- The same image remains the dominant background.
+- Metadata anchors lower-left with fixed boxes so title/logo swaps do not move the rest of the overlay.
+- Buttons sit on a stable lower-left baseline.
+- Cast/starring anchors lower-right on the same baseline.
+- Focused title/logo and action buttons should reveal via opacity only; keep their geometry fixed during the reveal.
+- Summary and badges should not cause the entire overlay to jump vertically.
+- The action row should sit slightly lower, with clearer separation from the summary block above it.
 
-These are the most important motion constraints for future agents.
+### Details Layout
 
-- Do not reveal metadata at the same instant the poster starts scaling.
-- Do not leave the sidebar focusable or visually active once preview begins.
-- Do not switch to a second background image when the hero expands or when the fold moves.
-- Do not replace the rounded-top card stage with an unrelated full-screen zero-radius layout during the expanded-card state.
-- Do not treat details as a pushed route with a different backdrop.
-- Do not make side cards look like evenly spaced siblings if the reference is supposed to read as a dominant center card with narrow peeks.
-- Do not make the bottom edge of the centered card fully visible if the reference state is supposed to imply more content below.
-- Do not use a blank interstitial frame between home, hero, and details.
+- Keep the same art and palette behind the fold.
+- Center the title/logo above the details shelves.
+- Do not reserve that centered-header space before scroll; the first shelf should be able to peek naturally at rest.
+- Season/episode/trailer rows should feel physically attached under the hero.
+- For single-season shows, keep the season-pill pattern with one pill instead of replacing it with an `Episodes` title block, including on season-detail surfaces.
+- Keep season pills visually hidden until the user actually scrolls into the below-fold shelf.
+- Once settled, details should be mostly static outside of focus effects.
+
+## Artwork Upgrade Policy
+
+Apple TV+ in this clip sometimes updates the active backdrop after the motion settles. That is allowed here, but only under these rules:
+
+- Choose one visible hero backdrop for the active motion phase.
+- Do not swap the visible backdrop during poster morph, paging, expand, or fold motion.
+- If a higher-quality backdrop becomes available after settle, update with a fixed-geometry opacity crossfade only.
+- The crossfade must not resize, reframe, or expose two differently cropped hero images at once.
+- If the replacement would materially change crop/framing, defer it until the next page or next session instead of swapping live.
+- The same policy applies to preview, standard detail hero, and other hero/loading surfaces that share this backdrop logic.
+
+## Motion Constraints
+
+- Do not reveal metadata at the same instant the poster begins scaling.
+- Do not keep the selected card mounted as both a side-card art layer and a hero/detail art layer at the same time.
+- Do not introduce a second background image during expand or fold.
+- Do not let the expanded hero snap to a zero-radius full-screen page before the details fold.
+- Do not crossfade to a better backdrop while geometry is still moving.
+- Do not let the details state feel like a route push to a different page.
+- Do not show wide gaps that make the side cards look like equal siblings.
+- Do not overlap or stack neighboring carousel cards behind the centered card.
+- Do not leave the sidebar focusable once preview owns the stage.
 
 ## Styling Notes
 
-### Typography
+- Title/logo should be bright, high-contrast, large, and given a slightly more generous slot than the current Rivulet default.
+- Metadata text is white or near-white over darkened art.
+- Action buttons are pill-shaped with soft material/glass treatment.
+- Quality/rating badges are compact inline pills.
+- Details use stronger blur/dim treatment than the expanded hero, but the same underlying art.
 
-- `Observed`: the show title/logo is large, bright, and high-contrast.
-- `Observed`: metadata text is white or near-white over darkened art.
-- `Observed`: section headers in details are clean and minimal, not heavily decorated.
+## Practical Comparison Anchors
 
-### Buttons and Pills
+These are the most useful checkpoints when comparing Rivulet footage against the clip.
 
-- `Observed`: hero actions are pill-shaped with soft material/glass treatment.
-- `Observed`: there is a clear primary action on the left side of the button row.
-- `Observed`: quality/rating badges are compact inline pills.
-
-### Background Treatment
-
-- `Observed`: the hero art is bright but darkened enough for readability.
-- `Observed`: the details view uses stronger blur/dimming than the hero state.
-- `Observed`: there is no second background image introduced at the fold.
-
-## Inferred Interaction Model
-
-These items are not all shown directly in the sample clip, but they fit the clip and the supplied stills.
-
-- `Inferred`: selecting a non-Continue Watching poster opens the carousel stage.
-- `Inferred`: `Left` and `Right` should page sibling cards while in carousel mode.
-- `User clarified`: a distinct user interaction expands the carousel into the metadata-rich expanded-card state.
-- `Inferred`: the next `Down` should move focus into the details content below the fold.
-- `User clarified`: details are reached by another user interaction after the expanded-card state.
-- `Inferred`: `Menu` should step back one layer at a time rather than dismiss everything at once.
-
-## What The Clip Does Not Prove
-
-Future agents should avoid over-claiming these points because they are not directly demonstrated in `IMG_4815.MOV`.
-
-- Exact spring constants or easing curves
-- Exact left/right carousel spacing during paging
-- Exact focus restoration behavior on `Menu`
-- Exact stagger order for title vs summary vs buttons
-- Whether the long art-only interval is entirely animation or partly user dwell
-
-Those details should be treated as implementation choices constrained by the broader visual rules above.
+- `0.0s - 2.0s`: browse row -> poster morph -> art-only carousel
+- `3.5s - 5.5s`: lateral item change followed by metadata-rich expanded hero
+- `10.0s - 12.0s`: stable expanded hero composition over the same background
+- `12.5s - 13.5s`: centered top title/logo plus details shelves after the vertical fold
 
 ## Future Agent Workflow
 
-When continuing preview-flow work:
-
 1. Read this file first.
-2. Compare the current app footage against the timeline and frame-by-frame checkpoints above.
-3. Fix stage ownership first:
-   Sidebar, background dimming, and focus fencing.
-4. Fix geometry second:
-   Card size, top-only radius, peeks, bottom edge, and continuity.
-5. Fix animation ordering third:
-   Poster morph, then user-triggered expanded-card reveal, then user-triggered vertical fold motion.
-6. If fidelity is still off, record a new current-state clip and compare it side-by-side against `IMG_4815.MOV`.
-
-## Practical Summary
-
-If a future implementation is close but still feels wrong, the most likely misses are:
-
-- The preview still shares focus or visual ownership with the sidebar.
-- The center card is too small or too low.
-- The side cards are too visible and too separate.
-- The card shows fully rounded corners on all sides instead of only the visible top corners.
-- Metadata appears too early or without a distinct expand state.
-- The expanded card switches backgrounds before the fold moves.
-- The details state feels like navigation to a new page instead of the same surface continuing downward.
-
-## Fidelity Checklist
-
-- Hide or fence off the tvOS sidebar while preview owns the stage.
-- Keep the settled carousel card dominant, with visible top radius and no visible bottom corners.
-- Show only narrow side peeks, not separated same-size side cards.
-- Delay metadata until after the initial poster-to-carousel motion settles.
-- Keep the first image as the background for both expanded card and details.
-- Make the details state feel attached below the expanded card, not routed to a new page.
-- Preserve a bottom teaser of below-fold content while the expanded card is visible.
-- Avoid blank frames, hard cuts, or a second background image during expand.
+2. Compare current footage against `IMG_4941.MOV`.
+3. Fix stage ownership first: sidebar, focus fencing, background continuity.
+4. Fix geometry second: card size, top-only radius, peeks, bottom-edge continuity.
+5. Fix animation ordering third: morph, then expand chrome, then fold.
+6. Fix backdrop upgrade behavior last: only post-settle, crossfade-only, no crop jump.
 
 ## Scope Boundary
 
-This reference describes the target behavior for the hub-row preview flow only. It should not be treated as a generic detail-page spec for every browse surface in the app.
+This reference is for the hub-row preview flow and the shared hero/backdrop behavior it depends on. It is not a generic spec for every detail screen layout in the app.

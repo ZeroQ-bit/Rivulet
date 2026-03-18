@@ -227,11 +227,31 @@ final class SampleBufferRenderer {
         }
 
         airPlayVideoDelay = CMTime(seconds: outputLatency, preferredTimescale: 90_000)
-        isVideoDelayQueueActive = true
 
-        print(
-            "[Renderer] AirPlay video compensation enabled: delay=\(String(format: "%.3f", outputLatency))s"
-        )
+        if videoTimebase == nil {
+            var timebase: CMTimebase?
+            CMTimebaseCreateWithSourceTimebase(
+                allocator: kCFAllocatorDefault,
+                sourceTimebase: renderSynchronizer.timebase,
+                timebaseOut: &timebase
+            )
+            if let timebase {
+                // Relative rate 1.0 = track synchronizer at same speed.
+                // Rate changes on the synchronizer propagate automatically.
+                CMTimebaseSetRate(timebase, rate: 1.0)
+                videoTimebase = timebase
+            }
+        }
+
+        if let timebase = videoTimebase {
+            let syncTime = renderSynchronizer.currentTime()
+            let compensated = CMTimeSubtract(syncTime, airPlayVideoDelay)
+            CMTimebaseSetTime(timebase, time: compensated < .zero ? .zero : compensated)
+            displayLayer.controlTimebase = timebase
+        }
+
+        isVideoDelayQueueActive = true
+        print("[Renderer] AirPlay video compensation enabled: delay=\(String(format: "%.3f", outputLatency))s")
     }
 
     func disableAirPlayVideoCompensation() {
@@ -241,7 +261,9 @@ final class SampleBufferRenderer {
         airPlayVideoDelay = .zero
         isVideoDelayQueueActive = false
 
-        // Fast-drain remaining frames to the display layer immediately
+        displayLayer.controlTimebase = renderSynchronizer.timebase
+        videoTimebase = nil
+
         for frame in videoDelayQueue {
             if displayLayer.isReadyForMoreMediaData {
                 displayLayer.enqueue(frame)
@@ -252,26 +274,11 @@ final class SampleBufferRenderer {
         print("[Renderer] AirPlay video compensation disabled")
     }
 
-    /// Drain frames from the delay queue to the display layer.
-    /// Frames are released 50ms before they're due, giving the display layer
-    /// a tiny buffer (1-2 frames) to smooth delivery jitter. The lead time is
-    /// kept small because the display layer shows late frames immediately —
-    /// a larger lead would cause video to appear early, breaking A/V sync.
+    /// Drain overflow frames from the delay queue to the display layer (FIFO).
+    /// The display layer manages all timing internally via its offset controlTimebase.
     private func drainVideoDelayQueue() {
-        guard isVideoDelayQueueActive else { return }
-        let syncTime = CMTimeGetSeconds(renderSynchronizer.currentTime())
-        guard syncTime.isFinite && syncTime >= 0 else { return }
-        let delaySeconds = CMTimeGetSeconds(airPlayVideoDelay)
-        let leadTime = 0.05 // 50ms — below lip-sync perception threshold
-
-        while !videoDelayQueue.isEmpty {
-            let framePTS = CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(videoDelayQueue[0]))
-            guard syncTime >= framePTS + delaySeconds - leadTime else { break }
-            guard displayLayer.isReadyForMoreMediaData else { break }
-            let frame = videoDelayQueue.removeFirst()
-            let adjustedPTS = CMTimeAdd(CMSampleBufferGetPresentationTimeStamp(frame), airPlayVideoDelay)
-            CMSampleBufferSetOutputPresentationTimeStamp(frame, newValue: adjustedPTS)
-            displayLayer.enqueue(frame)
+        while !videoDelayQueue.isEmpty && displayLayer.isReadyForMoreMediaData {
+            displayLayer.enqueue(videoDelayQueue.removeFirst())
         }
     }
 
@@ -410,7 +417,8 @@ final class SampleBufferRenderer {
             print("[Renderer] setRate(\(rate))")
         }
 
-        // Update separate video timebase (audio engine only)
+        // Update separate video timebase (audio engine only — AirPlay compensation
+        // uses synchronizer's timebase as source, so rate propagates automatically)
         if useAudioEngine, let timebase = videoTimebase {
             CMTimebaseSetRate(timebase, rate: Float64(rate))
         }
@@ -430,11 +438,22 @@ final class SampleBufferRenderer {
     func setRate(_ rate: Float, time: CMTime) {
         print("[Renderer] setRate(\(rate), time=\(String(format: "%.3f", CMTimeGetSeconds(time)))s)")
 
-        // Update separate video timebase with latency compensation (audio engine only)
-        if useAudioEngine, let timebase = videoTimebase {
-            let compensated = compensatedVideoTime(forMediaTime: time)
-            CMTimebaseSetTime(timebase, time: compensated)
-            CMTimebaseSetRate(timebase, rate: Float64(rate))
+        // Update separate video timebase with latency compensation
+        if let timebase = videoTimebase {
+            let delay = useAudioEngine ? audioEngineVideoLatency : airPlayVideoDelay
+            let displayTime: CMTime
+            if delay > .zero {
+                let compensated = CMTimeSubtract(time, delay)
+                displayTime = compensated < .zero ? .zero : compensated
+            } else {
+                displayTime = time
+            }
+            CMTimebaseSetTime(timebase, time: displayTime)
+            // Audio engine: rate managed manually (host clock source)
+            // AirPlay: rate inherited from synchronizer source timebase
+            if useAudioEngine {
+                CMTimebaseSetRate(timebase, rate: Float64(rate))
+            }
         }
 
         if useAudioEngine {
@@ -468,6 +487,12 @@ final class SampleBufferRenderer {
                 renderSynchronizer.setRate(rate, time: time, atHostTime: hostTime)
             } else {
                 renderSynchronizer.setRate(rate, time: time)
+            }
+
+            if let timebase = videoTimebase, airPlayVideoDelay > .zero {
+                let compensated = CMTimeSubtract(time, airPlayVideoDelay)
+                CMTimebaseSetTime(timebase, time: compensated < .zero ? .zero : compensated)
+                // Rate inherited from synchronizer source timebase
             }
         }
     }
@@ -573,12 +598,21 @@ final class SampleBufferRenderer {
 
         guard !Task.isCancelled else { return }
 
-        // Delay queue path: skip isReadyForMoreMediaData (display layer isn't
-        // fed directly) and append to the queue. The drain timer releases frames
-        // when syncTime >= framePTS + delay.
-        if isVideoDelayQueueActive && airPlayVideoDelay > .zero {
-            videoDelayQueue.append(sampleBuffer)
-            drainVideoDelayQueue()
+        // AirPlay video compensation: the display layer's controlTimebase is
+        // offset behind the synchronizer, so it manages all timing internally.
+        // Use an overflow queue to prevent blocking the read loop when the
+        // display layer's internal buffer is full.
+        if isVideoDelayQueueActive {
+            // Drain pending overflow frames first (FIFO)
+            while !videoDelayQueue.isEmpty && displayLayer.isReadyForMoreMediaData {
+                displayLayer.enqueue(videoDelayQueue.removeFirst())
+            }
+            // Enqueue current frame directly if possible, otherwise overflow
+            if videoDelayQueue.isEmpty && displayLayer.isReadyForMoreMediaData {
+                displayLayer.enqueue(sampleBuffer)
+            } else {
+                videoDelayQueue.append(sampleBuffer)
+            }
             return
         }
 

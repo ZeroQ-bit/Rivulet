@@ -308,16 +308,11 @@ struct PlexHomeView: View {
 
     /// Get art and poster images for the player loading screen
     private func getPlayerImages(for metadata: PlexMetadata, serverURL: String, authToken: String) async -> (UIImage?, UIImage?) {
-        let art = metadata.bestArt
-        let thumb = metadata.thumb ?? metadata.bestThumb
-
-        let artURL = art.flatMap { URL(string: "\(serverURL)\($0)?X-Plex-Token=\(authToken)") }
-        let thumbURL = thumb.flatMap { URL(string: "\(serverURL)\($0)?X-Plex-Token=\(authToken)") }
-
-        async let artTask: UIImage? = artURL != nil ? ImageCacheManager.shared.image(for: artURL!) : nil
-        async let thumbTask: UIImage? = thumbURL != nil ? ImageCacheManager.shared.image(for: thumbURL!) : nil
-
-        return await (artTask, thumbTask)
+        let request = metadata.heroBackdropRequest(
+            serverURL: serverURL,
+            authToken: authToken
+        )
+        return await HeroBackdropResolver.shared.playerLoadingImages(for: request)
     }
 
     // MARK: - Preview Presentation (UIKit Modal)
@@ -737,8 +732,7 @@ struct HeroView<FocusTarget: Hashable>: View {
     let authToken: String
     let onSelect: () -> Void
 
-    // Hero art image loaded at full size with guaranteed off-main-thread decoding
-    @State private var heroArtImage: UIImage?
+    @StateObject private var heroBackdrop = HeroBackdropCoordinator()
 
     // Focus binding - supports both Bool and enum-based patterns
     private let focusBinding: FocusBinding<FocusTarget>
@@ -788,46 +782,25 @@ struct HeroView<FocusTarget: Hashable>: View {
         }
     }
 
-    private var artURL: URL? {
-        // Prefer art (backdrop) over thumb (poster)
-        let path = item.art ?? item.thumb
-        guard let path else { return nil }
-        var urlString = "\(serverURL)\(path)"
-        if !urlString.contains("X-Plex-Token") {
-            urlString += urlString.contains("?") ? "&" : "?"
-            urlString += "X-Plex-Token=\(authToken)"
-        }
-        return URL(string: urlString)
+    private var heroBackdropRequest: HeroBackdropRequest {
+        item.heroBackdropRequest(
+            serverURL: serverURL,
+            authToken: authToken
+        )
     }
 
     var body: some View {
         heroButtonView
-            .task(id: artURL) {
-                await loadHeroArt()
+            .task(id: heroBackdropRequest) {
+                heroBackdrop.load(request: heroBackdropRequest, motionLocked: false)
             }
-    }
-
-    /// Load hero art at full size with guaranteed off-main-thread decoding
-    private func loadHeroArt() async {
-        guard let url = artURL else {
-            heroArtImage = nil
-            return
-        }
-        heroArtImage = await ImageCacheManager.shared.imageFullSize(for: url)
     }
 
     private var heroContentView: some View {
         GeometryReader { geo in
             ZStack(alignment: .bottomLeading) {
                 // Background art - full width edge to edge
-                // Uses imageFullSize() for guaranteed off-main-thread PNG decoding (fixes RIVULET-C)
-                if let heroArtImage {
-                    Image(uiImage: heroArtImage)
-                        .resizable()
-                        .aspectRatio(contentMode: .fill)
-                        .frame(width: geo.size.width, height: geo.size.height)
-                        .clipped()
-                } else {
+                HeroBackdropImage(url: heroBackdrop.session.displayedBackdropURL) {
                     Rectangle()
                         .fill(
                             LinearGradient(
@@ -837,6 +810,8 @@ struct HeroView<FocusTarget: Hashable>: View {
                             )
                         )
                 }
+                .frame(width: geo.size.width, height: geo.size.height)
+                .clipped()
 
                 // Gradient overlay for text legibility (simplified 2-stop gradient)
                 LinearGradient(

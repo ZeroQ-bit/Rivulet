@@ -8,9 +8,9 @@
 import SwiftUI
 import Combine
 
-let previewEntryAnimation = Animation.spring(response: 0.46, dampingFraction: 0.86)
-let previewPagingAnimation = Animation.easeInOut(duration: 0.8)
-let previewExpandAnimation = Animation.spring(response: 0.44, dampingFraction: 0.84)
+let previewEntryAnimation = Animation.spring(response: 0.45, dampingFraction: 0.88)
+let previewPagingAnimation = Animation.interactiveSpring(response: 0.3, dampingFraction: 0.9)
+let previewExpandAnimation = Animation.easeInOut(duration: 0.35)
 
 /// Bridge object that allows PreviewContainerViewController to trigger Menu actions
 /// on the SwiftUI PreviewOverlayHost.
@@ -55,15 +55,14 @@ struct PreviewOverlayHost: View {
     @State private var expandedChromeVisible = false
     @State private var verticalScrollEnabled = false
     @State private var capturedSourceFrame: CGRect?
-    @State private var tmdbBackdropURLs: [String: URL] = [:]
     @State private var metadataGate = PreviewLoadGate()
     @FocusState private var focusedArea: PreviewFocusArea?
 
     private let topInset: CGFloat = 52
-    private let cardGap: CGFloat = 16
     private let cornerRadius: CGFloat = 28
-    private let sidePeek: CGFloat = 80  // How much of side cards shows
-    private let cardParallax: CGFloat = 20  // Background offset per card position
+    private let centeredHorizontalInset: CGFloat = 92
+    private let sideCardGap: CGFloat = 12
+    private let cardParallax: CGFloat = 52
 
     init(
         request: PreviewRequest,
@@ -82,18 +81,11 @@ struct PreviewOverlayHost: View {
         self._selectedIndex = State(initialValue: request.selectedIndex)
     }
 
-    private var currentItem: PlexMetadata {
-        request.items[selectedIndex]
-    }
-
     private var visibleIndices: [Int] {
         switch stateMachine.phase {
-        case .enteringCarousel:
+        case .entryMorph:
             return [selectedIndex]
-        case .carousel, .expanding, .expanded:
-            // Side cards remain in ForEach during expanded state (opacity 0) to avoid
-            // structural ForEach changes when finishExpand() transitions .expanding → .expanded
-            // without animation, which can reset animation state and flash corner radii.
+        case .carouselStable, .expandingHero, .expandedHero, .detailsStable, .exiting:
             return [selectedIndex - 1, selectedIndex, selectedIndex + 1]
                 .filter { request.items.indices.contains($0) }
         }
@@ -102,7 +94,7 @@ struct PreviewOverlayHost: View {
     var body: some View {
         GeometryReader { geo in
             // Card extends from topInset to below the screen bottom (overflows by cornerRadius to hide bottom corners)
-            let cardWidth = max(0, geo.size.width - (sidePeek * 2) - (cardGap * 2))
+            let cardWidth = max(0, geo.size.width - (centeredHorizontalInset * 2))
             let cardHeight = geo.size.height - topInset + cornerRadius
             let centeredFrame = CGRect(
                 x: (geo.size.width - cardWidth) / 2,
@@ -126,23 +118,28 @@ struct PreviewOverlayHost: View {
                         item: request.items[index],
                         serverURL: serverURL,
                         authToken: authToken,
-                        tmdbArtURL: tmdbBackdropURLs[request.items[index].ratingKey ?? ""],
                         frame: frame(
                             for: index,
                             centeredFrame: centeredFrame,
                             fullFrame: fullFrame,
-                            entryFrame: entryFrame,
-                            containerSize: geo.size
+                            entryFrame: entryFrame
                         ),
                         isCurrent: index == selectedIndex,
                         isExpanded: stateMachine.isExpanded,
                         metadataVisible: index == selectedIndex && metadataVisible,
                         showExpandedChrome: expandedChromeVisible,
                         allowVerticalScroll: verticalScrollEnabled,
+                        allowActionRowInteraction: expandedChromeVisible,
+                        motionLocked: stateMachine.motionLocked,
                         backgroundParallaxOffset: CGFloat(selectedIndex - index) * cardParallax,
                         cornerRadius: cardCornerRadius(for: index),
                         opacity: cardOpacity(for: index),
-                        onPreviewExitRequested: handleExpandedExit
+                        onPreviewExitRequested: handleExpandedExit,
+                        onDetailsBecameVisible: {
+                            if index == selectedIndex {
+                                stateMachine.markDetailsStable()
+                            }
+                        }
                     )
                     .zIndex(index == selectedIndex ? 2 : 1)
                 }
@@ -211,9 +208,15 @@ struct PreviewOverlayHost: View {
         Task { @MainActor in
             await Task.yield()
             withAnimation(previewEntryAnimation) {
-                stateMachine.completeEntry()
+                stateMachine.completeEntryMorph()
             }
-            scheduleMetadataReveal(token: token, delayNanoseconds: 180_000_000)
+
+            try? await Task.sleep(nanoseconds: 450_000_000)
+            guard metadataGate.isCurrent(token) else { return }
+            stateMachine.setMotionLocked(false)
+            withAnimation(.easeOut(duration: 0.22)) {
+                metadataVisible = true
+            }
         }
     }
 
@@ -228,12 +231,20 @@ struct PreviewOverlayHost: View {
         verticalScrollEnabled = false
 
         let token = metadataGate.begin()
+        stateMachine.beginPaging()
 
         withAnimation(previewPagingAnimation) {
             selectedIndex = nextIndex
         }
 
-        scheduleMetadataReveal(token: token, delayNanoseconds: 120_000_000)
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 340_000_000)
+            guard metadataGate.isCurrent(token) else { return }
+            stateMachine.finishPaging()
+            withAnimation(.easeOut(duration: 0.22)) {
+                metadataVisible = true
+            }
+        }
     }
 
     private func expandCurrentCard() {
@@ -249,13 +260,21 @@ struct PreviewOverlayHost: View {
         }
 
         Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 100_000_000)
+            try? await Task.sleep(nanoseconds: 160_000_000)
             guard metadataGate.isCurrent(token) else { return }
-            withAnimation(.easeInOut(duration: 0.18)) {
+            if !metadataVisible {
+                withAnimation(.easeOut(duration: 0.22)) {
+                    metadataVisible = true
+                }
+            }
+
+            try? await Task.sleep(nanoseconds: 60_000_000)
+            guard metadataGate.isCurrent(token) else { return }
+            withAnimation(.easeOut(duration: 0.18)) {
                 expandedChromeVisible = true
             }
 
-            try? await Task.sleep(nanoseconds: 360_000_000)
+            try? await Task.sleep(nanoseconds: 130_000_000)
             guard metadataGate.isCurrent(token) else { return }
             stateMachine.finishExpand()
             verticalScrollEnabled = true
@@ -272,6 +291,7 @@ struct PreviewOverlayHost: View {
 
         switch action {
         case .dismissOverlay:
+            stateMachine.beginExit()
             onDismiss(request.sourceTarget)
 
         case .collapseToCarousel:
@@ -279,101 +299,63 @@ struct PreviewOverlayHost: View {
             expandedChromeVisible = false
             verticalScrollEnabled = false
 
+            var collapsedState = nextState
+            collapsedState.setMotionLocked(true)
             withAnimation(previewExpandAnimation) {
-                stateMachine = nextState
+                stateMachine = collapsedState
             }
 
             Task { @MainActor in
-                try? await Task.sleep(nanoseconds: 120_000_000)
+                try? await Task.sleep(nanoseconds: 350_000_000)
                 guard metadataGate.isCurrent(token) else { return }
+                stateMachine.setMotionLocked(false)
+                withAnimation(.easeOut(duration: 0.22)) {
+                    metadataVisible = true
+                }
                 focusedArea = .carousel
             }
         }
     }
 
-    private func scheduleMetadataReveal(token: Int, delayNanoseconds: UInt64) {
-        Task { @MainActor in
-            try? await Task.sleep(nanoseconds: delayNanoseconds)
-            guard metadataGate.isCurrent(token) else { return }
-            withAnimation(.easeInOut(duration: 1.0)) {
-                metadataVisible = true
-            }
-        }
-    }
-
+    @MainActor
     private func prefetchAssets(around index: Int) {
-        let adjacentItems = [index - 1, index + 1]
+        let requests = [index - 1, index, index + 1]
             .filter { request.items.indices.contains($0) }
-            .map { request.items[$0] }
+            .map { request.items[$0].heroBackdropRequest(serverURL: serverURL, authToken: authToken) }
 
-        let artURLs = adjacentItems.compactMap { previewArtURL(for: $0) }
-        if !artURLs.isEmpty {
-            Task {
-                await ImageCacheManager.shared.prefetch(urls: artURLs)
+        Task.detached(priority: .utility) { [requests] in
+            for request in requests {
+                _ = await HeroBackdropResolver.shared.resolveAssets(for: request)
             }
         }
-
-        let logoRequests = adjacentItems.compactMap { item -> (id: Int, type: TMDBMediaType)? in
-            switch item.type {
-            case "movie":
-                if let tmdbId = item.tmdbId {
-                    return (tmdbId, .movie)
-                }
-            case "show":
-                if let tmdbId = item.tmdbId {
-                    return (tmdbId, .tv)
-                }
-            case "episode":
-                if let tmdbId = item.showTmdbId {
-                    return (tmdbId, .tv)
-                }
-            default:
-                break
-            }
-            return nil
-        }
-
-        Task.detached(priority: .utility) { [adjacentItems] in
-            for (idx, req) in logoRequests.enumerated() {
-                _ = await TMDBClient.shared.fetchLogoURL(tmdbId: req.id, type: req.type)
-                if let backdropURL = await TMDBClient.shared.fetchBackdropURL(tmdbId: req.id, type: req.type, size: "original") {
-                    await ImageCacheManager.shared.prefetch(urls: [backdropURL])
-                    if idx < adjacentItems.count, let key = adjacentItems[idx].ratingKey {
-                        await MainActor.run { tmdbBackdropURLs[key] = backdropURL }
-                    }
-                }
-            }
-        }
-    }
-
-    private func previewArtURL(for item: PlexMetadata) -> URL? {
-        let path = item.bestArt ?? item.bestThumb
-        guard let path else { return nil }
-        return URL(string: "\(serverURL)\(path)?X-Plex-Token=\(authToken)")
     }
 
     private func frame(
         for index: Int,
         centeredFrame: CGRect,
         fullFrame: CGRect,
-        entryFrame: CGRect,
-        containerSize: CGSize
+        entryFrame: CGRect
     ) -> CGRect {
         if index == selectedIndex {
             switch stateMachine.phase {
-            case .enteringCarousel:
+            case .entryMorph:
                 return entryFrame
-            case .carousel:
+            case .carouselStable:
                 return centeredFrame
-            case .expanding, .expanded:
+            case .expandingHero, .expandedHero, .detailsStable, .exiting:
                 return fullFrame
             }
         }
 
-        // Side cards: same size, positioned inline with a gap
-        let offset = CGFloat(index - selectedIndex) * (centeredFrame.width + cardGap)
+        let x: CGFloat
+        if index < selectedIndex {
+            x = centeredFrame.minX - centeredFrame.width - sideCardGap
+        } else {
+            x = centeredFrame.maxX + sideCardGap
+        }
+
         return CGRect(
-            x: centeredFrame.minX + offset,
+            x: x,
             y: centeredFrame.minY,
             width: centeredFrame.width,
             height: centeredFrame.height
@@ -397,9 +379,9 @@ struct PreviewOverlayHost: View {
     private func cardOpacity(for index: Int) -> Double {
         guard index != selectedIndex else { return 1 }
         switch stateMachine.phase {
-        case .carousel:
-            return 1  // Side cards fully visible, same as main
-        case .expanding, .enteringCarousel, .expanded:
+        case .carouselStable:
+            return 1
+        case .entryMorph, .expandingHero, .expandedHero, .detailsStable, .exiting:
             return 0
         }
     }
@@ -410,43 +392,42 @@ private struct PreviewCarouselCard: View {
     let item: PlexMetadata
     let serverURL: String
     let authToken: String
-    var tmdbArtURL: URL? = nil
     let frame: CGRect
     let isCurrent: Bool
     let isExpanded: Bool
     let metadataVisible: Bool
     let showExpandedChrome: Bool
     let allowVerticalScroll: Bool
+    let allowActionRowInteraction: Bool
+    let motionLocked: Bool
     let backgroundParallaxOffset: CGFloat
     let cornerRadius: CGFloat
     let opacity: Double
     let onPreviewExitRequested: () -> Void
+    let onDetailsBecameVisible: () -> Void
 
     var body: some View {
-        ZStack {
-            // Side card art — always present, moves with card during paging
-            PreviewCarouselSideCard(
-                item: item,
-                serverURL: serverURL,
-                authToken: authToken,
-                tmdbArtURL: tmdbArtURL,
-                metadataVisible: !isCurrent && metadataVisible
-            )
-
-            // PlexDetailView after paging settles (metadataVisible) or when expanded
-            if isCurrent && (metadataVisible || isExpanded) {
+        Group {
+            if isCurrent {
                 PreviewHeroSurface(
                     item: item,
-                    serverURL: serverURL,
-                    authToken: authToken,
                     isExpanded: isExpanded,
                     metadataVisible: metadataVisible,
                     showExpandedChrome: showExpandedChrome,
                     allowVerticalScroll: allowVerticalScroll,
+                    allowActionRowInteraction: allowActionRowInteraction,
+                    heroBackdropMotionLocked: motionLocked,
                     backgroundParallaxOffset: backgroundParallaxOffset,
-                    onPreviewExitRequested: onPreviewExitRequested
+                    onPreviewExitRequested: onPreviewExitRequested,
+                    onDetailsBecameVisible: onDetailsBecameVisible
                 )
-                .transition(.identity)
+            } else {
+                PreviewCarouselSideCard(
+                    item: item,
+                    serverURL: serverURL,
+                    authToken: authToken,
+                    motionLocked: motionLocked
+                )
             }
         }
         .frame(width: frame.width, height: frame.height)
@@ -468,14 +449,15 @@ private struct PreviewCarouselCard: View {
 
 private struct PreviewHeroSurface: View {
     let item: PlexMetadata
-    let serverURL: String
-    let authToken: String
     let isExpanded: Bool
     let metadataVisible: Bool
     let showExpandedChrome: Bool
     let allowVerticalScroll: Bool
+    let allowActionRowInteraction: Bool
+    let heroBackdropMotionLocked: Bool
     let backgroundParallaxOffset: CGFloat
     let onPreviewExitRequested: () -> Void
+    let onDetailsBecameVisible: () -> Void
 
     var body: some View {
         PlexDetailView(
@@ -485,7 +467,10 @@ private struct PreviewHeroSurface: View {
             showMetadata: metadataVisible,
             showExpandedChrome: showExpandedChrome,
             allowVerticalScroll: allowVerticalScroll,
-            onPreviewExitRequested: onPreviewExitRequested
+            allowActionRowInteraction: allowActionRowInteraction,
+            heroBackdropMotionLocked: heroBackdropMotionLocked,
+            onPreviewExitRequested: onPreviewExitRequested,
+            onDetailsBecameVisible: onDetailsBecameVisible
         )
     }
 }
@@ -494,100 +479,40 @@ private struct PreviewCarouselSideCard: View {
     let item: PlexMetadata
     let serverURL: String
     let authToken: String
-    var tmdbArtURL: URL? = nil
-    var metadataVisible: Bool = true
+    let motionLocked: Bool
+
+    @StateObject private var backdropCoordinator = HeroBackdropCoordinator()
+
+    private var request: HeroBackdropRequest {
+        item.heroBackdropRequest(serverURL: serverURL, authToken: authToken)
+    }
 
     var body: some View {
-        ZStack(alignment: .bottomLeading) {
-            sideArtwork
-
-            LinearGradient(
-                colors: [
-                    .clear,
-                    .black.opacity(0.28),
-                    .black.opacity(0.72),
-                ],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-            .opacity(metadataVisible ? 1 : 0)
-
-            VStack(alignment: .leading, spacing: 6) {
-                Text(item.displayTitle)
-                    .font(.system(size: 32, weight: .bold))
-                    .foregroundStyle(.white)
-                    .lineLimit(2)
-
-                if let subtitle = subtitleText {
-                    Text(subtitle)
-                        .font(.system(size: 18, weight: .medium))
-                        .foregroundStyle(.white.opacity(0.72))
-                        .lineLimit(2)
-                }
-            }
-            .padding(.horizontal, 36)
-            .padding(.bottom, 34)
-            .opacity(metadataVisible ? 1 : 0)
+        HeroBackdropImage(url: backdropCoordinator.session.displayedBackdropURL) {
+            Rectangle()
+                .fill(
+                    LinearGradient(
+                        colors: [Color(white: 0.16), Color(white: 0.08)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
         }
         .overlay {
-            UnevenRoundedRectangle(topLeadingRadius: 28, bottomLeadingRadius: 0, bottomTrailingRadius: 0, topTrailingRadius: 28, style: .continuous)
-                .strokeBorder(.white.opacity(0.08), lineWidth: 1)
+            UnevenRoundedRectangle(
+                topLeadingRadius: 28,
+                bottomLeadingRadius: 0,
+                bottomTrailingRadius: 0,
+                topTrailingRadius: 28,
+                style: .continuous
+            )
+            .strokeBorder(.white.opacity(0.08), lineWidth: 1)
         }
-    }
-
-    private var sideArtwork: some View {
-        CachedAsyncImage(url: artworkURL) { phase in
-            switch phase {
-            case .success(let image):
-                image
-                    .resizable()
-                    .aspectRatio(contentMode: .fill)
-            case .empty:
-                Rectangle()
-                    .fill(Color(white: 0.12))
-                    .overlay {
-                        ProgressView()
-                            .tint(.white.opacity(0.5))
-                    }
-            case .failure:
-                Rectangle()
-                    .fill(
-                        LinearGradient(
-                            colors: [Color(white: 0.18), Color(white: 0.10)],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
-                    )
-            @unknown default:
-                Rectangle()
-                    .fill(Color(white: 0.12))
-            }
+        .task(id: request) {
+            backdropCoordinator.load(request: request, motionLocked: motionLocked)
         }
-    }
-
-    private var subtitleText: String? {
-        if item.type == "episode" {
-            let parts = [item.episodeString, item.durationFormatted].compactMap { $0 }
-            if !parts.isEmpty {
-                return parts.joined(separator: " • ")
-            }
+        .onChange(of: motionLocked) { _, locked in
+            backdropCoordinator.setMotionLocked(locked)
         }
-        return item.tagline ?? item.summary
-    }
-
-    private var artworkURL: URL? {
-        if let tmdbArtURL { return tmdbArtURL }
-        let path = item.bestArt ?? item.bestThumb
-        guard let path else { return nil }
-        return URL(string: "\(serverURL)\(path)?X-Plex-Token=\(authToken)")
-    }
-}
-
-private extension PlexMetadata {
-    var displayTitle: String {
-        if type == "episode" {
-            return grandparentTitle ?? title ?? "Unknown Title"
-        }
-        return title ?? "Unknown Title"
     }
 }
