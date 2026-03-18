@@ -32,7 +32,7 @@ These are implementation targets derived from the clip’s continuous motion, no
 |--------|--------|
 | Poster morph to centered card | `~0.45s`, spring/ease-out, no bounce |
 | Carousel paging | `~0.30s`, interactive spring, image-led |
-| Focused-card metadata after settle | `~0.18s - 0.22s` opacity-only fade once centered motion finishes |
+| Focused-card metadata after settle | `~0.18s - 0.28s` opacity-only fade once centered motion finishes; page-to-page reveals can be slightly slower than initial entry |
 | Background art during paging | fades/slides on a slightly slower cadence than the card frame |
 | Actions + cast reveal after focused info loads | present with the focused metadata state and fade in-place with the title/meta; expand mainly unlocks deeper continuity into details |
 | Expanded hero to details fold | `~0.35s`, one continuous vertical move |
@@ -77,6 +77,7 @@ These are implementation targets derived from the clip’s continuous motion, no
 - The move reads as one continuous vertical fold, not a route push or page replacement.
 - The same show art remains behind the details surface with heavier blur/dimming.
 - The details state introduces a centered title/logo at the top, then shelves/rows below.
+- On the way back up, that centered title/logo should fade away before the reverse fold fully finishes.
 - Episode/trailer rows feel attached below the hero rather than injected over a blank background.
 
 ## Layout Rules

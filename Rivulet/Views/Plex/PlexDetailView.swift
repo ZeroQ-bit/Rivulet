@@ -87,6 +87,7 @@ struct PlexDetailView: View {
     @State private var shuffledEpisodeQueue: [PlexMetadata] = []
     @StateObject private var heroBackdrop = HeroBackdropCoordinator()
     @State private var scrollProgress: CGFloat = 0  // 0 = at rest (peek), 1 = fully scrolled
+    @State private var belowFoldTitleOpacity: CGFloat = 0
     @State private var scrollResetID = UUID()
 
     // Navigation state for episode parent navigation
@@ -105,6 +106,30 @@ struct PlexDetailView: View {
     private var isPreviewCarousel: Bool { presentationMode == .previewCarousel }
     private var isExpandedPreviewFlow: Bool { onPreviewExitRequested != nil && presentationMode == .expandedDetail }
     private let heroOverlayHorizontalInset: CGFloat = 60
+
+    private var heroBrandTitle: String {
+        if currentItem.type == "season" {
+            return (fullMetadata?.seriesTitleForDisplay ?? currentItem.seriesTitleForDisplay)
+                ?? (fullMetadata?.title ?? currentItem.title ?? "Unknown Title")
+        }
+        return fullMetadata?.title ?? currentItem.title ?? "Unknown Title"
+    }
+
+    private var seasonHeroContextLabel: String? {
+        guard currentItem.type == "season" else { return nil }
+        return fullMetadata?.seasonDisplayTitle ?? currentItem.seasonDisplayTitle
+    }
+
+    private var relatedShowRatingKey: String? {
+        switch currentItem.type {
+        case "episode":
+            return fullMetadata?.grandparentRatingKey ?? currentItem.grandparentRatingKey
+        case "season":
+            return fullMetadata?.parentRatingKey ?? currentItem.parentRatingKey
+        default:
+            return nil
+        }
+    }
 
     /// Effective item data - uses fullMetadata for progress/viewOffset when available
     /// This ensures we have the most up-to-date playback position after returning from the player
@@ -307,7 +332,7 @@ struct PlexDetailView: View {
                                 .frame(height: 110)
                                 .padding(.top, 40)
                                 .padding(.bottom, 8)
-                                .opacity(scrollProgress)
+                                .opacity(belowFoldTitleOpacity)
                                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                         }
                     }
@@ -317,6 +342,9 @@ struct PlexDetailView: View {
                 } action: { _, isScrolled in
                     withAnimation(.easeInOut(duration: 0.7)) {
                         scrollProgress = isScrolled ? 1 : 0
+                    }
+                    withAnimation(isScrolled ? .easeInOut(duration: 0.45) : .easeOut(duration: 0.18)) {
+                        belowFoldTitleOpacity = isScrolled ? 1 : 0
                     }
                     if isScrolled {
                         onDetailsBecameVisible?()
@@ -348,6 +376,7 @@ struct PlexDetailView: View {
             nextUpEpisode = nil
             isSummaryExpanded = false
             scrollProgress = 0
+            belowFoldTitleOpacity = 0
             syncHeroBackdrop()
 
             // Initialize watched state
@@ -414,6 +443,7 @@ struct PlexDetailView: View {
                 displayedItem = nil
                 focusedActionButton = nil
                 scrollProgress = 0
+                belowFoldTitleOpacity = 0
                 scrollResetID = UUID()
             }
         }
@@ -584,8 +614,8 @@ struct PlexDetailView: View {
     private func heroContentHeight(for fullHeight: CGFloat) -> CGFloat {
         let shelfPeek: CGFloat
         switch currentItem.type {
-        case "show", "episode":
-            // Keep the real shelf visible, but only as a shallow tease.
+        case "show", "season", "episode":
+            // TV detail surfaces should all expose the shelf at the same shallow depth.
             shelfPeek = 136
         default:
             shelfPeek = 220
@@ -752,7 +782,6 @@ struct PlexDetailView: View {
             }
         }
         .animation(.easeInOut(duration: 0.3), value: currentItem.ratingKey)
-        .animation(.easeInOut(duration: 0.22), value: showMetadata)
     }
 
     // MARK: - Below-fold Title Logo (centered, Apple TV+ style)
@@ -767,14 +796,14 @@ struct PlexDetailView: View {
                             .resizable()
                             .aspectRatio(contentMode: .fit)
                     default:
-                        Text(fullMetadata?.title ?? currentItem.title ?? "")
+                        Text(heroBrandTitle)
                             .font(.system(size: 42, weight: .bold))
                             .foregroundStyle(.primary)
                     }
                 }
                 .frame(maxWidth: 680, maxHeight: 126)
             } else {
-                Text(fullMetadata?.title ?? currentItem.title ?? "")
+                Text(heroBrandTitle)
                     .font(.system(size: 42, weight: .bold))
                     .foregroundStyle(.primary)
                     .lineLimit(1)
@@ -786,7 +815,7 @@ struct PlexDetailView: View {
     // MARK: - Hero Sub-components
 
     private var heroTitleText: some View {
-        Text(fullMetadata?.title ?? currentItem.title ?? "Unknown Title")
+        Text(heroBrandTitle)
             .font(.system(size: 44, weight: .bold))
             .foregroundStyle(.white)
             .shadow(color: .black.opacity(0.5), radius: 10, x: 0, y: 4)
@@ -798,6 +827,8 @@ struct PlexDetailView: View {
             // Type label for non-obvious types
             if currentItem.type == "show" {
                 Text("Series")
+            } else if let seasonLabel = seasonHeroContextLabel {
+                Text(seasonLabel)
             }
 
             // Genres (up to 3)
@@ -1107,24 +1138,6 @@ struct PlexDetailView: View {
                 .focused($focusedActionButton, equals: "star")
             }
 
-            // Show button (for seasons)
-            if currentItem.type == "season", currentItem.parentRatingKey != nil {
-                Button {
-                    Task { await navigateToParentShowFromSeason() }
-                } label: {
-                    HStack(spacing: 10) {
-                        Image(systemName: "tv")
-                        Text("Show")
-                    }
-                    .font(.system(size: 18, weight: .semibold))
-                    .padding(.horizontal, 28)
-                    .frame(height: pillButtonHeight)
-                }
-                .buttonStyle(AppStoreActionButtonStyle(isFocused: focusedActionButton == "showFromSeason", cornerRadius: pillButtonHeight / 2, isPrimary: false))
-                .focused($focusedActionButton, equals: "showFromSeason")
-                .disabled(isLoadingNavigation)
-            }
-
             // Info button for artists — perfect circle
             if currentItem.type == "artist", let summary = fullMetadata?.summary ?? currentItem.summary, !summary.isEmpty {
                 Button {
@@ -1305,6 +1318,7 @@ struct PlexDetailView: View {
                         selectedSeason: $selectedSeason,
                         onSeasonSelected: { _ in }
                     )
+                    .opacity(scrollProgress)
                 } else {
                     Text("Episodes")
                         .font(.title2)
@@ -1581,8 +1595,8 @@ struct PlexDetailView: View {
             } else {
                 syncHeroBackdrop()
             }
-        case "episode":
-            if let tmdbId = await resolveShowTmdbId() {
+        case "episode", "season":
+            if let tmdbId = await resolveRelatedShowTmdbId() {
                 syncHeroBackdrop(tmdbIdOverride: tmdbId)
             } else {
                 syncHeroBackdrop()
@@ -1603,7 +1617,7 @@ struct PlexDetailView: View {
         switch currentItem.type {
         case "movie":
             mediaTypeOverride = .movie
-        case "show", "episode":
+        case "show", "season", "episode":
             mediaTypeOverride = .tv
         default:
             mediaTypeOverride = nil
@@ -1642,19 +1656,17 @@ struct PlexDetailView: View {
         )
     }
 
-    /// Resolve the TMDB ID for the parent show of an episode.
-    /// Tries grandparentGuid first, then fetches the show's metadata,
+    /// Resolve the TMDB ID for the related show of an episode or season.
+    /// Tries the local show guid first, then fetches the show's metadata,
     /// and falls back to TVDB→TMDB conversion for legacy Plex agents.
-    private func resolveShowTmdbId() async -> Int? {
-        // Try extracting from grandparentGuid if available
-        if let id = fullMetadata?.showTmdbId ?? currentItem.showTmdbId {
+    private func resolveRelatedShowTmdbId() async -> Int? {
+        if let id = fullMetadata?.parentShowTmdbId ?? currentItem.parentShowTmdbId {
             return id
         }
 
-        // Fetch the show's metadata using grandparentRatingKey
         guard let serverURL = authManager.selectedServerURL,
               let token = authManager.selectedServerToken,
-              let showRatingKey = fullMetadata?.grandparentRatingKey ?? currentItem.grandparentRatingKey else {
+              let showRatingKey = relatedShowRatingKey else {
             return nil
         }
 

@@ -136,8 +136,8 @@ enum PlaybackAudioSessionConfigurator {
             return RouteAudioPolicy(
                 profile: .airPlayMultichannel,
                 useAudioPullMode: true,
-                audioPullStartBufferDuration: 0.2,
-                audioPullResumeBufferDuration: 0.1,
+                audioPullStartBufferDuration: 1.0,
+                audioPullResumeBufferDuration: 0.3,
                 targetOutputSampleRate: 0,
                 preferAudioEngineForPCM: false,
                 forceClientDecodeAllAudio: true,
@@ -152,8 +152,8 @@ enum PlaybackAudioSessionConfigurator {
         return RouteAudioPolicy(
             profile: .airPlayStereo,
             useAudioPullMode: true,
-            audioPullStartBufferDuration: 0.2,
-            audioPullResumeBufferDuration: 0.1,
+            audioPullStartBufferDuration: 1.0,
+            audioPullResumeBufferDuration: 0.3,
             targetOutputSampleRate: 0,
             preferAudioEngineForPCM: false,
             forceClientDecodeAllAudio: true,
@@ -176,8 +176,8 @@ enum PlaybackAudioSessionConfigurator {
         return RouteAudioPolicy(
             profile: .airPlayStereo,
             useAudioPullMode: true,
-            audioPullStartBufferDuration: 0.2,
-            audioPullResumeBufferDuration: 0.1,
+            audioPullStartBufferDuration: 1.0,
+            audioPullResumeBufferDuration: 0.3,
             targetOutputSampleRate: 0,
             preferAudioEngineForPCM: false,
             forceClientDecodeAllAudio: true,

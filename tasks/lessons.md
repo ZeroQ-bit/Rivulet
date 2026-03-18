@@ -1,5 +1,33 @@
 # Lessons Learned
 
+## 2026-03-17 - TV Shelf Peek Depth Must Match Across Show And Season Detail
+
+**Mistake**: Tuned the real shelf peek depth for show detail but left season detail on the generic resting-height path, so season episode thumbnails sat visibly higher than the other TV items.
+**Pattern**: When adjacent content types are normalized onto the same visual pattern, layout constants can still diverge if one type keeps falling through a generic branch.
+**Rule**: Any TV detail surface that uses the shared hero-to-shelf transition should share the same resting peek-depth tuning unless the reference explicitly shows otherwise.
+**Applied**: `Rivulet/Views/Plex/PlexDetailView.swift`.
+
+## 2026-03-17 - Season Hero Normalization Must Remove Rest-State Season Chrome
+
+**Mistake**: Normalized Plex season items to the parent show's branding but left season-specific hero controls visible at rest, including a redundant `Show` action and the single-season pill header in the upper hero state.
+**Pattern**: When a detail surface is repurposed for a new content identity, leftover type-specific chrome can survive outside the main branding path and quietly break consistency with the rest of the flow.
+**Rule**: After rebranding a content type onto another surface pattern, audit the remaining controls and headers for that type and keep any below-fold navigation chrome hidden until the user actually scrolls into that section.
+**Applied**: `Rivulet/Views/Plex/PlexDetailView.swift`.
+
+## 2026-03-17 - Normalize Plex Season Items To Show Branding
+
+**Mistake**: Treated Plex `season` items from feeds like recently added as self-branded hero items, which surfaced raw labels like `Season 1` where the rest of the TV preview flow uses show-level branding.
+**Pattern**: Plex hub feeds can hand back season containers in places that are visually designed around episodes/shows, so trusting the raw item title/type for hero branding produces inconsistent TV presentation.
+**Rule**: For hero/title/logo/backdrop presentation, normalize season items to the parent show's branding path and keep the season identifier as secondary metadata instead of the primary title.
+**Applied**: `Rivulet/Models/Plex/PlexMetadata.swift`, `Rivulet/Views/Plex/HeroBackdropSupport.swift`, `Rivulet/Views/Plex/PlexDetailView.swift`.
+
+## 2026-03-17 - Tune Forward And Reverse Timing Separately
+
+**Mistake**: Kept the folded-header logo on the same long reverse-scroll timing as the whole fold motion and left carousel paging metadata on the same quick fade timing as other reveal paths.
+**Pattern**: In reference-driven UI work, the forward and reverse versions of a transition often need different timing, and paging reveal cadence does not automatically match entry/collapse cadence just because the same elements are involved.
+**Rule**: Decouple reverse-fade timing from the structural fold animation when the reference clears an element early, and tune carousel page-settle metadata timing independently from other `showMetadata` reveals.
+**Applied**: `Rivulet/Views/Plex/PlexDetailView.swift`, `Rivulet/Views/Plex/PreviewOverlayHost.swift`, `Docs/PREVIEW_REFERENCE_VIDEO.md`.
+
 ## 2026-03-17 - Match Reference Reveals With Geometry Locked
 
 **Mistake**: Left reveal-time motion in the focused title/action block and missed that the remaining single-season `Episodes` label was coming from the season-detail branch, not the show-detail branch.

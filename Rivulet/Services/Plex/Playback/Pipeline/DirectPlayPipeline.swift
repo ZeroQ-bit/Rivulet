@@ -440,6 +440,7 @@ final class DirectPlayPipeline {
         if isResume {
             // Resume: read loop is already running and blocked on pacing (rate=0).
             // Just set the rate so the synchronizer advances and pacing unblocks.
+            renderer.resumeAudio()
             renderer.setRate(rate)
             print("[DirectPlay] resume (rate=\(rate))")
         } else {
@@ -453,6 +454,7 @@ final class DirectPlayPipeline {
     func pause() {
         guard isPlaying else { return }
         isPlaying = false
+        renderer.pauseAudio()
         renderer.setRate(0)
         state = .paused
         onStateChange?(.paused)
@@ -473,6 +475,7 @@ final class DirectPlayPipeline {
             startReadLoop()
         } else {
             print("[DirectPlay] resume (rate=\(playbackRate))")
+            renderer.resumeAudio()
             renderer.setRate(playbackRate)
         }
     }

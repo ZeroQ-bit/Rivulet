@@ -397,7 +397,7 @@ extension PlexMetadata {
             switch type {
             case "movie":
                 mediaType = .movie
-            case "show", "episode":
+            case "show", "season", "episode":
                 mediaType = .tv
             default:
                 mediaType = nil
@@ -407,8 +407,8 @@ extension PlexMetadata {
         let resolvedTMDBId: Int?
         if let tmdbIdOverride {
             resolvedTMDBId = tmdbIdOverride
-        } else if type == "episode" {
-            resolvedTMDBId = showTmdbId
+        } else if type == "episode" || type == "season" {
+            resolvedTMDBId = parentShowTmdbId
         } else {
             resolvedTMDBId = tmdbId
         }
@@ -416,8 +416,8 @@ extension PlexMetadata {
         let resolvedTVDBId: Int?
         if let tvdbIdOverride {
             resolvedTVDBId = tvdbIdOverride
-        } else if type == "episode" {
-            resolvedTVDBId = nil
+        } else if type == "episode" || type == "season" {
+            resolvedTVDBId = parentShowTvdbId
         } else {
             resolvedTVDBId = tvdbId
         }

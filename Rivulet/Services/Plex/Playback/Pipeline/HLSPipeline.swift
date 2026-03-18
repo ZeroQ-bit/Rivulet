@@ -150,6 +150,7 @@ final class HLSPipeline {
         playbackRate = rate
 
         if !needsInitialSync {
+            renderer.resumeAudio()
             renderer.setRate(rate)
         }
 
@@ -165,6 +166,7 @@ final class HLSPipeline {
     func pause() {
         guard isPlaying else { return }
         isPlaying = false
+        renderer.pauseAudio()
         renderer.setRate(0)
         state = .paused
         onStateChange?(.paused)
@@ -173,6 +175,7 @@ final class HLSPipeline {
     func resume() {
         guard !isPlaying, state == .paused else { return }
         isPlaying = true
+        renderer.resumeAudio()
         renderer.setRate(playbackRate)
         state = .running
         onStateChange?(.running)

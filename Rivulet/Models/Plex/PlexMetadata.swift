@@ -387,6 +387,18 @@ extension PlexMetadata {
         return PlexMetadata.extractTmdbId(from: guid)
     }
 
+    /// TMDB ID for the related show when the item is a season or episode.
+    var parentShowTmdbId: Int? {
+        switch type {
+        case "episode":
+            return grandparentGuid.flatMap(PlexMetadata.extractTmdbId)
+        case "season":
+            return parentGuid.flatMap(PlexMetadata.extractTmdbId)
+        default:
+            return nil
+        }
+    }
+
     /// Best-effort extraction of TVDB ID from the guid (for legacy Plex agents)
     var tvdbId: Int? {
         if let guid, let id = PlexMetadata.extractExternalId(from: guid, prefixes: ["thetvdb://", "tvdb://"]) {
@@ -402,13 +414,53 @@ extension PlexMetadata {
         return nil
     }
 
+    /// TVDB ID for the related show when the item is a season or episode.
+    var parentShowTvdbId: Int? {
+        let showGuid: String?
+        switch type {
+        case "episode":
+            showGuid = grandparentGuid
+        case "season":
+            showGuid = parentGuid
+        default:
+            showGuid = nil
+        }
+
+        guard let showGuid else { return nil }
+        return PlexMetadata.extractExternalId(from: showGuid, prefixes: ["thetvdb://", "tvdb://"])
+    }
+
+    /// Preferred show/series title for hero branding.
+    var seriesTitleForDisplay: String? {
+        switch type {
+        case "episode":
+            return grandparentTitle ?? title
+        case "season":
+            return parentTitle ?? grandparentTitle ?? title
+        default:
+            return title
+        }
+    }
+
+    /// Season label for UI that needs to keep season context while borrowing show branding.
+    var seasonDisplayTitle: String? {
+        guard type == "season" else { return nil }
+
+        if let title, !title.isEmpty {
+            return title
+        }
+
+        guard let index else { return nil }
+        return index == 0 ? "Specials" : "Season \(index)"
+    }
+
     /// Extract a TMDB ID from a Plex guid string
-    static func extractTmdbId(from guid: String) -> Int? {
+    nonisolated static func extractTmdbId(from guid: String) -> Int? {
         extractExternalId(from: guid, prefixes: ["tmdb://", "themoviedb://"])
     }
 
     /// Extract a numeric ID from a guid string matching any of the given prefixes
-    static func extractExternalId(from guid: String, prefixes: [String]) -> Int? {
+    nonisolated static func extractExternalId(from guid: String, prefixes: [String]) -> Int? {
         let lower = guid.lowercased()
         for prefix in prefixes {
             if lower.contains(prefix) {

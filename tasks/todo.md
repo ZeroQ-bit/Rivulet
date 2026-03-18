@@ -1,5 +1,103 @@
 # Playback Reliability Worklog (2026-03-02)
 
+## Pause/Resume Audio Re-Prime Fix (2026-03-18)
+
+## Plan
+- [x] Trace the pause/resume path against seek/FF/RW behavior.
+  - Confirm whether pause/play was bypassing the preroll-aware audio recovery path that seek-based transport already uses.
+- [x] Preserve paused audio buffers instead of draining pull-mode delivery.
+  - Stop pull-mode requests during transport pause while keeping queued audio available for resume.
+- [x] Re-arm audio delivery on resume in both playback pipelines.
+  - Restart paused pull-mode audio before advancing the shared playback clock on direct-play and HLS resumes.
+- [x] Verify
+  - Run a focused tvOS build check after the playback pipeline patch.
+
+## Review
+- Fixed the pause/play-only regression by making `SampleBufferRenderer.pauseAudio()` actually preserve pull-mode buffered audio instead of routing through the destructive `stopAudioPullMode()` path.
+- Added an explicit `resumeAudio()` transport hook so both `DirectPlayPipeline` and `HLSPipeline` restart paused audio delivery before `setRate(...)` advances playback again.
+- Verification passed:
+  - `xcodebuild -project Rivulet.xcodeproj -scheme Rivulet -destination 'generic/platform=tvOS' build -quiet CODE_SIGNING_ALLOWED=NO`
+  - Result: build succeeded. Existing project warnings remain in unrelated files; no focused automated playback test currently covers this pause/resume path.
+
+## Season Shelf Peek Alignment (2026-03-17)
+
+## Plan
+- [x] Compare the season resting-height path with the show resting-height path.
+  - Confirm whether the season detail hero is exposing more of the below-fold shelf than the tuned show path.
+- [x] Align the resting peek depth.
+  - Put season detail on the same shallow shelf-peek constant as the other TV detail surfaces so the episode row sits at the same height.
+- [x] Verify
+  - Run build-check and focused preview/season-branding tests after the tweak.
+
+## Review
+- Moved season detail onto the same shallow resting shelf-peek constant as the show/episode TV detail surfaces, which lowers the visible episode-thumb slice to match the other TV items.
+- Verification passed:
+  - `xcodebuild -project Rivulet.xcodeproj -scheme Rivulet -destination 'generic/platform=tvOS' build -quiet CODE_SIGNING_ALLOWED=NO`
+  - `xcodebuild test -project Rivulet.xcodeproj -scheme Rivulet -destination 'platform=tvOS Simulator,id=F34B8F67-7F13-468F-9526-6A38C6B2181B' -only-testing:RivuletTests/PlexMetadataHeroBrandingTests -only-testing:RivuletTests/PreviewFlowStateTests -only-testing:RivuletTests/HeroBackdropSessionTests -quiet CODE_SIGNING_ALLOWED=NO`
+  - Result: build succeeded; all three focused test classes passed.
+
+## Season Hero Chrome Cleanup (2026-03-17)
+
+## Plan
+- [x] Remove the redundant season hero action.
+  - Drop the season-only `Show` button so normalized season items use the same hero action set as the other TV items.
+- [x] Restore hidden-until-scroll behavior for the single-season pill header.
+  - Keep the season pill out of the carousel/upper hero view and only reveal it as the user scrolls into the episode section.
+- [x] Verify
+  - Run build-check and focused preview/season-branding tests after the cleanup.
+
+## Review
+- Removed the redundant `Show` button from the season hero action row so Plex season containers no longer expose an extra hero-only control after being normalized to show branding.
+- Restored the single-season pill header to the same hidden-until-scroll behavior as the other below-fold chrome, keeping it out of the at-rest carousel and upper hero states.
+- Verification passed:
+  - `xcodebuild -project Rivulet.xcodeproj -scheme Rivulet -destination 'generic/platform=tvOS' build -quiet CODE_SIGNING_ALLOWED=NO`
+  - `xcodebuild test -project Rivulet.xcodeproj -scheme Rivulet -destination 'platform=tvOS Simulator,id=F34B8F67-7F13-468F-9526-6A38C6B2181B' -only-testing:RivuletTests/PlexMetadataHeroBrandingTests -only-testing:RivuletTests/PreviewFlowStateTests -only-testing:RivuletTests/HeroBackdropSessionTests -quiet CODE_SIGNING_ALLOWED=NO`
+  - Result: build succeeded; all three focused test classes passed.
+
+## Apple TV+ Season Item Branding Normalization (2026-03-17)
+
+## Plan
+- [x] Inspect the current season-item hero path.
+  - Confirm where `season` items still use raw Plex season titles instead of the parent show's branding and logo/backdrop identity.
+- [x] Normalize season hero branding.
+  - Make season items use the parent show's title/logo/backdrop identity for hero surfaces while keeping season-specific context in secondary metadata.
+- [x] Add focused verification coverage.
+  - Add a unit test for season backdrop-request normalization and any extracted season-branding helpers.
+- [x] Verify
+  - Run build-check and focused preview/backdrop tests after the normalization patch.
+
+## Review
+- Normalized Plex `season` items onto the same TV hero-branding path as episodes by deriving show title and TMDB/TVDB identity from the parent show instead of the raw season container.
+- Updated `PlexDetailView` so season heroes now use show branding for the title/logo while moving `Season 1` into the secondary metadata row, which keeps the preview visually aligned with the rest of the TV items.
+- Added focused unit coverage for season title normalization and season hero-backdrop request identity resolution.
+- Verification passed:
+  - `xcodebuild -project Rivulet.xcodeproj -scheme Rivulet -destination 'generic/platform=tvOS' build -quiet CODE_SIGNING_ALLOWED=NO`
+  - `xcodebuild test -project Rivulet.xcodeproj -scheme Rivulet -destination 'platform=tvOS Simulator,id=F34B8F67-7F13-468F-9526-6A38C6B2181B' -only-testing:RivuletTests/PlexMetadataHeroBrandingTests -only-testing:RivuletTests/PreviewFlowStateTests -only-testing:RivuletTests/HeroBackdropSessionTests -quiet CODE_SIGNING_ALLOWED=NO`
+  - Result: build succeeded; all three focused test classes passed.
+
+## Apple TV+ Reverse-Fade + Paging Timing Tune (2026-03-17)
+
+## Plan
+- [x] Isolate the two timing paths that still feel off.
+  - Separate the reverse-fold title/logo fade from the main fold scroll animation.
+  - Confirm where carousel page-to-page metadata reveal timing is currently being enforced.
+- [x] Patch the timing behavior.
+  - Make the centered top logo/header disappear faster when returning from details to the top.
+  - Slow the page-settle metadata fade slightly without changing the broader card motion timing.
+- [x] Update reference notes.
+  - Record the early reverse-fold logo clear and the slower page-to-page metadata fade in the canonical preview spec and lessons log.
+- [x] Verify
+  - Run build-check and focused preview/backdrop tests after the timing patch.
+
+## Review
+- Decoupled the centered folded-header logo opacity from `scrollProgress`, so it now clears quickly on the way back to the hero while the larger reverse-fold motion continues.
+- Removed the detail view's hardcoded metadata fade duration so carousel paging can own that timing, then slowed the page-settle reveal slightly without changing the card travel timing.
+- Updated the preview spec and lessons log to keep the early reverse-fold clear and slower page-to-page text fade as explicit fidelity rules.
+- Verification passed:
+  - `xcodebuild -project Rivulet.xcodeproj -scheme Rivulet -destination 'generic/platform=tvOS' build -quiet CODE_SIGNING_ALLOWED=NO`
+  - `xcodebuild test -project Rivulet.xcodeproj -scheme Rivulet -destination 'platform=tvOS Simulator,id=F34B8F67-7F13-468F-9526-6A38C6B2181B' -only-testing:RivuletTests/PreviewFlowStateTests -only-testing:RivuletTests/HeroBackdropSessionTests -quiet CODE_SIGNING_ALLOWED=NO`
+  - Result: build succeeded; both focused test classes passed.
+
 ## Apple TV+ Fade + Season Header Fidelity (2026-03-17)
 
 ## Plan

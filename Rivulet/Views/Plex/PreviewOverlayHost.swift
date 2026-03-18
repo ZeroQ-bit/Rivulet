@@ -241,7 +241,7 @@ struct PreviewOverlayHost: View {
             try? await Task.sleep(nanoseconds: 340_000_000)
             guard metadataGate.isCurrent(token) else { return }
             stateMachine.finishPaging()
-            withAnimation(.easeOut(duration: 0.22)) {
+            withAnimation(.easeOut(duration: 0.28)) {
                 metadataVisible = true
             }
         }

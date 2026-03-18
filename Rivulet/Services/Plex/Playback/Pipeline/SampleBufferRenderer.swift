@@ -84,6 +84,7 @@ final class SampleBufferRenderer {
     private nonisolated(unsafe) var audioPullBuffer: [CMSampleBuffer] = []
     private nonisolated(unsafe) var audioPullBufferedDuration: TimeInterval = 0
     private nonisolated(unsafe) var audioPullRequesting = false
+    private nonisolated(unsafe) var audioPullPaused = false
     private nonisolated(unsafe) var hasStartedAudioPullSinceReset = false
     private nonisolated(unsafe) var hasReachedReliableAudioPullStartSinceReset = false
     private let audioPullQueue = DispatchQueue(label: "rivulet.audio-pull", qos: .userInteractive)
@@ -211,49 +212,11 @@ final class SampleBufferRenderer {
         print("[Renderer] Audio engine mode disabled — reverted to sample-buffer audio")
     }
 
-    // MARK: - AirPlay Video Delay
+    // MARK: - AirPlay Video Delay (Legacy)
 
-    /// Enable AirPlay video compensation when using the sample-buffer audio path.
-    /// Reads output latency from AVAudioSession and activates a video delay queue
-    /// that holds frames for the latency period before feeding them to the display layer.
-    func enableAirPlayVideoCompensation() {
-        guard !useAudioEngine else { return }
-
-        let session = AVAudioSession.sharedInstance()
-        let outputLatency = session.outputLatency
-        guard outputLatency > 0.1 else {
-            disableAirPlayVideoCompensation()
-            return
-        }
-
-        airPlayVideoDelay = CMTime(seconds: outputLatency, preferredTimescale: 90_000)
-
-        if videoTimebase == nil {
-            var timebase: CMTimebase?
-            CMTimebaseCreateWithSourceTimebase(
-                allocator: kCFAllocatorDefault,
-                sourceTimebase: renderSynchronizer.timebase,
-                timebaseOut: &timebase
-            )
-            if let timebase {
-                // Relative rate 1.0 = track synchronizer at same speed.
-                // Rate changes on the synchronizer propagate automatically.
-                CMTimebaseSetRate(timebase, rate: 1.0)
-                videoTimebase = timebase
-            }
-        }
-
-        if let timebase = videoTimebase {
-            let syncTime = renderSynchronizer.currentTime()
-            let compensated = CMTimeSubtract(syncTime, airPlayVideoDelay)
-            CMTimebaseSetTime(timebase, time: compensated < .zero ? .zero : compensated)
-            displayLayer.controlTimebase = timebase
-        }
-
-        isVideoDelayQueueActive = true
-        print("[Renderer] AirPlay video compensation enabled: delay=\(String(format: "%.3f", outputLatency))s")
-    }
-
+    /// Reset any video compensation state. Called during audio policy changes.
+    /// Note: AirPlay A/V sync is handled automatically by AVSampleBufferRenderSynchronizer
+    /// via delaysRateChangeUntilHasSufficientMediaData — no explicit video delay needed.
     func disableAirPlayVideoCompensation() {
         guard airPlayVideoDelay > .zero || isVideoDelayQueueActive else { return }
         guard !useAudioEngine else { return }
@@ -263,23 +226,9 @@ final class SampleBufferRenderer {
 
         displayLayer.controlTimebase = renderSynchronizer.timebase
         videoTimebase = nil
-
-        for frame in videoDelayQueue {
-            if displayLayer.isReadyForMoreMediaData {
-                displayLayer.enqueue(frame)
-            }
-        }
         videoDelayQueue.removeAll()
 
         print("[Renderer] AirPlay video compensation disabled")
-    }
-
-    /// Drain overflow frames from the delay queue to the display layer (FIFO).
-    /// The display layer manages all timing internally via its offset controlTimebase.
-    private func drainVideoDelayQueue() {
-        while !videoDelayQueue.isEmpty && displayLayer.isReadyForMoreMediaData {
-            displayLayer.enqueue(videoDelayQueue.removeFirst())
-        }
     }
 
     private func configureAudioEngine(from sampleBuffer: CMSampleBuffer) -> Bool {
@@ -438,25 +387,13 @@ final class SampleBufferRenderer {
     func setRate(_ rate: Float, time: CMTime) {
         print("[Renderer] setRate(\(rate), time=\(String(format: "%.3f", CMTimeGetSeconds(time)))s)")
 
-        // Update separate video timebase with latency compensation
-        if let timebase = videoTimebase {
-            let delay = useAudioEngine ? audioEngineVideoLatency : airPlayVideoDelay
-            let displayTime: CMTime
-            if delay > .zero {
-                let compensated = CMTimeSubtract(time, delay)
-                displayTime = compensated < .zero ? .zero : compensated
-            } else {
-                displayTime = time
-            }
-            CMTimebaseSetTime(timebase, time: displayTime)
-            // Audio engine: rate managed manually (host clock source)
-            // AirPlay: rate inherited from synchronizer source timebase
-            if useAudioEngine {
+        if useAudioEngine {
+            // Audio engine: update video timebase first (host clock, no source dependency)
+            if let timebase = videoTimebase {
+                let compensated = compensatedVideoTime(forMediaTime: time)
+                CMTimebaseSetTime(timebase, time: compensated)
                 CMTimebaseSetRate(timebase, rate: Float64(rate))
             }
-        }
-
-        if useAudioEngine {
             if rate > 0 {
                 audioPlayerNode?.play()
             } else {
@@ -487,12 +424,6 @@ final class SampleBufferRenderer {
                 renderSynchronizer.setRate(rate, time: time, atHostTime: hostTime)
             } else {
                 renderSynchronizer.setRate(rate, time: time)
-            }
-
-            if let timebase = videoTimebase, airPlayVideoDelay > .zero {
-                let compensated = CMTimeSubtract(time, airPlayVideoDelay)
-                CMTimebaseSetTime(timebase, time: compensated < .zero ? .zero : compensated)
-                // Rate inherited from synchronizer source timebase
             }
         }
     }
@@ -853,6 +784,7 @@ final class SampleBufferRenderer {
         audioPullBufferedDuration += sampleDuration
         let bufferCount = audioPullBuffer.count
         let bufferedDuration = audioPullBufferedDuration
+        let paused = audioPullPaused
         let needsRestart = !audioPullRequesting
         if hasReliableAudioStartBuffer {
             hasReachedReliableAudioPullStartSinceReset = true
@@ -866,13 +798,12 @@ final class SampleBufferRenderer {
 
         audioEnqueueCount += 1
 
+        // Periodic audio diagnostics (every 5s)
         let now = CFAbsoluteTimeGetCurrent()
         if now - lastAudioDiagWallTime >= 5.0 {
             lastAudioDiagWallTime = now
             let syncTime = CMTimeGetSeconds(renderSynchronizer.currentTime())
             let pts = CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
-            let session = AVAudioSession.sharedInstance()
-            let outputLatency = session.outputLatency
             let audioAhead = pts - syncTime
             print("[Renderer] AudioPullDiag: buffered=\(bufferCount) enqueued=\(audioEnqueueCount) " +
                   "bufferedDur=\(String(format: "%.3f", bufferedDuration))s " +
@@ -881,9 +812,12 @@ final class SampleBufferRenderer {
                   "syncTime=\(String(format: "%.3f", syncTime))s " +
                   "audioPTS=\(String(format: "%.3f", pts))s " +
                   "audioAhead=\(String(format: "%.3f", audioAhead))s " +
-                  "outputLatency=\(String(format: "%.3f", outputLatency))s " +
                   "rate=\(renderSynchronizer.rate) " +
                   "status=\(audioRenderer.status.rawValue)")
+        }
+
+        if paused {
+            return
         }
 
         if needsRestart && shouldStart {
@@ -908,6 +842,10 @@ final class SampleBufferRenderer {
 
     private func startAudioPullMode() {
         audioPullLock.lock()
+        guard !audioPullPaused else {
+            audioPullLock.unlock()
+            return
+        }
         audioPullRequesting = true
         let buffered = audioPullBuffer.count
         let bufferedDuration = audioPullBufferedDuration
@@ -1018,6 +956,7 @@ final class SampleBufferRenderer {
         audioPullLock.lock()
         audioPullBuffer.removeAll()
         audioPullBufferedDuration = 0
+        audioPullPaused = false
         audioPullLock.unlock()
         audioPullDrainCount = 0
         audioPullShouldLogCurrentRequest = false
@@ -1034,10 +973,10 @@ final class SampleBufferRenderer {
         lastAudioRecoveryWallTime = 0
         lastAudioDiagWallTime = 0
         audioNotReadyStreak = 0
-
         audioPullLock.lock()
         audioPullBuffer.removeAll()
         audioPullBufferedDuration = 0
+        audioPullPaused = false
         audioPullLock.unlock()
         hasStartedAudioPullSinceReset = false
         audioPullDrainCount = 0
@@ -1051,16 +990,61 @@ final class SampleBufferRenderer {
 
     // MARK: - Flush
 
-    /// Stop pull-mode delivery and clear the internal audio buffer without
-    /// flushing the audio renderer. Already-delivered audio stays in the
-    /// renderer so resume is seamless. The pull buffer is cleared to prevent
-    /// accumulated audio from bursting on resume.
+    /// Pause audio delivery without discarding buffered data.
+    /// Stops pull-mode requests so the renderer doesn't drain the buffer,
+    /// but keeps buffered audio intact for seamless resume.
     func pauseAudio() {
         if useAudioEngine {
             audioPlayerNode?.pause()
-        } else {
-            stopAudioPullMode()
+            return
         }
+
+        guard useAudioPullMode else { return }
+
+        audioPullLock.lock()
+        audioPullPaused = true
+        let wasRequesting = audioPullRequesting
+        let buffered = audioPullBuffer.count
+        let bufferedDuration = audioPullBufferedDuration
+        if wasRequesting {
+            audioPullRequesting = false
+        }
+        audioPullLock.unlock()
+
+        if wasRequesting {
+            audioRenderer.stopRequestingMediaData()
+        }
+
+        audioPullDrainCount = 0
+        audioPullShouldLogCurrentRequest = false
+        print(
+            "[Renderer] Audio pull paused for transport: buffered=\(buffered) " +
+            "bufferedDur=\(String(format: "%.3f", bufferedDuration))s"
+        )
+    }
+
+    /// Resume pull-mode audio delivery after a transport pause.
+    func resumeAudio() {
+        if useAudioEngine {
+            return
+        }
+
+        guard useAudioPullMode else { return }
+
+        audioPullLock.lock()
+        audioPullPaused = false
+        let isRequesting = audioPullRequesting
+        let buffered = audioPullBuffer.count
+        let bufferedDuration = audioPullBufferedDuration
+        audioPullLock.unlock()
+
+        guard !isRequesting, buffered > 0 else { return }
+
+        print(
+            "[Renderer] Audio pull resume for transport: buffered=\(buffered) " +
+            "bufferedDur=\(String(format: "%.3f", bufferedDuration))s"
+        )
+        startAudioPullMode()
     }
 
     /// Flush audio renderer and pull-mode state without touching video.
