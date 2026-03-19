@@ -55,6 +55,11 @@
 		A72E03DA2EDA297D003A73DA /* Rivulet.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Rivulet.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A740D1182F59C56300B9820B /* AVKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AVKit.framework; path = Platforms/AppleTVOS.platform/Developer/SDKs/AppleTVOS26.2.sdk/System/Library/Frameworks/AVKit.framework; sourceTree = DEVELOPER_DIR; };
 		A784830A2F062C2000F9E6D0 /* RivuletTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = RivuletTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		B10000062F7A000100000001 /* Libavformat.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = Libavformat.xcframework; path = Frameworks/Libavformat.xcframework; sourceTree = "<group>"; };
+		B10000072F7A000100000001 /* Libavcodec.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = Libavcodec.xcframework; path = Frameworks/Libavcodec.xcframework; sourceTree = "<group>"; };
+		B10000082F7A000100000001 /* Libavutil.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = Libavutil.xcframework; path = Frameworks/Libavutil.xcframework; sourceTree = "<group>"; };
+		B10000092F7A000100000001 /* Libswresample.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = Libswresample.xcframework; path = Frameworks/Libswresample.xcframework; sourceTree = "<group>"; };
+		B100000A2F7A000100000001 /* Libdovi.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = Libdovi.xcframework; path = Frameworks/Libdovi.xcframework; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -97,14 +102,6 @@
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
-
-/* Begin PBXFileReference section (FFmpeg xcframeworks) */
-		B10000062F7A000100000001 /* Libavformat.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = Libavformat.xcframework; path = Frameworks/Libavformat.xcframework; sourceTree = "<group>"; };
-		B10000072F7A000100000001 /* Libavcodec.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = Libavcodec.xcframework; path = Frameworks/Libavcodec.xcframework; sourceTree = "<group>"; };
-		B10000082F7A000100000001 /* Libavutil.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = Libavutil.xcframework; path = Frameworks/Libavutil.xcframework; sourceTree = "<group>"; };
-		B10000092F7A000100000001 /* Libswresample.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = Libswresample.xcframework; path = Frameworks/Libswresample.xcframework; sourceTree = "<group>"; };
-		B100000A2F7A000100000001 /* Libdovi.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = Libdovi.xcframework; path = Frameworks/Libdovi.xcframework; sourceTree = "<group>"; };
-/* End PBXFileReference section (FFmpeg xcframeworks) */
 
 /* Begin PBXFrameworksBuildPhase section */
 		A70B44362F05AF3200DEF5ED /* Frameworks */ = {
@@ -451,6 +448,11 @@
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 26.1;
 				MARKETING_VERSION = 1.0.0;
+				OTHER_LDFLAGS = (
+					"-lbz2",
+					"-liconv",
+					"-lz",
+				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.gstudios.rivulet;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
@@ -501,6 +503,11 @@
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 26.1;
 				MARKETING_VERSION = 1.0.0;
+				OTHER_LDFLAGS = (
+					"-lbz2",
+					"-liconv",
+					"-lz",
+				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.gstudios.rivulet;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
@@ -725,9 +732,6 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
-
-/* Begin XCLocalSwiftPackageReference section */
-/* End XCLocalSwiftPackageReference section */
 
 /* Begin XCRemoteSwiftPackageReference section */
 		A700F81A2EFBA1610042C07D /* XCRemoteSwiftPackageReference "sentry-cocoa" */ = {

@@ -112,10 +112,15 @@ actor FFmpegRemuxSession {
     private var isCancelled = false
 
     // Target segment duration in seconds
-    private let targetSegmentDuration: TimeInterval = 6.0
+    private let targetSegmentDuration: TimeInterval = 2.0
 
     // Cached init segment (moov)
     private var cachedInitSegment: Data?
+
+    // Cached raw audio frame from init segment generation. The EAC3/AC3 muxer
+    // needs to parse a real audio packet before it can build the moov (dec3 box).
+    // If a media segment has no audio, we inject this primer so the moov succeeds.
+    private var cachedAudioPrimer: Data?
 
     // DV conversion support (Phase 5)
     private var doviConverter: DoviProfileConverter?
@@ -260,9 +265,11 @@ actor FFmpegRemuxSession {
         var outputBuffer: UnsafeMutablePointer<UInt8>? = nil
         var outputSize: Int = 0
 
-        let initData = try writeInitSegment(sourceCtx: ctx)
+        let rawData = try writeInitSegment(sourceCtx: ctx)
+        // Extract only ftyp + moov boxes (strip any moof+mdat from delay_moov output)
+        let initData = extractInitBoxes(from: rawData)
         cachedInitSegment = initData
-        print("[RemuxSession] Init segment: \(initData.count) bytes")
+        print("[RemuxSession] Init segment: \(initData.count) bytes (raw \(rawData.count) bytes)")
         return initData
     }
 
@@ -327,6 +334,7 @@ actor FFmpegRemuxSession {
         isOpen = false
         segments = []
         cachedInitSegment = nil
+        cachedAudioPrimer = nil
         doviConverter = nil
         audioDecoder = nil
         audioEncoder = nil
@@ -535,11 +543,8 @@ actor FFmpegRemuxSession {
         outVideoStream.pointee.time_base = srcVideoStream.pointee.time_base
         outVideoStream.pointee.codecpar.pointee.codec_tag = 0  // Let muxer choose
 
-        // For DV content, set dvh1 codec tag so AVPlayer triggers DV pipeline
-        if hasDolbyVision {
-            // DV P8 or converted P7→P8.1 — set dvh1 tag
-            outVideoStream.pointee.codecpar.pointee.codec_tag = fourCC("dvh1")
-        }
+        // Let FFmpeg choose the codec tag (hev1/hvc1).
+        // DV signaling (dvh1) will be patched in the init segment after muxing if needed.
 
         // Add audio stream (if present)
         if audioStreamIndex >= 0 {
@@ -549,7 +554,6 @@ actor FFmpegRemuxSession {
             let srcAudioStream = sourceCtx.pointee.streams[Int(audioStreamIndex)]!
 
             if needsAudioTranscode {
-                // Audio will be transcoded to EAC3 — set up output codec params accordingly
                 configureEAC3OutputParams(outAudioStream.pointee.codecpar,
                                           from: srcAudioStream.pointee.codecpar)
                 outAudioStream.pointee.time_base = AVRational(num: 1, den: 48000)
@@ -561,6 +565,15 @@ actor FFmpegRemuxSession {
                 outAudioStream.pointee.time_base = srcAudioStream.pointee.time_base
             }
             outAudioStream.pointee.codecpar.pointee.codec_tag = 0
+
+            // EAC3 requires frame_size to be set before moov can be written
+            if outAudioStream.pointee.codecpar.pointee.codec_id == AV_CODEC_ID_EAC3 {
+                outAudioStream.pointee.codecpar.pointee.frame_size = 1536
+            }
+            // AC3 also needs frame_size
+            if outAudioStream.pointee.codecpar.pointee.codec_id == AV_CODEC_ID_AC3 {
+                outAudioStream.pointee.codecpar.pointee.frame_size = 1536
+            }
         }
 
         // Set up in-memory I/O
@@ -570,7 +583,8 @@ actor FFmpegRemuxSession {
         }
 
         var outputData = Data()
-        let opaquePtr = Unmanaged.passRetained(OutputDataWrapper(data: &outputData)).toOpaque()
+        let writer = OutputWriter(target: &outputData)
+        let opaquePtr = Unmanaged.passRetained(writer).toOpaque()
 
         guard let avioCtx = avio_alloc_context(
             avioBuffer.assumingMemoryBound(to: UInt8.self),
@@ -579,44 +593,129 @@ actor FFmpegRemuxSession {
             opaquePtr,
             nil,  // read
             { opaquePtr, buf, bufSize -> Int32 in
-                // Write callback
                 guard let opaque = opaquePtr, let buf = buf, bufSize > 0 else { return 0 }
-                let wrapper = Unmanaged<OutputDataWrapper>.fromOpaque(opaque).takeUnretainedValue()
-                wrapper.dataPointer.pointee.append(buf, count: Int(bufSize))
-                return bufSize
+                let w = Unmanaged<OutputWriter>.fromOpaque(opaque).takeUnretainedValue()
+                return w.write(buf, count: bufSize)
             },
             nil   // seek
         ) else {
             av_free(avioBuffer)
-            Unmanaged<OutputDataWrapper>.fromOpaque(opaquePtr).release()
+            Unmanaged<OutputWriter>.fromOpaque(opaquePtr).release()
             throw RemuxError.muxerFailed("Failed to allocate AVIO context")
         }
 
         outCtx.pointee.pb = avioCtx
         outCtx.pointee.flags |= AVFMT_FLAG_CUSTOM_IO
 
-        // Set fMP4 options: write moov only (empty mdat), movflags for fragmented MP4
+        // Use delay_moov: moov is written after first fragment, allowing EAC3 muxer
+        // to parse a real packet before creating the dec3 box.
         var opts: OpaquePointer? = nil
-        av_dict_set(&opts, "movflags", "frag_custom+empty_moov+default_base_moof+omit_tfhd_offset", 0)
+        av_dict_set(&opts, "movflags", "frag_custom+delay_moov+default_base_moof+omit_tfhd_offset", 0)
+
+        // Allow unofficial extensions (DV dvcC/dvvC boxes)
+        outCtx.pointee.strict_std_compliance = -2  // FF_COMPLIANCE_UNOFFICIAL
 
         let headerRet = avformat_write_header(outCtx, &opts)
         av_dict_free(&opts)
         guard headerRet >= 0 else {
             avio_context_free(&outCtx.pointee.pb)
-            Unmanaged<OutputDataWrapper>.fromOpaque(opaquePtr).release()
+            Unmanaged<OutputWriter>.fromOpaque(opaquePtr).release()
             throw RemuxError.muxerFailed("Failed to write header: \(headerRet)")
         }
 
-        // Flush the header
+        // Feed a few real packets so EAC3 muxer can parse the bitstream.
+        // Seek to start and read until we have at least one audio packet.
+        avformat_seek_file(sourceCtx, -1, 0, 0, 0, 0)
+        var initPkt = av_packet_alloc()
+        guard let pkt = initPkt else {
+            avio_context_free(&outCtx.pointee.pb)
+            Unmanaged<OutputWriter>.fromOpaque(opaquePtr).release()
+            throw RemuxError.muxerFailed("Failed to allocate init packet")
+        }
+        defer { av_packet_free(&initPkt) }
+
+        var wroteVideo = false
+        var wroteAudio = false
+        let needAudio = audioStreamIndex >= 0
+
+        for _ in 0..<200 {  // Read up to 200 packets to find one of each
+            let readRet = av_read_frame(sourceCtx, pkt)
+            if readRet < 0 { break }
+
+            do {
+                defer { av_packet_unref(pkt) }
+
+                if pkt.pointee.stream_index == videoStreamIndex && !wroteVideo {
+                    pkt.pointee.stream_index = 0
+                    av_packet_rescale_ts(pkt, srcVideoStream.pointee.time_base, outVideoStream.pointee.time_base)
+                    av_write_frame(outCtx, pkt)
+                    wroteVideo = true
+                } else if pkt.pointee.stream_index == audioStreamIndex && !wroteAudio {
+                    let srcAudioStream = sourceCtx.pointee.streams[Int(audioStreamIndex)]!
+                    let dstAudioStream = outCtx.pointee.streams[1]!
+
+                    if needsAudioTranscode {
+                        // Transcode the audio packet (e.g., TrueHD → EAC3) so the
+                        // muxer sees real EAC3 data for building the dec3 box.
+                        let encodedPackets = transcodeAudioPacket(pkt, timebase: srcAudioStream.pointee.time_base)
+                        if let first = encodedPackets.first {
+                            // Cache the transcoded frame as primer for audio-less segments
+                            cachedAudioPrimer = first.data
+
+                            let bufSize = Int32(first.data.count)
+                            if let packetBuf = av_malloc(Int(bufSize)) {
+                                first.data.copyBytes(to: packetBuf.assumingMemoryBound(to: UInt8.self),
+                                                     count: Int(bufSize))
+                                var outPkt = av_packet_alloc()
+                                if let fp = outPkt,
+                                   av_packet_from_data(fp, packetBuf.assumingMemoryBound(to: UInt8.self), bufSize) >= 0 {
+                                    fp.pointee.stream_index = 1
+                                    fp.pointee.pts = first.pts
+                                    fp.pointee.dts = first.pts
+                                    fp.pointee.duration = first.duration
+                                    av_packet_rescale_ts(fp, AVRational(num: 1, den: 48000),
+                                                         dstAudioStream.pointee.time_base)
+                                    av_write_frame(outCtx, fp)
+                                    wroteAudio = true
+                                } else {
+                                    av_free(packetBuf)
+                                }
+                                av_packet_free(&outPkt)
+                            }
+                        }
+                        // If transcoder didn't produce output yet, keep reading
+                        if !wroteAudio { continue }
+                    } else {
+                        // Passthrough: cache raw frame and write directly
+                        if let rawData = pkt.pointee.data, pkt.pointee.size > 0 {
+                            cachedAudioPrimer = Data(bytes: rawData, count: Int(pkt.pointee.size))
+                        }
+                        pkt.pointee.stream_index = 1
+                        av_packet_rescale_ts(pkt, srcAudioStream.pointee.time_base,
+                                             dstAudioStream.pointee.time_base)
+                        av_write_frame(outCtx, pkt)
+                        wroteAudio = true
+                    }
+                }
+            }
+
+            if wroteVideo && (!needAudio || wroteAudio) { break }
+        }
+
+        // Flush the fragment — this triggers moov + moof+mdat to be written
+        avio_flush(outCtx.pointee.pb)
+        av_write_frame(outCtx, nil)  // Flush interleaving queue
         avio_flush(outCtx.pointee.pb)
 
-        // Write trailer (completes the moov)
         av_write_trailer(outCtx)
         avio_flush(outCtx.pointee.pb)
 
+        // Seek source back to start for future segment generation
+        avformat_seek_file(sourceCtx, -1, 0, 0, 0, 0)
+
         // Clean up AVIO
         avio_context_free(&outCtx.pointee.pb)
-        Unmanaged<OutputDataWrapper>.fromOpaque(opaquePtr).release()
+        Unmanaged<OutputWriter>.fromOpaque(opaquePtr).release()
 
         return outputData
     }
@@ -647,10 +746,6 @@ actor FFmpegRemuxSession {
         outVideoStream.pointee.time_base = srcVideoStream.pointee.time_base
         outVideoStream.pointee.codecpar.pointee.codec_tag = 0
 
-        if hasDolbyVision {
-            outVideoStream.pointee.codecpar.pointee.codec_tag = fourCC("dvh1")
-        }
-
         var outAudioStreamIndex: Int32 = -1
         if audioStreamIndex >= 0 {
             guard let outAudioStream = avformat_new_stream(outCtx, nil) else {
@@ -668,6 +763,12 @@ actor FFmpegRemuxSession {
                 outAudioStream.pointee.time_base = srcAudioStream.pointee.time_base
             }
             outAudioStream.pointee.codecpar.pointee.codec_tag = 0
+
+            // EAC3/AC3 require frame_size set before header write
+            let audioCodecId = outAudioStream.pointee.codecpar.pointee.codec_id
+            if audioCodecId == AV_CODEC_ID_EAC3 || audioCodecId == AV_CODEC_ID_AC3 {
+                outAudioStream.pointee.codecpar.pointee.frame_size = 1536
+            }
         }
 
         // Set up in-memory I/O
@@ -677,7 +778,8 @@ actor FFmpegRemuxSession {
         }
 
         var outputData = Data()
-        let opaquePtr = Unmanaged.passRetained(OutputDataWrapper(data: &outputData)).toOpaque()
+        let writer = OutputWriter(target: &outputData)
+        let opaquePtr = Unmanaged.passRetained(writer).toOpaque()
 
         guard let avioCtx = avio_alloc_context(
             avioBuffer.assumingMemoryBound(to: UInt8.self),
@@ -687,29 +789,31 @@ actor FFmpegRemuxSession {
             nil,
             { opaquePtr, buf, bufSize -> Int32 in
                 guard let opaque = opaquePtr, let buf = buf, bufSize > 0 else { return 0 }
-                let wrapper = Unmanaged<OutputDataWrapper>.fromOpaque(opaque).takeUnretainedValue()
-                wrapper.dataPointer.pointee.append(buf, count: Int(bufSize))
-                return bufSize
+                let w = Unmanaged<OutputWriter>.fromOpaque(opaque).takeUnretainedValue()
+                return w.write(buf, count: bufSize)
             },
             nil
         ) else {
             av_free(avioBuffer)
-            Unmanaged<OutputDataWrapper>.fromOpaque(opaquePtr).release()
+            Unmanaged<OutputWriter>.fromOpaque(opaquePtr).release()
             throw RemuxError.muxerFailed("Failed to allocate segment AVIO context")
         }
 
         outCtx.pointee.pb = avioCtx
         outCtx.pointee.flags |= AVFMT_FLAG_CUSTOM_IO
 
-        // Write header with frag_custom (we control fragment boundaries)
+        // delay_moov: the EAC3/AC3 muxer needs to parse a real audio packet
+        // before it can build the moov's dec3 box. We strip init boxes from
+        // media segments afterwards (they only need moof+mdat).
         var opts: OpaquePointer? = nil
-        av_dict_set(&opts, "movflags", "frag_custom+empty_moov+default_base_moof+omit_tfhd_offset", 0)
+        av_dict_set(&opts, "movflags", "frag_custom+delay_moov+default_base_moof+omit_tfhd_offset", 0)
+        outCtx.pointee.strict_std_compliance = -2  // FF_COMPLIANCE_UNOFFICIAL
 
         let headerRet = avformat_write_header(outCtx, &opts)
         av_dict_free(&opts)
         guard headerRet >= 0 else {
             avio_context_free(&outCtx.pointee.pb)
-            Unmanaged<OutputDataWrapper>.fromOpaque(opaquePtr).release()
+            Unmanaged<OutputWriter>.fromOpaque(opaquePtr).release()
             throw RemuxError.muxerFailed("Failed to write segment header: \(headerRet)")
         }
 
@@ -717,7 +821,7 @@ actor FFmpegRemuxSession {
         var pkt = av_packet_alloc()
         guard let packet = pkt else {
             avio_context_free(&outCtx.pointee.pb)
-            Unmanaged<OutputDataWrapper>.fromOpaque(opaquePtr).release()
+            Unmanaged<OutputWriter>.fromOpaque(opaquePtr).release()
             throw RemuxError.muxerFailed("Failed to allocate packet")
         }
         defer { av_packet_free(&pkt) }
@@ -726,157 +830,212 @@ actor FFmpegRemuxSession {
         var audioPacketCount = 0
         var hitNextSegment = false
         var foundFirstKeyframe = false
+        var nextVideoDTS: Int64 = Int64.min
+        var videoPTSShift: Int64 = 0  // Shift applied when PTS too small for depth offset
 
         while !isCancelled {
             let readRet = av_read_frame(sourceCtx, packet)
             if readRet < 0 { break }  // EOF or error
-            defer { av_packet_unref(packet) }
 
-            let streamIndex = packet.pointee.stream_index
+            do {
+                defer { av_packet_unref(packet) }
 
-            // Only process video and audio
-            guard streamIndex == videoStreamIndex || streamIndex == audioStreamIndex else {
-                continue
-            }
+                let streamIndex = packet.pointee.stream_index
 
-            if streamIndex == videoStreamIndex {
-                // Check if we've reached the next segment
-                if let endPTS = endPTS, packet.pointee.pts >= endPTS {
-                    if foundFirstKeyframe {
-                        hitNextSegment = true
-                        break
-                    }
-                }
-
-                // Wait for the first keyframe at or after our start PTS
-                if !foundFirstKeyframe {
-                    if (packet.pointee.flags & AV_PKT_FLAG_KEY) != 0 && packet.pointee.pts >= startPTS {
-                        foundFirstKeyframe = true
-                    } else {
-                        continue
-                    }
-                }
-
-                // Remap stream index for output (video is always stream 0)
-                packet.pointee.stream_index = 0
-
-                // Apply DV P7→P8.1 conversion if needed
-                if let converter = doviConverter, needsDVConversion,
-                   let packetData = packet.pointee.data, packet.pointee.size > 0 {
-                    let originalData = Data(bytes: packetData, count: Int(packet.pointee.size))
-                    let convertedData = converter.processVideoSample(originalData)
-
-                    if convertedData.count != originalData.count || convertedData != originalData {
-                        // Replace packet data with converted version
-                        let newSize = Int32(convertedData.count)
-                        if let newBuf = av_malloc(Int(newSize)) {
-                            convertedData.copyBytes(to: newBuf.assumingMemoryBound(to: UInt8.self),
-                                                    count: Int(newSize))
-                            // Free old buffer and replace
-                            av_buffer_unref(&packet.pointee.buf)
-                            packet.pointee.data = newBuf.assumingMemoryBound(to: UInt8.self)
-                            packet.pointee.size = newSize
-                            packet.pointee.buf = av_buffer_create(
-                                newBuf.assumingMemoryBound(to: UInt8.self),
-                                Int(newSize),
-                                { _, buf in av_free(buf) },
-                                nil, 0
-                            )
-                        }
-                    }
-                }
-
-                // Rescale timestamps to output timebase
-                av_packet_rescale_ts(packet,
-                                     srcVideoStream.pointee.time_base,
-                                     outVideoStream.pointee.time_base)
-
-                let writeRet = av_write_frame(outCtx, packet)
-                if writeRet < 0 {
-                    print("[RemuxSession] Warning: video write failed for segment \(segmentIndex): \(writeRet)")
-                }
-                videoPacketCount += 1
-
-            } else if streamIndex == audioStreamIndex {
-                // Only include audio packets in the time range
-                guard foundFirstKeyframe else { continue }
-
-                let audioPTS = av_rescale_q(packet.pointee.pts, audioTimebase, videoTimebase)
-                if let endPTS = endPTS, audioPTS >= endPTS {
+                // Only process video and audio
+                guard streamIndex == videoStreamIndex || streamIndex == audioStreamIndex else {
                     continue
                 }
 
-                let outStreamIdx = (outAudioStreamIndex >= 0) ? outAudioStreamIndex : 1
-
-                if needsAudioTranscode {
-                    // Transcode: DTS/TrueHD → PCM → EAC3
-                    let srcAudioStream = sourceCtx.pointee.streams[Int(audioStreamIndex)]!
-                    let encodedPackets = transcodeAudioPacket(packet, timebase: srcAudioStream.pointee.time_base)
-
-                    for enc in encodedPackets {
-                        var outPkt = av_packet_alloc()
-                        guard let encPkt = outPkt else { continue }
-                        defer { av_packet_free(&outPkt) }
-
-                        enc.data.withUnsafeBytes { buf in
-                            guard let baseAddr = buf.baseAddress else { return }
-                            av_packet_from_data(encPkt,
-                                              UnsafeMutablePointer(mutating: baseAddr.assumingMemoryBound(to: UInt8.self)),
-                                              Int32(enc.data.count))
+                if streamIndex == videoStreamIndex {
+                    // Check if we've reached the next segment.
+                    // Only break on a KEYFRAME past endPTS — non-keyframes (B/P-frames)
+                    // with PTS >= endPTS may still belong to the current GOP. Breaking
+                    // on a non-keyframe would lose trailing B-frames in decode order.
+                    if let endPTS = endPTS, packet.pointee.pts >= endPTS,
+                       (packet.pointee.flags & AV_PKT_FLAG_KEY) != 0 {
+                        if foundFirstKeyframe {
+                            hitNextSegment = true
+                            break
                         }
-                        // Actually, we need to copy the data since av_packet_from_data takes ownership
-                        // Use a different approach: allocate and copy
-                        let bufSize = Int32(enc.data.count)
-                        guard let packetBuf = av_malloc(Int(bufSize)) else { continue }
-                        enc.data.copyBytes(to: packetBuf.assumingMemoryBound(to: UInt8.self), count: Int(bufSize))
+                    }
 
-                        var freshPkt = av_packet_alloc()
-                        guard let fp = freshPkt else {
-                            av_free(packetBuf)
+                    // Wait for the first keyframe at or after our start PTS
+                    if !foundFirstKeyframe {
+                        if (packet.pointee.flags & AV_PKT_FLAG_KEY) != 0 && packet.pointee.pts >= startPTS {
+                            foundFirstKeyframe = true
+                        } else {
                             continue
                         }
-                        fp.pointee.data = packetBuf.assumingMemoryBound(to: UInt8.self)
-                        fp.pointee.size = bufSize
-                        fp.pointee.stream_index = outStreamIdx
-                        fp.pointee.pts = enc.pts
-                        fp.pointee.dts = enc.pts
-                        fp.pointee.duration = enc.duration
-
-                        let dstAudioStream = outCtx.pointee.streams[Int(outStreamIdx)]!
-                        av_packet_rescale_ts(fp,
-                                             AVRational(num: 1, den: 48000),
-                                             dstAudioStream.pointee.time_base)
-
-                        av_write_frame(outCtx, fp)
-                        av_packet_free(&freshPkt)
-                        audioPacketCount += 1
                     }
-                } else {
-                    // Copy audio packet directly
-                    packet.pointee.stream_index = outStreamIdx
 
-                    let srcAudioStream = sourceCtx.pointee.streams[Int(audioStreamIndex)]!
-                    let dstAudioStream = outCtx.pointee.streams[Int(outStreamIdx)]!
+                    // Remap stream index for output (video is always stream 0)
+                    packet.pointee.stream_index = 0
+
+                    // Apply DV P7→P8.1 conversion if needed
+                    if let converter = doviConverter, needsDVConversion,
+                       let packetData = packet.pointee.data, packet.pointee.size > 0 {
+                        let originalData = Data(bytes: packetData, count: Int(packet.pointee.size))
+                        let convertedData = converter.processVideoSample(originalData)
+
+                        if convertedData.count != originalData.count || convertedData != originalData {
+                            let newSize = Int32(convertedData.count)
+                            if let newBuf = av_malloc(Int(newSize)) {
+                                convertedData.copyBytes(to: newBuf.assumingMemoryBound(to: UInt8.self),
+                                                        count: Int(newSize))
+                                av_buffer_unref(&packet.pointee.buf)
+                                packet.pointee.data = newBuf.assumingMemoryBound(to: UInt8.self)
+                                packet.pointee.size = newSize
+                                packet.pointee.buf = av_buffer_create(
+                                    newBuf.assumingMemoryBound(to: UInt8.self),
+                                    Int(newSize),
+                                    { _, buf in av_free(buf) },
+                                    nil, 0
+                                )
+                            }
+                        }
+                    }
+
                     av_packet_rescale_ts(packet,
-                                         srcAudioStream.pointee.time_base,
-                                         dstAudioStream.pointee.time_base)
+                                         srcVideoStream.pointee.time_base,
+                                         outVideoStream.pointee.time_base)
+
+                    // Synthesize monotonic DTS. MKV demuxer produces non-monotonic
+                    // DTS after seeking for B-frame content. We replace it with a
+                    // linear counter offset by B-frame depth so DTS ≤ PTS for all
+                    // frames including B-frames with lower PTS than surrounding refs.
+                    let frameDur = packet.pointee.duration > 0 ? packet.pointee.duration : 1
+                    if nextVideoDTS == Int64.min {
+                        let depth = Int64(srcVideoStream.pointee.codecpar.pointee.video_delay)
+                        let d = depth > 0 ? depth : 4  // MKV demuxer often returns 0; 4 is safe for HEVC B-frames
+                        let neededRoom = d * frameDur
+                        // If PTS is too small for the depth offset, shift all PTS
+                        // forward so DTS starts at 0. This keeps relative timing
+                        // intact; AVPlayer adjusts via tfdt baseMediaDecodeTime.
+                        if packet.pointee.pts < neededRoom {
+                            videoPTSShift = neededRoom  // shift all PTS by this amount
+                        }
+                        let shiftedPTS = packet.pointee.pts + videoPTSShift
+                        nextVideoDTS = shiftedPTS - neededRoom  // always ≥ 0
+                    }
+                    // Apply PTS shift for this segment (0 for segments with large enough PTS)
+                    packet.pointee.pts += videoPTSShift
+                    packet.pointee.dts = nextVideoDTS
+                    nextVideoDTS += frameDur
 
                     let writeRet = av_write_frame(outCtx, packet)
                     if writeRet < 0 {
-                        print("[RemuxSession] Warning: audio write failed for segment \(segmentIndex): \(writeRet)")
+                        print("[RemuxSession] Warning: video write failed for segment \(segmentIndex): \(writeRet)")
                     }
-                    audioPacketCount += 1
+                    videoPacketCount += 1
+
+                } else if streamIndex == audioStreamIndex {
+                    guard foundFirstKeyframe else { continue }
+
+                    let audioPTS = av_rescale_q(packet.pointee.pts, audioTimebase, videoTimebase)
+                    if let endPTS = endPTS, audioPTS >= endPTS {
+                        continue
+                    }
+
+                    let outStreamIdx = (outAudioStreamIndex >= 0) ? outAudioStreamIndex : 1
+
+                    if needsAudioTranscode {
+                        let srcAudioStream = sourceCtx.pointee.streams[Int(audioStreamIndex)]!
+                        let encodedPackets = transcodeAudioPacket(packet, timebase: srcAudioStream.pointee.time_base)
+
+                        for enc in encodedPackets {
+                            let bufSize = Int32(enc.data.count)
+                            guard let packetBuf = av_malloc(Int(bufSize)) else { continue }
+                            enc.data.copyBytes(to: packetBuf.assumingMemoryBound(to: UInt8.self), count: Int(bufSize))
+
+                            var outPkt = av_packet_alloc()
+                            guard let fp = outPkt else {
+                                av_free(packetBuf)
+                                continue
+                            }
+
+                            let packetRet = av_packet_from_data(
+                                fp,
+                                packetBuf.assumingMemoryBound(to: UInt8.self),
+                                bufSize
+                            )
+                            guard packetRet >= 0 else {
+                                av_packet_free(&outPkt)
+                                av_free(packetBuf)
+                                continue
+                            }
+
+                            fp.pointee.stream_index = outStreamIdx
+                            fp.pointee.pts = enc.pts
+                            fp.pointee.dts = enc.pts
+                            fp.pointee.duration = enc.duration
+
+                            let dstAudioStream = outCtx.pointee.streams[Int(outStreamIdx)]!
+                            av_packet_rescale_ts(fp,
+                                                 AVRational(num: 1, den: 48000),
+                                                 dstAudioStream.pointee.time_base)
+
+                            let writeRet = av_write_frame(outCtx, fp)
+                            if writeRet < 0 {
+                                print("[RemuxSession] Warning: transcoded audio write failed for segment \(segmentIndex): \(writeRet)")
+                            }
+                            av_packet_free(&outPkt)
+                            audioPacketCount += 1
+                        }
+                    } else {
+                        packet.pointee.stream_index = outStreamIdx
+
+                        let srcAudioStream = sourceCtx.pointee.streams[Int(audioStreamIndex)]!
+                        let dstAudioStream = outCtx.pointee.streams[Int(outStreamIdx)]!
+                        av_packet_rescale_ts(packet,
+                                             srcAudioStream.pointee.time_base,
+                                             dstAudioStream.pointee.time_base)
+
+                        let writeRet = av_write_frame(outCtx, packet)
+                        if writeRet < 0 {
+                            print("[RemuxSession] Warning: audio write failed for segment \(segmentIndex): \(writeRet)")
+                        }
+                        audioPacketCount += 1
+                    }
                 }
             }
         }
 
         guard !isCancelled else {
             avio_context_free(&outCtx.pointee.pb)
-            Unmanaged<OutputDataWrapper>.fromOpaque(opaquePtr).release()
+            Unmanaged<OutputWriter>.fromOpaque(opaquePtr).release()
             throw RemuxError.cancelled
         }
 
-        // Flush the fragment
+        // If no audio was written, inject a cached primer packet so the EAC3/AC3
+        // muxer can parse the bitstream and build the moov's dec3/dac3 box.
+        // Without this, delay_moov fails for audio-less segments.
+        if audioPacketCount == 0, let primer = cachedAudioPrimer, outAudioStreamIndex >= 0 {
+            let bufSize = Int32(primer.count)
+            if let packetBuf = av_malloc(Int(bufSize)) {
+                primer.copyBytes(to: packetBuf.assumingMemoryBound(to: UInt8.self), count: Int(bufSize))
+                var primerPkt = av_packet_alloc()
+                if let pp = primerPkt {
+                    if av_packet_from_data(pp, packetBuf.assumingMemoryBound(to: UInt8.self), bufSize) >= 0 {
+                        pp.pointee.stream_index = outAudioStreamIndex
+                        // Convert video startPTS to output audio timebase directly
+                        let dstAudioStream = outCtx.pointee.streams[Int(outAudioStreamIndex)]!
+                        let audioPTS = av_rescale_q(startPTS,
+                                                     sourceCtx.pointee.streams[Int(videoStreamIndex)]!.pointee.time_base,
+                                                     dstAudioStream.pointee.time_base)
+                        pp.pointee.pts = audioPTS
+                        pp.pointee.dts = audioPTS
+                        pp.pointee.duration = 1536  // Standard EAC3 frame size
+                        av_write_frame(outCtx, pp)
+                    } else {
+                        av_free(packetBuf)
+                    }
+                    av_packet_free(&primerPkt)
+                }
+            }
+        }
+
+        // Flush the muxer
         avio_flush(outCtx.pointee.pb)
         av_write_frame(outCtx, nil)  // Flush interleaving queue
         avio_flush(outCtx.pointee.pb)
@@ -887,10 +1046,9 @@ actor FFmpegRemuxSession {
 
         // Clean up AVIO
         avio_context_free(&outCtx.pointee.pb)
-        Unmanaged<OutputDataWrapper>.fromOpaque(opaquePtr).release()
+        Unmanaged<OutputWriter>.fromOpaque(opaquePtr).release()
 
-        // The output contains both the (empty) moov and the moof+mdat.
-        // We need to strip the moov and return only the moof+mdat.
+        // Strip ftyp/moov so each media segment only contains moof+mdat fragment data.
         let segmentData = stripMoovBox(from: outputData)
 
         return segmentData
@@ -912,6 +1070,29 @@ actor FFmpegRemuxSession {
 
             // Keep everything except moov and ftyp (init-only boxes)
             if boxType != "moov" && boxType != "ftyp" {
+                result.append(data[offset..<offset+boxSize])
+            }
+
+            offset += boxSize
+        }
+
+        return result.isEmpty ? data : result
+    }
+
+    /// Extract only ftyp + moov boxes from fMP4 data (for init segment).
+    /// With delay_moov, the output contains ftyp + moov + moof + mdat — we only want ftyp + moov.
+    private func extractInitBoxes(from data: Data) -> Data {
+        var result = Data()
+        var offset = 0
+
+        while offset + 8 <= data.count {
+            let boxSize = Int(data.loadBigEndianUInt32(at: offset))
+            let boxType = String(data: data[offset+4..<offset+8], encoding: .ascii) ?? ""
+
+            guard boxSize >= 8 && offset + boxSize <= data.count else { break }
+
+            // Keep only ftyp and moov (init segment boxes)
+            if boxType == "ftyp" || boxType == "moov" {
                 result.append(data[offset..<offset+boxSize])
             }
 
@@ -948,14 +1129,20 @@ actor FFmpegRemuxSession {
     }
 }
 
-// MARK: - Output Data Wrapper (for AVIO callback)
+// MARK: - AVIO Output Writer
 
-/// Wrapper to pass a mutable Data pointer through an opaque C callback.
-private final class OutputDataWrapper {
-    let dataPointer: UnsafeMutablePointer<Data>
+/// Wrapper for AVIO write callbacks. Accumulates bytes in memory.
+private final class OutputWriter {
+    let dataPtr: UnsafeMutablePointer<Data>
 
-    init(data: UnsafeMutablePointer<Data>) {
-        self.dataPointer = data
+    init(target: UnsafeMutablePointer<Data>) {
+        self.dataPtr = target
+    }
+
+    /// Write bytes to the buffer. Returns number of bytes written.
+    func write(_ buffer: UnsafePointer<UInt8>, count: Int32) -> Int32 {
+        dataPtr.pointee.append(buffer, count: Int(count))
+        return count
     }
 }
 

@@ -9,8 +9,8 @@ import SwiftUI
 import Combine
 
 let previewEntryAnimation = Animation.spring(response: 0.45, dampingFraction: 0.88)
-let previewPagingAnimation = Animation.interactiveSpring(response: 0.38, dampingFraction: 0.92)
-let previewBackdropPagingAnimation = Animation.easeOut(duration: 0.3)
+let previewPagingAnimation = Animation.easeInOut(duration: 0.58)
+let previewBackdropPagingAnimation = Animation.easeOut(duration: 0.48)
 let previewExpandAnimation = Animation.easeInOut(duration: 0.35)
 
 /// Bridge object that allows PreviewContainerViewController to trigger Menu actions
@@ -57,6 +57,7 @@ struct PreviewOverlayHost: View {
     @State private var verticalScrollEnabled = false
     @State private var capturedSourceFrame: CGRect?
     @State private var heroBackdropOffset: CGFloat = 0
+    @State private var pagingMotionActive = false
     @State private var metadataGate = PreviewLoadGate()
     @FocusState private var focusedArea: PreviewFocusArea?
 
@@ -114,6 +115,34 @@ struct PreviewOverlayHost: View {
             ZStack {
                 Color.black.ignoresSafeArea()
 
+                if stateMachine.isExpanded {
+                    PreviewHeroSurface(
+                        item: request.items[selectedIndex],
+                        isExpanded: true,
+                        metadataVisible: metadataVisible,
+                        showExpandedChrome: expandedChromeVisible,
+                        showBackdropLayer: true,
+                        allowVerticalScroll: verticalScrollEnabled,
+                        allowActionRowInteraction: expandedChromeVisible,
+                        heroBackdropMotionLocked: stateMachine.motionLocked,
+                        backgroundParallaxOffset: heroBackdropOffset,
+                        onPreviewExitRequested: handleExpandedExit,
+                        onDetailsBecameVisible: {
+                            stateMachine.markDetailsStable()
+                        }
+                    )
+                    .allowsHitTesting(true)
+                } else if stateMachine.phase != .entryMorph {
+                    PreviewBackdropStage(
+                        item: request.items[selectedIndex],
+                        serverURL: serverURL,
+                        authToken: authToken,
+                        motionLocked: stateMachine.motionLocked,
+                        backgroundParallaxOffset: heroBackdropOffset
+                    )
+                    .transition(.opacity)
+                }
+
                 ForEach(visibleIndices, id: \.self) { index in
                     PreviewCarouselCard(
                         item: request.items[index],
@@ -125,22 +154,22 @@ struct PreviewOverlayHost: View {
                             fullFrame: fullFrame,
                             entryFrame: entryFrame
                         ),
+                        phase: stateMachine.phase,
                         isCurrent: index == selectedIndex,
-                        isExpanded: stateMachine.isExpanded,
                         metadataVisible: index == selectedIndex && metadataVisible,
                         showExpandedChrome: expandedChromeVisible,
                         allowVerticalScroll: verticalScrollEnabled,
                         allowActionRowInteraction: expandedChromeVisible,
+                        pagingMotionActive: pagingMotionActive,
                         motionLocked: stateMachine.motionLocked,
-                        backgroundParallaxOffset: index == selectedIndex ? heroBackdropOffset : 0,
-                        cornerRadius: cardCornerRadius(for: index),
-                        opacity: cardOpacity(for: index),
                         onPreviewExitRequested: handleExpandedExit,
                         onDetailsBecameVisible: {
                             if index == selectedIndex {
                                 stateMachine.markDetailsStable()
                             }
-                        }
+                        },
+                        cornerRadius: cardCornerRadius(for: index),
+                        opacity: cardOpacity(for: index)
                     )
                     .zIndex(index == selectedIndex ? 2 : 1)
                 }
@@ -205,6 +234,7 @@ struct PreviewOverlayHost: View {
         expandedChromeVisible = false
         verticalScrollEnabled = false
         heroBackdropOffset = 0
+        pagingMotionActive = false
         let token = metadataGate.begin()
 
         Task { @MainActor in
@@ -231,6 +261,7 @@ struct PreviewOverlayHost: View {
         metadataVisible = false
         expandedChromeVisible = false
         verticalScrollEnabled = false
+        pagingMotionActive = true
         heroBackdropOffset = CGFloat(delta) * backdropLagDistance
 
         let token = metadataGate.begin()
@@ -247,9 +278,10 @@ struct PreviewOverlayHost: View {
                 heroBackdropOffset = 0
             }
 
-            try? await Task.sleep(nanoseconds: 300_000_000)
+            try? await Task.sleep(nanoseconds: 480_000_000)
             guard metadataGate.isCurrent(token) else { return }
             stateMachine.finishPaging()
+            pagingMotionActive = false
             withAnimation(.easeOut(duration: 0.28)) {
                 metadataVisible = true
             }
@@ -259,6 +291,7 @@ struct PreviewOverlayHost: View {
     private func expandCurrentCard() {
         guard !stateMachine.isExpanded else { return }
 
+        pagingMotionActive = false
         expandedChromeVisible = false
         verticalScrollEnabled = false
         let token = metadataGate.begin()
@@ -300,11 +333,13 @@ struct PreviewOverlayHost: View {
 
         switch action {
         case .dismissOverlay:
+            pagingMotionActive = false
             stateMachine.beginExit()
             onDismiss(request.sourceTarget)
 
         case .collapseToCarousel:
             let token = metadataGate.begin()
+            pagingMotionActive = false
             expandedChromeVisible = false
             verticalScrollEnabled = false
 
@@ -349,10 +384,8 @@ struct PreviewOverlayHost: View {
             switch stateMachine.phase {
             case .entryMorph:
                 return entryFrame
-            case .carouselStable:
+            case .carouselStable, .expandingHero, .expandedHero, .detailsStable, .exiting:
                 return centeredFrame
-            case .expandingHero, .expandedHero, .detailsStable, .exiting:
-                return fullFrame
             }
         }
 
@@ -386,7 +419,15 @@ struct PreviewOverlayHost: View {
     }
 
     private func cardOpacity(for index: Int) -> Double {
-        guard index != selectedIndex else { return 1 }
+        if index == selectedIndex {
+            switch stateMachine.phase {
+            case .entryMorph, .carouselStable:
+                return 1
+            case .expandingHero, .expandedHero, .detailsStable, .exiting:
+                return 0
+            }
+        }
+
         switch stateMachine.phase {
         case .carouselStable:
             return 1
@@ -402,43 +443,51 @@ private struct PreviewCarouselCard: View {
     let serverURL: String
     let authToken: String
     let frame: CGRect
+    let phase: PreviewPhase
     let isCurrent: Bool
-    let isExpanded: Bool
     let metadataVisible: Bool
     let showExpandedChrome: Bool
     let allowVerticalScroll: Bool
     let allowActionRowInteraction: Bool
+    let pagingMotionActive: Bool
     let motionLocked: Bool
-    let backgroundParallaxOffset: CGFloat
-    let cornerRadius: CGFloat
-    let opacity: Double
     let onPreviewExitRequested: () -> Void
     let onDetailsBecameVisible: () -> Void
+    let cornerRadius: CGFloat
+    let opacity: Double
+
+    private var showsHeroOverlay: Bool {
+        isCurrent && phase == .carouselStable && !pagingMotionActive
+    }
 
     var body: some View {
-        Group {
+        ZStack {
+            PreviewCarouselSideCard(
+                item: item,
+                serverURL: serverURL,
+                authToken: authToken,
+                motionLocked: motionLocked
+            )
+            .opacity(showsHeroOverlay ? 0 : 1)
+
             if isCurrent {
                 PreviewHeroSurface(
                     item: item,
-                    isExpanded: isExpanded,
+                    isExpanded: false,
                     metadataVisible: metadataVisible,
                     showExpandedChrome: showExpandedChrome,
+                    showBackdropLayer: false,
                     allowVerticalScroll: allowVerticalScroll,
                     allowActionRowInteraction: allowActionRowInteraction,
                     heroBackdropMotionLocked: motionLocked,
-                    backgroundParallaxOffset: backgroundParallaxOffset,
+                    backgroundParallaxOffset: 0,
                     onPreviewExitRequested: onPreviewExitRequested,
                     onDetailsBecameVisible: onDetailsBecameVisible
                 )
-            } else {
-                PreviewCarouselSideCard(
-                    item: item,
-                    serverURL: serverURL,
-                    authToken: authToken,
-                    motionLocked: motionLocked
-                )
+                .opacity(showsHeroOverlay ? 1 : 0)
             }
         }
+        .animation(.easeOut(duration: 0.2), value: showsHeroOverlay)
         .frame(width: frame.width, height: frame.height)
         .clipped()
         .opacity(opacity)
@@ -452,7 +501,7 @@ private struct PreviewCarouselCard: View {
             )
         )
         .position(x: frame.midX, y: frame.midY)
-        .allowsHitTesting(isCurrent && isExpanded)
+        .allowsHitTesting(false)
     }
 }
 
@@ -461,6 +510,7 @@ private struct PreviewHeroSurface: View {
     let isExpanded: Bool
     let metadataVisible: Bool
     let showExpandedChrome: Bool
+    let showBackdropLayer: Bool
     let allowVerticalScroll: Bool
     let allowActionRowInteraction: Bool
     let heroBackdropMotionLocked: Bool
@@ -475,12 +525,54 @@ private struct PreviewHeroSurface: View {
             backgroundParallaxOffset: backgroundParallaxOffset,
             showMetadata: metadataVisible,
             showExpandedChrome: showExpandedChrome,
+            showsBackdropLayer: showBackdropLayer,
             allowVerticalScroll: allowVerticalScroll,
             allowActionRowInteraction: allowActionRowInteraction,
             heroBackdropMotionLocked: heroBackdropMotionLocked,
             onPreviewExitRequested: onPreviewExitRequested,
             onDetailsBecameVisible: onDetailsBecameVisible
         )
+    }
+}
+
+private struct PreviewBackdropStage: View {
+    let item: PlexMetadata
+    let serverURL: String
+    let authToken: String
+    let motionLocked: Bool
+    let backgroundParallaxOffset: CGFloat
+
+    @StateObject private var backdropCoordinator = HeroBackdropCoordinator()
+
+    private var request: HeroBackdropRequest {
+        item.heroBackdropRequest(serverURL: serverURL, authToken: authToken)
+    }
+
+    var body: some View {
+        HeroBackdropImage(
+            url: backdropCoordinator.session.displayedBackdropURL,
+            animationDuration: 0.38
+        ) {
+            Rectangle()
+                .fill(
+                    LinearGradient(
+                        colors: [Color(white: 0.16), Color(white: 0.06)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+        }
+        .aspectRatio(contentMode: .fill)
+        .scaleEffect(1.08)
+        .offset(x: backgroundParallaxOffset)
+        .ignoresSafeArea()
+        .task(id: request) {
+            backdropCoordinator.load(request: request, motionLocked: motionLocked)
+        }
+        .onChange(of: motionLocked) { _, locked in
+            backdropCoordinator.setMotionLocked(locked)
+        }
+        .animation(previewBackdropPagingAnimation, value: backgroundParallaxOffset)
     }
 }
 

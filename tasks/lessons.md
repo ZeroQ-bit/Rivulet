@@ -1,5 +1,26 @@
 # Lessons Learned
 
+## 2026-03-19 - Stable Parallax Needs Split Ownership
+
+**Mistake**: Fixed the lateral card motion, but first kept too much on the moving card, then over-corrected by moving the full hero content to the stage layer, which broke metadata positioning.
+**Pattern**: Reference-style carousel parallax needs the backdrop and the overlay content to have different ownership; if they share one layer, parallax breaks, and if both move to the stage, metadata placement breaks.
+**Rule**: Split ownership cleanly: keep the selected backdrop on a stable stage layer so it can drift independently, but keep the metadata/logo/action layout attached to the moving selected card overlay so positioning and reveal timing stay correct.
+**Applied**: `Rivulet/Views/Plex/PreviewOverlayHost.swift`, `Docs/PREVIEW_REFERENCE_VIDEO.md`.
+
+## 2026-03-19 - Motion Tuning Fails If The View Type Changes Mid-Flight
+
+**Mistake**: Kept adjusting the carousel duration/curve while the outgoing and incoming centered items were still swapping between different view implementations during the lateral move.
+**Pattern**: If a moving surface changes its underlying view structure mid-animation, the visible handoff can collapse into a few harsh frames no matter how much the outer animation duration is increased.
+**Rule**: For reference-driven carousel motion, keep the moving card on one consistent base surface for the entire lateral handoff, then reveal any heavier centered-only chrome after settle instead of swapping view types during motion.
+**Applied**: `Rivulet/Views/Plex/PreviewOverlayHost.swift`, `Docs/PREVIEW_REFERENCE_VIDEO.md`.
+
+## 2026-03-19 - Count The Slow Bookends Of Motion
+
+**Mistake**: Timed the carousel handoff mostly by the obvious high-velocity middle frames and undercounted the gentle lead-in and settle that make the reference feel slower.
+**Pattern**: Motion references with strong ease-in/out can look deceptively short if you only count the frames where distance changes are obvious; the slower bookend frames are still part of the move and materially affect feel.
+**Rule**: When tuning against a motion clip, count from the first subtle drift to the final full stop, and if the reference has long eased bookends, prefer an explicit ease curve over a short spring.
+**Applied**: `Rivulet/Views/Plex/PreviewOverlayHost.swift`, `Docs/PREVIEW_REFERENCE_VIDEO.md`.
+
 ## 2026-03-18 - Time Motion Against Frames, Not Just Feel
 
 **Mistake**: Kept nudging the carousel paging spring by feel even after the user called out that the transition was still reading too fast.

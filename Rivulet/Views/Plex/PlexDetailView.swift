@@ -18,6 +18,7 @@ struct PlexDetailView: View {
     var backgroundParallaxOffset: CGFloat = 0
     var showMetadata: Bool = true
     var showExpandedChrome: Bool = true
+    var showsBackdropLayer: Bool = true
     var allowVerticalScroll: Bool = true
     var allowActionRowInteraction: Bool = true
     var heroBackdropMotionLocked: Bool = false
@@ -189,17 +190,19 @@ struct PlexDetailView: View {
         GeometryReader { geo in
             let heroHeight = heroContentHeight(for: geo.size.height)
             ZStack {
-                // Layer 1: Fixed backdrop (doesn't scroll, fills screen)
-                heroBackdropImage
-                    .offset(x: backgroundParallaxOffset)
-                    .scaleEffect(isPreviewCarousel ? 1.12 : 1.04)
-                    .frame(width: geo.size.width, height: geo.size.height)
-                    .clipped()
-                    .overlay {
-                        Rectangle()
-                            .fill(.regularMaterial)
-                            .opacity(scrollProgress)
-                    }
+                if showsBackdropLayer {
+                    // Layer 1: Fixed backdrop (doesn't scroll, fills screen)
+                    heroBackdropImage
+                        .offset(x: backgroundParallaxOffset)
+                        .scaleEffect(isPreviewCarousel ? 1.12 : 1.04)
+                        .frame(width: geo.size.width, height: geo.size.height)
+                        .clipped()
+                        .overlay {
+                            Rectangle()
+                                .fill(.regularMaterial)
+                                .opacity(scrollProgress)
+                        }
+                }
 
                 // Fixed vignette for text readability (doesn't scroll)
                 RadialGradient(

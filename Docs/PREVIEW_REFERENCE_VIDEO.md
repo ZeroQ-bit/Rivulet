@@ -31,9 +31,9 @@ These are implementation targets derived from the clip’s continuous motion, no
 | Motion | Target |
 |--------|--------|
 | Poster morph to centered card | `~0.45s`, spring/ease-out, no bounce |
-| Carousel paging | first two clean handoffs read at roughly `8-10 frames` at `30 fps` from first visible card movement to visual settle (`~0.27s - 0.33s`); implementation target should read closer to `~0.34s - 0.38s` on device because the current SwiftUI spring was feeling quicker than the clip |
+| Carousel paging | the reference handoff reads closer to roughly `12-14 frames` at `30 fps` from first drift to full stop (`~0.40s - 0.47s`), and the current Rivulet capture in `IMG_4951.MOV` is still visibly faster at about `5-6` obvious transition frames; most of the reference travel happens in the middle, with a noticeably longer ease-in and ease-out than a short spring |
 | Focused-card metadata after settle | `~0.18s - 0.28s` opacity-only fade once centered motion finishes; page-to-page reveals can be slightly slower than initial entry |
-| Background art during paging | delayed by about `~0.08s`, then settles over roughly `~0.30s`; stays attached to the selected card, starts from a larger opposite-direction offset, and lands at the same time as the card |
+| Background art during paging | delayed by about `~0.08s`, then settles over roughly `~0.38s`; stays attached to the selected card, starts from a larger opposite-direction offset, and lands at the same time as the card |
 | Actions + cast reveal after focused info loads | present with the focused metadata state and fade in-place with the title/meta; expand mainly unlocks deeper continuity into details |
 | Expanded hero to details fold | `~0.35s`, one continuous vertical move |
 | Backdrop quality upgrade | only after `>=150ms` stable, `~0.22s` opacity crossfade |
@@ -54,9 +54,11 @@ These are implementation targets derived from the clip’s continuous motion, no
 - The user can page laterally while staying in the same carousel stage.
 - The next item takes over the same dominant centered stage.
 - Its metadata fades back in once the new item reaches focus.
+- The card does not snap across in a quick `~0.3s` move; it starts gently, covers most of the distance through the middle of the span, then eases noticeably into the stop.
 - The background art handoff is layered: it lags slightly and fades on a different cadence than the card frame movement.
-- The backdrop should remain owned by the selected carousel surface, not detached into its own stage layer.
-- The image inside that selected card should begin from a larger offset opposite the page direction, wait a beat, then ease back to neutral while still landing with the card rather than coasting after it.
+- The selected backdrop image should read as a stage-owned layer behind the carousel, while the selected card still owns the metadata/logo/action layout that sits on top of that backdrop.
+- Drive the selected hero backdrop on the stage layer behind the moving card so it can lag and scale independently without shrinking/clipping inside the card.
+- Keep the moving carousel overlay on one consistent card/window surface during the lateral handoff, and keep the metadata/logo attached to that card overlay rather than the stage so positioning stays correct.
 - The stage remains calm and image-led between lateral moves, with focused metadata only after settle.
 
 ### 3. Expanded Hero

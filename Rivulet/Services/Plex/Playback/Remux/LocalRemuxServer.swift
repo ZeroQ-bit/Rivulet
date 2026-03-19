@@ -36,11 +36,16 @@ final class LocalRemuxServer {
     /// Whether the server is running
     private(set) var isRunning = false
 
-    /// Segment cache — ring buffer to avoid regenerating recent segments
+    /// Segment cache — ring buffer to avoid regenerating recent segments.
+    /// 10 segments at 2s each = 20s lookahead buffer.
     private var segmentCache: [Int: Data] = [:]
     private var cacheOrder: [Int] = []
-    private let maxCachedSegments = 5
+    private let maxCachedSegments = 10
     private let cacheLock = NSLock()
+
+    /// Tracks which segment is currently being generated (to avoid duplicate work)
+    private var generatingSegments: Set<Int> = []
+    private let generatingLock = NSLock()
 
     /// Cached init segment
     private var initSegment: Data?
@@ -180,6 +185,7 @@ final class LocalRemuxServer {
 
     private func routeRequest(path: String, on connection: NWConnection) {
         let pathOnly = path.components(separatedBy: "?").first ?? path
+        print("[RemuxServer] Request: \(pathOnly)")
 
         if pathOnly == "/master.m3u8" {
             serveMasterPlaylist(on: connection)
@@ -292,38 +298,130 @@ final class LocalRemuxServer {
     // MARK: - Media Segment
 
     private func serveMediaSegment(index: Int, on connection: NWConnection) {
-        // Check cache
+        // Cache hit — serve immediately with Content-Length
         cacheLock.lock()
         if let cached = segmentCache[index] {
             cacheLock.unlock()
+            print("[RemuxServer] Segment \(index) cache hit (\(cached.count) bytes)")
             sendResponse(on: connection, contentType: "video/mp4", body: cached)
+            prefetchNextSegment(after: index)
             return
         }
         cacheLock.unlock()
 
-        // Generate asynchronously
+        // Check if this segment is already being generated (duplicate request).
+        // AVPlayer sometimes sends the same request twice. Wait for cache instead
+        // of starting a second concurrent generation.
+        generatingLock.lock()
+        let alreadyGenerating = generatingSegments.contains(index)
+        if !alreadyGenerating {
+            generatingSegments.insert(index)
+        }
+        generatingLock.unlock()
+
+        if alreadyGenerating {
+            print("[RemuxServer] Segment \(index) already generating — waiting for cache")
+            Task {
+                await self.waitForCachedSegment(index: index, on: connection)
+            }
+            return
+        }
+
+        // Cache miss — generate complete segment, cache, then respond
         Task {
             do {
                 let data = try await session.generateSegment(index: index)
-
-                // Cache it
-                self.cacheLock.lock()
-                self.segmentCache[index] = data
-                self.cacheOrder.append(index)
-                // Evict oldest if over limit
-                while self.cacheOrder.count > self.maxCachedSegments {
-                    let evicted = self.cacheOrder.removeFirst()
-                    self.segmentCache.removeValue(forKey: evicted)
-                }
-                self.cacheLock.unlock()
+                self.cacheSegment(index: index, data: data)
+                self.generatingLock.lock()
+                self.generatingSegments.remove(index)
+                self.generatingLock.unlock()
 
                 self.sendResponse(on: connection, contentType: "video/mp4", body: data)
+                self.prefetchNextSegment(after: index)
             } catch {
                 print("[RemuxServer] Segment \(index) generation failed: \(error)")
-                self.sendError(on: connection, status: 500,
-                             message: "Segment \(index) generation failed: \(error)")
+                self.generatingLock.lock()
+                self.generatingSegments.remove(index)
+                self.generatingLock.unlock()
+                self.sendError(on: connection, status: 500, message: "Segment generation failed")
             }
         }
+    }
+
+    /// Wait for a segment to appear in cache (another request is generating it).
+    private func waitForCachedSegment(index: Int, on connection: NWConnection) async {
+        // Poll cache every 100ms for up to 15 seconds
+        for _ in 0..<150 {
+            try? await Task.sleep(nanoseconds: 100_000_000)
+
+            cacheLock.lock()
+            if let cached = segmentCache[index] {
+                cacheLock.unlock()
+                print("[RemuxServer] Segment \(index) served from cache after wait (\(cached.count) bytes)")
+                sendResponse(on: connection, contentType: "video/mp4", body: cached)
+                return
+            }
+            cacheLock.unlock()
+        }
+
+        // Timed out — generate directly (actor serializes, so this waits its turn)
+        print("[RemuxServer] Segment \(index) wait timed out, generating directly")
+        do {
+            let data = try await session.generateSegment(index: index)
+            cacheSegment(index: index, data: data)
+            sendResponse(on: connection, contentType: "video/mp4", body: data)
+        } catch {
+            print("[RemuxServer] Segment \(index) generation failed: \(error)")
+            sendError(on: connection, status: 500, message: "Segment generation failed")
+        }
+    }
+
+    // MARK: - Prefetch
+
+    /// Enqueue background generation of the next segment for instant cache hits.
+    private func prefetchNextSegment(after index: Int) {
+        let nextIndex = index + 1
+        guard nextIndex < sessionInfo.segments.count else { return }
+
+        // Skip if already cached or being generated
+        cacheLock.lock()
+        let isCached = segmentCache[nextIndex] != nil
+        cacheLock.unlock()
+        guard !isCached else { return }
+
+        generatingLock.lock()
+        let alreadyGenerating = generatingSegments.contains(nextIndex)
+        if !alreadyGenerating {
+            generatingSegments.insert(nextIndex)
+        }
+        generatingLock.unlock()
+        guard !alreadyGenerating else { return }
+
+        Task {
+            do {
+                let data = try await session.generateSegment(index: nextIndex)
+                self.cacheSegment(index: nextIndex, data: data)
+                print("[RemuxServer] Prefetched segment \(nextIndex) (\(data.count) bytes)")
+            } catch {
+                print("[RemuxServer] Prefetch segment \(nextIndex) failed: \(error)")
+            }
+            self.generatingLock.lock()
+            self.generatingSegments.remove(nextIndex)
+            self.generatingLock.unlock()
+        }
+    }
+
+    // MARK: - Cache Management
+
+    private func cacheSegment(index: Int, data: Data) {
+        cacheLock.lock()
+        segmentCache[index] = data
+        cacheOrder.append(index)
+        while cacheOrder.count > maxCachedSegments {
+            let evicted = cacheOrder.removeFirst()
+            segmentCache.removeValue(forKey: evicted)
+        }
+        cacheLock.unlock()
     }
 
     // MARK: - HTTP Response Helpers

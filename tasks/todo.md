@@ -1,5 +1,85 @@
 # Playback Reliability Worklog (2026-03-02)
 
+## AVPlayer Remux Rework Review (2026-03-19)
+
+## Plan
+- [x] Review the current AVPlayer-first playback path.
+  - Confirm whether startup, routing, and remux handoff are actually aligned around `AVPlayer`, or whether legacy custom-player assumptions still leak into the flow.
+- [x] Inspect the local remux pipeline for immediate playback blockers.
+  - Review `ContentRouter`, `UniversalPlayerViewModel`, `LocalRemuxServer`, and `FFmpegRemuxSession` for correctness and runtime hazards.
+- [ ] Fix startup determinism before touching codec edge cases.
+  - Remove the race between async URL preparation and playback start so the player never enters `No stream URL available` during normal startup.
+- [ ] Make the remux output path valid and boring.
+  - Correct packet lifetime handling in `FFmpegRemuxSession`, remove unsafe packet ownership patterns, and add a local preflight that validates init + first media segment before constructing the `AVPlayerItem`.
+- [ ] Collapse legacy playback branches that no longer execute.
+  - Remove or quarantine dead `RivuletPlayer`/DV-proxy assumptions from the AVPlayer view model so audio/subtitle selection and error handling only reflect the active architecture.
+- [ ] Add focused coverage around the new route model.
+  - Replace stale route tests with cases that assert `avPlayerDirect` / `localRemux` / `hls`, and add at least one startup test for the remux handoff path.
+
+## Review
+- The view model is already AVPlayer-first, but startup still depends on a detached async `prepareStreamURL()` task launched from `init`, while `UniversalPlayerView` immediately calls `startPlayback()`. That leaves a real race where playback can fail before `streamURL` exists.
+- The remux session contains packet-lifetime bugs that can independently prevent playback: packets are `av_packet_unref`'d via `defer` inside long-running loops instead of per iteration, and the audio-transcode path still calls `av_packet_from_data` on Swift-managed memory before discarding that packet and allocating another one.
+- The AVPlayer migration is incomplete in the view model: the active player is `AVPlayer`, but track enumeration and media selection are still TODOs, and the old `RivuletPlayer` path remains as dead/stubbed branching logic.
+- The routing/tests/docs are out of sync. Production routing uses `avPlayerDirect` / `localRemux` / `hls`, but the route tests still expect the older `.directPlay` shape, which means the current rework is under-verified.
+- The Dolby Vision constraint should be treated as architectural, not as a local bug: the repo already documents that AVPlayer rejects `dvh1` in HLS manifests, so the robust AVPlayer target should be "plays reliably as AVPlayer-compatible HEVC/H.264 + AAC/AC3/EAC3/fMP4", not "preserve every DV signaling path through HLS".
+
+## Split Backdrop Ownership Behind Carousel Overlay (2026-03-19)
+
+## Plan
+- [x] Re-evaluate the current capture after the slower card retune.
+  - Check whether the background parallax, text placement, and scale behavior still read wrong even if the lateral card motion improved.
+- [x] Split selected backdrop and metadata ownership.
+  - Keep the selected backdrop on the stage so it can lag independently, while keeping metadata/logo/action chrome attached to the moving selected card overlay.
+- [x] Verify
+  - Run a tvOS build check after the layering change and record remaining test blockers accurately.
+
+## Review
+- After comparing the latest behavior, the lateral card motion was improved but the selected backdrop and metadata were still sharing the wrong ownership, which caused scale/clipping artifacts when the backdrop tried to live inside the moving card.
+- Split the selected hero into a stage-owned backdrop layer plus a selected-card metadata overlay: the backdrop now drifts behind the carousel, while the selected card uses `PlexDetailView` without its own backdrop so the text/logo/buttons stay attached to the card frame.
+- Kept the slower eased card timing from the prior pass, with the stage backdrop still driven by its own lagging offset/settle track behind the overlay.
+- Updated `Docs/PREVIEW_REFERENCE_VIDEO.md` and `tasks/lessons.md` with the split-ownership rule so future passes do not regress back to either fully card-owned or fully stage-owned hero content during carousel motion.
+- Verification:
+  - `xcodebuild -project Rivulet.xcodeproj -scheme Rivulet -destination 'generic/platform=tvOS' build -quiet CODE_SIGNING_ALLOWED=NO`
+  - Result: tvOS build succeeded. Focused simulator tests remain blocked in this environment because the bundled `Libavformat`/`Libavcodec`/`Libavutil`/`Libswresample` xcframeworks do not include tvOS Simulator libraries.
+
+## Carousel Surface Continuity + Slower Handoff (2026-03-19)
+
+## Plan
+- [x] Compare the latest Rivulet capture against the reference.
+  - Measure how many obvious frames the current handoff occupies and check whether the card surface itself changes during the move.
+- [x] Keep one consistent carousel surface during paging and slow the move further.
+  - Prevent the centered item from swapping between side-card and hero implementations mid-motion, and extend the lateral easing to better match the reference.
+- [x] Verify
+  - Run a tvOS build check after the preview host retune and record simulator test blockers accurately if they persist.
+
+## Review
+- Compared `IMG_4951.MOV` against `IMG_4941.MOV`; the current Rivulet handoff was still collapsing into roughly `5-6` obvious frames, while the reference reads closer to `12-14` frames from first drift to full stop.
+- Root cause was not just duration: the centered card was still changing surface implementation during the lateral move, which made the transition feel harsher and shorter than the timing constant alone suggested.
+- Kept the moving card on the same carousel-card surface during paging, then reveal the centered hero surface after settle, and slowed the paging curve to a longer eased `0.58s` move with a `0.48s` attached-backdrop settle after the existing short lag.
+- Updated `Docs/PREVIEW_REFERENCE_VIDEO.md` and `tasks/lessons.md` with the measured comparison and the continuity rule so future tuning does not regress back to mid-motion view swaps.
+- Verification:
+  - `xcodebuild -project Rivulet.xcodeproj -scheme Rivulet -destination 'generic/platform=tvOS' build -quiet CODE_SIGNING_ALLOWED=NO`
+  - Result: tvOS build succeeded. Focused simulator tests remain blocked in this environment because the bundled `Libavformat`/`Libavcodec`/`Libavutil`/`Libswresample` xcframeworks do not include tvOS Simulator libraries.
+
+## Carousel Ease Timing Retune (2026-03-19)
+
+## Plan
+- [x] Re-measure the carousel item movement from the reference clip.
+  - Count the subtle drift frames at the start and end of the move instead of only the obvious high-speed middle.
+- [x] Retune the carousel page animation to match the slower eased handoff.
+  - Replace the short spring with a longer ease-in/out card motion and extend the linked backdrop settle gate so both still stop together.
+- [x] Verify
+  - Run build-check and focused preview/backdrop verification after the retune.
+
+## Review
+- Re-reviewed `IMG_4941.MOV` and counted the actual card motion from first subtle drift through full stop; the first clean handoff reads closer to `12-14` frames at `30 fps`, or about `~0.40s - 0.47s`, not the shorter `~0.30s` feel we had been biasing toward.
+- Switched the carousel item movement to a longer `easeInOut` path and extended the backdrop settle so the slower card motion still lands with the attached background rather than unlocking metadata too early.
+- Updated `Docs/PREVIEW_REFERENCE_VIDEO.md` to call out the longer eased bookends explicitly so future tuning does not regress back to a short spring interpretation.
+- Verification:
+  - `xcodebuild -project Rivulet.xcodeproj -scheme Rivulet -destination 'generic/platform=tvOS' build -quiet CODE_SIGNING_ALLOWED=NO`
+  - `xcodebuild test -project Rivulet.xcodeproj -scheme Rivulet -destination 'platform=tvOS Simulator,id=F34B8F67-7F13-468F-9526-6A38C6B2181B' -only-testing:RivuletTests/PreviewFlowStateTests -only-testing:RivuletTests/HeroBackdropSessionTests -only-testing:RivuletTests/PlexMetadataHeroBrandingTests -derivedDataPath /tmp/rivulet-preview-ease-timing-tests -quiet CODE_SIGNING_ALLOWED=NO`
+  - Result: tvOS build succeeded. Focused simulator tests are currently blocked in this environment because the bundled `Libavformat`/`Libavcodec`/`Libavutil`/`Libswresample` xcframeworks do not include tvOS Simulator libraries.
+
 ## Carousel Paging Timing Retune (2026-03-18)
 
 ## Plan

@@ -6,8 +6,7 @@ This project has fairly *opinionated* designs and logic, with a few focal points
 - **Simplicity** - What is the best design to get me to the media I want to watch.
 - **Live TV** - Plex's live TV is, to put it nicely, sub-par. I've spent too long trying to get it to work well for me (kudos if you don't have this problem). I don't want live TV in a separate app, so this solves my problems. You might could use this just for live tv. Go for it.
 - **HomePod Integration** - The Plex app has never worked well when setting HomePod as the default audio output on my Apple TV. It hurts to have a HomePod sitting there collecting dust while my sub-par tv speakers play sound. This app helps the hurt.
-- **Vertical Scrolling** - I have never liked scrolling sideways. I use horizontal scrolling for some of the "infinite" lists, but use vertical scrolling whenever practical.
-- **Apple-esque** - I like most of Apple's designs. I want this to feel *somewhat* native.
+- **Apple TV+ Inspired** - The UI takes heavy inspiration from Apple's own TV app. Clean, focused, and native-feeling.
 
 ## Screenshots
 
@@ -63,9 +62,9 @@ open Rivulet.xcodeproj
 xcodebuild -scheme Rivulet -destination 'generic/platform=tvOS' build
 ```
 
-### Dependencies
+### Video Playback
 
-Rivulet uses a custom `AVSampleBufferDisplayLayer` + FFmpeg playback stack for VOD, while [MPV](https://mpv.io/) remains in the project for Live TV and fallback playback. The MPV framework must still be built for tvOS — see [mpv-build](https://github.com/AdrienMusic/mpv-build) for instructions.
+Rivulet uses AVPlayer for the vast majority of playback. After a long battle trying to build a custom video player (FFmpeg demuxing, sample buffer rendering, Dolby Vision tone mapping — the works), AVPlayer just does the job better for almost everything. For specific Dolby Vision profiles that AVPlayer can't handle natively, a custom pipeline uses [libdovi](https://github.com/quietvoid/dovi_tool) to convert DV profiles on the fly before handing off to Apple's built-in frameworks.
 
 ## Contributing
 
@@ -75,9 +74,9 @@ I welcome all contributions from any level of developer. I welcome contributions
 
 ## Acknowledgments
 
-- [MPV](https://mpv.io/) — Powerful open-source media player
 - [Plex](https://plex.tv/) — Media server platform
 - [Dispatcharr](https://github.com/Dispatcharr/Dispatcharr) — IPTV management
+- [libdovi](https://github.com/quietvoid/dovi_tool) — Dolby Vision metadata conversion
 
 ---
 

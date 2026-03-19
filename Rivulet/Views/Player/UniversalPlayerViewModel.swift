@@ -536,11 +536,6 @@ final class UniversalPlayerViewModel: ObservableObject {
 
         setupPlayer()
 
-        // Prepare stream URL asynchronously (may need to fetch full metadata for audio)
-        Task { @MainActor in
-            await prepareStreamURL()
-        }
-
         addPlaybackSelectionBreadcrumb(reason: "init")
     }
 
@@ -891,6 +886,10 @@ final class UniversalPlayerViewModel: ObservableObject {
     }
 
     func startPlayback() async {
+        if streamURL == nil {
+            await prepareStreamURL()
+        }
+
         guard let url = streamURL else {
             errorMessage = "No stream URL available"
             playbackState = .failed(.invalidURL)
@@ -1113,11 +1112,17 @@ final class UniversalPlayerViewModel: ObservableObject {
 
         let sessionInfo = try await session.open(url: sourceURL, headers: headers)
 
+        // Preflight: validate FFmpeg can produce valid fMP4 before starting server
+        let initData = try await session.generateInitSegment()
+        guard initData.count > 8 else {
+            throw PlayerError.loadFailed("Init segment invalid (\(initData.count) bytes)")
+        }
+
         let server = LocalRemuxServer(session: session, sessionInfo: sessionInfo)
         self.remuxServer = server
 
         let localURL = try server.start()
-        print("[Player] Remux server started: \(localURL)")
+        print("[Player] Remux server started: \(localURL), init segment: \(initData.count) bytes")
 
         try loadAVPlayer(url: localURL, headers: nil)
     }
