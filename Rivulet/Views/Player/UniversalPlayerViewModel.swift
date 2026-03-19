@@ -1272,8 +1272,30 @@ final class UniversalPlayerViewModel: ObservableObject {
         return "\(codecName) \(channelDesc)"
     }
 
-    /// Build navigation markers from Plex intro/credits markers.
+    /// Build navigation markers from Plex chapters (preferred) or intro/credits markers (fallback).
     private func buildNavigationMarkers() -> [AVNavigationMarkersGroup]? {
+        // Prefer real chapters from the media file
+        let chapters = metadata.Media?.first?.Part?.first?.Chapter ?? []
+        if !chapters.isEmpty {
+            let timedGroups: [AVTimedMetadataGroup] = chapters.compactMap { chapter in
+                guard let startMs = chapter.startTimeOffset,
+                      let endMs = chapter.endTimeOffset else { return nil }
+
+                let start = CMTime(value: CMTimeValue(startMs), timescale: 1000)
+                let end = CMTime(value: CMTimeValue(endMs), timescale: 1000)
+                let range = CMTimeRange(start: start, end: end)
+
+                let title = chapter.tag ?? "Chapter \(chapter.index ?? 0)"
+                let titleItem = makeMetadataItem(.commonIdentifierTitle, value: title)
+                return AVTimedMetadataGroup(items: [titleItem], timeRange: range)
+            }
+            if !timedGroups.isEmpty {
+                print("[Chapters] Using \(timedGroups.count) file chapters")
+                return [AVNavigationMarkersGroup(title: nil, timedNavigationMarkers: timedGroups)]
+            }
+        }
+
+        // Fall back to Plex markers (intro, credits)
         guard let markers = metadata.Marker, !markers.isEmpty else { return nil }
 
         let timedGroups: [AVTimedMetadataGroup] = markers.compactMap { marker in
@@ -1284,11 +1306,12 @@ final class UniversalPlayerViewModel: ObservableObject {
             let end = CMTime(value: CMTimeValue(endMs), timescale: 1000)
             let range = CMTimeRange(start: start, end: end)
 
-            let titleItem = makeMetadataItem(.commonIdentifierTitle, value: marker.type?.capitalized ?? "Chapter")
+            let titleItem = makeMetadataItem(.commonIdentifierTitle, value: marker.type?.capitalized ?? "Marker")
             return AVTimedMetadataGroup(items: [titleItem], timeRange: range)
         }
 
         guard !timedGroups.isEmpty else { return nil }
+        print("[Chapters] Using \(timedGroups.count) Plex markers (no file chapters)")
         return [AVNavigationMarkersGroup(title: nil, timedNavigationMarkers: timedGroups)]
     }
 

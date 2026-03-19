@@ -417,7 +417,8 @@ struct InfoRow: View {
                 file: "/path/to/movie.mkv",
                 size: 8000000000,
                 container: "mkv",
-                Stream: nil
+                Stream: nil,
+                Chapter: nil
             )
         ]
     )
