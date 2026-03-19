@@ -10,13 +10,7 @@
 //  HDR10, HLG, and SDR content.
 //
 
-import Foundation
-import AVFoundation
-import CoreMedia
-import Combine
-import Sentry
-
-/// Pipeline state for tracking lifecycle
+/// Pipeline state for tracking lifecycle (shared with HLSPipeline)
 enum PipelineState: Sendable, Equatable {
     case idle
     case loading
@@ -40,6 +34,14 @@ enum PipelineState: Sendable, Equatable {
         }
     }
 }
+
+#if RIVULET_FFMPEG
+
+import Foundation
+import AVFoundation
+import CoreMedia
+import Combine
+import Sentry
 
 /// Backpressure gate for queued audio sample buffers.
 /// Read loop increments pending count when yielding a buffer;
@@ -1849,3 +1851,5 @@ final class DirectPlayPipeline {
             .replacingOccurrences(of: " ", with: "")
     }
 }
+
+#endif // RIVULET_FFMPEG

@@ -11,6 +11,50 @@
 //  Conforms to PlayerProtocol for seamless integration with UniversalPlayerViewModel.
 //
 
+#if !RIVULET_FFMPEG
+import Foundation
+import AVFoundation
+import Combine
+// Stub so code compiles on simulator. Never used for actual playback.
+@MainActor final class RivuletPlayer: ObservableObject, PlayerProtocol {
+    let renderer = SampleBufferRenderer()
+    var isPlaying: Bool { false }
+    var currentTime: TimeInterval { 0 }
+    var duration: TimeInterval { 0 }
+    var bufferedTime: TimeInterval { 0 }
+    var playbackRate: Float = 1.0
+    var playbackStatePublisher: AnyPublisher<UniversalPlaybackState, Never> { Just(.idle).eraseToAnyPublisher() }
+    var timePublisher: AnyPublisher<TimeInterval, Never> { Just(0).eraseToAnyPublisher() }
+    var errorPublisher: AnyPublisher<PlayerError, Never> { Empty().eraseToAnyPublisher() }
+    var audioTracks: [MediaTrack] { [] }
+    var subtitleTracks: [MediaTrack] { [] }
+    var currentAudioTrackId: Int? { nil }
+    var currentSubtitleTrackId: Int? { nil }
+    func load(url: URL, headers: [String: String]?, startTime: TimeInterval?) async throws {}
+    func play() {}
+    func pause() {}
+    func stop() {}
+    func seek(to time: TimeInterval) async {}
+    func seekRelative(by seconds: TimeInterval) async {}
+    func selectAudioTrack(id: Int) {}
+    func selectSubtitleTrack(id: Int?) {}
+    func disableSubtitles() {}
+    func setMuted(_ muted: Bool) {}
+    func prepareForReuse() {}
+    func load(route: PlaybackRoute, startTime: TimeInterval?) async throws {}
+    enum ActivePipeline { case directPlay, hls }
+    var activePipeline: ActivePipeline? { nil }
+    var displayLayer: AVSampleBufferDisplayLayer { renderer.displayLayer }
+    var onSubtitleCue: ((String, TimeInterval, TimeInterval) -> Void)?
+    var onBitmapSubtitleCue: ((BitmapSubtitleCue) -> Void)?
+    func loadHLSWithConversion(url: URL, headers: [String: String]?, startTime: TimeInterval?, requiresProfileConversion: Bool) async throws {}
+    func selectAudioTrack(plexTrackId: Int, plexAudioTracks: [MediaTrack]) {}
+    func selectEmbeddedSubtitle(streamIndex: Int32) {}
+    func selectEmbeddedSubtitle(plexTrackId: Int, plexSubtitleTracks: [MediaTrack]) -> Bool { false }
+    func deselectEmbeddedSubtitle() {}
+    var ffmpegSubtitleTracks: [(streamIndex: Int32, language: String?, title: String?, codec: String?)] { [] }
+}
+#else
 import Foundation
 import AVFoundation
 import Combine
@@ -993,3 +1037,4 @@ final class RivuletPlayer: ObservableObject {
 // MARK: - PlayerProtocol Conformance
 
 extension RivuletPlayer: PlayerProtocol {}
+#endif // RIVULET_FFMPEG

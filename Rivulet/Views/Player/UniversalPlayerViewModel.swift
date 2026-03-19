@@ -469,6 +469,8 @@ final class UniversalPlayerViewModel: ObservableObject {
 
     let loadingArtImage: UIImage?
     let loadingThumbImage: UIImage?
+    /// Season/show poster fetched for Now Playing artwork (episodes only)
+    private var seasonPosterImage: UIImage?
 
     // MARK: - Stream URL (computed once)
 
@@ -912,10 +914,16 @@ final class UniversalPlayerViewModel: ObservableObject {
 
         addPlaybackSelectionBreadcrumb(reason: "startPlayback")
 
-        // Fetch detailed metadata with markers if not already present
-        if metadata.Marker == nil || metadata.Marker?.isEmpty == true {
+        // Fetch detailed metadata if markers or chapters are missing
+        let hasMarkers = !(metadata.Marker ?? []).isEmpty
+        let hasChapters = !(metadata.Media?.first?.Part?.first?.Chapter ?? []).isEmpty
+        let hasStreamDetails = metadata.Media?.first?.Part?.first?.Stream?.isEmpty == false
+        if !hasMarkers || !hasChapters || !hasStreamDetails {
             await fetchMarkersIfNeeded()
         }
+
+        // Fetch season/show poster for Now Playing artwork (episodes)
+        await fetchSeasonPosterIfNeeded()
 
         do {
             DisplayCriteriaManager.shared.configureForContent(
@@ -1106,6 +1114,31 @@ final class UniversalPlayerViewModel: ObservableObject {
                 print("[HLS Manifest] I-Frame playlist: \(hasIFrame ? "YES" : "NO")")
                 print("[HLS Manifest] Audio tracks: \(audioTags.count)")
                 print("[HLS Manifest] Subtitle tracks: \(subtitleTags.count)")
+
+                // Also fetch and log keyframe playlist if present
+                if let iframeLine = manifest.components(separatedBy: "\n")
+                    .first(where: { $0.contains("EXT-X-I-FRAME-STREAM-INF") }),
+                   let uriRange = iframeLine.range(of: "URI=\""),
+                   let endQuote = iframeLine[uriRange.upperBound...].firstIndex(of: "\"") {
+                    let keyframeRelative = String(iframeLine[uriRange.upperBound..<endQuote])
+                    let keyframeURL: URL?
+                    if keyframeRelative.contains("://") {
+                        keyframeURL = URL(string: keyframeRelative)
+                    } else {
+                        keyframeURL = URL(string: keyframeRelative, relativeTo: url.deletingLastPathComponent())
+                    }
+                    if let kfURL = keyframeURL {
+                        var kfRequest = URLRequest(url: kfURL)
+                        for (key, value) in headers { kfRequest.setValue(value, forHTTPHeaderField: key) }
+                        if let (kfData, _) = try? await URLSession.shared.data(for: kfRequest),
+                           let kfManifest = String(data: kfData, encoding: .utf8) {
+                            let kfLines = kfManifest.components(separatedBy: "\n")
+                            print("[HLS Manifest] ===== Keyframe Playlist (\(kfLines.count) lines) =====")
+                            for line in kfLines.prefix(20) { print("[HLS Manifest/KF] \(line)") }
+                            if kfLines.count > 20 { print("[HLS Manifest/KF] ... (\(kfLines.count - 20) more lines)") }
+                        }
+                    }
+                }
             }
         } catch {
             print("[HLS Manifest] Failed to fetch: \(error.localizedDescription)")
@@ -1220,8 +1253,8 @@ final class UniversalPlayerViewModel: ObservableObject {
             ))
         }
 
-        // Artwork — poster (thumb) first, then background art as fallback
-        if let image = loadingThumbImage ?? loadingArtImage,
+        // Artwork — for episodes use season/show poster, for movies use poster/backdrop
+        if let image = nowPlayingArtwork(),
            let jpegData = image.jpegData(compressionQuality: 0.85) {
             items.append(makeMetadataItem(.commonIdentifierArtwork, value: jpegData))
         }
@@ -1236,6 +1269,39 @@ final class UniversalPlayerViewModel: ObservableObject {
         }
 
         return items
+    }
+
+    /// Select the best artwork image for Now Playing.
+    /// Episodes: season poster → show poster → episode thumb → backdrop
+    /// Movies: poster (thumb) → backdrop
+    private func nowPlayingArtwork() -> UIImage? {
+        if metadata.type == "episode" {
+            // Prefer season/show poster over episode screenshot for Now Playing
+            if let poster = seasonPosterImage { return poster }
+        }
+        return loadingThumbImage ?? loadingArtImage
+    }
+
+    /// Fetch the season or show poster for episode Now Playing artwork.
+    /// Called before building external metadata so the image is ready.
+    private func fetchSeasonPosterIfNeeded() async {
+        guard metadata.type == "episode" else { return }
+
+        // Try season poster first, then show poster
+        let posterPath = metadata.parentThumb ?? metadata.grandparentThumb
+        guard let path = posterPath else { return }
+
+        let urlString = "\(serverURL)\(path)?X-Plex-Token=\(authToken)"
+        guard let url = URL(string: urlString) else { return }
+
+        do {
+            let (data, _) = try await URLSession.shared.data(from: url)
+            if let image = UIImage(data: data) {
+                seasonPosterImage = image
+            }
+        } catch {
+            // Fall through to episode thumb/backdrop
+        }
     }
 
     /// Build a human-readable audio description from metadata.
@@ -2673,8 +2739,23 @@ final class UniversalPlayerViewModel: ObservableObject {
             // Update metadata with markers from detailed fetch
             if let markers = detailedMetadata.Marker, !markers.isEmpty {
                 metadata.Marker = markers
-            } else {
             }
+
+            // Update Media (includes Part with chapters and stream details)
+            // Hub items often lack Part/Stream/Chapter data
+            if let media = detailedMetadata.Media, !media.isEmpty {
+                let chapters = media.first?.Part?.first?.Chapter ?? []
+                let hadChapters = metadata.Media?.first?.Part?.first?.Chapter?.isEmpty == false
+                metadata.Media = media
+                if !chapters.isEmpty && !hadChapters {
+                    print("[Chapters] Fetched \(chapters.count) chapters from detailed metadata")
+                }
+            }
+
+            // Fill in missing display info (summary, genres, etc.)
+            if metadata.summary == nil { metadata.summary = detailedMetadata.summary }
+            if metadata.Genre == nil { metadata.Genre = detailedMetadata.Genre }
+            if metadata.contentRating == nil { metadata.contentRating = detailedMetadata.contentRating }
         } catch {
             print("⏭️ [Skip] Failed to fetch detailed metadata: \(error)")
         }
