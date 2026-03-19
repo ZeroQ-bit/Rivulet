@@ -4,8 +4,8 @@
 //
 //  Decides the playback path for content:
 //    1. AVPlayer direct — MP4/MOV with native audio, no DV P7
-//    2. Local remux — MKV, DTS/TrueHD, or DV P7 → fMP4 via local server
-//    3. Plex HLS — live TV, forced HLS, or fallback
+//    2. Local remux — DV P7 only (Plex can't do P7→P8.1 conversion)
+//    3. Plex HLS — MKV remux, DTS/TrueHD transcode, live TV, or fallback
 //
 
 import Foundation
@@ -15,10 +15,10 @@ enum PlaybackRoute: Sendable, CustomStringConvertible {
     /// AVPlayer opens Plex URL directly — MP4/MOV with native audio
     case avPlayerDirect(url: URL, headers: [String: String]?)
 
-    /// Local remux server — MKV/DTS/TrueHD/DV P7 remuxed to HLS fMP4
+    /// Local remux server — DV P7 remuxed to HLS fMP4 with P8.1 conversion
     case localRemux(url: URL, headers: [String: String]?, analysis: RemuxAnalysis)
 
-    /// HLS via server-side remux/transcode — for live TV or fallback
+    /// HLS via server-side remux/transcode — MKV remux, DTS transcode, live TV
     case hls(url: URL, headers: [String: String]?)
 
     var description: String {
@@ -123,8 +123,8 @@ struct ContentRouter {
     ///
     /// Three paths:
     /// 1. **AVPlayer direct** — MP4/MOV with native audio, no DV P7
-    /// 2. **Local remux** — MKV, DTS/TrueHD, or DV P7 → fMP4 via local server
-    /// 3. **Plex HLS** — live TV, forced HLS, or fallback
+    /// 2. **Local remux** — DV P7 only (Plex can't do P7→P8.1 conversion)
+    /// 3. **Plex HLS** — MKV remux, DTS/TrueHD transcode, live TV, or fallback
     static func plan(for context: ContentRoutingContext) -> PlaybackPlan {
         let audioCodec = primaryAudioCodec(from: context.metadata) ?? "unknown"
         let container = context.metadata.Media?.first?.container ?? "unknown"
@@ -194,11 +194,10 @@ struct ContentRouter {
             )
         }
 
-        // Path 2: Local remux — needs container swap, audio transcode, or DV conversion
-        if analysis.needsRemux, let remuxRoute = buildLocalRemuxRoute(context: context, analysis: analysis) {
+        // Path 2: Local remux — ONLY for DV P7→P8.1 conversion (Plex can't do this)
+        if analysis.needsDVConversion, let remuxRoute = buildLocalRemuxRoute(context: context, analysis: analysis) {
             reasoning.append(contentsOf: analysis.reasoning)
-            print("[ContentRouter] \(container) | audio=\(audioCodec) → LocalRemux " +
-                  "(transcode=\(analysis.needsAudioTranscode), dvConvert=\(analysis.needsDVConversion))")
+            print("[ContentRouter] \(container) | audio=\(audioCodec) → LocalRemux (DV P7 conversion)")
             return PlaybackPlan(
                 policy: context.playbackPolicy,
                 primary: remuxRoute,
@@ -207,7 +206,20 @@ struct ContentRouter {
             )
         }
 
-        // Path 3: Plex HLS fallback
+        // Path 3: Plex HLS — server remuxes MKV→fMP4, transcodes DTS/TrueHD, etc.
+        if analysis.needsRemux {
+            reasoning.append(contentsOf: analysis.reasoning)
+            reasoning.append("plex_server_remux")
+            print("[ContentRouter] \(container) | audio=\(audioCodec) → HLS (server remux)")
+            return PlaybackPlan(
+                policy: context.playbackPolicy,
+                primary: hlsFallback,
+                fallbacks: [],
+                reasoning: reasoning
+            )
+        }
+
+        // Path 4: Plex HLS fallback
         reasoning.append("fallback_to_hls")
         print("[ContentRouter] \(container) | audio=\(audioCodec) → HLS (fallback)")
         return PlaybackPlan(

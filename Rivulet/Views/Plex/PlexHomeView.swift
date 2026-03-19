@@ -280,14 +280,8 @@ struct PlexHomeView: View {
                     loadingArtImage: artImage,
                     loadingThumbImage: thumbImage
                 )
-                let inputCoordinator = PlaybackInputCoordinator()
-                let playerView = UniversalPlayerView(viewModel: viewModel, inputCoordinator: inputCoordinator)
-                let container = PlayerContainerViewController(
-                    rootView: playerView,
-                    viewModel: viewModel,
-                    inputCoordinator: inputCoordinator
-                )
-                container.onDismiss = {
+                let nativePlayer = NativePlayerViewController(viewModel: viewModel)
+                nativePlayer.onDismiss = {
                     Task {
                         await dataStore.refreshHubs()
                     }
@@ -299,8 +293,7 @@ struct PlexHomeView: View {
                     while let presented = topVC.presentedViewController {
                         topVC = presented
                     }
-                    container.modalPresentationStyle = .fullScreen
-                    topVC.present(container, animated: true)
+                    topVC.present(nativePlayer, animated: true)
                 }
             }
         }

@@ -40,9 +40,8 @@ struct RivuletApp: App {
         }
         #endif
 
-        // Initialize Now Playing service early to configure and activate audio session
-        // This must be synchronous so audio session is ready before any player views appear
-        NowPlayingService.shared.initialize()
+        // NowPlayingService disabled — AVPlayerViewController handles Now Playing natively.
+        // NowPlayingService.shared.initialize()
     }
 
     var sharedModelContainer: ModelContainer = {

@@ -349,24 +349,15 @@ struct TVSidebarView: View {
                     loadingArtImage: artImage,
                     loadingThumbImage: thumbImage
                 )
-                let inputCoordinator = PlaybackInputCoordinator()
+                let nativePlayer = NativePlayerViewController(viewModel: viewModel)
 
-                let playerView = UniversalPlayerView(viewModel: viewModel, inputCoordinator: inputCoordinator)
-                let container = PlayerContainerViewController(
-                    rootView: playerView,
-                    viewModel: viewModel,
-                    inputCoordinator: inputCoordinator
-                )
-
-                // Present from top-most view controller
                 if let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
                    let rootVC = scene.windows.first?.rootViewController {
                     var topVC = rootVC
                     while let presented = topVC.presentedViewController {
                         topVC = presented
                     }
-                    container.modalPresentationStyle = .fullScreen
-                    topVC.present(container, animated: true)
+                    topVC.present(nativePlayer, animated: true)
                 }
             }
         }

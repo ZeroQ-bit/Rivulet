@@ -10,6 +10,7 @@ import Combine
 import UIKit
 import Sentry
 import AVFoundation
+import AVKit
 
 // MARK: - Subtitle Preference
 
@@ -407,6 +408,10 @@ final class UniversalPlayerViewModel: ObservableObject {
     /// DV HLS proxy for Plex HLS DV codec patching
     private var dvProxyServer: DVHLSProxyServer?
 
+    /// HLS manifest enricher — injects audio/subtitle track labels into the master playlist.
+    /// Must be retained for the lifetime of the AVURLAsset.
+    private var hlsManifestEnricher: HLSManifestEnricher?
+
     /// KVO observers
     private var rateObservation: NSKeyValueObservation?
     private var timeControlObservation: NSKeyValueObservation?
@@ -648,13 +653,17 @@ final class UniversalPlayerViewModel: ObservableObject {
     /// DTS/TrueHD should be transcoded by Plex. Multichannel AAC should be
     /// transcoded when output is AirPlay stereo.
     private static func isAudioDirectStreamCapable(_ metadata: PlexMetadata) -> Bool {
-        guard let audioStream = metadata.Media?
-            .first?
-            .Part?
-            .first?
-            .Stream?
-            .first(where: { $0.isAudio }),
-              let audioCodec = audioStream.codec?.lowercased() else {
+        // Try stream-level codec first, fall back to media-level
+        let audioCodec: String
+        let channelCount: Int
+        if let audioStream = metadata.Media?.first?.Part?.first?.Stream?.first(where: { $0.isAudio }),
+           let streamCodec = audioStream.codec?.lowercased() {
+            audioCodec = streamCodec
+            channelCount = audioStream.channels ?? 2
+        } else if let mediaCodec = metadata.Media?.first?.audioCodec?.lowercased() {
+            audioCodec = mediaCodec
+            channelCount = metadata.Media?.first?.audioChannels ?? 2
+        } else {
             // Unknown codec - prefer safety and allow server to transcode
             return false
         }
@@ -671,7 +680,6 @@ final class UniversalPlayerViewModel: ObservableObject {
 
         // For AAC, check if it's multichannel AND output is AirPlay (HomePod)
         // HomePod supports Dolby Digital surround but NOT multichannel AAC
-        let channelCount = audioStream.channels ?? 2
         if audioCodec == "aac" && channelCount > 2 {
             if isAirPlayOutput() {
                 return false
@@ -686,8 +694,12 @@ final class UniversalPlayerViewModel: ObservableObject {
     private func allowAudioDirectStreamDecision(reason: String) -> Bool {
         let allow = Self.isAudioDirectStreamCapable(metadata)
         let audioStream = metadata.Media?.first?.Part?.first?.Stream?.first(where: { $0.isAudio })
-        let codec = audioStream?.codec?.lowercased() ?? "unknown"
-        let channels = audioStream?.channels ?? 0
+        let codec = audioStream?.codec?.lowercased()
+            ?? metadata.Media?.first?.audioCodec?.lowercased()
+            ?? "unknown"
+        let channels = audioStream?.channels
+            ?? metadata.Media?.first?.audioChannels
+            ?? 0
         let routeSnapshot = PlaybackAudioSessionConfigurator.currentRouteAudioSnapshot(
             owner: "UniversalPlayerViewModel",
             reason: "hls_audio_policy_\(reason)"
@@ -1059,11 +1071,44 @@ final class UniversalPlayerViewModel: ObservableObject {
                 throw PlayerError.loadFailed("HLS transcode session failed to start")
             }
 
+            // Log the HLS master manifest for debugging track labels and I-frame playlists
+            await logHLSManifest(url: hlsURL, headers: streamHeaders)
+
             try loadAVPlayer(url: hlsURL, headers: streamHeaders)
 
             if let startTime, startTime > 0 {
                 await player?.seek(to: CMTime(seconds: startTime, preferredTimescale: 600))
             }
+        }
+    }
+
+    // MARK: - HLS Manifest Debugging
+
+    /// Fetch and log the HLS master manifest to inspect track labels and I-frame playlists.
+    private func logHLSManifest(url: URL, headers: [String: String]) async {
+        var request = URLRequest(url: url)
+        for (key, value) in headers {
+            request.setValue(value, forHTTPHeaderField: key)
+        }
+        do {
+            let (data, _) = try await URLSession.shared.data(for: request)
+            if let manifest = String(data: data, encoding: .utf8) {
+                print("[HLS Manifest] ===== Master Playlist =====")
+                for line in manifest.components(separatedBy: "\n") {
+                    print("[HLS Manifest] \(line)")
+                }
+                print("[HLS Manifest] ===== End =====")
+
+                // Quick summary
+                let hasIFrame = manifest.contains("EXT-X-I-FRAME")
+                let audioTags = manifest.components(separatedBy: "\n").filter { $0.contains("TYPE=AUDIO") }
+                let subtitleTags = manifest.components(separatedBy: "\n").filter { $0.contains("TYPE=SUBTITLES") }
+                print("[HLS Manifest] I-Frame playlist: \(hasIFrame ? "YES" : "NO")")
+                print("[HLS Manifest] Audio tracks: \(audioTags.count)")
+                print("[HLS Manifest] Subtitle tracks: \(subtitleTags.count)")
+            }
+        } catch {
+            print("[HLS Manifest] Failed to fetch: \(error.localizedDescription)")
         }
     }
 
@@ -1073,33 +1118,187 @@ final class UniversalPlayerViewModel: ObservableObject {
     private func loadAVPlayer(url: URL, headers: [String: String]?) throws {
         teardownAVPlayerObservers()
         player?.pause()
+        hlsManifestEnricher = nil
 
-        PlaybackAudioSessionConfigurator.activatePlaybackSession(
-            mode: .moviePlayback,
-            owner: "UniversalPlayerViewModel"
-        )
+        let asset: AVURLAsset
 
-        var options: [String: Any] = [AVURLAssetPreferPreciseDurationAndTimingKey: true]
-        if let headers, !headers.isEmpty {
-            options["AVURLAssetHTTPHeaderFieldsKey"] = headers
+        // For HLS URLs, use the manifest enricher to inject audio/subtitle track labels.
+        // The enricher intercepts ONLY the master playlist (custom scheme), patches it,
+        // and rewrites all sub-URLs to absolute HTTP so AVPlayer fetches them directly.
+        if url.path.contains("start.m3u8") || url.pathExtension == "m3u8",
+           let headers = headers {
+            let enricher = HLSManifestEnricher(metadata: metadata, headers: headers, originalURL: url)
+            if let enrichedURL = enricher.enrichedURL(from: url) {
+                hlsManifestEnricher = enricher
+                asset = AVURLAsset(url: enrichedURL)
+                asset.resourceLoader.setDelegate(enricher, queue: DispatchQueue(label: "com.rivulet.hls-enricher"))
+            } else {
+                var options: [String: Any] = [:]
+                options["AVURLAssetHTTPHeaderFieldsKey"] = headers
+                asset = AVURLAsset(url: url, options: options)
+            }
+        } else {
+            var options: [String: Any] = [:]
+            if let headers = headers, !headers.isEmpty {
+                options["AVURLAssetHTTPHeaderFieldsKey"] = headers
+            }
+            asset = AVURLAsset(url: url, options: options)
         }
 
-        let asset = AVURLAsset(url: url, options: options)
-        let item = AVPlayerItem(asset: asset, automaticallyLoadedAssetKeys: ["duration"])
-        item.preferredForwardBufferDuration = 30
-        item.appliesPerFrameHDRDisplayMetadata = true
+        let item = AVPlayerItem(asset: asset)
+
+        // Feed metadata to AVPlayerViewController (info panel + Now Playing)
+        item.externalMetadata = buildExternalMetadata()
+        if let markers = buildNavigationMarkers() {
+            item.navigationMarkerGroups = markers
+        }
 
         if let existing = player {
             existing.replaceCurrentItem(with: item)
         } else {
             let newPlayer = AVPlayer(playerItem: item)
-            newPlayer.automaticallyWaitsToMinimizeStalling = true
             player = newPlayer
             _playerForCleanup = newPlayer
         }
 
         setupAVPlayerObservers()
         updatePlaybackState(.loading)
+    }
+
+    // MARK: - AVPlayerItem Metadata
+
+    /// Build external metadata for AVPlayerViewController info panel and Now Playing.
+    private func buildExternalMetadata() -> [AVMetadataItem] {
+        var items: [AVMetadataItem] = []
+
+        // Title
+        let displayTitle: String
+        if metadata.type == "episode" {
+            let seasonNum = metadata.parentIndex ?? 0
+            let episodeNum = metadata.index ?? 0
+            let epTitle = metadata.title ?? ""
+            displayTitle = "S\(seasonNum) E\(episodeNum) · \(epTitle)"
+        } else {
+            displayTitle = metadata.title ?? ""
+        }
+        items.append(makeMetadataItem(.commonIdentifierTitle, value: displayTitle))
+
+        // Show name (for episodes)
+        if metadata.type == "episode", let showName = metadata.grandparentTitle {
+            items.append(makeMetadataItem(
+                .iTunesMetadataTrackSubTitle,
+                value: showName
+            ))
+        }
+
+        // Description
+        if let summary = metadata.summary {
+            items.append(makeMetadataItem(.commonIdentifierDescription, value: summary))
+        }
+
+        // Genre
+        if let genres = metadata.Genre, !genres.isEmpty {
+            let genreString = genres.compactMap(\.tag).joined(separator: ", ")
+            if !genreString.isEmpty {
+                items.append(makeMetadataItem(.quickTimeMetadataGenre, value: genreString))
+            }
+        }
+
+        // Content rating
+        if let rating = metadata.contentRating {
+            items.append(makeMetadataItem(
+                .iTunesMetadataContentRating,
+                value: rating
+            ))
+        }
+
+        // Year
+        if let year = metadata.year {
+            items.append(makeMetadataItem(
+                .commonIdentifierCreationDate,
+                value: String(year)
+            ))
+        }
+
+        // Artwork — poster (thumb) first, then background art as fallback
+        if let image = loadingThumbImage ?? loadingArtImage,
+           let jpegData = image.jpegData(compressionQuality: 0.85) {
+            items.append(makeMetadataItem(.commonIdentifierArtwork, value: jpegData))
+        }
+
+        // Audio format description — helps AVPlayerViewController label the audio track
+        let audioDesc = buildAudioDescription()
+        if !audioDesc.isEmpty {
+            items.append(makeMetadataItem(
+                .quickTimeMetadataInformation,
+                value: audioDesc
+            ))
+        }
+
+        return items
+    }
+
+    /// Build a human-readable audio description from metadata.
+    private func buildAudioDescription() -> String {
+        let codec = metadata.Media?.first?.audioCodec?.uppercased() ?? ""
+        let channels = metadata.Media?.first?.audioChannels ?? 0
+
+        guard !codec.isEmpty else { return "" }
+
+        let codecName: String
+        switch codec {
+        case "EAC3", "EC-3": codecName = "Dolby Digital+"
+        case "AC3": codecName = "Dolby Digital"
+        case "AAC": codecName = "AAC"
+        case "DTS": codecName = "DTS"
+        case "DTS-HD", "DTSHD": codecName = "DTS-HD MA"
+        case "TRUEHD", "MLP": codecName = "Dolby TrueHD"
+        case "FLAC": codecName = "FLAC"
+        default: codecName = codec
+        }
+
+        let channelDesc: String
+        switch channels {
+        case 8: channelDesc = "7.1"
+        case 6: channelDesc = "5.1"
+        case 2: channelDesc = "Stereo"
+        case 1: channelDesc = "Mono"
+        default: channelDesc = channels > 0 ? "\(channels)ch" : ""
+        }
+
+        if channelDesc.isEmpty {
+            return codecName
+        }
+        return "\(codecName) \(channelDesc)"
+    }
+
+    /// Build navigation markers from Plex intro/credits markers.
+    private func buildNavigationMarkers() -> [AVNavigationMarkersGroup]? {
+        guard let markers = metadata.Marker, !markers.isEmpty else { return nil }
+
+        let timedGroups: [AVTimedMetadataGroup] = markers.compactMap { marker in
+            guard let startMs = marker.startTimeOffset,
+                  let endMs = marker.endTimeOffset else { return nil }
+
+            let start = CMTime(value: CMTimeValue(startMs), timescale: 1000)
+            let end = CMTime(value: CMTimeValue(endMs), timescale: 1000)
+            let range = CMTimeRange(start: start, end: end)
+
+            let titleItem = makeMetadataItem(.commonIdentifierTitle, value: marker.type?.capitalized ?? "Chapter")
+            return AVTimedMetadataGroup(items: [titleItem], timeRange: range)
+        }
+
+        guard !timedGroups.isEmpty else { return nil }
+        return [AVNavigationMarkersGroup(title: nil, timedNavigationMarkers: timedGroups)]
+    }
+
+    /// Helper to create an AVMutableMetadataItem.
+    private func makeMetadataItem(_ identifier: AVMetadataIdentifier, value: Any) -> AVMetadataItem {
+        let item = AVMutableMetadataItem()
+        item.identifier = identifier
+        item.value = value as? NSCopying & NSObjectProtocol
+        item.extendedLanguageTag = "und"
+        return item.copy() as! AVMetadataItem
     }
 
     /// Create remux session + local server, then point AVPlayer at localhost HLS.
@@ -1324,6 +1523,7 @@ final class UniversalPlayerViewModel: ObservableObject {
         stopRemuxServer()
         dvProxyServer?.stop()
         dvProxyServer = nil
+        hlsManifestEnricher = nil
         subtitleManager.clear()
 
         // Stop the Plex transcode session so the server frees resources immediately.

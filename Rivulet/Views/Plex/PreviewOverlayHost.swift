@@ -162,6 +162,7 @@ struct PreviewOverlayHost: View {
                         allowActionRowInteraction: expandedChromeVisible,
                         pagingMotionActive: pagingMotionActive,
                         motionLocked: stateMachine.motionLocked,
+                        backgroundParallaxOffset: heroBackdropOffset,
                         onPreviewExitRequested: handleExpandedExit,
                         onDetailsBecameVisible: {
                             if index == selectedIndex {
@@ -451,6 +452,7 @@ private struct PreviewCarouselCard: View {
     let allowActionRowInteraction: Bool
     let pagingMotionActive: Bool
     let motionLocked: Bool
+    let backgroundParallaxOffset: CGFloat
     let onPreviewExitRequested: () -> Void
     let onDetailsBecameVisible: () -> Void
     let cornerRadius: CGFloat
@@ -466,7 +468,8 @@ private struct PreviewCarouselCard: View {
                 item: item,
                 serverURL: serverURL,
                 authToken: authToken,
-                motionLocked: motionLocked
+                motionLocked: motionLocked,
+                backgroundParallaxOffset: backgroundParallaxOffset
             )
             .opacity(showsHeroOverlay ? 0 : 1)
 
@@ -581,6 +584,7 @@ private struct PreviewCarouselSideCard: View {
     let serverURL: String
     let authToken: String
     let motionLocked: Bool
+    let backgroundParallaxOffset: CGFloat
 
     @StateObject private var backdropCoordinator = HeroBackdropCoordinator()
 
@@ -599,6 +603,9 @@ private struct PreviewCarouselSideCard: View {
                     )
                 )
         }
+        .offset(x: backgroundParallaxOffset)
+        .scaleEffect(1.08)
+        .animation(previewBackdropPagingAnimation, value: backgroundParallaxOffset)
         .overlay {
             UnevenRoundedRectangle(
                 topLeadingRadius: 28,

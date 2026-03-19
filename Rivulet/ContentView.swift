@@ -157,13 +157,7 @@ private struct AutoPlayLauncherModifier: ViewModifier {
                         loadingArtImage: nil,
                         loadingThumbImage: nil
                     )
-                    let inputCoordinator = PlaybackInputCoordinator()
-                    let playerView = UniversalPlayerView(viewModel: viewModel, inputCoordinator: inputCoordinator)
-                    let container = PlayerContainerViewController(
-                        rootView: playerView,
-                        viewModel: viewModel,
-                        inputCoordinator: inputCoordinator
-                    )
+                    let nativePlayer = NativePlayerViewController(viewModel: viewModel)
 
                     if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
                        let rootVC = windowScene.windows.first?.rootViewController {
@@ -171,7 +165,7 @@ private struct AutoPlayLauncherModifier: ViewModifier {
                         while let presented = topVC.presentedViewController {
                             topVC = presented
                         }
-                        topVC.present(container, animated: false)
+                        topVC.present(nativePlayer, animated: false)
                     }
 
                     // Schedule auto-stop after test duration

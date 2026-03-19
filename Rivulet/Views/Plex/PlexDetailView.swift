@@ -194,7 +194,7 @@ struct PlexDetailView: View {
                     // Layer 1: Fixed backdrop (doesn't scroll, fills screen)
                     heroBackdropImage
                         .offset(x: backgroundParallaxOffset)
-                        .scaleEffect(isPreviewCarousel ? 1.12 : 1.04)
+                        .scaleEffect(isPreviewCarousel ? 1.08 : 1.04)
                         .frame(width: geo.size.width, height: geo.size.height)
                         .clipped()
                         .overlay {
@@ -1504,32 +1504,19 @@ struct PlexDetailView: View {
                     loadingArtImage: artImage,
                     loadingThumbImage: thumbImage
                 )
-                let inputCoordinator = PlaybackInputCoordinator()
-
-                // Create view with the external viewModel
-                let playerView = UniversalPlayerView(viewModel: viewModel, inputCoordinator: inputCoordinator)
-
-                // Create container that intercepts Menu button, passing the same viewModel
-                let container = PlayerContainerViewController(
-                    rootView: playerView,
-                    viewModel: viewModel,
-                    inputCoordinator: inputCoordinator
-                )
-
-                // Update SwiftUI state when player is dismissed
-                container.onDismiss = { [weak viewModel] in
+                let nativePlayer = NativePlayerViewController(viewModel: viewModel)
+                nativePlayer.onDismiss = { [weak viewModel] in
                     lastPlayedMetadata = viewModel?.metadata
                     showPlayer = false
                 }
 
-                // Present from top-most view controller
                 if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
                    let rootVC = windowScene.windows.first?.rootViewController {
                     var topVC = rootVC
                     while let presented = topVC.presentedViewController {
                         topVC = presented
                     }
-                    topVC.present(container, animated: true)
+                    topVC.present(nativePlayer, animated: true)
                 }
             }
         }

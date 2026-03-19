@@ -8,8 +8,52 @@ import XCTest
 
 final class ContentRouterPlaybackPlanTests: XCTestCase {
 
-    func testPlanPrefersDirectPlayForVODWithFallbackToHLS() {
-        let metadata = makeMetadata(audioCodec: "dts", includePart: true)
+    // MARK: - MKV + DTS → Plex HLS (server transcodes audio)
+
+    func testMKVWithDTSRoutesToHLS() {
+        let metadata = makeMetadata(audioCodec: "dts", container: "mkv", includePart: true)
+        let context = ContentRoutingContext(
+            metadata: metadata,
+            serverURL: URL(string: "http://127.0.0.1:32400")!,
+            authToken: "token",
+            playbackPolicy: .directPlayFirst
+        )
+
+        let plan = ContentRouter.plan(for: context)
+
+        if case .hls = plan.primary {
+            XCTAssertTrue(plan.fallbacks.isEmpty, "HLS server remux should have no fallbacks")
+            XCTAssertTrue(plan.reasoning.contains("plex_server_remux"))
+        } else {
+            XCTFail("Expected HLS primary route for MKV + DTS, got \(plan.primary)")
+        }
+    }
+
+    // MARK: - MKV + native audio → Plex HLS (server remuxes container)
+
+    func testMKVWithEAC3RoutesToHLS() {
+        let metadata = makeMetadata(audioCodec: "eac3", container: "mkv", includePart: true)
+        let context = ContentRoutingContext(
+            metadata: metadata,
+            serverURL: URL(string: "http://127.0.0.1:32400")!,
+            authToken: "token",
+            playbackPolicy: .directPlayFirst
+        )
+
+        let plan = ContentRouter.plan(for: context)
+
+        if case .hls = plan.primary {
+            XCTAssertTrue(plan.fallbacks.isEmpty)
+            XCTAssertTrue(plan.reasoning.contains("plex_server_remux"))
+        } else {
+            XCTFail("Expected HLS primary route for MKV + EAC3, got \(plan.primary)")
+        }
+    }
+
+    // MARK: - MP4 + native audio → AVPlayer Direct
+
+    func testMP4WithAACRoutesToAVPlayerDirect() {
+        let metadata = makeMetadata(audioCodec: "aac", container: "mp4", includePart: true)
         let context = ContentRoutingContext(
             metadata: metadata,
             serverURL: URL(string: "http://127.0.0.1:32400")!,
@@ -20,25 +64,30 @@ final class ContentRouterPlaybackPlanTests: XCTestCase {
         let plan = ContentRouter.plan(for: context)
 
         if FFmpegDemuxer.isAvailable {
-            if case .directPlay = plan.primary {
+            if case .avPlayerDirect = plan.primary {
                 XCTAssertEqual(plan.fallbacks.count, 1)
                 if case .hls = plan.fallbacks[0] {
                     // expected
                 } else {
-                    XCTFail("Expected HLS fallback when primary is direct play")
+                    XCTFail("Expected HLS fallback")
                 }
             } else {
-                XCTFail("Expected DirectPlay primary route when FFmpeg is available")
+                XCTFail("Expected AVPlayerDirect for MP4 + AAC, got \(plan.primary)")
             }
         } else if case .hls = plan.primary {
-            XCTAssertTrue(plan.fallbacks.isEmpty)
+            // FFmpeg unavailable but native container — still routes to direct with HLS fallback
+            // or HLS if no FFmpeg at all
+        } else if case .avPlayerDirect = plan.primary {
+            // Also acceptable without FFmpeg for native container
         } else {
-            XCTFail("Expected HLS primary when FFmpeg is unavailable")
+            XCTFail("Unexpected route for MP4 + AAC without FFmpeg: \(plan.primary)")
         }
     }
 
+    // MARK: - No part key → HLS fallback
+
     func testPlanUsesHLSWhenNoDirectPlaySourceExists() {
-        let metadata = makeMetadata(audioCodec: "aac", includePart: false)
+        let metadata = makeMetadata(audioCodec: "aac", container: "mkv", includePart: false)
         let context = ContentRoutingContext(
             metadata: metadata,
             serverURL: URL(string: "http://127.0.0.1:32400")!,
@@ -54,8 +103,10 @@ final class ContentRouterPlaybackPlanTests: XCTestCase {
         }
     }
 
+    // MARK: - Live TV → HLS
+
     func testPlanUsesHLSForLiveTV() {
-        let metadata = makeMetadata(audioCodec: "aac", includePart: true)
+        let metadata = makeMetadata(audioCodec: "aac", container: "mkv", includePart: true)
         let context = ContentRoutingContext(
             metadata: metadata,
             serverURL: URL(string: "http://127.0.0.1:32400")!,
@@ -72,9 +123,49 @@ final class ContentRouterPlaybackPlanTests: XCTestCase {
         }
     }
 
+    // MARK: - DV P7 → Local Remux (unchanged)
+
+    func testDVP7RoutesToLocalRemux() {
+        let metadata = makeMetadata(
+            audioCodec: "eac3",
+            container: "mkv",
+            includePart: true,
+            streams: [makeAudioStream(id: 10, codec: "eac3", channels: 6)]
+        )
+        let context = ContentRoutingContext(
+            metadata: metadata,
+            serverURL: URL(string: "http://127.0.0.1:32400")!,
+            authToken: "token",
+            requiresProfileConversion: true,
+            playbackPolicy: .directPlayFirst
+        )
+
+        let plan = ContentRouter.plan(for: context)
+
+        if FFmpegDemuxer.isAvailable {
+            if case .localRemux = plan.primary {
+                XCTAssertEqual(plan.fallbacks.count, 1)
+                if case .hls = plan.fallbacks[0] {
+                    // expected
+                } else {
+                    XCTFail("Expected HLS fallback for local remux")
+                }
+            } else {
+                XCTFail("Expected LocalRemux for DV P7 content, got \(plan.primary)")
+            }
+        } else if case .hls = plan.primary {
+            // Without FFmpeg, can't do local remux
+        } else {
+            XCTFail("Expected HLS when FFmpeg unavailable, got \(plan.primary)")
+        }
+    }
+
+    // MARK: - DV conversion + TrueHD only → HLS (can't local remux without native audio)
+
     func testPlanUsesHLSForDVConversionWhenOnlyClientDecodeAudioExists() {
         let metadata = makeMetadata(
             audioCodec: "truehd",
+            container: "mkv",
             includePart: true,
             streams: [makeAudioStream(id: 10, codec: "truehd", channels: 8)]
         )
@@ -95,9 +186,12 @@ final class ContentRouterPlaybackPlanTests: XCTestCase {
         }
     }
 
-    func testPlanKeepsDirectPlayForDVConversionWhenNativeAudioFallbackExists() {
+    // MARK: - DV conversion + native audio fallback → Local Remux
+
+    func testPlanKeepsLocalRemuxForDVConversionWhenNativeAudioFallbackExists() {
         let metadata = makeMetadata(
             audioCodec: "truehd",
+            container: "mkv",
             includePart: true,
             streams: [
                 makeAudioStream(id: 10, codec: "truehd", channels: 8),
@@ -115,10 +209,10 @@ final class ContentRouterPlaybackPlanTests: XCTestCase {
         let plan = ContentRouter.plan(for: context)
 
         if FFmpegDemuxer.isAvailable {
-            if case .directPlay = plan.primary {
+            if case .localRemux = plan.primary {
                 XCTAssertEqual(plan.fallbacks.count, 1)
             } else {
-                XCTFail("Expected DirectPlay primary when DV conversion has a native audio fallback")
+                XCTFail("Expected LocalRemux primary when DV conversion has native audio fallback, got \(plan.primary)")
             }
         } else if case .hls = plan.primary {
             XCTAssertTrue(plan.fallbacks.isEmpty)
@@ -127,15 +221,22 @@ final class ContentRouterPlaybackPlanTests: XCTestCase {
         }
     }
 
-    private func makeMetadata(audioCodec: String, includePart: Bool, streams: [PlexStream]? = nil) -> PlexMetadata {
+    // MARK: - Helpers
+
+    private func makeMetadata(
+        audioCodec: String,
+        container: String = "mkv",
+        includePart: Bool,
+        streams: [PlexStream]? = nil
+    ) -> PlexMetadata {
         let part: [PlexPart]? = includePart
             ? [PlexPart(
                 id: 1,
-                key: "/library/parts/100/file.mkv",
+                key: "/library/parts/100/file.\(container)",
                 duration: nil,
                 file: nil,
                 size: nil,
-                container: "mkv",
+                container: container,
                 Stream: streams
             )]
             : nil
@@ -151,7 +252,7 @@ final class ContentRouterPlaybackPlanTests: XCTestCase {
             audioCodec: audioCodec,
             videoCodec: "hevc",
             videoResolution: "4k",
-            container: "mkv",
+            container: container,
             videoFrameRate: nil,
             Part: part
         )
