@@ -150,7 +150,8 @@ final class RivuletPlayer: ObservableObject {
         )
 
         switch route {
-        case .directPlay(let url, let headers):
+        case .avPlayerDirect(let url, let headers), .localRemux(let url, let headers, _):
+            // Legacy: treat both AVPlayer-direct and local-remux URLs as direct play
             print("[RivuletPlayer] load(route:) → DirectPlay: \(url.lastPathComponent) DV=\(isDolbyVision)")
             try await loadDirectPlay(url: url, headers: headers, startTime: startTime, isDolbyVision: isDolbyVision, enableDVConversion: enableDVConversion)
 

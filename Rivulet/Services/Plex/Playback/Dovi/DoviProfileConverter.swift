@@ -113,6 +113,12 @@ final class DoviProfileConverter {
             convertedSample = nalParser.stripEnhancementLayer(from: convertedSample)
         }
 
+        // Modify VPS to indicate single-layer configuration.
+        // The original VPS has max_layers_minus1=1 (dual-layer P7). After stripping EL,
+        // this mismatch causes VideoToolbox to produce a black screen. Setting it to 0
+        // tells VideoToolbox this is single-layer content.
+        convertedSample = nalParser.modifyVPSForSingleLayer(in: convertedSample)
+
         framesConverted += 1
 
         let elapsed = CFAbsoluteTimeGetCurrent() - startTime

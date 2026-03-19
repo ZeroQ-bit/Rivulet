@@ -397,11 +397,30 @@ final class UniversalPlayerViewModel: ObservableObject {
 
     // MARK: - Player Instance
 
-    /// RivuletPlayer (unified native player: FFmpeg + AVSampleBufferDisplayLayer)
-    @Published private(set) var rivuletPlayer: RivuletPlayer?
+    /// AVPlayer used for all playback paths (direct, remuxed HLS, Plex HLS)
+    @Published private(set) var player: AVPlayer?
 
-    /// Whether DV profile conversion (P7/P8.6 → P8.1) is needed for RivuletPlayer
+    /// Local remux server for MKV/DTS/DV content
+    private var remuxServer: LocalRemuxServer?
+    private var remuxSession: FFmpegRemuxSession?
+
+    /// DV HLS proxy for Plex HLS DV codec patching
+    private var dvProxyServer: DVHLSProxyServer?
+
+    /// KVO observers
+    private var rateObservation: NSKeyValueObservation?
+    private var timeControlObservation: NSKeyValueObservation?
+    private var itemStatusObservation: NSKeyValueObservation?
+    private var timeObserver: Any?
+    // Non-isolated reference for cleanup in deinit
+    private nonisolated(unsafe) var _playerForCleanup: AVPlayer?
+    private nonisolated(unsafe) var _timeObserverForCleanup: Any?
+
+    /// Whether DV profile conversion (P7/P8.6 → P8.1) is needed
     private var requiresProfileConversion = false
+
+    /// Stub — legacy RivuletPlayer removed. Returns nil so all guard-let paths bail safely.
+    private var rivuletPlayer: RivuletPlayer? { nil }
 
     /// Subtitle manager for custom subtitle rendering.
     let subtitleManager = SubtitleManager()
@@ -511,14 +530,9 @@ final class UniversalPlayerViewModel: ObservableObject {
               "content: DV=\(hasDolbyVision) profile=\(dvProfile ?? -1) blCompat=\(doviBLCompatID ?? -1) " +
               "container=\(container) airPlay=\(isAirPlayRoute) compatDV=\(!requiresDVProfileConversion)")
 
-        self.rivuletPlayer = RivuletPlayer()
         self.requiresProfileConversion = requiresDVProfileConversion
 
-        if requiresDVProfileConversion {
-            print("[PlayerSelect] → RivuletPlayer (DV profile conversion required)")
-        } else {
-            print("[PlayerSelect] → RivuletPlayer")
-        }
+        print("[PlayerSelect] → AVPlayer (primary)")
 
         setupPlayer()
 
@@ -592,7 +606,8 @@ final class UniversalPlayerViewModel: ObservableObject {
         rivuletFallbackHeaders = [:]
 
         switch plan.primary {
-        case .directPlay:
+        case .avPlayerDirect(let url, let headers):
+            // AVPlayer direct — use the URL from the plan
             if let cached = cachedDirectPlay {
                 streamURL = cached.url
                 streamHeaders = cached.headers
@@ -600,23 +615,24 @@ final class UniversalPlayerViewModel: ObservableObject {
                 Task(priority: .utility) {
                     await networkManager.warmDirectPlayStream(url: cached.url, headers: cached.headers)
                 }
-                } else if let partKey = metadata.Media?.first?.Part?.first?.key,
-                      let directURL = networkManager.buildPlaybackDirectPlayURL(
-                        serverURL: serverURL,
-                        authToken: authToken,
-                        partKey: partKey
-                      ) {
-                streamURL = directURL
-                let directHeaders = rivuletDirectPlayHeaders()
-                streamHeaders = directHeaders
+            } else {
+                streamURL = url
+                streamHeaders = headers ?? rivuletDirectPlayHeaders()
                 Task(priority: .utility) {
-                    await networkManager.warmDirectPlayStream(url: directURL, headers: directHeaders)
+                    await networkManager.warmDirectPlayStream(url: url, headers: headers ?? [:])
                 }
-            } else if let fallback = buildRivuletHLSURL(offset: startOffset) {
-                streamURL = fallback.url
-                streamHeaders = fallback.headers
-                plexSessionId = fallback.sessionId
             }
+
+            if plan.fallbacks.contains(where: { if case .hls = $0 { return true } else { return false } }),
+               let preparedFallback = buildRivuletHLSURL(offset: startOffset) {
+                rivuletFallbackURL = preparedFallback.url
+                rivuletFallbackHeaders = preparedFallback.headers
+            }
+
+        case .localRemux(let url, let headers, _):
+            // Local remux — use the raw file URL from the plan
+            streamURL = url
+            streamHeaders = headers ?? rivuletDirectPlayHeaders()
 
             if plan.fallbacks.contains(where: { if case .hls = $0 { return true } else { return false } }),
                let preparedFallback = buildRivuletHLSURL(offset: startOffset) {
@@ -702,104 +718,139 @@ final class UniversalPlayerViewModel: ObservableObject {
     }
 
     private func bindPlayerState() {
-        guard let rp = rivuletPlayer else { return }
-        let statePublisher = rp.playbackStatePublisher
-        let timePublisher = rp.timePublisher
-        let errorPublisher = rp.errorPublisher
+        // Nothing to bind at init — observers are set up in setupAVPlayerObservers()
+        // when the player is created during startPlayback()
+    }
 
-        statePublisher
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] state in
-                self?.playbackState = state
-                self?.isBuffering = state == .buffering
+    // MARK: - AVPlayer Observation (standard KVO)
 
-                // Auto-hide controls when playing
-                if state == .playing {
-                    self?.startControlsHideTimer()
-                    // Prevent screensaver during playback
-                    UIApplication.shared.isIdleTimerDisabled = true
-                    // Cancel paused poster timer and hide poster when resuming
-                    self?.cancelPausedPosterTimer()
-                } else {
-                    self?.controlsTimer?.invalidate()
-                    // Re-enable screensaver when not playing
-                    if state == .paused || state == .ended || state == .idle {
-                        UIApplication.shared.isIdleTimerDisabled = false
-                    }
-                    // Start paused poster timer when paused
-                    if state == .paused {
-                        self?.startPausedPosterTimer()
-                    } else {
-                        // Cancel timer for any other non-playing state
-                        self?.cancelPausedPosterTimer()
-                    }
-                }
+    /// Set up KVO observers on the current AVPlayer + AVPlayerItem.
+    private func setupAVPlayerObservers() {
+        guard let player = player else { return }
 
-                // Handle video end - show post-video summary
-                if state == .ended {
-                    Task { await self?.handlePlaybackEnded() }
-                }
-            }
-            .store(in: &cancellables)
-
-        timePublisher
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] time in
+        // Rate changes → play/pause state
+        rateObservation = player.observe(\.rate, options: [.new]) { [weak self] player, _ in
+            Task { @MainActor [weak self] in
                 guard let self else { return }
-                self.currentTime = time
-                if let wrapper = self.rivuletPlayer, wrapper.duration > 0 {
-                    self.duration = wrapper.duration
+                if player.rate > 0 {
+                    self.updatePlaybackState(.playing)
+                } else if self.playbackState == .playing {
+                    self.updatePlaybackState(.paused)
                 }
-                // Check for markers at current time
-                self.checkMarkers(at: time)
             }
-            .store(in: &cancellables)
+        }
 
-        errorPublisher
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] error in
+        // Buffering detection
+        timeControlObservation = player.observe(\.timeControlStatus, options: [.new]) { [weak self] player, _ in
+            Task { @MainActor [weak self] in
                 guard let self else { return }
-
-                if let rp = self.rivuletPlayer,
-                   rp.activePipeline == .directPlay,
-                   !self.hasAttemptedRivuletHLSFallback,
-                   !self.isAttemptingRivuletHLSFallback {
-                    Task { @MainActor in
-                        do {
-                            let failureKind = self.classifyDirectPlayFailure(error)
-                            try await self.attemptRivuletHLSFallback(
-                                resumeTime: self.currentTime,
-                                reason: "runtime_error",
-                                failureKind: failureKind
-                            )
-                            self.rivuletPlayer?.play()
-                            self.errorMessage = nil
-                            self.duration = self.rivuletPlayer?.duration ?? self.duration
-                            self.updateTrackLists()
-                        } catch let fallbackError {
-                            print("🎬 [RivuletFallback] Runtime fallback failed: \(fallbackError.localizedDescription)")
-                            self.errorMessage = error.userFacingDescription
-                        }
+                switch player.timeControlStatus {
+                case .waitingToPlayAtSpecifiedRate:
+                    self.updatePlaybackState(.buffering)
+                case .playing:
+                    if self.playbackState == .buffering {
+                        self.updatePlaybackState(.playing)
                     }
-                    return
+                case .paused:
+                    break  // Handled by rate observer
+                @unknown default:
+                    break
                 }
-
-                self.errorMessage = error.userFacingDescription
             }
-            .store(in: &cancellables)
+        }
 
-        rp.tracksPublisher
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] in
-                self?.updateTrackLists()
+        // Player item status → ready/failed
+        if let item = player.currentItem {
+            itemStatusObservation = item.observe(\.status, options: [.new]) { [weak self] item, _ in
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    switch item.status {
+                    case .readyToPlay:
+                        let dur = item.duration.seconds
+                        if dur.isFinite { self.duration = dur }
+                        self.updateTrackLists()
+                    case .failed:
+                        let message = item.error?.localizedDescription ?? "Playback failed"
+                        self.errorMessage = PlayerError.loadFailed(message).userFacingDescription
+                        self.updatePlaybackState(.failed(.loadFailed(message)))
+                    case .unknown:
+                        break
+                    @unknown default:
+                        break
+                    }
+                }
             }
-            .store(in: &cancellables)
+
+            // End of playback
+            NotificationCenter.default.addObserver(
+                forName: .AVPlayerItemDidPlayToEndTime,
+                object: item,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    self?.updatePlaybackState(.ended)
+                }
+            }
+        }
+
+        // Time updates (every 0.5s)
+        let interval = CMTime(seconds: 0.5, preferredTimescale: 600)
+        let observer = player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] time in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.currentTime = time.seconds
+                self.checkMarkers(at: time.seconds)
+            }
+        }
+        timeObserver = observer
+        _timeObserverForCleanup = observer
+    }
+
+    /// Tear down AVPlayer observers.
+    private func teardownAVPlayerObservers() {
+        rateObservation?.invalidate()
+        rateObservation = nil
+        timeControlObservation?.invalidate()
+        timeControlObservation = nil
+        itemStatusObservation?.invalidate()
+        itemStatusObservation = nil
+        if let timeObserver, let player {
+            player.removeTimeObserver(timeObserver)
+        }
+        timeObserver = nil
+        NotificationCenter.default.removeObserver(self, name: .AVPlayerItemDidPlayToEndTime, object: nil)
+    }
+
+    /// Update playback state with side effects (controls, screensaver, post-video).
+    private func updatePlaybackState(_ state: UniversalPlaybackState) {
+        playbackState = state
+        isBuffering = state == .buffering
+
+        if state == .playing {
+            startControlsHideTimer()
+            UIApplication.shared.isIdleTimerDisabled = true
+            cancelPausedPosterTimer()
+        } else {
+            controlsTimer?.invalidate()
+            if state == .paused || state == .ended || state == .idle {
+                UIApplication.shared.isIdleTimerDisabled = false
+            }
+            if state == .paused {
+                startPausedPosterTimer()
+            } else {
+                cancelPausedPosterTimer()
+            }
+        }
+
+        if state == .ended {
+            Task { await handlePlaybackEnded() }
+        }
     }
 
     // MARK: - Computed Properties
 
     var isPlaying: Bool {
-        rivuletPlayer?.isPlaying ?? false
+        (player?.rate ?? 0) > 0
     }
 
     /// Log the selection decision to Sentry for debugging DV routing.
@@ -810,7 +861,7 @@ final class UniversalPlayerViewModel: ObservableObject {
         let breadcrumb = Breadcrumb(level: .info, category: "playback.selection")
         breadcrumb.message = "Playback selection (\(reason))"
         breadcrumb.data = [
-            "player": "rivulet",
+            "player": "avplayer",
             "has_dv": metadata.hasDolbyVision,
             "dv_profile": dvStream?.DOVIProfile ?? -1,
             "dv_bl_compat": dvStream?.DOVIBLCompatID ?? -1,
@@ -833,7 +884,7 @@ final class UniversalPlayerViewModel: ObservableObject {
         isAttemptingRivuletHLSFallback = false
 
         // Stop existing player before retrying
-        rivuletPlayer?.stop()
+        stopPlayback()
         subtitleClockSync.stop()
 
         await startPlayback()
@@ -856,8 +907,6 @@ final class UniversalPlayerViewModel: ObservableObject {
         }
 
         do {
-            guard let rp = rivuletPlayer else { return }
-
             DisplayCriteriaManager.shared.configureForContent(
                 videoStream: metadata.primaryVideoStream
             )
@@ -871,9 +920,10 @@ final class UniversalPlayerViewModel: ObservableObject {
             ))
             try await startWithFallback(plan: plan, startTime: startOffset)
 
-            rp.play()
-            configureSubtitleClockSyncForCurrentPlayer()
-            self.duration = rp.duration
+            player?.play()
+            if let dur = player?.currentItem?.duration.seconds, dur.isFinite {
+                self.duration = dur
+            }
             updateTrackLists()
 
             // Preload thumbnails for scrubbing
@@ -881,7 +931,6 @@ final class UniversalPlayerViewModel: ObservableObject {
 
             startControlsHideTimer()
         } catch {
-            // Show user-friendly message, but keep technical details for Sentry
             let technicalError = error.localizedDescription
             if let playerError = error as? PlayerError {
                 errorMessage = playerError.userFacingDescription
@@ -890,10 +939,9 @@ final class UniversalPlayerViewModel: ObservableObject {
             }
             playbackState = .failed(.loadFailed(technicalError))
 
-            // Capture playback load failure to Sentry
             SentrySDK.capture(error: error) { scope in
                 scope.setTag(value: "playback", key: "component")
-                scope.setTag(value: "rivulet", key: "player_type")
+                scope.setTag(value: "avplayer", key: "player_type")
                 scope.setExtra(value: url.absoluteString, key: "stream_url")
                 scope.setExtra(value: self.metadata.title ?? "unknown", key: "media_title")
                 scope.setExtra(value: self.metadata.type ?? "unknown", key: "media_type")
@@ -971,58 +1019,33 @@ final class UniversalPlayerViewModel: ObservableObject {
         return .unknown
     }
 
-    /// Load Rivulet content using direct-play-first policy with one-shot HLS fallback.
+    /// Load content using the appropriate path from the playback plan.
+    ///
+    /// Three paths:
+    /// 1. **AVPlayer direct** — AVPlayer opens Plex URL directly (MP4/MOV + native audio)
+    /// 2. **Local remux** — FFmpegRemuxSession → LocalRemuxServer → AVPlayer (MKV, DTS, DV P7)
+    /// 3. **Plex HLS** — AVPlayer opens Plex HLS URL
     private func startWithFallback(plan: PlaybackPlan, startTime: TimeInterval?) async throws {
-        guard let rp = rivuletPlayer else { return }
-
         switch plan.primary {
-        case .directPlay(let directURLFromPlan, let directHeadersFromPlan):
-            let directURL = streamURL ?? directURLFromPlan
-            let directHeaders = streamHeaders.isEmpty
-                ? (directHeadersFromPlan ?? rivuletDirectPlayHeaders())
-                : streamHeaders
+        case .avPlayerDirect(let url, let headers):
+            let directURL = streamURL ?? url
+            let directHeaders = streamHeaders.isEmpty ? (headers ?? rivuletDirectPlayHeaders()) : streamHeaders
+            try loadAVPlayer(url: directURL, headers: directHeaders)
 
-            do {
-                try await rp.load(
-                    route: .directPlay(url: directURL, headers: directHeaders),
-                    startTime: startTime,
-                    isDolbyVision: metadata.hasDolbyVision,
-                    enableDVConversion: requiresProfileConversion
-                )
-            } catch {
-                let failureKind = classifyDirectPlayFailure(error)
+            if let startTime, startTime > 0 {
+                await player?.seek(to: CMTime(seconds: startTime, preferredTimescale: 600))
+            }
 
-                // Retry once for transient network errors before falling back to HLS
-                if failureKind == .network || failureKind == .demuxInit {
-                    print("🎬 [Rivulet] Direct play failed (\(failureKind.rawValue)), retrying in 2s...")
-                    try await Task.sleep(for: .seconds(2))
-                    rp.stop()
-                    do {
-                        try await rp.load(
-                            route: .directPlay(url: directURL, headers: directHeaders),
-                            startTime: startTime,
-                            isDolbyVision: metadata.hasDolbyVision,
-                            enableDVConversion: requiresProfileConversion
-                        )
-                        return  // Retry succeeded
-                    } catch {
-                        print("🎬 [Rivulet] Retry also failed, falling back to HLS")
-                    }
-                }
+        case .localRemux(let url, let headers, _):
+            let remuxURL = streamURL ?? url
+            let remuxHeaders = streamHeaders.isEmpty ? (headers ?? rivuletDirectPlayHeaders()) : streamHeaders
+            try await loadWithRemuxServer(sourceURL: remuxURL, headers: remuxHeaders)
 
-                guard plan.fallbacks.contains(where: { if case .hls = $0 { return true } else { return false } }) else {
-                    throw error
-                }
-                try await attemptRivuletHLSFallback(
-                    resumeTime: startTime ?? 0,
-                    reason: "startup_directplay_failure",
-                    failureKind: failureKind
-                )
+            if let startTime, startTime > 0 {
+                await player?.seek(to: CMTime(seconds: startTime, preferredTimescale: 600))
             }
 
         case .hls:
-            // streamURL is built during URL-building phase; the plan's HLS URL is just
-            // a placeholder (server base URL), so we must have a real URL here.
             if streamURL == nil, let builtHLS = buildRivuletHLSURL(offset: startTime) {
                 streamURL = builtHLS.url
                 streamHeaders = builtHLS.headers
@@ -1036,16 +1059,80 @@ final class UniversalPlayerViewModel: ObservableObject {
             if !transcodeReady {
                 throw PlayerError.loadFailed("HLS transcode session failed to start")
             }
-            try await rp.loadHLSWithConversion(
-                url: hlsURL,
-                headers: streamHeaders,
-                startTime: startTime,
-                requiresProfileConversion: requiresProfileConversion
-            )
+
+            try loadAVPlayer(url: hlsURL, headers: streamHeaders)
+
+            if let startTime, startTime > 0 {
+                await player?.seek(to: CMTime(seconds: startTime, preferredTimescale: 600))
+            }
         }
     }
 
-    /// One-shot fallback path from direct play to HLS.
+    // MARK: - AVPlayer Creation
+
+    /// Create an AVPlayer for a URL (direct play or HLS).
+    private func loadAVPlayer(url: URL, headers: [String: String]?) throws {
+        teardownAVPlayerObservers()
+        player?.pause()
+
+        PlaybackAudioSessionConfigurator.activatePlaybackSession(
+            mode: .moviePlayback,
+            owner: "UniversalPlayerViewModel"
+        )
+
+        var options: [String: Any] = [AVURLAssetPreferPreciseDurationAndTimingKey: true]
+        if let headers, !headers.isEmpty {
+            options["AVURLAssetHTTPHeaderFieldsKey"] = headers
+        }
+
+        let asset = AVURLAsset(url: url, options: options)
+        let item = AVPlayerItem(asset: asset, automaticallyLoadedAssetKeys: ["duration"])
+        item.preferredForwardBufferDuration = 30
+        item.appliesPerFrameHDRDisplayMetadata = true
+
+        if let existing = player {
+            existing.replaceCurrentItem(with: item)
+        } else {
+            let newPlayer = AVPlayer(playerItem: item)
+            newPlayer.automaticallyWaitsToMinimizeStalling = true
+            player = newPlayer
+            _playerForCleanup = newPlayer
+        }
+
+        setupAVPlayerObservers()
+        updatePlaybackState(.loading)
+    }
+
+    /// Create remux session + local server, then point AVPlayer at localhost HLS.
+    private func loadWithRemuxServer(sourceURL: URL, headers: [String: String]?) async throws {
+        // Stop previous remux infrastructure
+        stopRemuxServer()
+
+        let session = FFmpegRemuxSession()
+        self.remuxSession = session
+
+        let sessionInfo = try await session.open(url: sourceURL, headers: headers)
+
+        let server = LocalRemuxServer(session: session, sessionInfo: sessionInfo)
+        self.remuxServer = server
+
+        let localURL = try server.start()
+        print("[Player] Remux server started: \(localURL)")
+
+        try loadAVPlayer(url: localURL, headers: nil)
+    }
+
+    /// Stop remux server and session.
+    private func stopRemuxServer() {
+        remuxServer?.stop()
+        remuxServer = nil
+        if let session = remuxSession {
+            Task { await session.close() }
+        }
+        remuxSession = nil
+    }
+
+    /// One-shot fallback path to Plex HLS.
     private func attemptRivuletHLSFallback(
         resumeTime: TimeInterval,
         reason: String,
@@ -1057,19 +1144,14 @@ final class UniversalPlayerViewModel: ObservableObject {
         guard !hasAttemptedRivuletHLSFallback else {
             throw PlayerError.loadFailed("Already attempted HLS fallback")
         }
-        guard let rp = rivuletPlayer else {
-            throw PlayerError.loadFailed("Rivulet player unavailable for fallback")
-        }
 
         isAttemptingRivuletHLSFallback = true
         hasAttemptedRivuletHLSFallback = true
         defer { isAttemptingRivuletHLSFallback = false }
 
-        print("🎬 [RivuletFallback] DirectPlay failed (\(failureKind.rawValue), reason=\(reason)) → HLS")
+        print("[Fallback] Failed (\(failureKind.rawValue), reason=\(reason)) → HLS")
 
         let fallback: (url: URL, headers: [String: String], sessionId: String?)?
-        // Use pre-built fallback URL only when near the start of playback — it has
-        // the original offset baked in, so it's invalid once playback has progressed.
         if resumeTime <= 0.5, let prebuiltURL = rivuletFallbackURL, !rivuletFallbackHeaders.isEmpty {
             let sessionId = URLComponents(url: prebuiltURL, resolvingAgainstBaseURL: false)?
                 .queryItems?.first(where: { $0.name == "session" })?.value
@@ -1082,7 +1164,11 @@ final class UniversalPlayerViewModel: ObservableObject {
             throw PlayerError.loadFailed("Unable to build HLS fallback URL")
         }
 
-        rp.stop()
+        // Stop current player
+        teardownAVPlayerObservers()
+        player?.pause()
+        stopRemuxServer()
+
         streamURL = fallback.url
         streamHeaders = fallback.headers
         plexSessionId = fallback.sessionId
@@ -1092,12 +1178,10 @@ final class UniversalPlayerViewModel: ObservableObject {
             throw PlayerError.loadFailed("HLS transcode session failed to start")
         }
 
-        try await rp.loadHLSWithConversion(
-            url: fallback.url,
-            headers: fallback.headers,
-            startTime: resumeTime,
-            requiresProfileConversion: requiresProfileConversion
-        )
+        try loadAVPlayer(url: fallback.url, headers: fallback.headers)
+        if resumeTime > 0 {
+            await player?.seek(to: CMTime(seconds: resumeTime, preferredTimescale: 600))
+        }
     }
 
     // MARK: - HLS Transcode Preflight
@@ -1227,7 +1311,14 @@ final class UniversalPlayerViewModel: ObservableObject {
 
     func stopPlayback() {
         subtitleClockSync.stop()
-        rivuletPlayer?.stop()
+        teardownAVPlayerObservers()
+        player?.pause()
+        player?.replaceCurrentItem(with: nil)
+        player = nil
+        _playerForCleanup = nil
+        stopRemuxServer()
+        dvProxyServer?.stop()
+        dvProxyServer = nil
         subtitleManager.clear()
 
         // Stop the Plex transcode session so the server frees resources immediately.
@@ -1258,26 +1349,36 @@ final class UniversalPlayerViewModel: ObservableObject {
 
     func togglePlayPause() {
         hidePausedPoster()
-        if rivuletPlayer?.isPlaying == true {
-            rivuletPlayer?.pause()
+        if isPlaying {
+            activePlayer_pause()
         } else {
-            rivuletPlayer?.play()
+            activePlayer_play()
         }
         showControlsTemporarily()
     }
 
     /// Resume playback (used by remote commands)
     func resume() {
-        pausedDueToAppInactive = false  // User explicitly resumed, allow normal playback
+        pausedDueToAppInactive = false
         hidePausedPoster()
-        rivuletPlayer?.play()
+        activePlayer_play()
         showControlsTemporarily()
     }
 
     /// Pause playback (used by remote commands)
     func pause() {
-        rivuletPlayer?.pause()
+        activePlayer_pause()
         showControlsTemporarily()
+    }
+
+    // MARK: - Active Player Helpers
+
+    private func activePlayer_play() {
+        player?.play()
+    }
+
+    private func activePlayer_pause() {
+        player?.pause()
     }
 
     // MARK: - Info Panel Navigation
@@ -1291,14 +1392,15 @@ final class UniversalPlayerViewModel: ObservableObject {
     }
 
     func seek(to time: TimeInterval) async {
-        await rivuletPlayer?.seek(to: time)
+        await player?.seek(to: CMTime(seconds: time, preferredTimescale: 600))
         subtitleClockSync.didSeek()
         showControlsTemporarily()
     }
 
     func seekRelative(by seconds: TimeInterval) async {
         hidePausedPoster()
-        await rivuletPlayer?.seekRelative(by: seconds)
+        let targetTime = max(0, min(currentTime + seconds, duration))
+        await player?.seek(to: CMTime(seconds: targetTime, preferredTimescale: 600))
         subtitleClockSync.didSeek()
         showControlsTemporarily()
 
@@ -1552,16 +1654,7 @@ final class UniversalPlayerViewModel: ObservableObject {
     // MARK: - Track Selection
 
     func selectAudioTrack(id: Int) {
-        if let rp = rivuletPlayer {
-            rp.selectAudioTrack(plexTrackId: id, plexAudioTracks: audioTracks)
-
-            // For HLS path, rebuild the Plex session with the new audio stream ID
-            if rp.activePipeline == .hls {
-                Task {
-                    await switchHLSAudioTrack(plexStreamId: id)
-                }
-            }
-        }
+        // TODO: AVPlayer audio track selection via AVMediaSelectionGroup
         currentAudioTrackId = id
 
         // Save preference
@@ -1661,10 +1754,7 @@ final class UniversalPlayerViewModel: ObservableObject {
     }
 
     func selectSubtitleTrack(id: Int?) {
-        if rivuletPlayer != nil {
-            rivuletPlayer?.selectSubtitleTrack(id: id)
-            loadSubtitleForRivuletPlayer(trackId: id)
-        }
+        // TODO: AVPlayer subtitle selection via AVMediaSelectionGroup
         currentSubtitleTrackId = id
 
         // Save preference
@@ -1798,10 +1888,6 @@ final class UniversalPlayerViewModel: ObservableObject {
         let previousSubtitleCount = subtitleTracks.count
         let previousAudioCount = audioTracks.count
 
-        guard let rp = rivuletPlayer else {
-            return
-        }
-
         let newAudioTracks: [MediaTrack]
         let newSubtitleTracks: [MediaTrack]
         let newCurrentAudioTrackId: Int?
@@ -1819,10 +1905,11 @@ final class UniversalPlayerViewModel: ObservableObject {
                 newSubtitleTracks.first(where: { $0.isForced })?.id ??
                 newSubtitleTracks.first(where: { $0.isDefault })?.id
         } else {
-            newAudioTracks = rp.audioTracks
-            newSubtitleTracks = rp.subtitleTracks
-            newCurrentAudioTrackId = rp.currentAudioTrackId
-            newCurrentSubtitleTrackId = rp.currentSubtitleTrackId
+            // AVPlayer track enumeration would go here — for now use empty
+            newAudioTracks = []
+            newSubtitleTracks = []
+            newCurrentAudioTrackId = nil
+            newCurrentSubtitleTrackId = nil
         }
 
         audioTracks = newAudioTracks
@@ -2782,6 +2869,12 @@ final class UniversalPlayerViewModel: ObservableObject {
     // MARK: - Cleanup
 
     deinit {
+        // Clean up AVPlayer time observer (must happen synchronously in deinit)
+        if let timeObserver = _timeObserverForCleanup, let player = _playerForCleanup {
+            player.removeTimeObserver(timeObserver)
+        }
+        NotificationCenter.default.removeObserver(self, name: .AVPlayerItemDidPlayToEndTime, object: nil)
+
         Task { @MainActor [subtitleClockSync] in
             subtitleClockSync.stop()
         }

@@ -293,6 +293,204 @@ final class HEVCNALParser {
         }
     }
 
+    // MARK: - hvcC Parameter Set Extraction
+
+    /// Extract all parameter set NAL units from an hvcC box.
+    /// Returns individual NAL unit data (without length prefix) for VPS/SPS/PPS.
+    ///
+    /// hvcC structure: 22-byte header, numOfArrays (1 byte), then arrays of NALUs.
+    static func extractParameterSets(from hvcCData: Data) -> [Data] {
+        guard hvcCData.count > 23 else { return [] }
+
+        let headerSize = 22
+        let numArrays = Int(hvcCData[headerSize])
+        var offset = headerSize + 1
+        var result: [Data] = []
+
+        for _ in 0..<numArrays {
+            guard offset + 3 <= hvcCData.count else { break }
+            let numNalus = Int(hvcCData.readUInt16BE(at: offset + 1))
+            offset += 3
+
+            for _ in 0..<numNalus {
+                guard offset + 2 <= hvcCData.count else { break }
+                let naluLength = Int(hvcCData.readUInt16BE(at: offset))
+                offset += 2
+                guard offset + naluLength <= hvcCData.count else {
+                    offset += naluLength
+                    continue
+                }
+                result.append(hvcCData[offset..<(offset + naluLength)])
+                offset += naluLength
+            }
+        }
+
+        return result
+    }
+
+    // MARK: - VPS Modification for DV P7→P8.1
+
+    /// Modify VPS NAL units in sample data to indicate single-layer configuration.
+    /// After DV P7→P8.1 conversion, the VPS still describes dual-layer (max_layers_minus1=1).
+    /// This causes VideoToolbox to expect dual-layer data, producing a black screen.
+    /// Setting max_layers_minus1=0 tells VideoToolbox this is single-layer content.
+    ///
+    /// VPS payload layout (after 2-byte NAL header):
+    ///   Byte 0: [vps_id(4)][base_internal(1)][base_avail(1)][max_layers_hi(2)]
+    ///   Byte 1: [max_layers_lo(4)][max_sub_layers(3)][nesting(1)]
+    ///
+    /// - Parameter sampleData: Sample data potentially containing VPS NALs
+    /// - Returns: Modified data with VPS max_layers_minus1 set to 0
+    func modifyVPSForSingleLayer(in sampleData: Data) -> Data {
+        sampleData.withUnsafeBytes { buffer -> Data in
+            guard let base = buffer.baseAddress else { return sampleData }
+            let count = buffer.count
+
+            // First pass: check if any VPS NALs exist with max_layers_minus1 > 0
+            var needsModification = false
+            var offset = 0
+            while offset + lengthPrefixSize + 4 <= count {
+                let length = Int(
+                    base.advanced(by: offset)
+                        .loadUnaligned(as: UInt32.self)
+                        .bigEndian
+                )
+                guard length >= 4, offset + lengthPrefixSize + length <= count else { break }
+
+                let byte0 = base.load(fromByteOffset: offset + lengthPrefixSize, as: UInt8.self)
+                let nalType = (byte0 >> 1) & 0x3F
+
+                if nalType == 32 { // VPS
+                    // Check max_layers_minus1 (6 bits spanning payload bytes 0-1)
+                    let payloadOffset = offset + lengthPrefixSize + 2 // Skip 2-byte NAL header
+                    let vpsByte0 = base.load(fromByteOffset: payloadOffset, as: UInt8.self)
+                    let vpsByte1 = base.load(fromByteOffset: payloadOffset + 1, as: UInt8.self)
+                    let maxLayersHi = vpsByte0 & 0x03
+                    let maxLayersLo = (vpsByte1 >> 4) & 0x0F
+                    let maxLayersMinus1 = (Int(maxLayersHi) << 4) | Int(maxLayersLo)
+
+                    if maxLayersMinus1 > 0 {
+                        needsModification = true
+                        break
+                    }
+                }
+                offset += lengthPrefixSize + length
+            }
+
+            guard needsModification else { return sampleData }
+
+            // Second pass: copy data, modifying VPS NALs
+            var result = Data(sampleData)
+            offset = 0
+            while offset + lengthPrefixSize + 4 <= count {
+                let length = Int(
+                    base.advanced(by: offset)
+                        .loadUnaligned(as: UInt32.self)
+                        .bigEndian
+                )
+                guard length >= 4, offset + lengthPrefixSize + length <= count else { break }
+
+                let byte0 = base.load(fromByteOffset: offset + lengthPrefixSize, as: UInt8.self)
+                let nalType = (byte0 >> 1) & 0x3F
+
+                if nalType == 32 {
+                    let payloadOffset = offset + lengthPrefixSize + 2
+                    // Clear max_layers_minus1: clear bottom 2 bits of payload byte 0,
+                    // clear top 4 bits of payload byte 1
+                    result[payloadOffset] = result[payloadOffset] & 0xFC
+                    result[payloadOffset + 1] = result[payloadOffset + 1] & 0x0F
+                }
+                offset += lengthPrefixSize + length
+            }
+
+            return result
+        }
+    }
+
+    /// Modify VPS in raw hvcC extradata to set max_layers_minus1=0 and strip EL parameter sets.
+    /// The hvcC box contains parameter set arrays; this method:
+    /// 1. Modifies VPS max_layers_minus1 to 0
+    /// 2. Removes parameter sets with nuh_layer_id != 0 (EL sets)
+    ///
+    /// hvcC structure:
+    ///   23 bytes header, then numOfArrays (1 byte)
+    ///   Each array: flags+type (1 byte), numNalus (2 bytes), then NALUs
+    ///   Each NALU: length (2 bytes), data (length bytes)
+    static func cleanHvcCForSingleLayer(_ hvcCData: Data) -> Data {
+        guard hvcCData.count > 23 else { return hvcCData }
+
+        var result = Data()
+        let headerSize = 22 // Everything before numOfArrays
+        result.append(hvcCData[0..<headerSize])
+
+        let numArrays = hvcCData[headerSize]
+        var offset = headerSize + 1
+        var cleanedArrays: [Data] = []
+
+        for _ in 0..<numArrays {
+            guard offset + 3 <= hvcCData.count else { break }
+
+            let arrayHeader = hvcCData[offset]
+            let nalType = arrayHeader & 0x3F
+            let numNalus = Int(hvcCData.readUInt16BE(at: offset + 1))
+            offset += 3
+
+            var keptNalus: [Data] = []
+
+            for _ in 0..<numNalus {
+                guard offset + 2 <= hvcCData.count else { break }
+                let naluLength = Int(hvcCData.readUInt16BE(at: offset))
+                offset += 2
+
+                guard offset + naluLength <= hvcCData.count, naluLength >= 2 else {
+                    offset += naluLength
+                    continue
+                }
+
+                var naluData = Data(hvcCData[offset..<(offset + naluLength)])
+
+                // Check layer_id: byte0 bit0 and byte1 bits 7-3
+                let byte0 = naluData[0]
+                let byte1 = naluData[1]
+                let layerId = (Int(byte0 & 0x01) << 5) | Int((byte1 >> 3) & 0x1F)
+
+                if layerId == 0 {
+                    // VPS (type 32): modify max_layers_minus1 to 0
+                    if nalType == 32, naluData.count >= 4 {
+                        naluData[2] = naluData[2] & 0xFC  // Clear max_layers hi 2 bits
+                        naluData[3] = naluData[3] & 0x0F  // Clear max_layers lo 4 bits
+                    }
+                    keptNalus.append(naluData)
+                }
+                // Skip EL parameter sets (layer_id != 0)
+
+                offset += naluLength
+            }
+
+            // Only include array if it has NALUs left
+            if !keptNalus.isEmpty {
+                var arrayData = Data()
+                arrayData.append(arrayHeader)
+                var count16 = UInt16(keptNalus.count).bigEndian
+                arrayData.append(Data(bytes: &count16, count: 2))
+                for nalu in keptNalus {
+                    var len16 = UInt16(nalu.count).bigEndian
+                    arrayData.append(Data(bytes: &len16, count: 2))
+                    arrayData.append(nalu)
+                }
+                cleanedArrays.append(arrayData)
+            }
+        }
+
+        // Write cleaned arrays
+        result.append(UInt8(cleanedArrays.count))
+        for array in cleanedArrays {
+            result.append(array)
+        }
+
+        return result
+    }
+
     /// Get summary of NAL units in sample (for debugging)
     /// - Parameter sampleData: The raw sample data from fMP4
     /// - Returns: String describing the NAL units present

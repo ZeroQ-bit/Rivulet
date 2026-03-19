@@ -873,52 +873,117 @@ final class FFmpegDemuxer: @unchecked Sendable {
     ///   - blCompatId: Base layer signal compatibility ID (1 = HDR10, 4 = HLG)
     func rebuildFormatDescriptionWithDVCC(dvProfile: UInt8, blCompatId: UInt8) {
         guard let existingFD = videoFormatDescription else { return }
+        guard let existingExts = CMFormatDescriptionGetExtensions(existingFD) as? [CFString: Any],
+              let atoms = existingExts[kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms] as? [CFString: Any],
+              let hvcCData = atoms["hvcC" as CFString] as? Data else { return }
 
-        let width = Int32(CMVideoFormatDescriptionGetDimensions(existingFD).width)
-        let height = Int32(CMVideoFormatDescriptionGetDimensions(existingFD).height)
-        let codecType = CMFormatDescriptionGetMediaSubType(existingFD)
+        // Step 1: Extract VPS/SPS/PPS from hvcC, clean for single-layer
+        let paramSets = HEVCNALParser.extractParameterSets(from: hvcCData)
+        let cleanedSets = paramSets.compactMap { naluData -> Data? in
+            guard naluData.count >= 2 else { return nil }
+            let byte0 = naluData[naluData.startIndex]
+            let byte1 = naluData[naluData.startIndex + 1]
+            let nalType = (byte0 >> 1) & 0x3F
+            let layerId = (Int(byte0 & 0x01) << 5) | Int((byte1 >> 3) & 0x1F)
 
-        // Extract existing extensions
-        guard let existingExts = CMFormatDescriptionGetExtensions(existingFD) as? [CFString: Any] else { return }
+            // Strip EL parameter sets (layer_id != 0)
+            guard layerId == 0 else {
+                print("[FFmpegDemuxer] Stripped EL parameter set: type=\(nalType) layer=\(layerId) size=\(naluData.count)B")
+                return nil
+            }
 
-        // Build dvcC (DOVIDecoderConfigurationRecord) — 24 bytes
-        // Layout:
-        //   byte 0: dv_version_major (8 bits)
-        //   byte 1: dv_version_minor (8 bits)
-        //   byte 2: dv_profile (7 bits) | dv_level bit5 (1 bit)
-        //   byte 3: dv_level bits4-0 (5 bits) | rpu_present (1) | el_present (1) | bl_present (1)
-        //   byte 4: dv_bl_signal_compatibility_id (4 bits) | reserved (4 bits)
-        //   bytes 5-7: reserved (24 bits)
-        let dvLevel: UInt8 = 6  // Level 6 = 4K@24fps
-        let rpuPresent: UInt8 = 1
-        let elPresent: UInt8 = 0  // Single-layer after conversion
-        let blPresent: UInt8 = 1
-
-        let byte2 = (dvProfile << 1) | ((dvLevel >> 5) & 0x01)
-        let byte3 = ((dvLevel & 0x1F) << 3) | (rpuPresent << 2) | (elPresent << 1) | blPresent
-        let byte4 = (blCompatId << 4)
-
-        let dvcCData = Data([0x01, 0x00, byte2, byte3, byte4, 0x00, 0x00, 0x00])
-
-        // Merge dvcC into the existing sample description atoms
-        var extensions = existingExts
-        if var atoms = extensions[kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms] as? [CFString: Any] {
-            atoms["dvcC" as CFString] = dvcCData as CFData
-            extensions[kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms] = atoms
+            // VPS (type 32): set max_layers_minus1 = 0
+            if nalType == 32, naluData.count >= 4 {
+                var modified = Data(naluData)
+                modified[modified.startIndex + 2] = modified[modified.startIndex + 2] & 0xFC
+                modified[modified.startIndex + 3] = modified[modified.startIndex + 3] & 0x0F
+                print("[FFmpegDemuxer] Fixed VPS: max_layers_minus1 → 0")
+                return modified
+            }
+            return Data(naluData)
         }
 
-        var desc: CMFormatDescription?
-        let status = CMVideoFormatDescriptionCreate(
-            allocator: kCFAllocatorDefault, codecType: codecType,
-            width: width, height: height,
-            extensions: extensions as CFDictionary, formatDescriptionOut: &desc
+        guard !cleanedSets.isEmpty else {
+            print("[FFmpegDemuxer] No parameter sets after cleaning — aborting rebuild")
+            return
+        }
+
+        print("[FFmpegDemuxer] Parameter sets: \(paramSets.count) original → \(cleanedSets.count) cleaned")
+
+        // Step 2: Build a clean HEVC format description from the parameter sets.
+        // CMVideoFormatDescriptionCreateFromHEVCParameterSets builds a proper hvcC internally.
+        // Flatten all parameter sets into a single contiguous buffer with an index.
+        let paramCount = cleanedSets.count
+        var flatBuffer = [UInt8]()
+        var offsets = [(offset: Int, length: Int)]()
+        for set in cleanedSets {
+            let start = flatBuffer.count
+            flatBuffer.append(contentsOf: set)
+            offsets.append((start, set.count))
+        }
+
+        var tempDesc: CMFormatDescription?
+        let status1: OSStatus = flatBuffer.withUnsafeBufferPointer { flatBuf in
+            let base = flatBuf.baseAddress!
+            var pointers = offsets.map { base + $0.offset }
+            var sizes = offsets.map { $0.length }
+            return pointers.withUnsafeMutableBufferPointer { ptrBuf in
+                sizes.withUnsafeMutableBufferPointer { sizesBuf in
+                    CMVideoFormatDescriptionCreateFromHEVCParameterSets(
+                        allocator: kCFAllocatorDefault,
+                        parameterSetCount: paramCount,
+                        parameterSetPointers: ptrBuf.baseAddress!,
+                        parameterSetSizes: sizesBuf.baseAddress!,
+                        nalUnitHeaderLength: 4,
+                        extensions: nil,
+                        formatDescriptionOut: &tempDesc
+                    )
+                }
+            }
+        }
+
+        guard status1 == noErr, let cleanFD = tempDesc else {
+            print("[FFmpegDemuxer] CMVideoFormatDescriptionCreateFromHEVCParameterSets failed: \(status1)")
+            return
+        }
+
+        // Step 3: Extract the clean hvcC and build final DV format description
+        guard let cleanExts = CMFormatDescriptionGetExtensions(cleanFD) as? [CFString: Any],
+              var cleanAtoms = cleanExts[kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms] as? [CFString: Any] else {
+            print("[FFmpegDemuxer] Failed to extract clean hvcC extensions")
+            return
+        }
+
+        // Build dvcC (DOVIDecoderConfigurationRecord)
+        let dvLevel: UInt8 = 6  // Level 6 = 4K@24fps
+        let byte2 = (dvProfile << 1) | ((dvLevel >> 5) & 0x01)
+        let byte3 = ((dvLevel & 0x1F) << 3) | (1 << 2) | (0 << 1) | 1  // rpu=1 el=0 bl=1
+        let byte4 = (blCompatId << 4)
+        let dvcCData = Data([0x01, 0x00, byte2, byte3, byte4, 0x00, 0x00, 0x00])
+        cleanAtoms["dvcC" as CFString] = dvcCData as CFData
+
+        // Merge with color metadata from original format description
+        var finalExts = existingExts
+        finalExts[kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms] = cleanAtoms
+        finalExts[kCMFormatDescriptionExtension_ColorPrimaries] = kCMFormatDescriptionColorPrimaries_ITU_R_2020
+        finalExts[kCMFormatDescriptionExtension_TransferFunction] = kCMFormatDescriptionTransferFunction_SMPTE_ST_2084_PQ
+        finalExts[kCMFormatDescriptionExtension_YCbCrMatrix] = kCMFormatDescriptionYCbCrMatrix_ITU_R_2020
+
+        let dims = CMVideoFormatDescriptionGetDimensions(existingFD)
+        var finalDesc: CMFormatDescription?
+        let status2 = CMVideoFormatDescriptionCreate(
+            allocator: kCFAllocatorDefault,
+            codecType: kCMVideoCodecType_DolbyVisionHEVC,
+            width: dims.width, height: dims.height,
+            extensions: finalExts as CFDictionary,
+            formatDescriptionOut: &finalDesc
         )
 
-        if status == noErr, let newDesc = desc {
-            videoFormatDescription = newDesc
-            print("[FFmpegDemuxer] Rebuilt format description with dvcC: profile=\(dvProfile) level=\(dvLevel) bl_compat=\(blCompatId)")
+        if status2 == noErr, let result = finalDesc {
+            videoFormatDescription = result
+            print("[FFmpegDemuxer] Rebuilt DV format description: dvh1 P\(dvProfile) level=\(dvLevel) bl_compat=\(blCompatId) (clean hvcC + dvcC)")
         } else {
-            print("[FFmpegDemuxer] Failed to rebuild format description with dvcC: status=\(status)")
+            print("[FFmpegDemuxer] Failed to create DV format description: \(status2)")
         }
     }
 

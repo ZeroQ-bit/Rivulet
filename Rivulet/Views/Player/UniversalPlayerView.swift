@@ -876,7 +876,7 @@ struct UniversalPlayerView: View {
     @ViewBuilder
     private var playerContentLayer: some View {
         ZStack {
-            if viewModel.rivuletPlayer != nil {
+            if viewModel.player != nil {
                 SubtitleOverlayView(
                     subtitleManager: viewModel.subtitleManager,
                     bottomOffset: viewModel.showControls ? 140 : 60
@@ -998,8 +998,8 @@ struct UniversalPlayerView: View {
 
     @ViewBuilder
     private var playerLayer: some View {
-        if let rp = viewModel.rivuletPlayer, viewModel.streamURL != nil {
-            SampleBufferDisplayView(player: rp)
+        if let player = viewModel.player, viewModel.streamURL != nil {
+            AVPlayerLayerView(player: player)
                 .scaleEffect(viewModel.videoFrameState.scale, anchor: .topLeading)
                 .offset(viewModel.videoFrameState.offset)
                 .animation(.spring(response: 0.5, dampingFraction: 0.85), value: viewModel.videoFrameState)

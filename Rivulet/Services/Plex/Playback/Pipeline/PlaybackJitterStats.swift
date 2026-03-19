@@ -246,4 +246,141 @@ struct PlaybackJitterStats {
         lastReportFrameCount = totalVideoFrames
         return true
     }
+
+    // MARK: - Health Snapshot
+
+    /// Returns current jitter metrics for use in health reports.
+    func healthSnapshot() -> JitterSnapshot {
+        let frameCount = totalVideoFrames
+        let avgGap: TimeInterval = frameCount > 1 ? ptsGapSum / Double(frameCount - 1) : 0
+        let fps: Double
+        if expectedFrameDuration > 0 {
+            fps = 1.0 / expectedFrameDuration
+        } else if avgGap > 0 {
+            fps = 1.0 / avgGap
+        } else {
+            fps = 0
+        }
+
+        let n = Double(max(frameCount - 1, 1))
+        let variance = max(0, (ptsGapSumSquared / n) - (avgGap * avgGap))
+        let stdDev = sqrt(variance)
+
+        var syncAvg: Double = 1.0
+        if !syncDriftSamples.isEmpty {
+            syncAvg = syncDriftSamples.reduce(0, +) / Double(syncDriftSamples.count)
+        }
+
+        return JitterSnapshot(
+            fps: fps,
+            gapMaxMs: maxPTSGap * 1000,
+            gapStdDevMs: stdDev * 1000,
+            droppedFrameGaps: droppedFrameGaps,
+            syncDriftPercent: (syncAvg - 1.0) * 100,
+            syncDriftAlerts: syncDriftAlerts
+        )
+    }
+}
+
+// MARK: - Health Report Types
+
+/// Snapshot of jitter metrics for health reporting.
+struct JitterSnapshot {
+    let fps: Double
+    let gapMaxMs: Double
+    let gapStdDevMs: Double
+    let droppedFrameGaps: Int
+    let syncDriftPercent: Double
+    let syncDriftAlerts: Int
+}
+
+/// Aggregated playback health report with computed verdict.
+struct PlaybackHealthReport {
+    // Timeline
+    let playbackTime: TimeInterval
+    let fps: Double
+    let wallRate: Double
+
+    // Video health
+    let lateFrames: Int
+    let droppedFrames: Int
+    let resyncs: Int
+    let slowFrames: Int
+
+    // Audio health
+    let audioStatus: Int  // 0=unknown, 1=rendering, 2=failed
+    let audioPullMode: Bool
+    let audioAhead: TimeInterval
+    let audioDrops: Int
+    let audioPath: AudioPath  // decode vs passthrough
+    let audioRoute: AudioRoute  // output destination
+    let audioPullDeliveries: Int  // total pull-mode deliveries this period
+
+    // Display
+    let displayErrors: Int
+
+    // Frame timing (from jitter stats)
+    let gapMaxMs: Double
+    let gapStdDevMs: Double
+    let syncDriftPercent: Double
+
+    enum AudioPath: String {
+        case passthrough    // compressed audio sent directly to renderer
+        case clientDecode = "decode"  // decoded to PCM by FFmpeg
+    }
+
+    enum AudioRoute: String {
+        case airPlay = "airplay"
+        case hdmi = "hdmi"
+        case speaker = "speaker"
+    }
+
+    enum Verdict: String {
+        case good = "GOOD"
+        case warn = "WARN"
+        case bad = "BAD"
+    }
+
+    var verdict: Verdict {
+        // BAD: critical failures — actively losing frames or broken output
+        if droppedFrames > 1 { return .bad }
+        if resyncs > 0 { return .bad }
+        if audioStatus != 1 { return .bad }
+        if displayErrors > 0 { return .bad }
+        // AirPlay + passthrough = silent audio (renderer accepts but no sound)
+        if audioRoute == .airPlay && audioPath == .passthrough { return .bad }
+        // Pipeline slow AND buffer exhausted (display layer likely frozen)
+        if wallRate < 0.90 && audioAhead < -3.0 { return .bad }
+
+        // WARN: minor issues — pipeline slow or degraded but not catastrophic
+        if wallRate < 0.90 { return .warn }
+        if lateFrames > 0 { return .warn }
+        if droppedFrames > 0 { return .warn }
+        // Only warn on negative audioAhead if pipeline isn't recovering
+        if audioAhead < 0 && wallRate < 1.0 { return .warn }
+        // PTS gaps between consecutive packets can be large due to B-frame reordering
+        // (HEVC 7-frame GOPs produce ~290ms gaps at 24fps). Use 500ms as a more
+        // meaningful threshold that catches actual decode stalls.
+        if gapMaxMs > 500 { return .warn }
+        // AirPlay with no pull deliveries AND renderer not rendering = audio stalled
+        // (zero deliveries alone is normal — renderer batches requests when it has enough buffered)
+        if audioRoute == .airPlay && audioPullMode && audioPullDeliveries == 0 && audioStatus != 1 && playbackTime > 5 { return .warn }
+
+        return .good
+    }
+
+    /// Single-line log string for automated parsing.
+    var logLine: String {
+        "[PlaybackHealth] t=\(f1(playbackTime))s fps=\(f1(fps)) wall=\(f3(wallRate))x " +
+        "late=\(lateFrames) drops=\(droppedFrames) resyncs=\(resyncs) slowFrames=\(slowFrames) " +
+        "audioStatus=\(audioStatus) audioPull=\(audioPullMode) audioPath=\(audioPath.rawValue) " +
+        "audioRoute=\(audioRoute.rawValue) audioAhead=\(f1(audioAhead))s audioDrops=\(audioDrops) " +
+        "audioPullDel=\(audioPullDeliveries) displayErr=\(displayErrors) " +
+        "gapMax=\(f0(gapMaxMs))ms gapσ=\(f1(gapStdDevMs))ms syncDrift=\(f1(syncDriftPercent))% " +
+        "verdict=\(verdict.rawValue)"
+    }
+
+    private func f0(_ v: Double) -> String { String(format: "%.0f", v) }
+    private func f1(_ v: Double) -> String { String(format: "%.1f", v) }
+    private func f3(_ v: Double) -> String { String(format: "%.3f", v) }
 }

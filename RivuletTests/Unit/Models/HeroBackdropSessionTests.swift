@@ -28,7 +28,7 @@ final class HeroBackdropSessionTests: XCTestCase {
         XCTAssertEqual(resolution.thumbnailURL, thumbURL)
     }
 
-    func testSelectionStagesPendingUpgradeWhenNeeded() {
+    func testSelectionDoesNotStagePendingUpgradeWhenTMDBBackdropExists() {
         let plexURL = URL(string: "https://example.com/plex.jpg")
         let tmdbURL = URL(string: "https://example.com/tmdb.jpg")
         let request = HeroBackdropRequest(
@@ -49,8 +49,8 @@ final class HeroBackdropSessionTests: XCTestCase {
         )
 
         XCTAssertEqual(resolution.displayedBackdropURL, plexURL)
-        XCTAssertEqual(resolution.pendingUpgradeURL, tmdbURL)
-        XCTAssertTrue(resolution.canUpgradeAfterSettle)
+        XCTAssertNil(resolution.pendingUpgradeURL)
+        XCTAssertFalse(resolution.canUpgradeAfterSettle)
     }
 
     func testSessionBlocksPendingUpgradeWhileMotionLocked() {

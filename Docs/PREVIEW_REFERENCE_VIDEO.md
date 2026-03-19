@@ -31,9 +31,9 @@ These are implementation targets derived from the clip’s continuous motion, no
 | Motion | Target |
 |--------|--------|
 | Poster morph to centered card | `~0.45s`, spring/ease-out, no bounce |
-| Carousel paging | `~0.30s`, interactive spring, image-led |
+| Carousel paging | first two clean handoffs read at roughly `8-10 frames` at `30 fps` from first visible card movement to visual settle (`~0.27s - 0.33s`); implementation target should read closer to `~0.34s - 0.38s` on device because the current SwiftUI spring was feeling quicker than the clip |
 | Focused-card metadata after settle | `~0.18s - 0.28s` opacity-only fade once centered motion finishes; page-to-page reveals can be slightly slower than initial entry |
-| Background art during paging | fades/slides on a slightly slower cadence than the card frame |
+| Background art during paging | delayed by about `~0.08s`, then settles over roughly `~0.30s`; stays attached to the selected card, starts from a larger opposite-direction offset, and lands at the same time as the card |
 | Actions + cast reveal after focused info loads | present with the focused metadata state and fade in-place with the title/meta; expand mainly unlocks deeper continuity into details |
 | Expanded hero to details fold | `~0.35s`, one continuous vertical move |
 | Backdrop quality upgrade | only after `>=150ms` stable, `~0.22s` opacity crossfade |
@@ -55,6 +55,8 @@ These are implementation targets derived from the clip’s continuous motion, no
 - The next item takes over the same dominant centered stage.
 - Its metadata fades back in once the new item reaches focus.
 - The background art handoff is layered: it lags slightly and fades on a different cadence than the card frame movement.
+- The backdrop should remain owned by the selected carousel surface, not detached into its own stage layer.
+- The image inside that selected card should begin from a larger offset opposite the page direction, wait a beat, then ease back to neutral while still landing with the card rather than coasting after it.
 - The stage remains calm and image-led between lateral moves, with focused metadata only after settle.
 
 ### 3. Expanded Hero
@@ -127,6 +129,7 @@ Apple TV+ in this clip sometimes updates the active backdrop after the motion se
 - The crossfade must not resize, reframe, or expose two differently cropped hero images at once.
 - If the replacement would materially change crop/framing, defer it until the next page or next session instead of swapping live.
 - The same policy applies to preview, standard detail hero, and other hero/loading surfaces that share this backdrop logic.
+- Current Rivulet simplification: live backdrop replacement is disabled for now; keep Plex-provided art in place until this behavior is intentionally revisited.
 
 ## Motion Constraints
 
@@ -135,6 +138,8 @@ Apple TV+ in this clip sometimes updates the active backdrop after the motion se
 - Do not introduce a second background image during expand or fold.
 - Do not let the expanded hero snap to a zero-radius full-screen page before the details fold.
 - Do not crossfade to a better backdrop while geometry is still moving.
+- Do not drive the backdrop on the exact same timing/value track as the card frame during paging; the card should lead and the internal backdrop image should trail.
+- Do not detach the active backdrop into a separate stage layer during carousel paging; the parallax should come from the image lag inside the selected card.
 - Do not let the details state feel like a route push to a different page.
 - Do not show wide gaps that make the side cards look like equal siblings.
 - Do not overlap or stack neighboring carousel cards behind the centered card.

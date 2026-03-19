@@ -232,7 +232,7 @@ final class DirectPlayPipeline {
         // Conversion sessions need the most buffer; non-conversion DV still needs
         // more than plain HEVC to absorb 200-300ms decode stalls.
         if enableDVConversion {
-            renderer.maxVideoLookahead = 1.2
+            renderer.maxVideoLookahead = 5.0
         } else if isDolbyVision {
             renderer.maxVideoLookahead = 0.6
         } else {
@@ -269,6 +269,12 @@ final class DirectPlayPipeline {
             requiresProfileConversion = true
             profileConverter = DoviProfileConverter()
             print("[DirectPlay] DV profile conversion enabled (P7/P8.6 → P8.1)")
+
+            // Rebuild the format description with a proper dvcC config box signalling
+            // Profile 8.1 with HDR10-compatible base layer. Without this, VideoToolbox
+            // gets a dvh1-tagged stream with no DV configuration and may use a slow or
+            // incorrect decode path (e.g., attempting dual-layer P7 processing).
+            demuxer.rebuildFormatDescriptionWithDVCC(dvProfile: 8, blCompatId: 1)
         }
 
         // Set up audio path.
@@ -459,11 +465,13 @@ final class DirectPlayPipeline {
         state = .paused
         onStateChange?(.paused)
         print("[DirectPlay] paused")
+        print("[PlaybackHealth] EVENT=pause")
     }
 
     func resume() {
         guard !isPlaying, state == .paused else { return }
         isPlaying = true
+        print("[PlaybackHealth] EVENT=resume")
         state = .running
         onStateChange?(.running)
 
@@ -593,6 +601,7 @@ final class DirectPlayPipeline {
             "[DirectPlay] seek request: from=\(String(format: "%.3f", currentTime))s " +
             "to=\(String(format: "%.3f", time))s playing=\(isPlaying)"
         )
+        print("[PlaybackHealth] EVENT=seek from=\(String(format: "%.1f", currentTime))s to=\(String(format: "%.1f", time))s")
 
         state = .seeking
         renderer.jitterStats.reset()
@@ -834,8 +843,14 @@ final class DirectPlayPipeline {
 
         print("[DirectPlay] Starting read loop (audioFD=\(audioFD != nil), hasDV=\(hasDV), conversion=\(requiresConversion))")
 
+        let capturedLookahead = renderer.maxVideoLookahead
+        let capturedContainer = streamURL?.pathExtension ?? "?"
+
         readTask = Task.detached { [weak self] in
             print("[DirectPlay] Read loop started on background thread")
+            print("[PlaybackHealth] CONFIG hasDV=\(hasDV) conversion=\(requiresConversion) " +
+                  "lookahead=\(String(format: "%.1f", capturedLookahead))s " +
+                  "audioDecoder=\(audioDecoder != nil) container=\(capturedContainer)")
             var isFirstVideoFrame = true
             var videoPacketCount = 0
             var audioPacketCount = 0
@@ -851,18 +866,35 @@ final class DirectPlayPipeline {
             var consecutiveLateVideoFrames = 0
             var lateVideoResyncCount = 0
             var lastLateVideoResyncWall: CFAbsoluteTime = 0
-            let lateVideoDropThreshold: TimeInterval = 0.75 // 750ms behind sync clock
-            let forceLateResyncThreshold: TimeInterval = 2.0 // hard recover when >2s behind
-            let maxConsecutiveLateFramesBeforeResync = 24 // ~1s at 24fps
-            let lateResyncCooldown: TimeInterval = 0.5 // avoid rapid sync thrash
-            let softLateDropThreshold: TimeInterval = requiresConversion ? 0.90 : 1.10
-            let maxSoftLateDropsPerBurst = requiresConversion ? 12 : 8
+            // DV conversion pipeline runs at ~80% real-time initially. Aggressive drop/resync
+            // cascades make this worse by flushing the decode pipeline repeatedly. Give the
+            // conversion pipeline generous headroom to absorb initial throughput deficit.
+            let lateVideoDropThreshold: TimeInterval = requiresConversion ? 3.0 : 0.75
+            let forceLateResyncThreshold: TimeInterval = requiresConversion ? 8.0 : 2.0
+            let maxConsecutiveLateFramesBeforeResync = requiresConversion ? 120 : 24 // 5s at 24fps
+            let lateResyncCooldown: TimeInterval = requiresConversion ? 2.0 : 0.5
+            let softLateDropThreshold: TimeInterval = requiresConversion ? 3.0 : 1.10
+            let maxSoftLateDropsPerBurst = requiresConversion ? 24 : 8
             var slowVideoPipelineCount = 0
+
+            // Health report state (emits every 5s)
+            var lastHealthReportWall: CFAbsoluteTime = 0
+            let healthReportInterval: TimeInterval = 5.0
+            var healthLateFramesSinceReport = 0
+            var healthDropsSinceReport = 0
+            var healthResyncsSinceReport = 0
+            var healthSlowFramesSinceReport = 0
+            var healthDisplayErrorsSinceReport = 0
+            var healthLastPullDeliveries = 0
+            var healthLastPeriodPTS: TimeInterval = 0
+            var healthLastPeriodWall: CFAbsoluteTime = 0
+
             var waitingForPrerollStart = false
             var prerollWaitStartWall: CFAbsoluteTime?
             var prerollAnchorPTSSeconds: Double?
             var prerollAnchorTime: CMTime?
             var prerollMaxPTSSeconds: Double?
+            var prerollMaxVideoPTSSeconds: Double?  // Video-only PTS for accurate preroll lead
             let hasAudioPath = (audioDecoder != nil || audioFD != nil)
             let prerollStartHostLeadSeconds: TimeInterval = activeTargetOutputSampleRate > 0 ? 0.10 : 0.03
 
@@ -919,15 +951,22 @@ final class DirectPlayPipeline {
                     guard let anchor = prerollAnchorPTSSeconds, let maxPTS = prerollMaxPTSSeconds else { return 0 }
                     return max(0, maxPTS - anchor)
                 }()
+                // Use video-only PTS for videoReady check — audio PTS can race ahead
+                // and cause preroll to complete with insufficient video buffer.
+                let videoLeadSeconds: Double = {
+                    guard let anchor = prerollAnchorPTSSeconds, let maxVPTS = prerollMaxVideoPTSSeconds else { return 0 }
+                    return max(0, maxVPTS - anchor)
+                }()
                 // Non-conversion streams commonly expose ~200ms reordered lead at startup.
                 // Requiring more can stall preroll on some DV direct-play files.
-                let requiredPrerollLeadSeconds = requiresConversion ? 0.45 : 0.20
-                let videoReady = prerollLeadSeconds >= requiredPrerollLeadSeconds
+                let requiredPrerollLeadSeconds = requiresConversion ? 5.0 : 0.20
+                let videoReady = videoLeadSeconds >= requiredPrerollLeadSeconds
                 let waitedMs: Double = {
                     guard let start = prerollWaitStartWall else { return 0 }
                     return (CFAbsoluteTimeGetCurrent() - start) * 1000
                 }()
-                let timedOut = hasAudioPath && waitedMs >= 1000
+                let prerollTimeout: Double = requiresConversion ? 5000 : 1000
+                let timedOut = hasAudioPath && waitedMs >= prerollTimeout
 
                 if timedOut {
                     print("[DirectPlay] Preroll timeout after \(String(format: "%.0f", waitedMs))ms " +
@@ -970,6 +1009,7 @@ final class DirectPlayPipeline {
                 prerollAnchorPTSSeconds = nil
                 prerollAnchorTime = nil
                 prerollMaxPTSSeconds = nil
+                prerollMaxVideoPTSSeconds = nil
                 print(
                     "[DirectPlay] Preroll complete: starting clock from anchor=\(String(format: "%.3f", anchorTime))s " +
                     "packet=\(String(format: "%.3f", packetTime))s rate=\(String(format: "%.2f", playbackRate)) " +
@@ -977,6 +1017,7 @@ final class DirectPlayPipeline {
                     "lead=\(String(format: "%.0f", prerollLeadSeconds * 1000))ms " +
                     "hostLead=\(String(format: "%.0f", hostLead * 1000))ms"
                 )
+                print("[PlaybackHealth] EVENT=preroll_complete elapsed=\(String(format: "%.0f", waitedMs))ms")
 
                 return true
             }
@@ -1128,15 +1169,23 @@ final class DirectPlayPipeline {
 
                         // If the render clock has run ahead of packet PTS, attempt bounded
                         // clock recovery; only drop in emergency stale-frame cases.
-                        if !isFirstVideoFrame {
+                        // DV conversion pipelines need a 30s startup grace period — the DV
+                        // decoder warms up slowly and aggressive drop/resync cascades make
+                        // things worse by repeatedly flushing the decode pipeline.
+                        let startupGracePeriod: TimeInterval = requiresConversion ? 60.0 : 0.0
+                        let elapsedSinceStart = CFAbsoluteTimeGetCurrent() - videoDiagStartWall
+                        let inGracePeriod = elapsedSinceStart < startupGracePeriod
+                        if !isFirstVideoFrame && !inGracePeriod {
                             let syncTime = renderer.currentTime
                             let lateness = syncTime - packet.ptsSeconds
                             if lateness > lateVideoDropThreshold {
                                 lateVideoObservationCount += 1
+                                healthLateFramesSinceReport += 1
                                 consecutiveLateVideoFrames += 1
 
                                 let nowWall = CFAbsoluteTimeGetCurrent()
-                                let wantsKeyframeResync = packet.isKeyframe && consecutiveLateVideoFrames >= 4
+                                let keyframeResyncThreshold = requiresConversion ? 48 : 4
+                                let wantsKeyframeResync = packet.isKeyframe && consecutiveLateVideoFrames >= keyframeResyncThreshold
                                 let wantsForcedResync = lateness > forceLateResyncThreshold ||
                                     consecutiveLateVideoFrames >= maxConsecutiveLateFramesBeforeResync
                                 let canResync = nowWall - lastLateVideoResyncWall >= lateResyncCooldown
@@ -1152,6 +1201,7 @@ final class DirectPlayPipeline {
 
                                     if let resyncRate {
                                         lateVideoResyncCount += 1
+                                        healthResyncsSinceReport += 1
                                         lastLateVideoResyncWall = nowWall
 
                                         if lateVideoResyncCount <= 10 || lateVideoResyncCount % 60 == 0 {
@@ -1175,6 +1225,7 @@ final class DirectPlayPipeline {
                                     if shouldSoftDrop {
                                         lateVideoDropCount += 1
                                         lateVideoSoftDropCount += 1
+                                        healthDropsSinceReport += 1
                                         if lateVideoSoftDropCount <= 10 || lateVideoSoftDropCount % 120 == 0 {
                                             print("[DirectPlayDiag] Soft drop late video #\(lateVideoSoftDropCount): " +
                                                   "pts=\(String(format: "%.3f", packet.ptsSeconds))s " +
@@ -1196,6 +1247,7 @@ final class DirectPlayPipeline {
                                 // Emergency only: if a frame is extremely stale, drop it.
                                 if lateness > 4.0 {
                                     lateVideoDropCount += 1
+                                    healthDropsSinceReport += 1
                                     if lateVideoDropCount <= 10 || lateVideoDropCount % 60 == 0 {
                                         print("[DirectPlayDiag] Emergency drop #\(lateVideoDropCount): " +
                                               "pts=\(String(format: "%.3f", packet.ptsSeconds))s " +
@@ -1288,6 +1340,12 @@ final class DirectPlayPipeline {
                             } else {
                                 prerollMaxPTSSeconds = ptsSeconds
                             }
+                            // Track video PTS separately for accurate preroll lead
+                            if let maxVPTS = prerollMaxVideoPTSSeconds {
+                                prerollMaxVideoPTSSeconds = max(maxVPTS, ptsSeconds)
+                            } else {
+                                prerollMaxVideoPTSSeconds = ptsSeconds
+                            }
 
                             let didStartPreroll = await maybeCompletePrerollStart(ptsSeconds, false)
                             if !didStartPreroll, (videoPacketCount <= 10 || videoPacketCount % 120 == 0) {
@@ -1302,7 +1360,7 @@ final class DirectPlayPipeline {
                                     guard let anchor = prerollAnchorPTSSeconds, let maxPTS = prerollMaxPTSSeconds else { return 0 }
                                     return max(0, maxPTS - anchor)
                                 }()
-                                let requiredPrerollLeadSeconds = requiresConversion ? 0.45 : 0.20
+                                let requiredPrerollLeadSeconds = requiresConversion ? 5.0 : 0.20
                                 let waitedMs: Double = {
                                     guard let start = prerollWaitStartWall else { return 0 }
                                     return (CFAbsoluteTimeGetCurrent() - start) * 1000
@@ -1322,6 +1380,7 @@ final class DirectPlayPipeline {
                         let totalPipelineMs = (enqueueEnd - frameWallStart) * 1000
                         if totalPipelineMs > 120 {
                             slowVideoPipelineCount += 1
+                            healthSlowFramesSinceReport += 1
                         }
 
                         // Video cadence diagnostics (ground truth for jump/stutter analysis).
@@ -1371,6 +1430,71 @@ final class DirectPlayPipeline {
                                 "lateBurst=\(consecutiveLateVideoFrames) " +
                                 "lateResyncs=\(lateVideoResyncCount) slowFrames=\(slowVideoPipelineCount)"
                             )
+                        }
+
+                        // Periodic health report (every 5s wall time)
+                        if nowWall - lastHealthReportWall >= healthReportInterval {
+                            // Per-period wall rate (current throughput, not cumulative)
+                            let periodWall = nowWall - healthLastPeriodWall
+                            let periodStream = ptsSeconds - healthLastPeriodPTS
+                            let wallRate = periodWall > 0 ? (periodStream / periodWall) : 1.0
+                            let audioSnapshot = localAudioGate?.snapshot()
+                            let audioDrops = audioSnapshot?.dropped ?? 0
+                            let capturedLate = healthLateFramesSinceReport
+                            let capturedDrops = healthDropsSinceReport
+                            let capturedResyncs = healthResyncsSinceReport
+                            let capturedSlow = healthSlowFramesSinceReport
+                            let capturedDispErr = healthDisplayErrorsSinceReport
+
+                            let isClientDecode = audioDecoder != nil
+                            let healthResult = await MainActor.run { [weak self] () -> (line: String, totalPullDel: Int)? in
+                                guard let self else { return nil }
+                                let jitter = self.renderer.jitterStats.healthSnapshot()
+                                let status = Int(self.renderer.audioRenderer.status.rawValue)
+                                let isPull = self.renderer.useAudioPullMode
+                                let syncTime = self.renderer.currentTime
+                                let audioAhead = ptsSeconds - syncTime
+                                let dispErr = (self.renderer.displayLayerError != nil ? 1 : 0) + capturedDispErr
+                                let totalPullDel = self.renderer.totalAudioPullDeliveries
+                                let pullDel = totalPullDel - healthLastPullDeliveries
+                                let isAirPlay = PlaybackAudioSessionConfigurator.isAirPlayRouteActive()
+                                let report = PlaybackHealthReport(
+                                    playbackTime: ptsSeconds,
+                                    fps: jitter.fps,
+                                    wallRate: wallRate,
+                                    lateFrames: capturedLate,
+                                    droppedFrames: capturedDrops,
+                                    resyncs: capturedResyncs,
+                                    slowFrames: capturedSlow,
+                                    audioStatus: status,
+                                    audioPullMode: isPull,
+                                    audioAhead: audioAhead,
+                                    audioDrops: audioDrops,
+                                    audioPath: isClientDecode ? .clientDecode : .passthrough,
+                                    audioRoute: isAirPlay ? .airPlay : .hdmi,
+                                    audioPullDeliveries: pullDel,
+                                    displayErrors: dispErr,
+                                    gapMaxMs: jitter.gapMaxMs,
+                                    gapStdDevMs: jitter.gapStdDevMs,
+                                    syncDriftPercent: jitter.syncDriftPercent
+                                )
+                                return (report.logLine, totalPullDel)
+                            }
+
+                            if let result = healthResult {
+                                print(result.line)
+                                healthLastPullDeliveries = result.totalPullDel
+                            }
+
+                            // Reset per-period counters
+                            healthLateFramesSinceReport = 0
+                            healthDropsSinceReport = 0
+                            healthResyncsSinceReport = 0
+                            healthSlowFramesSinceReport = 0
+                            healthDisplayErrorsSinceReport = 0
+                            healthLastPeriodPTS = ptsSeconds
+                            healthLastPeriodWall = nowWall
+                            lastHealthReportWall = nowWall
                         }
 
                         // Single MainActor hop for post-enqueue state updates

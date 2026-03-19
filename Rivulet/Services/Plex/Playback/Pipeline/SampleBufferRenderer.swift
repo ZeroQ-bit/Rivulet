@@ -499,6 +499,11 @@ final class SampleBufferRenderer {
         return audioPullDeliveredCount
     }
 
+    /// Total audio pull deliveries (for health reporting).
+    nonisolated var totalAudioPullDeliveries: Int {
+        audioPullDeliveredCountSnapshot()
+    }
+
     // MARK: - Enqueue Video
 
     /// Enqueue a video sample buffer with pacing to prevent buffer overflow.

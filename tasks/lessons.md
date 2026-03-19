@@ -1,5 +1,47 @@
 # Lessons Learned
 
+## 2026-03-18 - Time Motion Against Frames, Not Just Feel
+
+**Mistake**: Kept nudging the carousel paging spring by feel even after the user called out that the transition was still reading too fast.
+**Pattern**: Reference-driven motion tuning needs at least one concrete frame-count pass from the source clip, because a spring that "looks close" in code can still feel materially quicker on device.
+**Rule**: When a user says a transition is too quick, measure the start-to-settle frame span from the reference clip, write the observed range down, and retune both the primary motion and any linked settle gates from that measured band instead of guessing.
+**Applied**: `Rivulet/Views/Plex/PreviewOverlayHost.swift`, `Docs/PREVIEW_REFERENCE_VIDEO.md`.
+
+## 2026-03-18 - Parallax Lag Must Land With The Card
+
+**Mistake**: Let the card-owned backdrop keep settling after the carousel frame had effectively stopped, which made the motion feel late rather than layered.
+**Pattern**: Reference-style parallax often comes from delayed onset and different travel distance, not from a later stop time.
+**Rule**: For this carousel, the internal backdrop drift can start later than the card, but it should still finish with the card settle rather than continuing to coast after it.
+**Applied**: `Rivulet/Views/Plex/PreviewOverlayHost.swift`, `Docs/PREVIEW_REFERENCE_VIDEO.md`.
+
+## 2026-03-18 - Disable Live Backdrop Upgrades If They Break Motion
+
+**Mistake**: Kept the shared backdrop-upgrade path active even though it was swapping art on nearly every preview entry and undercutting the motion work.
+**Pattern**: Visual asset quality upgrades are not worth it when they fire often enough to read as animation bugs instead of rare fidelity improvements.
+**Rule**: If live hero-art upgrades are causing repeated visible swaps, disable them and stick to Plex-provided default art until the upgrade path can be reintroduced without motion regressions.
+**Applied**: `Rivulet/Views/Plex/HeroBackdropSupport.swift`, `RivuletTests/Unit/Models/HeroBackdropSessionTests.swift`.
+
+## 2026-03-18 - Card-Owned Parallax Must Seed On The Trailing Side
+
+**Mistake**: Seeded the card-owned backdrop lag on the wrong side of the page change and with too little travel, so the internal image drift moved against the expected parallax and barely read at all.
+**Pattern**: Once layer ownership is correct, the next failure mode in motion tuning is often the sign and magnitude of the starting offset rather than the easing curve itself.
+**Rule**: For a card-owned backdrop lag, seed the internal image on the trailing side of the incoming card's travel and use enough overscan/travel for the drift to be visibly readable on device.
+**Applied**: `Rivulet/Views/Plex/PreviewOverlayHost.swift`, `Rivulet/Views/Plex/PlexDetailView.swift`.
+
+## 2026-03-18 - Carousel Backdrop Parallax Must Stay Card-Owned
+
+**Mistake**: Over-corrected the unreadable backdrop lag by moving the active preview backdrop to a detached stage layer behind the carousel, which broke the reference and felt worse than the card-owned behavior.
+**Pattern**: When a motion detail is too subtle, changing ownership layers entirely is often the wrong fix; the issue may be offset amplitude and delayed settle timing rather than the layer hierarchy itself.
+**Rule**: Keep the preview backdrop attached to the selected carousel card, but seed the image inside that card with a larger starting offset and a delayed slower settle so the card leads while the backdrop still feels attached.
+**Applied**: `Rivulet/Views/Plex/PreviewOverlayHost.swift`, `Rivulet/Views/Plex/PlexDetailView.swift`, `Docs/PREVIEW_REFERENCE_VIDEO.md`.
+
+## 2026-03-18 - Carousel Backdrop Parallax Needs Its Own Motion Track
+
+**Mistake**: Left the carousel backdrop too tightly coupled to the card transition, which flattened the Apple TV+ paging feel even though the reference clip clearly shows the card leading and the background trailing.
+**Pattern**: In reference-driven motion work, "slower background" is not just a longer duration constant; it usually requires its own seeded offset and settle animation so the layers separate perceptually.
+**Rule**: When the reference shows parallax between a focused card and its backdrop, drive the backdrop on a distinct motion track with its own offset and timing rather than binding it 1:1 to the card frame animation.
+**Applied**: `Rivulet/Views/Plex/PreviewOverlayHost.swift`, `Rivulet/Views/Plex/PlexDetailView.swift`, `Docs/PREVIEW_REFERENCE_VIDEO.md`.
+
 ## 2026-03-17 - TV Shelf Peek Depth Must Match Across Show And Season Detail
 
 **Mistake**: Tuned the real shelf peek depth for show detail but left season detail on the generic resting-height path, so season episode thumbnails sat visibly higher than the other TV items.

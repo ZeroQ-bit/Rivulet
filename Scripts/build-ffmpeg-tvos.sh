@@ -1,14 +1,17 @@
 #!/bin/bash
 #
-# Build minimal FFmpeg for tvOS (arm64 only)
-# Produces static libraries: libavformat.a, libavutil.a, libavcodec.a
-# Only demuxers, parsers, and protocols — no encoders, decoders, or filters.
+# Build FFmpeg for tvOS (arm64 only)
+# Produces static libraries + headers for Rivulet's remux pipeline.
+#
+# Includes: demuxers (MKV, MP4, HLS), muxers (fMP4), parsers,
+#           decoders (DTS/TrueHD for audio transcode, subtitles),
+#           encoders (EAC3 for audio transcode), and swresample.
 #
 # Usage: ./build-ffmpeg-tvos.sh [ffmpeg-source-dir]
 #
 # Prerequisites:
 #   - Xcode with tvOS SDK installed
-#   - FFmpeg source (git clone https://git.ffmpeg.org/ffmpeg.git)
+#   - FFmpeg source (git clone https://git.ffmpeg.org/ffmpeg.git && git checkout n7.1)
 #   - pkg-config (brew install pkg-config)
 #
 # Output: ./ffmpeg-tvos-build/lib/*.a and ./ffmpeg-tvos-build/include/*
@@ -26,7 +29,7 @@ if [ ! -d "$FFMPEG_SRC" ]; then
     echo ""
     echo "To get FFmpeg source:"
     echo "  git clone https://git.ffmpeg.org/ffmpeg.git"
-    echo "  cd ffmpeg && git checkout n7.1"
+    echo "  cd ffmpeg && git checkout n8.1"
     exit 1
 fi
 
@@ -47,9 +50,9 @@ cd "$FFMPEG_SRC"
 # Clean any previous FFmpeg build artifacts
 make distclean 2>/dev/null || true
 
-echo "Configuring FFmpeg for tvOS arm64 (demuxer-only build)..."
+echo "Configuring FFmpeg for tvOS arm64..."
 
-# Configure minimal build
+# Configure build: demuxers + mp4 muxer + audio transcode (DTS/TrueHD → EAC3)
 ./configure \
     --prefix="$BUILD_DIR" \
     --target-os=darwin \
@@ -65,12 +68,12 @@ echo "Configuring FFmpeg for tvOS arm64 (demuxer-only build)..."
     --disable-everything \
     \
     --enable-demuxer=matroska,mov,mpegts,hls,flv,avi,ogg,wav,aiff,flac,mp3,concat,srt,webvtt,ass \
+    --enable-muxer=mp4,ipod \
     --enable-parser=hevc,h264,aac,ac3,eac3,flac,opus,vorbis,h263 \
     --enable-protocol=file,http,https,tcp,tls,crypto \
-    --enable-decoder=srt,webvtt,ass,ssa,subrip,truehd,mlp,dca \
+    --enable-decoder=srt,webvtt,ass,ssa,subrip,truehd,mlp,dca,flac,pcm_s16le,pcm_s24le \
+    --enable-encoder=eac3 \
     \
-    --disable-encoders \
-    --disable-muxers \
     --disable-filters \
     --disable-bsfs \
     --disable-indevs \
@@ -81,7 +84,6 @@ echo "Configuring FFmpeg for tvOS arm64 (demuxer-only build)..."
     --disable-manpages \
     --disable-podpages \
     --disable-txtpages \
-    --disable-network \
     --enable-network \
     --disable-debug \
     --disable-symver \
@@ -89,7 +91,6 @@ echo "Configuring FFmpeg for tvOS arm64 (demuxer-only build)..."
     --disable-avdevice \
     --enable-swresample \
     --disable-swscale \
-    --disable-postproc \
     --disable-avfilter \
     --enable-small \
     --enable-pic \
@@ -108,21 +109,78 @@ echo "Installing to $BUILD_DIR..."
 make install
 
 echo ""
-echo "Build complete!"
-echo ""
-echo "Libraries:"
-ls -lh "$BUILD_DIR/lib/"*.a 2>/dev/null || echo "  (none found)"
-echo ""
-echo "Headers:"
-ls -d "$BUILD_DIR/include/"*/ 2>/dev/null || echo "  (none found)"
-echo ""
+echo "Build complete! Packaging xcframeworks..."
 
-# Show total size
-TOTAL_SIZE=$(du -sh "$BUILD_DIR/lib/" | cut -f1)
-echo "Total library size: $TOTAL_SIZE"
+# Remove non-Apple platform headers that break Clang module compilation.
+# FFmpeg installs headers for all platforms (AMD AMF, CUDA, D3D, VAAPI, etc.)
+# but only VideoToolbox is relevant on tvOS.
 echo ""
-echo "Next steps:"
-echo "  1. Add $BUILD_DIR/lib/*.a to your Xcode project (Link Binary With Libraries)"
-echo "  2. Add $BUILD_DIR/include to Header Search Paths"
-echo "  3. Add -lz -liconv to Other Linker Flags"
-echo "  4. Ensure FFmpegBridge.h is set as the bridging header for the target"
+echo "Stripping non-Apple platform headers..."
+
+# Libavutil: remove all hwcontext_* except hwcontext.h and hwcontext_videotoolbox.h
+for h in "$BUILD_DIR/include/libavutil/hwcontext_"*.h; do
+    name=$(basename "$h")
+    case "$name" in
+        hwcontext_videotoolbox.h) ;; # keep
+        *) echo "  Removing libavutil/$name"; rm "$h" ;;
+    esac
+done
+# Also remove iamf.h if it has non-Apple references
+rm -f "$BUILD_DIR/include/libavutil/hwcontext_amf.h" 2>/dev/null
+
+# Libavcodec: remove platform-specific codec headers
+for h in d3d11va.h dxva2.h vdpau.h mediacodec.h qsv.h jni.h; do
+    rm -f "$BUILD_DIR/include/libavcodec/$h" 2>/dev/null && echo "  Removing libavcodec/$h"
+done
+
+# Package each library as an xcframework
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+FW_DIR="$PROJECT_DIR/Frameworks"
+
+for lib in avformat avcodec avutil swresample; do
+    LIB_NAME="Lib${lib}"
+    echo ""
+    echo "Packaging $LIB_NAME.xcframework..."
+
+    DEVICE_FW="$BUILD_DIR/fw/${LIB_NAME}/${LIB_NAME}.framework"
+    mkdir -p "$DEVICE_FW/Headers" "$DEVICE_FW/Modules"
+
+    cp "$BUILD_DIR/lib/lib${lib}.a" "$DEVICE_FW/$LIB_NAME"
+    cp "$BUILD_DIR/include/lib${lib}/"*.h "$DEVICE_FW/Headers/"
+
+    cat > "$DEVICE_FW/Modules/module.modulemap" << MODEOF
+framework module ${LIB_NAME} [system] {
+    umbrella "."
+    export *
+}
+MODEOF
+
+    cat > "$DEVICE_FW/Info.plist" << PLISTEOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key><string>org.ffmpeg.${lib}</string>
+    <key>CFBundleName</key><string>${LIB_NAME}</string>
+    <key>CFBundleVersion</key><string>8.0.1</string>
+    <key>CFBundleShortVersionString</key><string>8.0.1</string>
+    <key>MinimumOSVersion</key><string>${TVOS_MIN}</string>
+</dict>
+</plist>
+PLISTEOF
+
+    rm -rf "$FW_DIR/${LIB_NAME}.xcframework"
+    xcodebuild -create-xcframework \
+        -framework "$DEVICE_FW" \
+        -output "$FW_DIR/${LIB_NAME}.xcframework" 2>&1 | tail -1
+done
+
+echo ""
+echo "=== Done ==="
+echo ""
+echo "Installed xcframeworks:"
+ls -d "$FW_DIR"/Lib*.xcframework 2>/dev/null
+echo ""
+TOTAL_SIZE=$(du -sh "$FW_DIR/" | cut -f1)
+echo "Total Frameworks size: $TOTAL_SIZE"

@@ -1,6 +1,6 @@
 # RivuletPlayer — Custom Video Player Architecture
 
-RivuletPlayer is Rivulet's native video player, replacing the MPV-based stack for VOD playback. It uses FFmpeg for demuxing/decoding and Apple's `AVSampleBufferDisplayLayer` for rendering, with full Dolby Vision and HDR passthrough support.
+RivuletPlayer is Rivulet's native video player, replacing the MPV-based stack for VOD playback. It uses FFmpeg for demuxing/decoding and Apple's `AVSampleBufferDisplayLayer` for rendering, with native HDR / Dolby Vision-compatible playback plus a custom DV profile-conversion path for unsupported sources.
 
 ## High-Level Architecture
 
@@ -61,7 +61,7 @@ SubtitleManager → SubtitleOverlayView
 
 | File | Lines | Description |
 |------|-------|-------------|
-| `Services/Plex/Playback/Dovi/DoviProfileConverter.swift` | ~300 | Converts incompatible DV profiles (P7 MEL, P8.4) to P8.1 on-the-fly by modifying RPU NAL units. Uses libdovi for RPU parsing/rewriting. |
+| `Services/Plex/Playback/Dovi/DoviProfileConverter.swift` | ~300 | Converts incompatible DV profiles (P7 MEL, P8.6) to P8.1 on-the-fly by modifying RPU NAL units. Uses libdovi for RPU parsing/rewriting. |
 | `Services/Plex/Playback/Dovi/HEVCNALParser.swift` | 338 | Parses HEVC NAL units from Annex-B or length-prefixed bitstreams. Extracts RPU (NAL type 62) for DV processing, injects converted RPUs back. |
 | `Services/Plex/Playback/Dovi/LibdoviWrapper.swift` | ~180 | Swift wrapper around the C libdovi library. Manages `DoviRpuOpaque` lifecycle (parse, convert profile, write). |
 
@@ -158,7 +158,7 @@ Hard blockers that start on HLS immediately:
 ### Video
 - **H.264/H.265**: Hardware decode via VideoToolbox → `CMSampleBuffer` → `AVSampleBufferDisplayLayer`
 - **Dolby Vision P5/P8.1**: Native VideoToolbox decode with DV metadata
-- **Dolby Vision P7/P8.4**: On-the-fly RPU conversion to P8.1 via libdovi before decode
+- **Dolby Vision P7/P8.6**: On-the-fly RPU conversion to P8.1 via libdovi before decode
 
 ### Audio
 - **AAC/AC3/EAC3**: Passthrough to `AVSampleBufferAudioRenderer` (Apple-native decode)

@@ -9,7 +9,8 @@ import SwiftUI
 import Combine
 
 let previewEntryAnimation = Animation.spring(response: 0.45, dampingFraction: 0.88)
-let previewPagingAnimation = Animation.interactiveSpring(response: 0.3, dampingFraction: 0.9)
+let previewPagingAnimation = Animation.interactiveSpring(response: 0.38, dampingFraction: 0.92)
+let previewBackdropPagingAnimation = Animation.easeOut(duration: 0.3)
 let previewExpandAnimation = Animation.easeInOut(duration: 0.35)
 
 /// Bridge object that allows PreviewContainerViewController to trigger Menu actions
@@ -55,6 +56,7 @@ struct PreviewOverlayHost: View {
     @State private var expandedChromeVisible = false
     @State private var verticalScrollEnabled = false
     @State private var capturedSourceFrame: CGRect?
+    @State private var heroBackdropOffset: CGFloat = 0
     @State private var metadataGate = PreviewLoadGate()
     @FocusState private var focusedArea: PreviewFocusArea?
 
@@ -62,7 +64,7 @@ struct PreviewOverlayHost: View {
     private let cornerRadius: CGFloat = 28
     private let centeredHorizontalInset: CGFloat = 92
     private let sideCardGap: CGFloat = 12
-    private let cardParallax: CGFloat = 52
+    private let backdropLagDistance: CGFloat = 188
 
     init(
         request: PreviewRequest,
@@ -110,7 +112,6 @@ struct PreviewOverlayHost: View {
             )
 
             ZStack {
-                // Solid background behind cards
                 Color.black.ignoresSafeArea()
 
                 ForEach(visibleIndices, id: \.self) { index in
@@ -131,7 +132,7 @@ struct PreviewOverlayHost: View {
                         allowVerticalScroll: verticalScrollEnabled,
                         allowActionRowInteraction: expandedChromeVisible,
                         motionLocked: stateMachine.motionLocked,
-                        backgroundParallaxOffset: CGFloat(selectedIndex - index) * cardParallax,
+                        backgroundParallaxOffset: index == selectedIndex ? heroBackdropOffset : 0,
                         cornerRadius: cardCornerRadius(for: index),
                         opacity: cardOpacity(for: index),
                         onPreviewExitRequested: handleExpandedExit,
@@ -203,6 +204,7 @@ struct PreviewOverlayHost: View {
         metadataVisible = false
         expandedChromeVisible = false
         verticalScrollEnabled = false
+        heroBackdropOffset = 0
         let token = metadataGate.begin()
 
         Task { @MainActor in
@@ -229,6 +231,7 @@ struct PreviewOverlayHost: View {
         metadataVisible = false
         expandedChromeVisible = false
         verticalScrollEnabled = false
+        heroBackdropOffset = CGFloat(delta) * backdropLagDistance
 
         let token = metadataGate.begin()
         stateMachine.beginPaging()
@@ -238,7 +241,13 @@ struct PreviewOverlayHost: View {
         }
 
         Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 340_000_000)
+            try? await Task.sleep(nanoseconds: 80_000_000)
+            guard metadataGate.isCurrent(token) else { return }
+            withAnimation(previewBackdropPagingAnimation) {
+                heroBackdropOffset = 0
+            }
+
+            try? await Task.sleep(nanoseconds: 300_000_000)
             guard metadataGate.isCurrent(token) else { return }
             stateMachine.finishPaging()
             withAnimation(.easeOut(duration: 0.28)) {

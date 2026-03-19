@@ -108,21 +108,11 @@ enum HeroBackdropSelection {
         logoURL: URL?,
         needsUpgrade: Bool
     ) -> HeroBackdropResolution {
-        let displayedBackdropURL = request.plexBackdropURL ?? tmdbBackdropURL ?? request.plexThumbnailURL
-
-        let pendingUpgradeURL: URL?
-        if needsUpgrade,
-           let tmdbBackdropURL,
-           request.plexBackdropURL != nil,
-           tmdbBackdropURL != displayedBackdropURL {
-            pendingUpgradeURL = tmdbBackdropURL
-        } else {
-            pendingUpgradeURL = nil
-        }
+        let displayedBackdropURL = request.plexBackdropURL ?? request.plexThumbnailURL ?? tmdbBackdropURL
 
         return HeroBackdropResolution(
             displayedBackdropURL: displayedBackdropURL,
-            pendingUpgradeURL: pendingUpgradeURL,
+            pendingUpgradeURL: nil,
             logoURL: logoURL,
             thumbnailURL: request.plexThumbnailURL
         )
@@ -133,10 +123,9 @@ actor HeroBackdropResolver {
     static let shared = HeroBackdropResolver()
 
     func resolveAssets(for request: HeroBackdropRequest) async -> HeroBackdropResolution {
-        async let needsUpgradeTask = plexBackdropNeedsUpgrade(request.plexBackdropURL)
         async let tmdbIdentityTask = resolvedTMDBIdentity(for: request)
 
-        let (needsUpgrade, tmdbIdentity) = await (needsUpgradeTask, tmdbIdentityTask)
+        let tmdbIdentity = await tmdbIdentityTask
 
         var logoURL: URL?
         var tmdbBackdropURL: URL?
@@ -162,7 +151,7 @@ actor HeroBackdropResolver {
             request: request,
             tmdbBackdropURL: tmdbBackdropURL,
             logoURL: logoURL,
-            needsUpgrade: needsUpgrade
+            needsUpgrade: false
         )
     }
 
@@ -193,18 +182,6 @@ actor HeroBackdropResolver {
         }
 
         return (tmdbId, mediaType)
-    }
-
-    private func plexBackdropNeedsUpgrade(_ plexBackdropURL: URL?) async -> Bool {
-        guard let plexBackdropURL else {
-            return true
-        }
-
-        guard let image = await ImageCacheManager.shared.imageFullSize(for: plexBackdropURL) else {
-            return true
-        }
-
-        return image.size.width * image.scale < 1280
     }
 }
 

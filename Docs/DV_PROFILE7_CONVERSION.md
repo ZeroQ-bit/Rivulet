@@ -105,10 +105,10 @@ Measured on Apple TV 4K (A15):
   - DisplayCriteria change triggers HDMI mode switch
   - Audio capabilities may not re-establish properly for compressed passthrough
   - HDMI output reports 2ch even when connected to 5.1 AVR
-- TrueHD auto-promotion attempted but blocked:
-  - `selectAudioStream()` fails because TrueHD (`AV_CODEC_ID_TRUEHD`) has no CoreAudio format ID in `createAudioFormatDescription()`
-  - Bug: `selectAudioStream()` is not atomic — sets `selectedAudioStream` before format description creation throws, leaving demuxer reading TrueHD packets with AC3 format description
-- **Fix needed**: For client-side decode, skip format description creation (FFmpegAudioDecoder creates its own PCM sample buffers)
+- TrueHD auto-promotion initially exposed a demuxer limitation:
+  - `selectAudioStream()` still cannot build a CoreAudio format description for TrueHD (`AV_CODEC_ID_TRUEHD`)
+  - This is now handled with `selectAudioStreamForClientDecode()`, which switches the demuxer without requiring a CoreAudio format description
+- **Remaining work**: Validate that the client-decode path is reliable enough to be the default answer for DV + lossless audio
 
 ### What dovi_tool Does Differently
 Our conversion replicates most of `dovi_tool convert --discard`, but not all:

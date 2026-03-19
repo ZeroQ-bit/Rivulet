@@ -65,7 +65,7 @@ xcodebuild -scheme Rivulet -destination 'generic/platform=tvOS' build
 
 ### Dependencies
 
-Rivulet uses [MPV](https://mpv.io/) for video playback with Metal rendering. The MPV framework must be built for tvOS — see [mpv-build](https://github.com/AdrienMusic/mpv-build) for instructions.
+Rivulet uses a custom `AVSampleBufferDisplayLayer` + FFmpeg playback stack for VOD, while [MPV](https://mpv.io/) remains in the project for Live TV and fallback playback. The MPV framework must still be built for tvOS — see [mpv-build](https://github.com/AdrienMusic/mpv-build) for instructions.
 
 ## Contributing
 

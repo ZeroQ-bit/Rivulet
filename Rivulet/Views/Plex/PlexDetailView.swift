@@ -192,7 +192,7 @@ struct PlexDetailView: View {
                 // Layer 1: Fixed backdrop (doesn't scroll, fills screen)
                 heroBackdropImage
                     .offset(x: backgroundParallaxOffset)
-                    .scaleEffect(1.04)
+                    .scaleEffect(isPreviewCarousel ? 1.12 : 1.04)
                     .frame(width: geo.size.width, height: geo.size.height)
                     .clipped()
                     .overlay {
@@ -634,7 +634,7 @@ struct PlexDetailView: View {
     private var heroBackdropImage: some View {
         HeroBackdropImage(
             url: heroBackdrop.session.displayedBackdropURL,
-            animationDuration: isPreviewCarousel ? 0.3 : 0.26
+            animationDuration: isPreviewCarousel ? 0.38 : 0.26
         ) {
             Rectangle()
                 .fill(
@@ -645,7 +645,7 @@ struct PlexDetailView: View {
                     )
                 )
         }
-        .animation(.easeOut(duration: isPreviewCarousel ? 0.42 : 0.48), value: backgroundParallaxOffset)
+        .animation(.easeOut(duration: isPreviewCarousel ? 0.46 : 0.48), value: backgroundParallaxOffset)
     }
 
     /// Gradient overlay for hero text readability (scrolls with content)
@@ -1455,8 +1455,27 @@ struct PlexDetailView: View {
             } else if selectedTrack != nil {
                 playItem = selectedTrack!
             } else {
-                // For main item (movie), prefer fullMetadata as it has Stream data for DV/HDR detection
-                playItem = fullMetadata ?? item
+                // For main item (movie), ensure full metadata with Stream data for DV/HDR detection.
+                // Hub metadata often lacks Stream details needed for Dolby Vision profile detection.
+                if let fm = fullMetadata, fm.Media?.first?.Part?.first?.Stream != nil {
+                    playItem = fm
+                } else if let serverURL = authManager.selectedServerURL,
+                          let token = authManager.selectedServerToken,
+                          let ratingKey = item.ratingKey {
+                    do {
+                        let metadata = try await networkManager.getFullMetadata(
+                            serverURL: serverURL,
+                            authToken: token,
+                            ratingKey: ratingKey
+                        )
+                        fullMetadata = metadata
+                        playItem = metadata
+                    } catch {
+                        playItem = fullMetadata ?? item
+                    }
+                } else {
+                    playItem = fullMetadata ?? item
+                }
             }
 
             // Use fullMetadata for updated viewOffset when playing the main item (not episodes/tracks)

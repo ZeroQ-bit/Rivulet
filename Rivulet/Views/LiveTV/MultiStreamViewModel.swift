@@ -69,7 +69,7 @@ final class MultiStreamViewModel: ObservableObject {
                 try await rivuletPlayer.load(url: url, headers: headers, startTime: nil)
             } else {
                 try await rivuletPlayer.load(
-                    route: .directPlay(url: url, headers: headers),
+                    route: .avPlayerDirect(url: url, headers: headers),
                     startTime: nil
                 )
             }

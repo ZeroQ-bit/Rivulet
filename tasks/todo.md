@@ -1,5 +1,118 @@
 # Playback Reliability Worklog (2026-03-02)
 
+## Carousel Paging Timing Retune (2026-03-18)
+
+## Plan
+- [x] Measure the carousel handoff timing from the reference clip.
+  - Count the first visible card-motion frame through visual settle instead of tuning the spring by feel alone.
+- [x] Slow the carousel page animation slightly.
+  - Retune the card spring and linked backdrop settle so both still land together while reading closer to the measured clip on device.
+- [x] Verify
+  - Run build-check and focused preview/backdrop verification after the timing change.
+
+## Review
+- Timed two clean lateral handoffs in `IMG_4941.MOV`; both read at roughly `8-10` frames at `30 fps` from first visible movement to settle, which puts the observed motion in the `~0.27s - 0.33s` band.
+- Slowed the carousel paging spring slightly and extended the delayed backdrop settle gate so the card and attached backdrop still land together instead of the card reading too quick relative to the reference.
+- Updated `Docs/PREVIEW_REFERENCE_VIDEO.md` with the measured frame-count range and the note that the SwiftUI implementation target can bias a little slower on device.
+- Verification passed:
+  - `xcodebuild -project Rivulet.xcodeproj -scheme Rivulet -destination 'generic/platform=tvOS' build -quiet CODE_SIGNING_ALLOWED=NO`
+  - `xcodebuild test -project Rivulet.xcodeproj -scheme Rivulet -destination 'platform=tvOS Simulator,id=F34B8F67-7F13-468F-9526-6A38C6B2181B' -only-testing:RivuletTests/PreviewFlowStateTests -only-testing:RivuletTests/HeroBackdropSessionTests -only-testing:RivuletTests/PlexMetadataHeroBrandingTests -derivedDataPath /tmp/rivulet-preview-paging-timing-tests -quiet CODE_SIGNING_ALLOWED=NO`
+  - Result: build succeeded; all three focused test classes passed.
+
+## Carousel Settle Alignment + Plex Art Lock (2026-03-18)
+
+## Plan
+- [x] Re-check the reference stop timing.
+  - Confirm whether the card and internal backdrop should finish together instead of letting the backdrop coast past the card settle.
+- [x] Align the backdrop settle with the card.
+  - Keep the delayed-start card-owned drift, but shorten the settle so it lands with the carousel frame.
+- [x] Disable live backdrop upgrades.
+  - Stop generating/scheduling pending "better art" swaps and keep Plex default hero art in place for now.
+- [x] Verify
+  - Run build-check and focused preview/backdrop verification after the timing and backdrop-lock changes.
+
+## Review
+- Rechecked the clip and aligned the card-owned backdrop lag so it starts late but now lands with the card instead of drifting after the page motion has already settled.
+- Disabled the shared live backdrop-upgrade path, so preview/detail surfaces now keep Plex-provided default art instead of swapping to a "better" image on repeated entries.
+- Verification passed:
+  - `xcodebuild -project Rivulet.xcodeproj -scheme Rivulet -destination 'generic/platform=tvOS' build -quiet CODE_SIGNING_ALLOWED=NO`
+  - `xcodebuild test -project Rivulet.xcodeproj -scheme Rivulet -destination 'platform=tvOS Simulator,id=F34B8F67-7F13-468F-9526-6A38C6B2181B' -only-testing:RivuletTests/PreviewFlowStateTests -only-testing:RivuletTests/HeroBackdropSessionTests -only-testing:RivuletTests/PlexMetadataHeroBrandingTests -derivedDataPath /tmp/rivulet-preview-stop-and-plex-art-tests -quiet CODE_SIGNING_ALLOWED=NO`
+  - Result: build succeeded; all three focused test classes passed.
+
+## Carousel Backdrop Parallax Direction Fix (2026-03-18)
+
+## Plan
+- [x] Correct the seeded lag direction.
+  - Flip the internal backdrop offset so the image starts on the trailing side of the incoming card's motion instead of the leading side.
+- [x] Increase the visible drift.
+  - Raise the card-owned backdrop travel and preview overscan so the parallax reads more clearly on device.
+- [x] Verify
+  - Run build-check and focused preview/backdrop verification after the sign/amplitude correction.
+
+## Review
+- Flipped the card-owned backdrop lag so the internal image now starts on the trailing side of the page motion instead of drifting the wrong way.
+- Increased the preview-only backdrop travel and overscan so the lag should read more clearly without detaching the backdrop from the selected card.
+- Verification passed:
+  - `xcodebuild -project Rivulet.xcodeproj -scheme Rivulet -destination 'generic/platform=tvOS' build -quiet CODE_SIGNING_ALLOWED=NO`
+  - `xcodebuild test -project Rivulet.xcodeproj -scheme Rivulet -destination 'platform=tvOS Simulator,id=F34B8F67-7F13-468F-9526-6A38C6B2181B' -only-testing:RivuletTests/PreviewFlowStateTests -only-testing:RivuletTests/HeroBackdropSessionTests -only-testing:RivuletTests/PlexMetadataHeroBrandingTests -derivedDataPath /tmp/rivulet-preview-card-parallax-direction-tests -quiet CODE_SIGNING_ALLOWED=NO`
+  - Result: build succeeded; all three focused test classes passed.
+
+## Carousel Backdrop Parallax Retry (2026-03-18)
+
+## Plan
+- [x] Undo the detached stage-backdrop experiment.
+  - Restore the selected hero card as the owner of the active backdrop instead of keeping a shared stage-level background behind the carousel.
+- [x] Retune the card-owned lag so it actually reads.
+  - Increase the internal backdrop offset, add a short delay before it settles, and give the preview card more backdrop overscan so the slower drift is visible while still moving with the carousel.
+- [x] Verify
+  - Run build-check and focused preview/backdrop verification after the retry.
+
+## Review
+- Reverted the stage-owned backdrop experiment and restored the active backdrop to the selected carousel card, matching the reference ownership model again.
+- Retuned the card-owned backdrop lag with a larger starting offset, a short delayed settle, and extra preview overscan so the image should drift more visibly while still traveling with the card.
+- Verification passed:
+  - `xcodebuild -project Rivulet.xcodeproj -scheme Rivulet -destination 'generic/platform=tvOS' build -quiet CODE_SIGNING_ALLOWED=NO`
+  - `xcodebuild test -project Rivulet.xcodeproj -scheme Rivulet -destination 'platform=tvOS Simulator,id=F34B8F67-7F13-468F-9526-6A38C6B2181B' -only-testing:RivuletTests/PreviewFlowStateTests -only-testing:RivuletTests/HeroBackdropSessionTests -only-testing:RivuletTests/PlexMetadataHeroBrandingTests -derivedDataPath /tmp/rivulet-preview-card-owned-parallax-tests -quiet CODE_SIGNING_ALLOWED=NO`
+  - Result: build succeeded; all three focused test classes passed.
+
+## Preview Stage Backdrop Decoupling (2026-03-18)
+
+## Plan
+- [x] Re-check why the prior parallax patch still read as card-attached.
+  - Confirm whether the active backdrop was still visually confined to the selected card surface.
+- [x] Move carousel backdrop ownership to the stage.
+  - Render the active hero backdrop as a stage-level layer behind the cards and keep the selected hero card on top of it.
+  - Increase the lag distance now that the backdrop is no longer clipped to the moving card.
+- [x] Verify
+  - Run build-check and focused preview/backdrop verification after the stage-backdrop change.
+
+## Review
+- Moved the active preview backdrop out of the selected hero card and onto a shared stage layer behind the carousel, so the card can travel independently while the background trails on its own track.
+- Kept the selected hero card over the shared stage backdrop with its own overlay chrome, which makes the backdrop lag visibly readable instead of feeling like texture drift inside the card.
+- Verification passed:
+  - `xcodebuild -project Rivulet.xcodeproj -scheme Rivulet -destination 'generic/platform=tvOS' build -quiet CODE_SIGNING_ALLOWED=NO`
+  - `xcodebuild test -project Rivulet.xcodeproj -scheme Rivulet -destination 'platform=tvOS Simulator,id=F34B8F67-7F13-468F-9526-6A38C6B2181B' -only-testing:RivuletTests/PreviewFlowStateTests -only-testing:RivuletTests/HeroBackdropSessionTests -only-testing:RivuletTests/PlexMetadataHeroBrandingTests -derivedDataPath /tmp/rivulet-preview-stage-backdrop-tests -quiet CODE_SIGNING_ALLOWED=NO`
+  - Result: build succeeded; all three focused test classes passed.
+
+## Carousel Backdrop Parallax Follow-up (2026-03-18)
+
+## Plan
+- [x] Re-check the reference clip for the card/backdrop motion relationship during carousel paging.
+  - Confirm whether the backdrop is simply slower or actually runs on a visibly separate lagging track.
+- [x] Patch the preview carousel backdrop motion.
+  - Give the incoming hero backdrop its own seeded offset and slower settle animation so the card leads and the background trails during page changes.
+  - Slow the preview backdrop crossfade slightly so the art handoff matches the lagging motion.
+- [x] Verify
+  - Run build-check and focused preview/backdrop verification after the paging-motion adjustment.
+
+## Review
+- Updated the preview carousel so the incoming hero backdrop starts from a small opposite-direction offset and eases home on a slower curve, instead of reading as locked to the card frame.
+- Slowed the preview hero backdrop crossfade slightly so the image handoff keeps drifting after the card is already close to settled, matching the Apple TV+ reference more closely.
+- Verification passed:
+  - `xcodebuild -project Rivulet.xcodeproj -scheme Rivulet -destination 'generic/platform=tvOS' build -quiet CODE_SIGNING_ALLOWED=NO`
+  - `xcodebuild test -project Rivulet.xcodeproj -scheme Rivulet -destination 'platform=tvOS Simulator,id=F34B8F67-7F13-468F-9526-6A38C6B2181B' -only-testing:RivuletTests/PreviewFlowStateTests -only-testing:RivuletTests/HeroBackdropSessionTests -only-testing:RivuletTests/PlexMetadataHeroBrandingTests -derivedDataPath /tmp/rivulet-preview-parallax-tests -quiet CODE_SIGNING_ALLOWED=NO`
+  - Result: build succeeded; all three focused test classes passed.
+
 ## Pause/Resume Audio Re-Prime Fix (2026-03-18)
 
 ## Plan
