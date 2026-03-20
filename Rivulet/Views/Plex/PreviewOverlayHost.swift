@@ -63,9 +63,9 @@ struct PreviewOverlayHost: View {
 
     private let topInset: CGFloat = 52
     private let cornerRadius: CGFloat = 28
-    private let centeredHorizontalInset: CGFloat = 92
-    private let sideCardGap: CGFloat = 12
-    private let backdropLagDistance: CGFloat = 188
+    private let centeredHorizontalInset: CGFloat = 88
+    private let sideCardGap: CGFloat = 14
+    private let backdropLagDistance: CGFloat = 120
 
     init(
         request: PreviewRequest,
@@ -89,7 +89,8 @@ struct PreviewOverlayHost: View {
         case .entryMorph:
             return [selectedIndex]
         case .carouselStable, .expandingHero, .expandedHero, .detailsStable, .exiting:
-            return [selectedIndex - 1, selectedIndex, selectedIndex + 1]
+            // Two on each side so outgoing edge cards animate away instead of vanishing
+            return [selectedIndex - 2, selectedIndex - 1, selectedIndex, selectedIndex + 1, selectedIndex + 2]
                 .filter { request.items.indices.contains($0) }
         }
     }
@@ -113,7 +114,9 @@ struct PreviewOverlayHost: View {
             )
 
             ZStack {
-                Color.black.ignoresSafeArea()
+                Rectangle()
+                    .fill(.ultraThinMaterial)
+                    .ignoresSafeArea()
 
                 if stateMachine.isExpanded {
                     PreviewHeroSurface(
@@ -132,15 +135,6 @@ struct PreviewOverlayHost: View {
                         }
                     )
                     .allowsHitTesting(true)
-                } else if stateMachine.phase != .entryMorph {
-                    PreviewBackdropStage(
-                        item: request.items[selectedIndex],
-                        serverURL: serverURL,
-                        authToken: authToken,
-                        motionLocked: stateMachine.motionLocked,
-                        backgroundParallaxOffset: heroBackdropOffset
-                    )
-                    .transition(.opacity)
                 }
 
                 ForEach(visibleIndices, id: \.self) { index in
@@ -162,7 +156,7 @@ struct PreviewOverlayHost: View {
                         allowActionRowInteraction: expandedChromeVisible,
                         pagingMotionActive: pagingMotionActive,
                         motionLocked: stateMachine.motionLocked,
-                        backgroundParallaxOffset: heroBackdropOffset,
+                        backgroundParallaxOffset: 0,
                         onPreviewExitRequested: handleExpandedExit,
                         onDetailsBecameVisible: {
                             if index == selectedIndex {
@@ -172,7 +166,7 @@ struct PreviewOverlayHost: View {
                         cornerRadius: cardCornerRadius(for: index),
                         opacity: cardOpacity(for: index)
                     )
-                    .zIndex(index == selectedIndex ? 2 : 1)
+                    .zIndex(0)
                 }
 
                 if stateMachine.isCarouselInputEnabled {
@@ -263,6 +257,7 @@ struct PreviewOverlayHost: View {
         expandedChromeVisible = false
         verticalScrollEnabled = false
         pagingMotionActive = true
+
         heroBackdropOffset = CGFloat(delta) * backdropLagDistance
 
         let token = metadataGate.begin()
@@ -283,7 +278,11 @@ struct PreviewOverlayHost: View {
             guard metadataGate.isCurrent(token) else { return }
             stateMachine.finishPaging()
             pagingMotionActive = false
-            withAnimation(.easeOut(duration: 0.28)) {
+
+            // Brief pause after card settles before metadata fade-in
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            guard metadataGate.isCurrent(token) else { return }
+            withAnimation(.easeOut(duration: 0.5)) {
                 metadataVisible = true
             }
         }
@@ -390,12 +389,8 @@ struct PreviewOverlayHost: View {
             }
         }
 
-        let x: CGFloat
-        if index < selectedIndex {
-            x = centeredFrame.minX - centeredFrame.width - sideCardGap
-        } else {
-            x = centeredFrame.maxX + sideCardGap
-        }
+        let offset = index - selectedIndex
+        let x = centeredFrame.minX + CGFloat(offset) * (centeredFrame.width + sideCardGap)
 
         return CGRect(
             x: x,
@@ -471,7 +466,6 @@ private struct PreviewCarouselCard: View {
                 motionLocked: motionLocked,
                 backgroundParallaxOffset: backgroundParallaxOffset
             )
-            .opacity(showsHeroOverlay ? 0 : 1)
 
             if isCurrent {
                 PreviewHeroSurface(
@@ -492,9 +486,7 @@ private struct PreviewCarouselCard: View {
         }
         .animation(.easeOut(duration: 0.2), value: showsHeroOverlay)
         .frame(width: frame.width, height: frame.height)
-        .clipped()
-        .opacity(opacity)
-        .clipShape(
+        .mask(
             UnevenRoundedRectangle(
                 topLeadingRadius: cornerRadius,
                 bottomLeadingRadius: 0,
@@ -503,6 +495,7 @@ private struct PreviewCarouselCard: View {
                 style: .continuous
             )
         )
+        .opacity(opacity)
         .position(x: frame.midX, y: frame.midY)
         .allowsHitTesting(false)
     }
@@ -604,8 +597,6 @@ private struct PreviewCarouselSideCard: View {
                 )
         }
         .offset(x: backgroundParallaxOffset)
-        .scaleEffect(1.08)
-        .animation(previewBackdropPagingAnimation, value: backgroundParallaxOffset)
         .overlay {
             UnevenRoundedRectangle(
                 topLeadingRadius: 28,

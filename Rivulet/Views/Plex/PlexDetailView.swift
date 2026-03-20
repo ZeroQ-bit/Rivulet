@@ -106,7 +106,18 @@ struct PlexDetailView: View {
     private let recommendationService = PersonalizedRecommendationService.shared
     private var isPreviewCarousel: Bool { presentationMode == .previewCarousel }
     private var isExpandedPreviewFlow: Bool { onPreviewExitRequested != nil && presentationMode == .expandedDetail }
-    private let heroOverlayHorizontalInset: CGFloat = 60
+    private let heroOverlayHorizontalInset: CGFloat = 140
+
+    /// Effective metadata visibility — in preview/carousel flows, gates on
+    /// fullMetadata being loaded so genres, cast, summary all appear together
+    /// instead of popping in piecemeal.
+    private var effectiveMetadataVisible: Bool {
+        guard showMetadata else { return false }
+        if isPreviewCarousel || isExpandedPreviewFlow {
+            return fullMetadata != nil
+        }
+        return true
+    }
 
     private var heroBrandTitle: String {
         if currentItem.type == "season" {
@@ -215,8 +226,8 @@ struct PlexDetailView: View {
                     startRadius: geo.size.width * 0.25,
                     endRadius: geo.size.width * 0.75
                 )
-                .opacity(showMetadata ? 1 : 0)
-                .animation(.easeInOut(duration: 0.7), value: showMetadata)
+                .opacity(effectiveMetadataVisible ? 1 : 0)
+                .animation(.easeOut(duration: 0.5), value: effectiveMetadataVisible)
                 .ignoresSafeArea()
                 .allowsHitTesting(false)
 
@@ -224,17 +235,18 @@ struct PlexDetailView: View {
                 LinearGradient(
                     stops: [
                         .init(color: .clear, location: 0.0),
-                        .init(color: .black.opacity(0.4), location: 0.25),
-                        .init(color: .black.opacity(0.75), location: 0.55),
-                        .init(color: .black.opacity(0.9), location: 1.0),
+                        .init(color: .black.opacity(0.35), location: 0.15),
+                        .init(color: .black.opacity(0.7), location: 0.35),
+                        .init(color: .black.opacity(0.88), location: 0.55),
+                        .init(color: .black.opacity(0.95), location: 1.0),
                     ],
                     startPoint: .top,
                     endPoint: .bottom
                 )
-                .frame(height: geo.size.height * 0.55)
+                .frame(height: geo.size.height * 0.65)
                 .frame(maxHeight: .infinity, alignment: .bottom)
-                .opacity(showMetadata ? 1 : 0)
-                .animation(.easeInOut(duration: 0.7), value: showMetadata)
+                .opacity(effectiveMetadataVisible ? 1 : 0)
+                .animation(.easeOut(duration: 0.5), value: effectiveMetadataVisible)
                 .ignoresSafeArea()
                 .allowsHitTesting(false)
 
@@ -243,14 +255,11 @@ struct PlexDetailView: View {
                 ScrollView(.vertical, showsIndicators: false) {
                     VStack(alignment: .leading, spacing: 0) {
                         // Metadata pinned near bottom of visible area
-                        VStack(alignment: .leading, spacing: 0) {
-                            Spacer(minLength: 0)
-                            heroMetadataOverlay
-                                .padding(.horizontal, heroOverlayHorizontalInset)
-                                .opacity(showMetadata ? (1 - scrollProgress) : 0)
-                        }
-                        .frame(height: heroHeight)
-                        .id("scrollTop")
+                        heroMetadataOverlay
+                            .opacity(effectiveMetadataVisible ? (1 - scrollProgress) : 0)
+                            .animation(.easeOut(duration: 0.5), value: effectiveMetadataVisible)
+                            .frame(height: heroHeight)
+                            .id("scrollTop")
 
                         // Below-fold page: ZStack decouples min height from content layout.
                         // Color.clear sets the height floor; the VStack sits on top
@@ -619,7 +628,7 @@ struct PlexDetailView: View {
         switch currentItem.type {
         case "show", "season", "episode":
             // TV detail surfaces should all expose the shelf at the same shallow depth.
-            shelfPeek = 136
+            shelfPeek = 160
         default:
             shelfPeek = 220
         }
@@ -673,7 +682,7 @@ struct PlexDetailView: View {
 
                 // Text content — fixed height so buttons/peek distance
                 // stays constant regardless of description length, logo vs title, etc.
-                VStack(alignment: .leading, spacing: 10) {
+                VStack(alignment: .leading, spacing: 14) {
                     // TMDB logo or title — fixed height so content below is always
                     // at the same position regardless of logo aspect ratio
                     Group {
@@ -694,12 +703,12 @@ struct PlexDetailView: View {
                         }
                     }
                     .frame(maxWidth: 520, alignment: .leading)
-                    .frame(height: 112, alignment: .bottomLeading)
+                    .frame(height: 120, alignment: .bottomLeading)
 
                     // Genre + content rating row
                     heroMetadataRow
 
-                    // Description area
+                    // Description area (narrower than full metadata block, per Apple TV+ reference)
                     VStack(alignment: .leading, spacing: 4) {
                         if currentItem.type == "episode" {
                             if let epString = currentItem.episodeString {
@@ -709,7 +718,7 @@ struct PlexDetailView: View {
                                 (Text(header).bold() + Text(desc.isEmpty ? "" : ":  \(desc)"))
                                     .font(.caption)
                                     .foregroundStyle(.white)
-                                    .lineLimit(4)
+                                    .lineLimit(3)
                             }
                         } else if currentItem.type == "show" || currentItem.type == "season" {
                             if let tagline = fullMetadata?.tagline ?? currentItem.tagline {
@@ -722,7 +731,7 @@ struct PlexDetailView: View {
                                 Text(summary)
                                     .font(.caption)
                                     .foregroundStyle(.white.opacity(0.85))
-                                    .lineLimit(4)
+                                    .lineLimit(3)
                             }
                         } else {
                             if let tagline = fullMetadata?.tagline ?? currentItem.tagline {
@@ -734,10 +743,11 @@ struct PlexDetailView: View {
                                 Text(summary)
                                     .font(.caption)
                                     .foregroundStyle(.white.opacity(0.85))
-                                    .lineLimit(4)
+                                    .lineLimit(3)
                             }
                         }
                     }
+                    .frame(maxWidth: 560, alignment: .leading)
 
                     // Year · Duration · Quality badges
                     heroQualityRow
@@ -749,7 +759,7 @@ struct PlexDetailView: View {
                             .foregroundStyle(.white.opacity(0.7))
                     }
                 }
-                .frame(height: 392, alignment: .bottomLeading)
+                .frame(height: 420, alignment: .bottomLeading)
                 .frame(maxWidth: 760, alignment: .leading)
 
                 // Bottom row: buttons (left) + starring (right) — full width
@@ -768,21 +778,22 @@ struct PlexDetailView: View {
 
                     // Starring (comma-separated, right-aligned)
                     if let roles = (fullMetadata ?? currentItem).Role, !roles.isEmpty {
-                        let topCast = roles.prefix(5).compactMap { $0.tag }
+                        let topCast = roles.prefix(3).compactMap { $0.tag }
                         if !topCast.isEmpty {
                             Text("Starring \(topCast.joined(separator: ", "))")
                                 .font(.caption)
                                 .foregroundStyle(.white.opacity(0.85))
-                                .lineLimit(2)
+                                .lineLimit(3)
                                 .multilineTextAlignment(.trailing)
-                                .frame(maxWidth: 700, alignment: .trailing)
+                                .frame(maxWidth: 460, alignment: .trailing)
                         }
                     }
                 }
                 .padding(.top, 24)
-                .opacity(showMetadata ? 1 : 0)
+                .opacity(effectiveMetadataVisible ? 1 : 0)
                 .allowsHitTesting(allowActionRowInteraction)
             }
+            .padding(.horizontal, heroOverlayHorizontalInset)
         }
         .animation(.easeInOut(duration: 0.3), value: currentItem.ratingKey)
     }
@@ -819,31 +830,24 @@ struct PlexDetailView: View {
 
     private var heroTitleText: some View {
         Text(heroBrandTitle)
-            .font(.system(size: 44, weight: .bold))
+            .font(.system(size: 52, weight: .bold))
             .foregroundStyle(.white)
             .shadow(color: .black.opacity(0.5), radius: 10, x: 0, y: 4)
     }
 
-    /// Genre tags + content rating badge
+    /// Genre tags + content rating badge (Apple TV+ style: "TV Show · Adventure · Sci-Fi [TV-14]")
     private var heroMetadataRow: some View {
-        HStack(spacing: 10) {
-            // Type label for non-obvious types
-            if currentItem.type == "show" {
-                Text("Series")
-            } else if let seasonLabel = seasonHeroContextLabel {
-                Text(seasonLabel)
-            }
-
-            // Genres (up to 3)
-            if let genres = (fullMetadata ?? currentItem).Genre?.prefix(3) {
-                ForEach(Array(genres), id: \.id) { genre in
-                    if let tag = genre.tag {
-                        Text(tag)
-                    }
+        HStack(spacing: 8) {
+            // Build label parts with dot separators
+            let parts = heroMetadataParts
+            ForEach(Array(parts.enumerated()), id: \.offset) { index, part in
+                if index > 0 {
+                    Text("·")
                 }
+                Text(part)
             }
 
-            // Content rating badge
+            // Content rating badge (bordered, at end)
             if let contentRating = fullMetadata?.contentRating ?? currentItem.contentRating {
                 Text(contentRating)
                     .padding(.horizontal, 6)
@@ -858,14 +862,45 @@ struct PlexDetailView: View {
         .foregroundStyle(.white.opacity(0.85))
     }
 
-    /// Year, duration, quality badges row
+    private var heroMetadataParts: [String] {
+        var parts: [String] = []
+
+        // Type label: prefer library section title, fall back to content type
+        if let library = (fullMetadata ?? currentItem).librarySectionTitle {
+            parts.append(library)
+        } else if currentItem.type == "show" || currentItem.type == "episode" || currentItem.type == "season" {
+            parts.append("TV Show")
+        } else if currentItem.type == "movie" {
+            parts.append("Movie")
+        }
+
+        // Genres (up to 2 — keeps the row concise alongside the type label and rating badge)
+        let genreSource = fullMetadata ?? currentItem
+        if let genres = genreSource.Genre?.prefix(2) {
+            for genre in genres {
+                if let tag = genre.tag {
+                    parts.append(tag)
+                }
+            }
+        }
+
+        return parts
+    }
+
+    /// Year, duration, quality badges row (Apple TV+ style: "2023 · 49 min [4K] [DV] [5.1]")
     private var heroQualityRow: some View {
-        HStack(spacing: 10) {
-            if let year = fullMetadata?.year ?? currentItem.year {
+        HStack(spacing: 8) {
+            // Year · Duration with dot separator
+            let year = fullMetadata?.year ?? currentItem.year
+            let duration = fullMetadata?.durationFormatted ?? currentItem.durationFormatted
+
+            if let year {
                 Text(String(year))
             }
-
-            if let duration = fullMetadata?.durationFormatted ?? currentItem.durationFormatted {
+            if year != nil && duration != nil {
+                Text("·")
+            }
+            if let duration {
                 Text(duration)
             }
 
@@ -1025,11 +1060,11 @@ struct PlexDetailView: View {
 
     // MARK: - Action Buttons (Apple TV+ style)
 
-    private let pillButtonHeight: CGFloat = 58
-    private let circleButtonSize: CGFloat = 58
+    private let pillButtonHeight: CGFloat = 66
+    private let circleButtonSize: CGFloat = 66
 
     private var actionButtons: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 18) {
             // Primary play button with inline progress + time remaining
             if currentItem.type == "artist" {
                 Button {
@@ -1043,8 +1078,8 @@ struct PlexDetailView: View {
                         }
                         Text("Play All")
                     }
-                    .font(.system(size: 18, weight: .semibold))
-                    .padding(.horizontal, 28)
+                    .font(.system(size: 22, weight: .semibold))
+                    .padding(.horizontal, 32)
                     .frame(height: pillButtonHeight)
                 }
                 .buttonStyle(AppStoreActionButtonStyle(isFocused: focusedActionButton == "play", cornerRadius: pillButtonHeight / 2))
@@ -1059,8 +1094,8 @@ struct PlexDetailView: View {
                         Image(systemName: "play.fill")
                         Text("Play Album")
                     }
-                    .font(.system(size: 18, weight: .semibold))
-                    .padding(.horizontal, 28)
+                    .font(.system(size: 22, weight: .semibold))
+                    .padding(.horizontal, 32)
                     .frame(height: pillButtonHeight)
                 }
                 .buttonStyle(AppStoreActionButtonStyle(isFocused: focusedActionButton == "play", cornerRadius: pillButtonHeight / 2))
@@ -1073,8 +1108,8 @@ struct PlexDetailView: View {
                     showPlayer = true
                 } label: {
                     playButtonLabel(text: showPlayButtonLabel, isFocused: focusedActionButton == "play")
-                        .font(.system(size: 18, weight: .semibold))
-                        .padding(.horizontal, 28)
+                        .font(.system(size: 22, weight: .semibold))
+                        .padding(.horizontal, 32)
                         .frame(height: pillButtonHeight)
                 }
                 .buttonStyle(AppStoreActionButtonStyle(isFocused: focusedActionButton == "play", cornerRadius: pillButtonHeight / 2))
@@ -1093,8 +1128,8 @@ struct PlexDetailView: View {
                         }
                         Text("Shuffle")
                     }
-                    .font(.system(size: 18, weight: .semibold))
-                    .padding(.horizontal, 28)
+                    .font(.system(size: 22, weight: .semibold))
+                    .padding(.horizontal, 32)
                     .frame(height: pillButtonHeight)
                 }
                 .buttonStyle(AppStoreActionButtonStyle(isFocused: focusedActionButton == "shuffle", cornerRadius: pillButtonHeight / 2, isPrimary: false))
@@ -1107,8 +1142,8 @@ struct PlexDetailView: View {
                     showPlayer = true
                 } label: {
                     playButtonLabel(text: effectiveItem.isInProgress ? "Resume" : "Play", isFocused: focusedActionButton == "play")
-                        .font(.system(size: 18, weight: .semibold))
-                        .padding(.horizontal, 28)
+                        .font(.system(size: 22, weight: .semibold))
+                        .padding(.horizontal, 32)
                         .frame(height: pillButtonHeight)
                 }
                 .buttonStyle(AppStoreActionButtonStyle(isFocused: focusedActionButton == "play", cornerRadius: pillButtonHeight / 2))
@@ -1121,7 +1156,7 @@ struct PlexDetailView: View {
                     Task { await toggleWatched() }
                 } label: {
                     Image(systemName: "checkmark")
-                        .font(.system(size: 20, weight: .semibold))
+                        .font(.system(size: 24, weight: .semibold))
                         .frame(width: circleButtonSize, height: circleButtonSize)
                 }
                 .buttonStyle(AppStoreActionButtonStyle(isFocused: focusedActionButton == "watched", cornerRadius: circleButtonSize / 2, isPrimary: false))
@@ -1134,7 +1169,7 @@ struct PlexDetailView: View {
                     Task { await toggleStarRating() }
                 } label: {
                     Image(systemName: isStarred ? "star.fill" : "star")
-                        .font(.system(size: 20, weight: .semibold))
+                        .font(.system(size: 24, weight: .semibold))
                         .frame(width: circleButtonSize, height: circleButtonSize)
                 }
                 .buttonStyle(AppStoreActionButtonStyle(isFocused: focusedActionButton == "star", cornerRadius: circleButtonSize / 2, isPrimary: false))
@@ -1147,7 +1182,7 @@ struct PlexDetailView: View {
                     showBioSheet = true
                 } label: {
                     Image(systemName: "info.circle")
-                        .font(.system(size: 20, weight: .semibold))
+                        .font(.system(size: 24, weight: .semibold))
                         .frame(width: circleButtonSize, height: circleButtonSize)
                 }
                 .buttonStyle(AppStoreActionButtonStyle(isFocused: focusedActionButton == "info", cornerRadius: circleButtonSize / 2, isPrimary: false))
@@ -1160,7 +1195,7 @@ struct PlexDetailView: View {
                     Task { await loadAndPlayTrailer() }
                 } label: {
                     Image(systemName: "film")
-                        .font(.system(size: 20, weight: .semibold))
+                        .font(.system(size: 24, weight: .semibold))
                         .frame(width: circleButtonSize, height: circleButtonSize)
                 }
                 .buttonStyle(AppStoreActionButtonStyle(isFocused: focusedActionButton == "trailer", cornerRadius: circleButtonSize / 2, isPrimary: false))
@@ -1551,6 +1586,10 @@ struct PlexDetailView: View {
 
             // If cache is fresh enough, skip the network request entirely
             if PlexDataStore.shared.isFullMetadataFresh(for: ratingKey) {
+                // Still need to backfill genres for episodes from parent show
+                if cached.type == "episode", (cached.Genre == nil || cached.Genre?.isEmpty == true) {
+                    await backfillParentGenres(serverURL: serverURL, authToken: token)
+                }
                 isLoadingExtras = false
                 return
             }
@@ -1558,11 +1597,23 @@ struct PlexDetailView: View {
 
         // Fetch from network (either no cache or stale cache)
         do {
-            let metadata = try await networkManager.getFullMetadata(
+            var metadata = try await networkManager.getFullMetadata(
                 serverURL: serverURL,
                 authToken: token,
                 ratingKey: ratingKey
             )
+
+            // Episodes don't carry Genre — backfill from parent show
+            if metadata.type == "episode", (metadata.Genre == nil || metadata.Genre?.isEmpty == true),
+               let showKey = metadata.grandparentRatingKey ?? currentItem.grandparentRatingKey {
+                if let showMeta = try? await networkManager.getFullMetadata(
+                    serverURL: serverURL, authToken: token, ratingKey: showKey
+                ) {
+                    metadata.Genre = showMeta.Genre
+                    metadata.contentRating = metadata.contentRating ?? showMeta.contentRating
+                }
+            }
+
             fullMetadata = metadata
             PlexDataStore.shared.cacheFullMetadata(metadata, for: ratingKey)
 
@@ -1576,6 +1627,21 @@ struct PlexDetailView: View {
         }
 
         isLoadingExtras = false
+    }
+
+    /// Backfill genres from parent show for episodes that don't carry their own
+    private func backfillParentGenres(serverURL: String, authToken: String) async {
+        guard var current = fullMetadata, current.type == "episode",
+              let showKey = current.grandparentRatingKey ?? currentItem.grandparentRatingKey else { return }
+
+        if let showMeta = try? await networkManager.getFullMetadata(
+            serverURL: serverURL, authToken: authToken, ratingKey: showKey
+        ) {
+            current.Genre = showMeta.Genre
+            current.contentRating = current.contentRating ?? showMeta.contentRating
+            fullMetadata = current
+            PlexDataStore.shared.cacheFullMetadata(current, for: current.ratingKey ?? "")
+        }
     }
 
     private func syncHeroBackdrop(tmdbIdOverride: Int? = nil, tvdbIdOverride: Int? = nil) {

@@ -455,9 +455,12 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
             throw PlexAPIError.notFound
         }
 
-        // Copy librarySectionID from container to item if not present
+        // Copy library section info from container to item if not present
         if item.librarySectionID == nil {
             item.librarySectionID = container.MediaContainer.librarySectionID
+        }
+        if item.librarySectionTitle == nil {
+            item.librarySectionTitle = container.MediaContainer.librarySectionTitle
         }
 
         return item

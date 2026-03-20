@@ -64,6 +64,8 @@ Remember: users view this on a TV from across the room. Design for:
 
 - **Don't add "just in case" features**: Every element must earn its place. If users haven't asked for it, don't build it.
 
+- **Don't use solid color backgrounds**: Always prefer translucent materials (`.ultraThinMaterial`, `.thinMaterial`, `.regularMaterial`, or `.glassEffect()`) over opaque fills like `Color.black` or `Color.gray` for overlay and container backgrounds. Solid colors feel flat and disconnected from the system aesthetic. The only exception is when an opaque background is explicitly required (e.g., behind video playback).
+
 ---
 
 ## Focus & Selection Styling
