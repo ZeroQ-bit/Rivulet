@@ -79,7 +79,7 @@ struct PreviewStateMachine {
     }
 
     var isExpanded: Bool {
-        phase == .expandingHero || phase == .expandedHero || phase == .detailsStable
+        phase == .expandedHero || phase == .detailsStable
     }
 
     mutating func completeEntryMorph() {

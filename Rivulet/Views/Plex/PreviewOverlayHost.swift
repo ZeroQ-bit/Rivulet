@@ -257,7 +257,6 @@ struct PreviewOverlayHost: View {
         expandedChromeVisible = false
         verticalScrollEnabled = false
         pagingMotionActive = true
-
         heroBackdropOffset = CGFloat(delta) * backdropLagDistance
 
         let token = metadataGate.begin()
@@ -384,7 +383,12 @@ struct PreviewOverlayHost: View {
             switch stateMachine.phase {
             case .entryMorph:
                 return entryFrame
-            case .carouselStable, .expandingHero, .expandedHero, .detailsStable, .exiting:
+            case .carouselStable:
+                return centeredFrame
+            case .expandingHero:
+                // Card expands from carousel size to full screen
+                return fullFrame
+            case .expandedHero, .detailsStable, .exiting:
                 return centeredFrame
             }
         }
@@ -411,15 +415,18 @@ struct PreviewOverlayHost: View {
     }
 
     private func cardCornerRadius(for index: Int) -> CGFloat {
+        if index == selectedIndex && stateMachine.phase == .expandingHero {
+            return 0
+        }
         return cornerRadius
     }
 
     private func cardOpacity(for index: Int) -> Double {
         if index == selectedIndex {
             switch stateMachine.phase {
-            case .entryMorph, .carouselStable:
+            case .entryMorph, .carouselStable, .expandingHero, .expandedHero:
                 return 1
-            case .expandingHero, .expandedHero, .detailsStable, .exiting:
+            case .detailsStable, .exiting:
                 return 0
             }
         }
@@ -454,7 +461,7 @@ private struct PreviewCarouselCard: View {
     let opacity: Double
 
     private var showsHeroOverlay: Bool {
-        isCurrent && phase == .carouselStable && !pagingMotionActive
+        isCurrent && (phase == .carouselStable || phase == .expandingHero || phase == .expandedHero) && !pagingMotionActive
     }
 
     var body: some View {
@@ -596,6 +603,10 @@ private struct PreviewCarouselSideCard: View {
                     )
                 )
         }
+        // Scale so image is already ~full-screen sized even inside the narrower card.
+        // When the card expands during hero transition, the image doesn't resize —
+        // the mask just reveals more of the already-positioned image.
+        .scaleEffect(1.12)
         .offset(x: backgroundParallaxOffset)
         .overlay {
             UnevenRoundedRectangle(

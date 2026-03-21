@@ -1,0 +1,5 @@
+framework module Libdovi {
+    umbrella header "rpu_parser.h"
+    export *
+    module * { export * }
+}

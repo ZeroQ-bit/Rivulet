@@ -347,6 +347,8 @@ struct PlexDetailView: View {
                                 .opacity(belowFoldTitleOpacity)
                                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                         }
+                        .opacity(effectiveMetadataVisible ? 1 : 0)
+                        .animation(.easeOut(duration: 0.5), value: effectiveMetadataVisible)
                     }
                 }
                 .onScrollGeometryChange(for: Bool.self) { geometry in
