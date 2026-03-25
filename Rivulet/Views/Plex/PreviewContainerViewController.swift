@@ -86,9 +86,14 @@ class PreviewContainerViewController: UIViewController {
     }
 
     /// Block system-initiated dismissals (Menu button propagation).
-    /// Only dismissPreview() should actually dismiss.
+    /// Only dismissPreview() should actually dismiss — unless a child VC
+    /// (e.g. the player) is presented on top and needs to dismiss itself.
     override func dismiss(animated flag: Bool, completion: (() -> Void)? = nil) {
-        // Block — we handle dismissal explicitly via dismissPreview()
+        if presentedViewController != nil {
+            // A child VC (player) is presented on top — let it dismiss normally
+            super.dismiss(animated: flag, completion: completion)
+        }
+        // Otherwise block — we handle our own dismissal via dismissPreview()
     }
 
     /// Explicitly dismiss the preview overlay

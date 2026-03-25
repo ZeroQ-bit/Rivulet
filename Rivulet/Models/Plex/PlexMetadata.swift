@@ -220,6 +220,9 @@ struct PlexMetadata: Codable, Identifiable, Hashable, Sendable {
     // MARK: - Markers (Intro, Credits, etc.)
     var Marker: [PlexMarker]?
 
+    // MARK: - Chapters
+    var Chapter: [PlexChapter]?
+
     // MARK: - On Deck (Next Episode for Shows)
     var OnDeck: PlexOnDeck?
 

@@ -239,13 +239,10 @@ struct SettingsView: View {
     @AppStorage("combineLiveTVSources") private var combineLiveTVSources = true
     @AppStorage("liveTVAboveLibraries") private var liveTVAboveLibraries = false
     @AppStorage("classicTVMode") private var classicTVMode = false
-    @AppStorage("showSkipButton") private var showSkipButton = true
     @AppStorage("autoSkipIntro") private var autoSkipIntro = false
     @AppStorage("autoSkipCredits") private var autoSkipCredits = false
     @AppStorage("autoSkipAds") private var autoSkipAds = false
-    @AppStorage("highQualityScaling") private var highQualityScaling = true
     @AppStorage("autoplayCountdown") private var autoplayCountdownRaw = AutoplayCountdown.fiveSeconds.rawValue
-    @AppStorage("showMarkersOnScrubber") private var showMarkersOnScrubber = true
     @AppStorage("displaySize") private var displaySizeRaw = DisplaySize.normal.rawValue
 
 
@@ -569,20 +566,6 @@ struct SettingsView: View {
             )
 
             SettingsToggleRow(
-                title: "Show Skip Button",
-                subtitle: "",
-                isOn: $showSkipButton,
-                onFocusChange: { if $0 { focusState.focusedSettingId = "showSkipButton" } }
-            )
-
-            SettingsToggleRow(
-                title: "Show Markers on Scrubber",
-                subtitle: "",
-                isOn: $showMarkersOnScrubber,
-                onFocusChange: { if $0 { focusState.focusedSettingId = "showMarkers" } }
-            )
-
-            SettingsToggleRow(
                 title: "Auto-Skip Intro",
                 subtitle: "",
                 isOn: $autoSkipIntro,
@@ -610,12 +593,6 @@ struct SettingsView: View {
                 onFocusChange: { if $0 { focusState.focusedSettingId = "autoplayCountdown" } }
             )
 
-            SettingsToggleRow(
-                title: "High Quality Scaling",
-                subtitle: "",
-                isOn: $highQualityScaling,
-                onFocusChange: { if $0 { focusState.focusedSettingId = "highQualityScaling" } }
-            )
         }
     }
 

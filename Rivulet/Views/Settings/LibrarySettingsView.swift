@@ -91,21 +91,36 @@ private struct LibraryVisibilityRow: View {
         }
     }
 
+    private var iconColor: Color {
+        switch library.type {
+        case "movie": return .blue
+        case "show": return .purple
+        case "artist": return .pink
+        case "photo": return .green
+        default: return .gray
+        }
+    }
+
     var body: some View {
         Button(action: onToggle) {
             HStack(spacing: 20) {
-                Image(systemName: iconName)
-                    .font(.system(size: 24))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 32)
+                ZStack {
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .fill(iconColor.gradient)
+                        .frame(width: 64, height: 64)
 
-                VStack(alignment: .leading, spacing: 2) {
+                    Image(systemName: iconName)
+                        .font(.system(size: 28, weight: .semibold))
+                        .foregroundStyle(.white)
+                }
+
+                VStack(alignment: .leading, spacing: 4) {
                     Text(library.title)
-                        .font(.system(size: 29, weight: .medium))
+                        .font(.system(size: 32))
 
                     if let showOnHome = isShownOnHome {
                         Text(showOnHome ? "On Home" : "Hidden from Home")
-                            .font(.system(size: 22))
+                            .font(.system(size: 28))
                             .foregroundStyle(.secondary)
                     }
                 }
@@ -113,7 +128,7 @@ private struct LibraryVisibilityRow: View {
                 Spacer()
 
                 Text(isVisible ? "On" : "Off")
-                    .font(.system(size: 26))
+                    .font(.system(size: 32))
                     .foregroundStyle(.secondary)
             }
         }

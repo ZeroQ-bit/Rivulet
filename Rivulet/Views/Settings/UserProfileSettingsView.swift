@@ -160,7 +160,7 @@ private struct ProfileRow: View {
 
                 VStack(alignment: .leading, spacing: 4) {
                     Text(user.displayName)
-                        .font(.system(size: 28, weight: .medium))
+                        .font(.system(size: 32))
 
                     HStack(spacing: 8) {
                         if user.admin {

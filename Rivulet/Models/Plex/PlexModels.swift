@@ -244,7 +244,6 @@ struct PlexPart: Codable, Sendable {
     let size: Int?
     let container: String?
     let Stream: [PlexStream]?
-    let Chapter: [PlexChapter]?
 }
 
 struct PlexChapter: Codable, Sendable {
@@ -253,4 +252,5 @@ struct PlexChapter: Codable, Sendable {
     let index: Int?               // Chapter sequence number
     let startTimeOffset: Int?     // Start time in milliseconds
     let endTimeOffset: Int?       // End time in milliseconds
+    let thumb: String?            // Chapter thumbnail path (e.g., "/library/media/202357/chapterImages/1")
 }

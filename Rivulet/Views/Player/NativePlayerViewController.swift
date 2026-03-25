@@ -45,6 +45,25 @@ class NativePlayerViewController: AVPlayerViewController {
                 self?.player = avPlayer
             }
             .store(in: &cancellables)
+
+        // Show/hide skip button via contextualActions (native AVPlayerViewController pattern)
+        viewModel.$activeMarker
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] marker in
+                guard let self else { return }
+                if marker != nil {
+                    let label = self.viewModel.skipButtonLabel
+                    self.contextualActions = [
+                        UIAction(title: label, image: UIImage(systemName: "forward.fill")) { [weak self] _ in
+                            guard let self else { return }
+                            Task { await self.viewModel.skipActiveMarker() }
+                        }
+                    ]
+                } else {
+                    self.contextualActions = []
+                }
+            }
+            .store(in: &cancellables)
     }
 
     override func viewDidAppear(_ animated: Bool) {

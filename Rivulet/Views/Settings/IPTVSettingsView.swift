@@ -23,37 +23,31 @@ struct IPTVSettingsView: View {
     }
 
     var body: some View {
-        VStack(spacing: 24) {
-            Text("Add sources for Live TV channels. You can use Plex Live TV or any M3U playlist.")
-                .font(.system(size: 24))
-                .foregroundStyle(.white.opacity(0.5))
-
-            // Connected Sources
-            if !dataStore.sources.isEmpty {
-                SettingsSection(title: "Connected Sources") {
-                    ForEach(dataStore.sources) { source in
-                        LiveTVSourceRow(source: source) {
-                            selectedSourceForDetail = source
-                        }
-                    }
-                }
+        Group {
+            ForEach(dataStore.sources) { source in
+                LiveTVSourceRow(
+                    source: source,
+                    action: { selectedSourceForDetail = source },
+                    onFocusChange: { if $0 { focusedSettingId = descriptorKey(for: source) } }
+                )
             }
 
-            // Add Source Button
-            SettingsSection(title: dataStore.sources.isEmpty ? "Get Started" : "Add More") {
-                AddSourceButton {
-                    showAddSourceSheet = true
-                }
-            }
+            SettingsRow(
+                icon: "plus",
+                iconColor: .blue,
+                title: "Add Live TV Source",
+                subtitle: "",
+                action: { showAddSourceSheet = true },
+                onFocusChange: { if $0 { focusedSettingId = "addLiveTVSource" } }
+            )
 
-            // Plex Live TV availability hint
             if authManager.isAuthenticated && !hasPlexLiveTVSource && plexDVRAvailable {
-                PlexLiveTVHintCard(
+                PlexLiveTVHintRow(
                     isLoading: isAddingPlexLiveTV,
-                    errorMessage: plexAddError
-                ) {
-                    addPlexLiveTV()
-                }
+                    errorMessage: plexAddError,
+                    action: { addPlexLiveTV() },
+                    onFocusChange: { if $0 { focusedSettingId = "plexLiveTVHint" } }
+                )
             }
         }
         .task {
@@ -73,6 +67,16 @@ struct IPTVSettingsView: View {
         }
         .fullScreenCover(item: $selectedSourceForDetail) { source in
             LiveTVSourceDetailSheet(source: source)
+        }
+    }
+
+    // MARK: - Helpers
+
+    private func descriptorKey(for source: LiveTVDataStore.LiveTVSourceInfo) -> String {
+        switch source.sourceType {
+        case .plex: return "plexLiveTVSource"
+        case .dispatcharr: return "dispatcharrSource"
+        case .genericM3U: return "m3uSource"
         }
     }
 
@@ -140,6 +144,7 @@ struct IPTVSettingsView: View {
 struct LiveTVSourceRow: View {
     let source: LiveTVDataStore.LiveTVSourceInfo
     let action: () -> Void
+    var onFocusChange: ((Bool) -> Void)? = nil
 
     @FocusState private var isFocused: Bool
 
@@ -160,195 +165,112 @@ struct LiveTVSourceRow: View {
     }
 
     var body: some View {
-        HStack(spacing: 20) {
-            // Icon
-            ZStack {
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(iconColor.gradient)
-                    .frame(width: 64, height: 64)
-
-                Image(systemName: iconName)
-                    .font(.system(size: 28, weight: .semibold))
-                    .foregroundStyle(.white)
-            }
-
-            // Source info
-            VStack(alignment: .leading, spacing: 5) {
-                Text(source.displayName)
-                    .font(.system(size: 29, weight: .medium))
-                    .foregroundStyle(.white)
-
-                HStack(spacing: 10) {
-                    // Connection status
-                    Circle()
-                        .fill(source.isConnected ? Color.green : Color.red)
-                        .frame(width: 10, height: 10)
-
-                    Text(source.isConnected ? "Connected" : "Disconnected")
-                        .font(.system(size: 21))
-                        .foregroundStyle(.white.opacity(0.6))
-
-                    if source.channelCount > 0 {
-                        Text("\u{2022}")
-                            .foregroundStyle(.white.opacity(0.6))
-                        Text("\(source.channelCount) channels")
-                            .font(.system(size: 21))
-                            .foregroundStyle(.white.opacity(0.6))
-                    }
-                }
-            }
-
-            Spacer()
-
-            // Chevron
-            Image(systemName: "chevron.right")
-                .font(.system(size: 22, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.4))
-        }
-        .padding(.horizontal, 24)
-        .padding(.vertical, 20)
-        .background(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(isFocused ? .white.opacity(0.15) : .clear)
-        )
-        .focusable()
-        .focused($isFocused)
-        .onTapGesture {
-            action()
-        }
-        .animation(.easeOut(duration: 0.15), value: isFocused)
-    }
-}
-
-// MARK: - Add Source Button
-
-struct AddSourceButton: View {
-    let action: () -> Void
-
-    @FocusState private var isFocused: Bool
-
-    var body: some View {
-        HStack(spacing: 20) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(Color.blue.gradient)
-                    .frame(width: 64, height: 64)
-
-                Image(systemName: "plus")
-                    .font(.system(size: 28, weight: .bold))
-                    .foregroundStyle(.white)
-            }
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Add Live TV Source")
-                    .font(.system(size: 29, weight: .medium))
-                    .foregroundStyle(.white)
-
-                Text("Plex Live TV or M3U playlist")
-                    .font(.system(size: 23))
-                    .foregroundStyle(.white.opacity(0.6))
-            }
-
-            Spacer()
-
-            Image(systemName: "chevron.right")
-                .font(.system(size: 22, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.4))
-        }
-        .padding(.horizontal, 24)
-        .padding(.vertical, 20)
-        .background(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(isFocused ? .white.opacity(0.15) : .clear)
-        )
-        .focusable()
-        .focused($isFocused)
-        .onTapGesture {
-            action()
-        }
-        .animation(.easeOut(duration: 0.15), value: isFocused)
-    }
-}
-
-// MARK: - Plex Live TV Hint Card
-
-struct PlexLiveTVHintCard: View {
-    var isLoading: Bool = false
-    var errorMessage: String? = nil
-    let action: () -> Void
-
-    @FocusState private var isFocused: Bool
-
-    var body: some View {
-        VStack(spacing: 20) {
-            HStack(spacing: 18) {
+        Button(action: action) {
+            HStack(spacing: 20) {
                 ZStack {
-                    Image(systemName: "tv.and.mediabox")
-                        .font(.system(size: 36, weight: .medium))
-                        .foregroundStyle(.orange)
-                        .opacity(isLoading ? 0 : 1)
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .fill(iconColor.gradient)
+                        .frame(width: 64, height: 64)
 
-                    if isLoading {
-                        ProgressView()
-                            .tint(.orange)
-                    }
-                }
-
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(isLoading ? "Adding Plex Live TV..." : "Plex Live TV Available")
+                    Image(systemName: iconName)
                         .font(.system(size: 28, weight: .semibold))
                         .foregroundStyle(.white)
+                }
 
-                    Text(isLoading ? "Setting up channels from your Plex server" : "Your Plex server has Live TV. Tap to add it.")
-                        .font(.system(size: 22))
-                        .foregroundStyle(.white.opacity(0.6))
-                        .fixedSize(horizontal: false, vertical: true)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(source.displayName)
+                        .font(.system(size: 32))
+
+                    HStack(spacing: 10) {
+                        Circle()
+                            .fill(source.isConnected ? Color.green : Color.red)
+                            .frame(width: 10, height: 10)
+
+                        Text(source.isConnected ? "Connected" : "Disconnected")
+                            .font(.system(size: 28))
+                            .foregroundStyle(.secondary)
+
+                        if source.channelCount > 0 {
+                            Text("\u{2022}")
+                                .foregroundStyle(.secondary)
+                            Text("\(source.channelCount) channels")
+                                .font(.system(size: 28))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
                 }
 
                 Spacer()
-            }
 
-            if let error = errorMessage {
-                HStack(spacing: 10) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .font(.system(size: 18))
-                        .foregroundStyle(.yellow)
-                    Text(error)
-                        .font(.system(size: 20))
-                        .foregroundStyle(.white.opacity(0.7))
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-            } else if !isLoading {
-                HStack {
-                    Spacer()
-                    Text("Add Plex Live TV")
-                        .font(.system(size: 22, weight: .semibold))
-                        .foregroundStyle(.blue)
-                    Image(systemName: "arrow.right")
-                        .font(.system(size: 20, weight: .bold))
-                        .foregroundStyle(.blue)
-                }
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 40, weight: .semibold))
+                    .foregroundStyle(.secondary)
             }
         }
-        .padding(24)
-        .background(
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .fill(.white.opacity(0.08))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .stroke(isFocused ? .blue.opacity(0.5) : .clear, lineWidth: 3)
-        )
-        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
-        .focusable(!isLoading)
         .focused($isFocused)
-        .onTapGesture {
-            if !isLoading {
-                action()
+        .onChange(of: isFocused) { _, focused in
+            onFocusChange?(focused)
+        }
+    }
+}
+
+// MARK: - Plex Live TV Hint Row
+
+private struct PlexLiveTVHintRow: View {
+    let isLoading: Bool
+    let errorMessage: String?
+    let action: () -> Void
+    var onFocusChange: ((Bool) -> Void)? = nil
+
+    @FocusState private var isFocused: Bool
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 20) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .fill(Color.orange.gradient)
+                        .frame(width: 64, height: 64)
+
+                    if isLoading {
+                        ProgressView()
+                            .tint(.white)
+                    } else {
+                        Image(systemName: "tv.and.mediabox")
+                            .font(.system(size: 28, weight: .semibold))
+                            .foregroundStyle(.white)
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(isLoading ? "Adding Plex Live TV..." : "Plex Live TV Available")
+                        .font(.system(size: 32))
+
+                    if let error = errorMessage {
+                        Text(error)
+                            .font(.system(size: 28))
+                            .foregroundStyle(.red)
+                    } else {
+                        Text(isLoading ? "Setting up channels" : "Tap to add from your server")
+                            .font(.system(size: 28))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                Spacer()
+
+                if !isLoading {
+                    Image(systemName: "plus.circle.fill")
+                        .font(.system(size: 32))
+                        .foregroundStyle(.orange)
+                }
             }
         }
-        .animation(.easeOut(duration: 0.15), value: isFocused)
-        .animation(.easeOut(duration: 0.2), value: isLoading)
+        .disabled(isLoading)
+        .focused($isFocused)
+        .onChange(of: isFocused) { _, focused in
+            onFocusChange?(focused)
+        }
     }
 }
 

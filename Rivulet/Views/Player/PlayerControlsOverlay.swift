@@ -9,8 +9,6 @@ import SwiftUI
 
 struct PlayerControlsOverlay: View {
     @ObservedObject var viewModel: UniversalPlayerViewModel
-    @AppStorage("showMarkersOnScrubber") private var showMarkersOnScrubber = true
-
     /// When true, shows only the info panel. When false, shows only the transport bar.
     var showInfoPanel: Bool = false
 
@@ -73,8 +71,7 @@ struct PlayerControlsOverlay: View {
                 scrubTime: viewModel.scrubTime,
                 scrubStepLabel: viewModel.scrubStepLabel,
                 scrubThumbnail: viewModel.scrubThumbnail,
-                markers: viewModel.metadata.allMarkers,
-                showMarkers: showMarkersOnScrubber
+                markers: viewModel.metadata.allMarkers
             )
             .padding(.horizontal, 80)
             .padding(.bottom, 50)
@@ -506,7 +503,6 @@ private struct TransportProgressBar: View {
     var scrubStepLabel: String?  // YouTube-style step indicator (e.g. "▶▶ 30s")
     var scrubThumbnail: UIImage?
     var markers: [PlexMarker] = []
-    var showMarkers: Bool = true
 
     private var displayTime: TimeInterval {
         isScrubbing ? scrubTime : currentTime
@@ -577,7 +573,7 @@ private struct TransportProgressBar: View {
                         .frame(width: max(0, geometry.size.width * progress))
 
                     // Marker highlights (on top of progress bar, only show unplayed portion)
-                    if showMarkers && duration > 0 {
+                    if duration > 0 {
                         ForEach(Array(markers.enumerated()), id: \.offset) { _, marker in
                             let startProgress = max(0, marker.startTimeSeconds / duration)
                             let endProgress = min(1, marker.endTimeSeconds / duration)

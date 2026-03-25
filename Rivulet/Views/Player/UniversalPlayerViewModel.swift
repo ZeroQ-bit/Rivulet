@@ -290,6 +290,9 @@ final class UniversalPlayerViewModel: ObservableObject {
     /// Shows a brief indicator when user taps left/right to skip 10 seconds
     @Published var seekIndicator: SeekIndicator?
 
+    // MARK: - Chapter Thumbnails
+    private var chapterThumbnails: [Int: Data] = [:]  // index → image data
+
     // MARK: - Skip Marker State
     @Published private(set) var activeMarker: PlexMarker?
     @Published private(set) var showSkipButton = false
@@ -916,7 +919,7 @@ final class UniversalPlayerViewModel: ObservableObject {
 
         // Fetch detailed metadata if markers or chapters are missing
         let hasMarkers = !(metadata.Marker ?? []).isEmpty
-        let hasChapters = !(metadata.Media?.first?.Part?.first?.Chapter ?? []).isEmpty
+        let hasChapters = !(metadata.Chapter ?? []).isEmpty
         let hasStreamDetails = metadata.Media?.first?.Part?.first?.Stream?.isEmpty == false
         if !hasMarkers || !hasChapters || !hasStreamDetails {
             await fetchMarkersIfNeeded()
@@ -1338,10 +1341,41 @@ final class UniversalPlayerViewModel: ObservableObject {
         return "\(codecName) \(channelDesc)"
     }
 
+    /// Fetch chapter thumbnail images from Plex in parallel.
+    private func fetchChapterThumbnails(chapters: [PlexChapter]) async {
+        let thumbCount = chapters.filter { $0.thumb != nil }.count
+        print("[Chapters] Fetching \(thumbCount) chapter thumbnails...")
+
+        await withTaskGroup(of: (Int, Data?).self) { group in
+            for chapter in chapters {
+                guard let index = chapter.index, let thumbPath = chapter.thumb else { continue }
+                let url = URL(string: "\(serverURL)\(thumbPath)?X-Plex-Token=\(authToken)")
+                guard let url else { continue }
+
+                group.addTask {
+                    do {
+                        let (data, _) = try await URLSession.shared.data(from: url)
+                        return (index, data)
+                    } catch {
+                        return (index, nil)
+                    }
+                }
+            }
+
+            for await (index, data) in group {
+                if let data {
+                    chapterThumbnails[index] = data
+                }
+            }
+        }
+
+        print("[Chapters] Fetched \(chapterThumbnails.count)/\(thumbCount) chapter thumbnails")
+    }
+
     /// Build navigation markers from Plex chapters (preferred) or intro/credits markers (fallback).
     private func buildNavigationMarkers() -> [AVNavigationMarkersGroup]? {
-        // Prefer real chapters from the media file
-        let chapters = metadata.Media?.first?.Part?.first?.Chapter ?? []
+        // Prefer real chapters from the media file (Plex returns these at metadata level, not Part level)
+        let chapters = metadata.Chapter ?? []
         if !chapters.isEmpty {
             let timedGroups: [AVTimedMetadataGroup] = chapters.compactMap { chapter in
                 guard let startMs = chapter.startTimeOffset,
@@ -1352,11 +1386,15 @@ final class UniversalPlayerViewModel: ObservableObject {
                 let range = CMTimeRange(start: start, end: end)
 
                 let title = chapter.tag ?? "Chapter \(chapter.index ?? 0)"
-                let titleItem = makeMetadataItem(.commonIdentifierTitle, value: title)
-                return AVTimedMetadataGroup(items: [titleItem], timeRange: range)
+                var items = [makeMetadataItem(.commonIdentifierTitle, value: title)]
+
+                if let index = chapter.index, let imageData = chapterThumbnails[index] {
+                    items.append(makeMetadataItem(.commonIdentifierArtwork, value: imageData))
+                }
+
+                return AVTimedMetadataGroup(items: items, timeRange: range)
             }
             if !timedGroups.isEmpty {
-                print("[Chapters] Using \(timedGroups.count) file chapters")
                 return [AVNavigationMarkersGroup(title: nil, timedNavigationMarkers: timedGroups)]
             }
         }
@@ -1377,7 +1415,6 @@ final class UniversalPlayerViewModel: ObservableObject {
         }
 
         guard !timedGroups.isEmpty else { return nil }
-        print("[Chapters] Using \(timedGroups.count) Plex markers (no file chapters)")
         return [AVNavigationMarkersGroup(title: nil, timedNavigationMarkers: timedGroups)]
     }
 
@@ -2564,7 +2601,6 @@ final class UniversalPlayerViewModel: ObservableObject {
     /// When auto-skip is enabled, shows a countdown to give user a chance to cancel.
     private func handleMarkerActive(_ marker: PlexMarker, isIntro: Bool, currentTime: TimeInterval) {
         let autoSkipIntro = UserDefaults.standard.bool(forKey: "autoSkipIntro")
-        let showSkipButtonSetting = UserDefaults.standard.object(forKey: "showSkipButton") as? Bool ?? true
 
         // Only auto-skip when actually inside the marker (not during preview window)
         // This ensures we use Plex's exact marker timing and don't cut off content
@@ -2577,19 +2613,17 @@ final class UniversalPlayerViewModel: ObservableObject {
                 startIntroSkipCountdown(for: marker)
             }
             // Show skip button during countdown
-            if showSkipButtonSetting && activeMarker == nil {
+            if activeMarker == nil {
                 activeMarker = marker
                 showSkipButton = true
             }
             return
         }
 
-        // Show skip button if enabled and not already skipped
-        if showSkipButtonSetting {
-            if !hasSkippedIntro && activeMarker == nil {
-                activeMarker = marker
-                showSkipButton = true
-            }
+        // Show skip button if not already skipped
+        if !hasSkippedIntro && activeMarker == nil {
+            activeMarker = marker
+            showSkipButton = true
         }
     }
 
@@ -2632,7 +2666,6 @@ final class UniversalPlayerViewModel: ObservableObject {
         guard let creditsId = marker.id else { return }
 
         let autoSkipCredits = UserDefaults.standard.bool(forKey: "autoSkipCredits")
-        let showSkipButtonSetting = UserDefaults.standard.object(forKey: "showSkipButton") as? Bool ?? true
 
         // Only auto-skip when actually inside the marker (not during preview window)
         let insideMarker = currentTime >= marker.startTimeSeconds
@@ -2644,12 +2677,10 @@ final class UniversalPlayerViewModel: ObservableObject {
             return
         }
 
-        // Show skip button if enabled and not already skipped
-        if showSkipButtonSetting {
-            if !skippedCreditsIds.contains(creditsId) && activeMarker == nil {
-                activeMarker = marker
-                showSkipButton = true
-            }
+        // Show skip button if not already skipped
+        if !skippedCreditsIds.contains(creditsId) && activeMarker == nil {
+            activeMarker = marker
+            showSkipButton = true
         }
     }
 
@@ -2659,7 +2690,6 @@ final class UniversalPlayerViewModel: ObservableObject {
         guard let commercialId = marker.id else { return }
 
         let autoSkipAds = UserDefaults.standard.bool(forKey: "autoSkipAds")
-        let showSkipButtonSetting = UserDefaults.standard.object(forKey: "showSkipButton") as? Bool ?? true
 
         // Only auto-skip when actually inside the marker (not during preview window)
         let insideMarker = currentTime >= marker.startTimeSeconds
@@ -2671,12 +2701,10 @@ final class UniversalPlayerViewModel: ObservableObject {
             return
         }
 
-        // Show skip button if enabled and not already skipped
-        if showSkipButtonSetting {
-            if !skippedCommercialIds.contains(commercialId) && activeMarker == nil {
-                activeMarker = marker
-                showSkipButton = true
-            }
+        // Show skip button if not already skipped
+        if !skippedCommercialIds.contains(commercialId) && activeMarker == nil {
+            activeMarker = marker
+            showSkipButton = true
         }
     }
 
@@ -2741,15 +2769,16 @@ final class UniversalPlayerViewModel: ObservableObject {
                 metadata.Marker = markers
             }
 
-            // Update Media (includes Part with chapters and stream details)
-            // Hub items often lack Part/Stream/Chapter data
+            // Update chapters (Plex returns these at metadata level, not inside Part)
+            if let chapters = detailedMetadata.Chapter, !chapters.isEmpty {
+                metadata.Chapter = chapters
+                await fetchChapterThumbnails(chapters: chapters)
+            }
+
+            // Update Media (includes Part with stream details)
+            // Hub items often lack Part/Stream data
             if let media = detailedMetadata.Media, !media.isEmpty {
-                let chapters = media.first?.Part?.first?.Chapter ?? []
-                let hadChapters = metadata.Media?.first?.Part?.first?.Chapter?.isEmpty == false
                 metadata.Media = media
-                if !chapters.isEmpty && !hadChapters {
-                    print("[Chapters] Fetched \(chapters.count) chapters from detailed metadata")
-                }
             }
 
             // Fill in missing display info (summary, genres, etc.)

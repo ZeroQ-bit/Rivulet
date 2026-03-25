@@ -23,6 +23,7 @@ struct PlexSearchView: View {
     @AppStorage("recentSearches") private var recentSearchesData: Data = Data()
 
     @FocusState private var isSearchFieldFocused: Bool
+    @FocusState private var focusedRecentSearch: String?
 
     private let networkManager = PlexNetworkManager.shared
     private let minQueryLength = 2
@@ -289,25 +290,26 @@ struct PlexSearchView: View {
                 .tracking(1)
                 .padding(.horizontal, 4)
 
-            // Horizontal scroll for tvOS - searches first, then Clear button
+            // Horizontal scroll for tvOS - Clear first, then searches
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 16) {
+                    ClearRecentSearchesButton {
+                        clearRecentSearches()
+                    }
+
                     ForEach(recentSearches, id: \.self) { search in
                         RecentSearchButton(text: search) {
                             query = search
                             submitSearch()
                         }
-                    }
-
-                    // Clear button at the end of the row
-                    ClearRecentSearchesButton {
-                        clearRecentSearches()
+                        .focused($focusedRecentSearch, equals: search)
                     }
                 }
                 .padding(.horizontal, 8)   // Room for scale effect on edges
                 .padding(.vertical, 12)    // Room for scale effect top/bottom
             }
             .scrollClipDisabled()  // Allow scale overflow
+            .defaultFocus($focusedRecentSearch, recentSearches.first)
         }
         .frame(maxWidth: 800)
         .padding(.top, 32)

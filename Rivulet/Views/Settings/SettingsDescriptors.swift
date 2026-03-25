@@ -109,16 +109,6 @@ enum SettingsDescriptorStore {
             iconColor: .yellow,
             description: "Sets the preferred language for subtitles. Choose Off to disable automatic subtitle selection."
         ),
-        "showSkipButton": SettingDescriptor(
-            icon: "forward.fill",
-            iconColor: .blue,
-            description: "Shows a skip button when intro, credits, or ad markers are detected during playback."
-        ),
-        "showMarkers": SettingDescriptor(
-            icon: "timeline.selection",
-            iconColor: .yellow,
-            description: "Highlights intro, credits, and advertisement segments on the progress bar during playback."
-        ),
         "autoSkipIntro": SettingDescriptor(
             icon: "play.circle",
             iconColor: .green,
@@ -138,11 +128,6 @@ enum SettingsDescriptorStore {
             icon: "forward.end.alt",
             iconColor: .purple,
             description: "How long to wait before automatically playing the next episode. Set to Off to disable autoplay."
-        ),
-        "highQualityScaling": SettingDescriptor(
-            icon: "sparkles.tv",
-            iconColor: .pink,
-            description: "Enables EWA Lanczos upscaling for sharper 720p/1080p content on your 4K display. Uses slightly more GPU power. Press and hold to learn more."
         ),
         "avPlayerDV": SettingDescriptor(
             icon: "sparkles.tv",
@@ -244,6 +229,31 @@ enum SettingsDescriptorStore {
             icon: "tv.and.mediabox",
             iconColor: .blue,
             description: "Add and manage Live TV sources including Plex Live TV and M3U playlists."
+        ),
+        "plexLiveTVSource": SettingDescriptor(
+            icon: "play.rectangle.fill",
+            iconColor: .orange,
+            description: "Plex Live TV source using your server's DVR tuners. Tap to view details or remove."
+        ),
+        "dispatcharrSource": SettingDescriptor(
+            icon: "antenna.radiowaves.left.and.right",
+            iconColor: .blue,
+            description: "Dispatcharr source providing managed IPTV channels. Tap to view details or remove."
+        ),
+        "m3uSource": SettingDescriptor(
+            icon: "list.bullet.rectangle",
+            iconColor: .green,
+            description: "M3U playlist source for IPTV channels. Tap to view details or remove."
+        ),
+        "addLiveTVSource": SettingDescriptor(
+            icon: "plus.circle.fill",
+            iconColor: .blue,
+            description: "Add a new Live TV source — Plex Live TV, Dispatcharr, or a generic M3U playlist URL."
+        ),
+        "plexLiveTVHint": SettingDescriptor(
+            icon: "tv.and.mediabox",
+            iconColor: .orange,
+            description: "Your Plex server has Live TV available. Tap to automatically add it as a source."
         ),
 
         // MARK: About
