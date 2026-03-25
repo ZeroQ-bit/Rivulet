@@ -540,30 +540,14 @@ private struct PreviewCarouselCard: View {
 
     var body: some View {
         ZStack {
-            if usesExpandedSurface {
+            // Current card uses a single persistent surface across carousel→expanded
+            // so the backdrop and metadata keep their view identity (no redraw).
+            // Non-current cards in carousel share the same rendering path so
+            // incoming artwork slides in with the card during paging.
+            if isCurrent || phase == .carouselStable {
                 PreviewHeroSurface(
                     item: item,
-                    isExpanded: isCardExpanded,
-                    vignetteVisible: vignetteVisible,
-                    metadataVisible: metadataVisible,
-                    showExpandedChrome: showExpandedChrome,
-                    showBackdropLayer: true,
-                    allowVerticalScroll: allowVerticalScroll,
-                    allowActionRowInteraction: allowActionRowInteraction,
-                    heroBackdropMotionLocked: motionLocked,
-                    backgroundParallaxOffset: backgroundParallaxOffset,
-                    backdropStageSize: stageSize,
-                    backdropWindowFrame: stageWindowFrame,
-                    onPreviewExitRequested: onPreviewExitRequested,
-                    onDetailsBecameVisible: onDetailsBecameVisible
-                )
-            } else if phase == .carouselStable {
-                // Keep all carousel cards on the same rendering path so the
-                // incoming card's artwork slides in with the card instead of
-                // swapping surface type at the moment it becomes centered.
-                PreviewHeroSurface(
-                    item: item,
-                    isExpanded: false,
+                    isExpanded: isCurrent ? isCardExpanded : false,
                     vignetteVisible: isCurrent ? vignetteVisible : false,
                     metadataVisible: isCurrent ? metadataVisible : false,
                     showExpandedChrome: isCurrent ? showExpandedChrome : false,
@@ -577,7 +561,8 @@ private struct PreviewCarouselCard: View {
                     onPreviewExitRequested: onPreviewExitRequested,
                     onDetailsBecameVisible: onDetailsBecameVisible
                 )
-                .allowsHitTesting(false)
+                .allowsHitTesting(usesExpandedSurface && isCardExpanded)
+
                 if showsCarouselOverlay {
                     PreviewCarouselStageWindow(cornerRadius: cornerRadius)
                 }
@@ -686,7 +671,7 @@ private struct PreviewCarouselSideCard: View {
         // Scale so image is already ~full-screen sized even inside the narrower card.
         // When the card expands during hero transition, the image doesn't resize —
         // the mask just reveals more of the already-positioned image.
-        .scaleEffect(1.08)
+        .scaleEffect(1.14)
         .overlay {
             UnevenRoundedRectangle(
                 topLeadingRadius: 28,

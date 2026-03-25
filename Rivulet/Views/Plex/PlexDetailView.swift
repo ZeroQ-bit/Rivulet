@@ -110,6 +110,9 @@ struct PlexDetailView: View {
     private let recommendationService = PersonalizedRecommendationService.shared
     private var isPreviewCarousel: Bool { presentationMode == .previewCarousel }
     private var isExpandedPreviewFlow: Bool { onPreviewExitRequested != nil && presentationMode == .expandedDetail }
+    private var heroBackdropScale: CGFloat {
+        (isPreviewCarousel || isExpandedPreviewFlow) ? 1.14 : 1.08
+    }
     private var heroOverlayHorizontalInset: CGFloat {
         if isPreviewCarousel { return 118 }
         if isExpandedPreviewFlow { return 128 }
@@ -229,14 +232,20 @@ struct PlexDetailView: View {
         GeometryReader { geo in
             let heroHeight = heroContentHeight(for: geo.size.height)
             let stageSize = backdropStageSize ?? geo.size
-            let centeredStageBaseOffset = CGPoint(
-                x: -((stageSize.width - geo.size.width) / 2),
-                y: -((stageSize.height - geo.size.height) / 2)
-            )
+            // For preview/expanded-preview flows, keep the backdrop at a fixed
+            // screen position so it doesn't drift when the card mask expands.
+            // The image is already full-screen-sized; the mask just reveals more.
+            // Parallax during paging comes from backgroundParallaxOffset alone.
+            let centeredStageBaseOffset: CGPoint = {
+                if isPreviewCarousel || isExpandedPreviewFlow {
+                    return .zero
+                }
+                return CGPoint(
+                    x: -((stageSize.width - geo.size.width) / 2),
+                    y: -((stageSize.height - geo.size.height) / 2)
+                )
+            }()
             let stageWindowOrigin: CGPoint = {
-                // For preview/expanded-preview flows, do not anchor backdrop to a moving
-                // window origin; that forces opposite-direction drift during paging.
-                // Parallax should come from backgroundParallaxOffset only.
                 if isPreviewCarousel || isExpandedPreviewFlow {
                     return .zero
                 }
@@ -252,7 +261,7 @@ struct PlexDetailView: View {
                             x: centeredStageBaseOffset.x - stageWindowOrigin.x + backgroundParallaxOffset + kenBurnsOffset,
                             y: centeredStageBaseOffset.y - stageWindowOrigin.y
                         )
-                        .scaleEffect(1.08)
+                        .scaleEffect(heroBackdropScale)
                         .frame(width: geo.size.width, height: geo.size.height)
                         .clipped()
                         .overlay {
