@@ -319,15 +319,18 @@ struct PreviewOverlayHost: View {
                 }
             }
 
+            // Finish expand BEFORE showing chrome so presentationMode is
+            // .expandedDetail when the showExpandedChrome onChange fires
+            // (PlexDetailView uses isExpandedPreviewFlow to set focus).
+            try? await Task.sleep(nanoseconds: 60_000_000)
+            guard metadataGate.isCurrent(token) else { return }
+            stateMachine.finishExpand()
+
             try? await Task.sleep(nanoseconds: 60_000_000)
             guard metadataGate.isCurrent(token) else { return }
             withAnimation(.easeOut(duration: 0.18)) {
                 expandedChromeVisible = true
             }
-
-            try? await Task.sleep(nanoseconds: 130_000_000)
-            guard metadataGate.isCurrent(token) else { return }
-            stateMachine.finishExpand()
             verticalScrollEnabled = true
         }
     }
@@ -353,20 +356,28 @@ struct PreviewOverlayHost: View {
             pagingMotionActive = false
             pagingFromIndex = nil
             pagingProgress = 0
-            expandedChromeVisible = false
             verticalScrollEnabled = false
 
-            var collapsedState = nextState
-            collapsedState.setMotionLocked(true)
-            withAnimation(previewExpandAnimation) {
-                stateMachine = collapsedState
+            // Phase 1: Fade out expanded chrome (reverse of expand)
+            withAnimation(.easeIn(duration: 0.18)) {
+                expandedChromeVisible = false
             }
 
             Task { @MainActor in
-                try? await Task.sleep(nanoseconds: 350_000_000)
+                // Phase 2: After chrome fades, animate card back to carousel
+                try? await Task.sleep(nanoseconds: 140_000_000)
+                guard metadataGate.isCurrent(token) else { return }
+
+                var collapsedState = nextState
+                collapsedState.setMotionLocked(true)
+                withAnimation(previewExpandAnimation) {
+                    stateMachine = collapsedState
+                }
+
+                // Phase 3: After card settles, unlock motion and restore focus
+                try? await Task.sleep(nanoseconds: 380_000_000)
                 guard metadataGate.isCurrent(token) else { return }
                 stateMachine.setMotionLocked(false)
-                // Vignette should already be visible; ensure it is
                 if !vignetteVisible {
                     withAnimation(.easeOut(duration: 0.4)) {
                         vignetteVisible = true

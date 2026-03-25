@@ -524,9 +524,13 @@ struct PlexDetailView: View {
             if newMode == .previewCarousel {
                 displayedItem = nil
                 focusedActionButton = nil
-                scrollProgress = 0
-                belowFoldTitleOpacity = 0
-                scrollResetID = UUID()
+                // Animate scroll-dependent state back so metadata doesn't pop.
+                // Scroll-to-top resets the position; no .id() swap needed.
+                withAnimation(previewExpandAnimation) {
+                    scrollProgress = 0
+                    belowFoldTitleOpacity = 0
+                }
+                scrollToTopTrigger.toggle()
             }
         }
         .onChange(of: heroBackdropMotionLocked) { _, locked in
