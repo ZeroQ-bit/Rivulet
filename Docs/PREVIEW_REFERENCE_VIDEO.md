@@ -1,178 +1,254 @@
-# Apple TV Preview Reference Video Notes
+# Apple TV+ Preview Fidelity Spec (Canonical)
 
-This document is the canonical visual and motion reference for the hub-row preview flow. It describes the target experience, not the current implementation.
+This is the single source of truth for matching the Apple TV+ preview carousel and hero/detail flow.
+If implementation behavior conflicts with this file, this file wins.
 
-Use this before changing the preview carousel, expanded hero, details fold, or backdrop-upgrade behavior. `Docs/PREVIEW_CARD_CAROUSEL.md` remains the implementation-history/status doc; this file is the fidelity spec.
+## Goal
 
-## Source
+Match Apple TV+ behavior as closely as practical in:
 
-- Primary reference: `/Users/bain/Downloads/IMG_4941.MOV`
-- Clip metadata: `1920x1080`, `30 fps`, `24.46s`
-- Analysis method: manual review plus still extraction across the first `0-7s` entry/paging segment and the later `10-17s` details segment
-- Important note: the long holds/swells in the clip are manual pauses from the user and must not be treated as animation dwell time
+- motion timing and easing
+- spatial composition and anchoring
+- visual style and surface treatment
+- focus/input behavior
+- state transitions (carousel -> expanded hero -> details fold -> return)
 
-## Core Phase Model
+## Reference Inputs
 
-Future agents should model the preview flow as these distinct states:
+- Apple reference clip: `/Users/bain/Downloads/IMG_4941.MOV`
+- Current app capture: `/Users/bain/Desktop/Simulator Screen Recording - Apple TV 4K (3rd generation) - 2026-03-24 at 19.42.45.mov`
+- Paging-only current capture: `/Users/bain/Desktop/Simulator Screen Recording - Apple TV 4K (3rd generation) - 2026-03-25 at 07.10.26.mov`
+- Apple clip metadata: `1920x1080`, `30fps`, `24.463s`
+- Current clip metadata: `3840x2160` source, normalized to `1920x1080 @ 30fps`, `19.332s`
+- Manual holds in the Apple clip are user pauses and must be ignored for timing.
 
-1. `Home row`
-2. `Poster selected`
-3. `Carousel with focused metadata`
-4. `Expanded hero card`
-5. `Details fold`
-6. `Paged hero / repeated cycle`
+## What The Apple Clip Is Doing (End-To-End)
 
-This clip shows more than one title transition, so do not treat it as a single straight-line “home -> detail” example.
+## 1. Entry (home row to preview ownership)
 
-## Timing Targets
+- Selected poster morphs to a dominant centered card.
+- Sidebar/home context visually recedes; preview owns the stage.
+- No metadata on initial movement.
+- Card settles first, then overlay elements appear.
 
-These are implementation targets derived from the clip’s continuous motion, not the user’s pauses.
+## 2. Carousel stable (focused item)
 
-| Motion | Target |
-|--------|--------|
-| Poster morph to centered card | `~0.45s`, spring/ease-out, no bounce |
-| Carousel paging | the reference handoff reads closer to roughly `12-14 frames` at `30 fps` from first drift to full stop (`~0.40s - 0.47s`), and the current Rivulet capture in `IMG_4951.MOV` is still visibly faster at about `5-6` obvious transition frames; most of the reference travel happens in the middle, with a noticeably longer ease-in and ease-out than a short spring |
-| Focused-card metadata after settle | `~0.18s - 0.28s` opacity-only fade once centered motion finishes; page-to-page reveals can be slightly slower than initial entry |
-| Background art during paging | delayed by about `~0.08s`, then settles over roughly `~0.38s`; stays attached to the selected card, starts from a larger opposite-direction offset, and lands at the same time as the card |
-| Actions + cast reveal after focused info loads | present with the focused metadata state and fade in-place with the title/meta; expand mainly unlocks deeper continuity into details |
-| Expanded hero to details fold | `~0.35s`, one continuous vertical move |
-| Backdrop quality upgrade | only after `>=150ms` stable, `~0.22s` opacity crossfade |
+- Center card is dominant and tall, with top corners visible and rounded.
+- Side cards are adjacent siblings (no stacking/overlap reads).
+- Focused metadata is present on the center card only.
+- Buttons are present with metadata (not gated to expanded-only).
 
-## Observed Sequence
+## 3. Carousel paging (left/right)
 
-### 1. Home to Carousel
+- Card translation is smooth and longer than a short snap.
+- Metadata fades out before/at motion start.
+- New item metadata fades in after settle.
+- Backdrop inside the selected card exhibits lag/parallax:
+  - starts offset opposite travel direction
+  - moves on its own track
+  - still stays attached to selected card geometry
+  - lands at the same end beat as the card
 
-- The selected poster scales into a dominant centered card very quickly.
-- The browse surface visually recedes and stops reading as the active stage.
-- Once the centered item settles, its title/meta information fades in.
-- The centered card keeps top-only rounded corners and extends below the visible bottom edge.
-- Side neighbors sit beside the centered card rather than stacking behind it.
-- The centered card remains dominant, but the neighboring cards should read as separate side-by-side surfaces.
+## 4. Expanded hero
 
-### 2. Carousel Paging
+- Same visual card/hero composition continues.
+- No hard route push.
+- Metadata and buttons already exist; reveal is mostly opacity, not slide.
+- Episode shelf from below-fold context peeks at bottom.
 
-- The user can page laterally while staying in the same carousel stage.
-- The next item takes over the same dominant centered stage.
-- Its metadata fades back in once the new item reaches focus.
-- The card does not snap across in a quick `~0.3s` move; it starts gently, covers most of the distance through the middle of the span, then eases noticeably into the stop.
-- The background art handoff is layered: it lags slightly and fades on a different cadence than the card frame movement.
-- The selected backdrop image should read as a stage-owned layer behind the carousel, while the selected card still owns the metadata/logo/action layout that sits on top of that backdrop.
-- Drive the selected hero backdrop on the stage layer behind the moving card so it can lag and scale independently without shrinking/clipping inside the card.
-- Keep the moving carousel overlay on one consistent card/window surface during the lateral handoff, and keep the metadata/logo attached to that card overlay rather than the stage so positioning stays correct.
-- The stage remains calm and image-led between lateral moves, with focused metadata only after settle.
+## 5. Details fold
 
-### 3. Expanded Hero
+- One continuous vertical move into detail content.
+- Same backdrop persists with stronger dim/blur.
+- Centered title/logo appears above shelves in folded state.
+- On return upward, centered header fades out before fold ends.
 
-- A second user interaction unlocks the expanded chrome over the same card.
-- The card silhouette stays the same rounded-top stage; this is not a hard cut to a different page.
-- Title/logo, metadata rows, and summary are already present from carousel focus.
-- Buttons and cast treatment are already present with the focused info state.
-- The title/logo block and the action row fade in where they live; they do not slide up or laterally on reveal.
-- Expanded mode mainly deepens the connection to the fold and the below-fold content.
-- The left column sits in the lower-left quadrant.
-- Cast/starring text anchors in the lower-right quadrant.
-- A teaser of the real below-fold shelves remains visible at the bottom edge.
-- The shelf tease should be shallow; only the upper portion of the episode thumbnails should show before scroll.
-- For shows, the same episode shelf the user will scroll into should be the one peeking into the expanded hero.
+## Motion Spec (Target)
 
-### 4. Details Fold
+| Motion | Target | Notes |
+|---|---:|---|
+| Entry morph | `~0.45s` | spring/ease-out, no bounce |
+| Carousel page (card frame) | `~0.72s - 0.82s` | long ease-in/out, no snap read |
+| Backdrop lag start delay | `0s` (already offset at page start) | backdrop begins from offset inside card |
+| Backdrop lag travel | same total page duration | separate curve, same stop beat as card |
+| Metadata fade-out on page start | `~0.10s - 0.16s` | near-immediate |
+| Metadata fade-in after settle | `~0.24s - 0.42s` | opacity-only, no lateral/vertical travel |
+| Expand to hero | `~0.35s` | single continuity move |
+| Expand chrome stagger | `0.16s` delay + `0.22s` text + `0.06s` controls | fade-in-place |
+| Fold to details | `~0.35s` | one vertical continuity move |
+| Backdrop upgrade crossfade | `~0.22s` | opacity-only, post-settle only |
 
-- A further user interaction moves the composition downward into the details content.
-- The move reads as one continuous vertical fold, not a route push or page replacement.
-- The same show art remains behind the details surface with heavier blur/dimming.
-- The details state introduces a centered title/logo at the top, then shelves/rows below.
-- On the way back up, that centered title/logo should fade away before the reverse fold fully finishes.
-- Episode/trailer rows feel attached below the hero rather than injected over a blank background.
+## Parallax Model (Required)
 
-## Layout Rules
+- The selected card owns visible backdrop + overlays during carousel.
+- Parallax is implemented as internal backdrop image lag inside each carousel card.
+- Do not detach active backdrop to a separate stage layer during paging.
+- Do not run backdrop on the exact same transform curve as the card frame.
+- Card and backdrop must finish together.
+- Offset should be noticeable but subtle (image does not look detached).
+- The image must not teleport when paging starts; offset is continuous from frame 0.
 
-### Stage Ownership
+## Carousel Composition Model (Required)
 
-- Once preview starts, it owns the full stage.
-- The tvOS sidebar must not remain visually active or focusable.
-- The preview should not feel like a floating overlay above live browse content.
+- During `.carouselStable`, all visible cards render through the same card surface path.
+- A card becoming centered must not switch from a different art surface type mid-travel.
+- Each card's backdrop image is wider than its mask (`~115% - 125%` of card width).
+- The card mask clips overflow; no background resize during paging.
+- Inner parallax is driven from continuous page progress, not step state changes:
+  - `cardX = lerp(fromIndexX, toIndexX, progress)`
+  - `imageX = cardX * parallaxFactor` where `parallaxFactor` is typically `0.35 - 0.55`
+  - equivalent counter-offset form is acceptable as long as it is continuous and monotonic
+- Expanded transition reveals more of the same already-sized image; no scale jump at expand start.
 
-### Carousel Geometry
+## Geometry & Layout
 
-- The centered card is large, high, and visually dominant.
-- Only the top corners should be clearly visible and rounded.
-- The bottom corners should not read as exposed in the settled carousel state.
-- Side cards should share the same top alignment as the centered card.
-- Side cards should sit next to the centered card with a clear gap, not overlap it.
-- The visible portions of the neighboring cards can be narrow, but they must still read as separate adjacent cards rather than stacked layers.
+All values are for 1920x1080 reference canvas and should scale proportionally.
 
-### Expanded Hero Layout
+## Carousel Card Geometry
 
-- The same image remains the dominant background.
-- Metadata anchors lower-left with fixed boxes so title/logo swaps do not move the rest of the overlay.
-- Buttons sit on a stable lower-left baseline.
-- Cast/starring anchors lower-right on the same baseline.
-- Focused title/logo and action buttons should reveal via opacity only; keep their geometry fixed during the reveal.
-- Summary and badges should not cause the entire overlay to jump vertically.
-- The action row should sit slightly lower, with clearer separation from the summary block above it.
+- Top inset: `~50-55`
+- Horizontal inset: `~80-90` each side
+- Side gap: `~10-14`
+- Top corner radius: `~24-28`, continuous
+- Bottom edge extends below viewport; bottom corners should not read in carousel stable
+- Carousel cards must remain on a single visual z-plane while paging (no selected-card over/under pass).
 
-### Details Layout
+## Overlay Anchors
 
-- Keep the same art and palette behind the fold.
-- Center the title/logo above the details shelves.
-- Do not reserve that centered-header space before scroll; the first shelf should be able to peek naturally at rest.
-- Season/episode/trailer rows should feel physically attached under the hero.
-- For single-season shows, keep the season-pill pattern with one pill instead of replacing it with an `Episodes` title block, including on season-detail surfaces.
-- Keep season pills visually hidden until the user actually scrolls into the below-fold shelf.
-- Once settled, details should be mostly static outside of focus effects.
+- Left metadata column anchored bottom-left with fixed slots.
+- Right cast/starring block anchored bottom-right on same baseline as actions.
+- Description max width constrained (does not span full card).
+- Title/logo slot fixed height so rows below do not jump when source swaps.
+- Action row baseline stable across logo/title/source changes.
 
-## Artwork Upgrade Policy
+## Below-Fold Peek
 
-Apple TV+ in this clip sometimes updates the active backdrop after the motion settles. That is allowed here, but only under these rules:
+- The real below-fold shelf must peek in expanded hero.
+- Peek depth should show upper portion of thumbnails only.
+- This is not a synthetic/non-interactive fake strip.
 
-- Choose one visible hero backdrop for the active motion phase.
-- Do not swap the visible backdrop during poster morph, paging, expand, or fold motion.
-- If a higher-quality backdrop becomes available after settle, update with a fixed-geometry opacity crossfade only.
-- The crossfade must not resize, reframe, or expose two differently cropped hero images at once.
-- If the replacement would materially change crop/framing, defer it until the next page or next session instead of swapping live.
-- The same policy applies to preview, standard detail hero, and other hero/loading surfaces that share this backdrop logic.
-- Current Rivulet simplification: live backdrop replacement is disabled for now; keep Plex-provided art in place until this behavior is intentionally revisited.
+## Visual Style Spec
 
-## Motion Constraints
+## Color / Contrast / Layering
 
-- Do not reveal metadata at the same instant the poster begins scaling.
-- Do not keep the selected card mounted as both a side-card art layer and a hero/detail art layer at the same time.
-- Do not introduce a second background image during expand or fold.
-- Do not let the expanded hero snap to a zero-radius full-screen page before the details fold.
-- Do not crossfade to a better backdrop while geometry is still moving.
-- Do not drive the backdrop on the exact same timing/value track as the card frame during paging; the card should lead and the internal backdrop image should trail.
-- Do not detach the active backdrop into a separate stage layer during carousel paging; the parallax should come from the image lag inside the selected card.
-- Do not let the details state feel like a route push to a different page.
-- Do not show wide gaps that make the side cards look like equal siblings.
-- Do not overlap or stack neighboring carousel cards behind the centered card.
-- Do not leave the sidebar focusable once preview owns the stage.
+- Backdrop is dominant image-led surface.
+- Left and bottom gradients provide readability, with stronger darkening in lower zone.
+- Text mostly white/near-white, high contrast.
+- Details fold applies heavier dim/blur over same art.
 
-## Styling Notes
+## Typography
 
-- Title/logo should be bright, high-contrast, large, and given a slightly more generous slot than the current Rivulet default.
-- Metadata text is white or near-white over darkened art.
-- Action buttons are pill-shaped with soft material/glass treatment.
+- Title/logo is the largest left-column element.
+- Metadata rows use compact caption/body styles.
+- Dot separators are centered `·`, not dashes.
+- Cast line is concise and right-aligned.
+
+## Buttons and Chips
+
+- Primary actions are pill-shaped, glass/material look.
+- Secondary circular icon actions match same visual system.
 - Quality/rating badges are compact inline pills.
-- Details use stronger blur/dim treatment than the expanded hero, but the same underlying art.
+- Action row appears with metadata state, not only after expansion.
 
-## Practical Comparison Anchors
+## Content/Logic Rules
 
-These are the most useful checkpoints when comparing Rivulet footage against the clip.
+- Focused item metadata appears only for centered card.
+- Metadata reveal is opacity-only in-place.
+- No duplicate selected-card artwork layers at once.
+- No mid-motion artwork replacement.
+- Single-season behavior:
+  - if only one season, keep season-pill pattern with one pill
+  - do not show `Episodes` heading in that case
+- Season entities in recently-added rails should normalize into same overlay structure as episode/show hero style.
+- Keep unwanted `Show` action removed where not part of Apple-style target behavior.
 
-- `0.0s - 2.0s`: browse row -> poster morph -> art-only carousel
-- `3.5s - 5.5s`: lateral item change followed by metadata-rich expanded hero
-- `10.0s - 12.0s`: stable expanded hero composition over the same background
-- `12.5s - 13.5s`: centered top title/logo plus details shelves after the vertical fold
+## Asset Resolution Rules
 
-## Future Agent Workflow
+- One chosen displayed backdrop per active motion phase.
+- Better backdrop replacement allowed only after motion is stable (`>=150ms`).
+- Live replacement must be fixed-geometry opacity crossfade only.
+- If framing/crop would materially change, defer replacement to next page/session.
+- Current simplification: keep Plex default backdrop stable unless upgrade policy is explicitly re-enabled with safeguards.
 
-1. Read this file first.
-2. Compare current footage against `IMG_4941.MOV`.
-3. Fix stage ownership first: sidebar, focus fencing, background continuity.
-4. Fix geometry second: card size, top-only radius, peeks, bottom-edge continuity.
-5. Fix animation ordering third: morph, then expand chrome, then fold.
-6. Fix backdrop upgrade behavior last: only post-settle, crossfade-only, no crop jump.
+## Focus / Input Rules
+
+- During carousel stable: left/right pages, down/select expands.
+- During expanded/detail: focus ownership transfers to detail content.
+- Menu from detail:
+  1. pop internal nested level if present
+  2. otherwise collapse to carousel
+  3. next menu dismisses overlay
+- Sidebar/home focus cannot leak while preview owns stage.
+
+## Current Gap Snapshot (From 2026-03-24 Capture)
+
+- Paging feel improved but still drifts when easing becomes too short.
+- Parallax readability regresses when backdrop and card are coupled too tightly.
+- Metadata can appear too eager in some transitions; must stay settle-gated.
+- Overlay margin and title/logo scale still need strict lock to avoid near-edge clipping on some assets.
+
+## Paging Calibration Update (2026-03-25 Capture)
+
+- New paging-only capture confirms prior tuning still felt too fast and mid-clustered.
+- Target was adjusted to a slower full transition window with stronger ease-in/ease-out.
+- Required parallax behavior for this implementation cycle:
+  - backdrop offset is continuous from first frame (no hard jump)
+  - backdrop follows a slower inner-parallax curve while remaining card-attached
+  - backdrop and card must end on the same frame/beat
+  - no backdrop scale pop or size shift at settle
+
+## Do Not Do This
+
+- Do not stack/overlap carousel siblings behind selected card.
+- Do not elevate selected card z-order during carousel paging; all carousel items must move inline on the same z level.
+- Do not detach active backdrop into a full-stage independent surface while paging.
+- Do not hard-set per-page backdrop offset (single-frame jump) before running animation.
+- Do not switch incoming centered card from side-art path to hero-art path mid-motion.
+- Do not animate metadata with slide offsets when revealing.
+- Do not mount selected hero as both side-card art and hero art simultaneously.
+- Do not relayout overlay when logo/title/source changes.
+- Do not show season pills at top state if scroll-gated behavior is expected.
+- Do not reintroduce `Episodes` title for single-season case.
+- Do not live-swap backdrop during motion.
+
+## Acceptance Checklist (Ship Gate)
+
+Every item must pass in side-by-side playback against `IMG_4941.MOV`.
+
+1. Entry morph reads as one smooth ownership transfer.
+2. Carousel siblings are side-by-side, not stacked.
+3. Focused metadata is center-card only.
+4. Metadata appears after settle, not during main card travel.
+5. Metadata reveal is fade-in-place only.
+6. Buttons appear with focused info state.
+7. Card paging has long ease-in and ease-out (no snap read).
+8. Backdrop lag is visible and opposite-direction at page start.
+9. Backdrop remains attached to selected card geometry while lagging.
+10. Card and backdrop end at same stop beat.
+11. No backdrop size pop at settle.
+12. No text/logo clipping during page/expand/fold.
+13. Expanded hero maintains continuity from carousel.
+14. Below-fold shelf peek is real, not fake.
+15. Details fold is one continuous vertical move.
+16. Return-to-top fades centered header out early.
+17. Single-season show does not show `Episodes` heading.
+18. Season pill behavior matches scroll-gated expectation.
+19. No duplicate artwork layers visible during any phase.
+20. No mid-motion backdrop swap.
+21. Carousel paging has no over/under pass; cards stay on one z plane.
+22. No first-frame backdrop teleport on page-out/page-in.
+23. Incoming card art remains attached and slides in with the card.
+24. Expand transition has no backdrop resize pop.
+
+## Workflow For Future Changes
+
+1. Capture current app video first.
+2. Compare against Apple reference in frame strips.
+   Always verify z-plane behavior in strips: selected card must not pass over/under siblings during paging.
+3. Update this spec before coding if any new visual truth is discovered.
+4. Implement changes against this file only.
+5. Re-record and verify all checklist items.
 
 ## Scope Boundary
 
-This reference is for the hub-row preview flow and the shared hero/backdrop behavior it depends on. It is not a generic spec for every detail screen layout in the app.
+This file governs preview carousel + expanded hero + details fold behavior and shared hero/backdrop policy for those surfaces. It is not a full global style guide for every screen in the app.

@@ -16,12 +16,15 @@ struct PlexDetailView: View {
     let item: PlexMetadata
     var presentationMode: PlexDetailPresentationMode = .expandedDetail
     var backgroundParallaxOffset: CGFloat = 0
+    var showVignette: Bool = true
     var showMetadata: Bool = true
     var showExpandedChrome: Bool = true
     var showsBackdropLayer: Bool = true
     var allowVerticalScroll: Bool = true
     var allowActionRowInteraction: Bool = true
     var heroBackdropMotionLocked: Bool = false
+    var backdropStageSize: CGSize? = nil
+    var backdropWindowFrame: CGRect? = nil
     var onPreviewExitRequested: (() -> Void)? = nil
     var onDetailsBecameVisible: (() -> Void)? = nil
 
@@ -90,6 +93,7 @@ struct PlexDetailView: View {
     @State private var scrollProgress: CGFloat = 0  // 0 = at rest (peek), 1 = fully scrolled
     @State private var belowFoldTitleOpacity: CGFloat = 0
     @State private var scrollResetID = UUID()
+    @State private var kenBurnsOffset: CGFloat = 0
 
     // Navigation state for episode parent navigation
     @State private var navigateToSeason: PlexMetadata?
@@ -106,7 +110,31 @@ struct PlexDetailView: View {
     private let recommendationService = PersonalizedRecommendationService.shared
     private var isPreviewCarousel: Bool { presentationMode == .previewCarousel }
     private var isExpandedPreviewFlow: Bool { onPreviewExitRequested != nil && presentationMode == .expandedDetail }
-    private let heroOverlayHorizontalInset: CGFloat = 140
+    private var heroOverlayHorizontalInset: CGFloat {
+        if isPreviewCarousel { return 118 }
+        if isExpandedPreviewFlow { return 128 }
+        return 140
+    }
+
+    private var heroLogoMaxWidth: CGFloat {
+        (isPreviewCarousel || isExpandedPreviewFlow) ? 620 : 520
+    }
+
+    private var heroLogoSlotHeight: CGFloat {
+        (isPreviewCarousel || isExpandedPreviewFlow) ? 138 : 120
+    }
+
+    private var heroActionRowTopPadding: CGFloat {
+        (isPreviewCarousel || isExpandedPreviewFlow) ? 32 : 24
+    }
+
+    /// Effective vignette visibility — vignette fades in before text (Apple TV+ two-phase reveal)
+    private var effectiveVignetteVisible: Bool {
+        guard showVignette else { return false }
+        // In standalone mode, vignette always shows when metadata would show
+        if !isPreviewCarousel && !isExpandedPreviewFlow { return true }
+        return true
+    }
 
     /// Effective metadata visibility — in preview/carousel flows, gates on
     /// fullMetadata being loaded so genres, cast, summary all appear together
@@ -200,12 +228,31 @@ struct PlexDetailView: View {
     var body: some View {
         GeometryReader { geo in
             let heroHeight = heroContentHeight(for: geo.size.height)
+            let stageSize = backdropStageSize ?? geo.size
+            let centeredStageBaseOffset = CGPoint(
+                x: -((stageSize.width - geo.size.width) / 2),
+                y: -((stageSize.height - geo.size.height) / 2)
+            )
+            let stageWindowOrigin: CGPoint = {
+                // For preview/expanded-preview flows, do not anchor backdrop to a moving
+                // window origin; that forces opposite-direction drift during paging.
+                // Parallax should come from backgroundParallaxOffset only.
+                if isPreviewCarousel || isExpandedPreviewFlow {
+                    return .zero
+                }
+                return backdropWindowFrame?.origin ?? .zero
+            }()
             ZStack {
                 if showsBackdropLayer {
                     // Layer 1: Fixed backdrop (doesn't scroll, fills screen)
+                    // Ken Burns: subtle slow pan adds life to the static detail view
                     heroBackdropImage
-                        .offset(x: backgroundParallaxOffset)
-                        .scaleEffect(isPreviewCarousel ? 1.08 : 1.04)
+                        .frame(width: stageSize.width, height: stageSize.height)
+                        .offset(
+                            x: centeredStageBaseOffset.x - stageWindowOrigin.x + backgroundParallaxOffset + kenBurnsOffset,
+                            y: centeredStageBaseOffset.y - stageWindowOrigin.y
+                        )
+                        .scaleEffect(1.08)
                         .frame(width: geo.size.width, height: geo.size.height)
                         .clipped()
                         .overlay {
@@ -215,19 +262,19 @@ struct PlexDetailView: View {
                         }
                 }
 
-                // Fixed vignette for text readability (doesn't scroll)
-                RadialGradient(
-                    colors: [
-                        .clear,
-                        .black.opacity(0.3),
-                        .black.opacity(0.7),
+                // Left-side gradient for text readability (Apple TV+ style)
+                LinearGradient(
+                    stops: [
+                        .init(color: .black.opacity(0.7), location: 0),
+                        .init(color: .black.opacity(0.4), location: 0.25),
+                        .init(color: .black.opacity(0.12), location: 0.42),
+                        .init(color: .clear, location: 0.55),
                     ],
-                    center: .center,
-                    startRadius: geo.size.width * 0.25,
-                    endRadius: geo.size.width * 0.75
+                    startPoint: .leading,
+                    endPoint: .trailing
                 )
-                .opacity(effectiveMetadataVisible ? 1 : 0)
-                .animation(.easeOut(duration: 0.5), value: effectiveMetadataVisible)
+                .opacity(effectiveVignetteVisible ? 1 : 0)
+                .animation(.easeOut(duration: 0.6), value: effectiveVignetteVisible)
                 .ignoresSafeArea()
                 .allowsHitTesting(false)
 
@@ -235,18 +282,18 @@ struct PlexDetailView: View {
                 LinearGradient(
                     stops: [
                         .init(color: .clear, location: 0.0),
-                        .init(color: .black.opacity(0.35), location: 0.15),
-                        .init(color: .black.opacity(0.7), location: 0.35),
-                        .init(color: .black.opacity(0.88), location: 0.55),
+                        .init(color: .black.opacity(0.25), location: 0.2),
+                        .init(color: .black.opacity(0.55), location: 0.4),
+                        .init(color: .black.opacity(0.8), location: 0.65),
                         .init(color: .black.opacity(0.95), location: 1.0),
                     ],
                     startPoint: .top,
                     endPoint: .bottom
                 )
-                .frame(height: geo.size.height * 0.65)
+                .frame(height: geo.size.height * 0.55)
                 .frame(maxHeight: .infinity, alignment: .bottom)
-                .opacity(effectiveMetadataVisible ? 1 : 0)
-                .animation(.easeOut(duration: 0.5), value: effectiveMetadataVisible)
+                .opacity(effectiveVignetteVisible ? 1 : 0)
+                .animation(.easeOut(duration: 0.6), value: effectiveVignetteVisible)
                 .ignoresSafeArea()
                 .allowsHitTesting(false)
 
@@ -257,7 +304,7 @@ struct PlexDetailView: View {
                         // Metadata pinned near bottom of visible area
                         heroMetadataOverlay
                             .opacity(effectiveMetadataVisible ? (1 - scrollProgress) : 0)
-                            .animation(.easeOut(duration: 0.5), value: effectiveMetadataVisible)
+                            .animation(.easeOut(duration: 0.35), value: effectiveMetadataVisible)
                             .frame(height: heroHeight)
                             .id("scrollTop")
 
@@ -357,7 +404,7 @@ struct PlexDetailView: View {
                     withAnimation(.easeInOut(duration: 0.7)) {
                         scrollProgress = isScrolled ? 1 : 0
                     }
-                    withAnimation(isScrolled ? .easeInOut(duration: 0.45) : .easeOut(duration: 0.18)) {
+                    withAnimation(isScrolled ? .easeInOut(duration: 0.45) : .easeOut(duration: 0.12)) {
                         belowFoldTitleOpacity = isScrolled ? 1 : 0
                     }
                     if isScrolled {
@@ -450,6 +497,18 @@ struct PlexDetailView: View {
             // Load albums for artists
             if currentItem.type == "artist" {
                 await loadAlbums()
+            }
+        }
+        .task(id: "kenburns-\(currentItem.ratingKey ?? "")") {
+            guard !isPreviewCarousel, !isExpandedPreviewFlow else {
+                kenBurnsOffset = 0
+                return
+            }
+            // Ken Burns: wait for view to settle, then start slow backdrop drift
+            kenBurnsOffset = 0
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            withAnimation(.easeInOut(duration: 15).repeatForever(autoreverses: true)) {
+                kenBurnsOffset = 50
             }
         }
         .onChange(of: presentationMode) { _, newMode in
@@ -659,7 +718,6 @@ struct PlexDetailView: View {
                     )
                 )
         }
-        .animation(.easeOut(duration: isPreviewCarousel ? 0.46 : 0.48), value: backgroundParallaxOffset)
     }
 
     /// Gradient overlay for hero text readability (scrolls with content)
@@ -704,8 +762,8 @@ struct PlexDetailView: View {
                             heroTitleText
                         }
                     }
-                    .frame(maxWidth: 520, alignment: .leading)
-                    .frame(height: 120, alignment: .bottomLeading)
+                    .frame(maxWidth: heroLogoMaxWidth, alignment: .leading)
+                    .frame(height: heroLogoSlotHeight, alignment: .bottomLeading)
 
                     // Genre + content rating row
                     heroMetadataRow
@@ -791,7 +849,7 @@ struct PlexDetailView: View {
                         }
                     }
                 }
-                .padding(.top, 24)
+                .padding(.top, heroActionRowTopPadding)
                 .opacity(effectiveMetadataVisible ? 1 : 0)
                 .allowsHitTesting(allowActionRowInteraction)
             }
@@ -1274,7 +1332,7 @@ struct PlexDetailView: View {
     }
 
     private var shouldUseSingleSeasonPillHeaderInSeasonDetail: Bool {
-        currentItem.type == "season" && seasons.count == 1
+        currentItem.type == "season" && seasons.count <= 1
     }
 
     private var seasonDetailHeaderPills: [PlexMetadata] {
