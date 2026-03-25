@@ -153,16 +153,9 @@ struct CastCrewRow: View {
 
 /// Subtle focus style for circular cast/crew cards
 struct CircleCardButtonStyle: ButtonStyle {
-    @FocusState private var isFocused: Bool
-
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .scaleEffect(isFocused ? 1.08 : 1.0)
             .scaleEffect(configuration.isPressed ? 0.95 : 1.0)
-            .focused($isFocused)
-            .hoverEffectDisabled()
-            .focusEffectDisabled()
-            .animation(.spring(response: 0.25, dampingFraction: 0.8), value: isFocused)
-            .animation(.spring(response: 0.15, dampingFraction: 0.9), value: configuration.isPressed)
+            .animation(.easeOut(duration: 0.15), value: configuration.isPressed)
     }
 }

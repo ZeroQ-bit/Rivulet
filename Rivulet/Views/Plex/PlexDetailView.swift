@@ -310,9 +310,12 @@ struct PlexDetailView: View {
                 ScrollViewReader { verticalProxy in
                 ScrollView(.vertical, showsIndicators: false) {
                     VStack(alignment: .leading, spacing: 0) {
-                        // Metadata pinned near bottom of visible area
+                        // Metadata pinned near bottom of visible area.
+                        // Scroll fade is applied inside heroMetadataOverlay to
+                        // the text only — action buttons stay fully opaque so
+                        // they remain in the tvOS focus hierarchy when scrolled off.
                         heroMetadataOverlay
-                            .opacity(effectiveMetadataVisible ? (1 - scrollProgress) : 0)
+                            .opacity(effectiveMetadataVisible ? 1 : 0)
                             .animation(.easeOut(duration: 0.35), value: effectiveMetadataVisible)
                             .frame(height: heroHeight)
                             .id("scrollTop")
@@ -831,9 +834,11 @@ struct PlexDetailView: View {
                 }
                 .frame(height: 420, alignment: .bottomLeading)
                 .frame(maxWidth: 760, alignment: .leading)
+                .opacity(1 - scrollProgress)
 
                 // Bottom row: buttons (left) + starring (right) — full width
-                // Always in tree to avoid layout shift; opacity-controlled
+                // Buttons stay fully opaque (not faded by scroll) so tvOS keeps
+                // them in the focus hierarchy for Up navigation from below-fold.
                 HStack(alignment: .bottom, spacing: 0) {
                     actionButtons
                         .onMoveCommand { direction in
@@ -860,6 +865,7 @@ struct PlexDetailView: View {
                     }
                 }
                 .padding(.top, heroActionRowTopPadding)
+                .focusSection()
                 .opacity(effectiveMetadataVisible ? 1 : 0)
                 .allowsHitTesting(allowActionRowInteraction)
             }
@@ -1273,7 +1279,6 @@ struct PlexDetailView: View {
             }
         }
         .disabled(!allowActionRowInteraction)
-        .focusSection()
     }
 
     /// Play button label with inline progress bar + time remaining (Apple TV+ style)
@@ -1884,7 +1889,7 @@ struct PlexDetailView: View {
 
     private func loadRecommendedItems() async {
         do {
-            let items = try await recommendationService.recommendationsForItem(item, blendWithHistory: true, limit: 12)
+            let items = try await recommendationService.recommendationsForItem(currentItem, blendWithHistory: true, limit: 12)
             recommendedItems = items
         } catch {
             print("Failed to load recommended items: \(error)")

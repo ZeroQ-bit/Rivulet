@@ -250,7 +250,9 @@ actor PersonalizedRecommendationService {
 
         for item in watchedSample {
             let features = await buildFeatures(for: item)
-            let weight = recencyWeight(lastViewedAt: item.lastViewedAt) * rewatchBoost(viewCount: item.viewCount)
+            let weight = recencyWeight(lastViewedAt: item.lastViewedAt)
+                * rewatchBoost(viewCount: item.viewCount)
+                * ratingMultiplier(userRating: item.userRating)
             profile.add(features: features, weight: weight)
         }
 
@@ -314,12 +316,35 @@ actor PersonalizedRecommendationService {
         return log2(count) + 1.0
     }
 
+    /// Rating multiplier for profile building (upstream v2.8.7+)
+    /// User's star rating directly weights how much an item influences the profile
+    private func ratingMultiplier(userRating: Double?) -> Double {
+        guard let rating = userRating, rating > 0 else { return 0.6 }  // Unrated = 0.6x
+        switch rating {
+        case 9...10: return 1.0    // 5 stars
+        case 7..<9: return 0.75    // 4 stars
+        case 5..<7: return 0.5     // 3 stars
+        case 4..<5: return 0.25    // 2 stars
+        default: return 0.6        // Unrated default
+        }
+    }
+
+    /// Popularity dampening: slightly penalizes very popular content (upstream v2.8+)
+    private func popularityDampening(voteCount: Int?) -> Double {
+        guard let votes = voteCount, votes > 50_000 else { return 1.0 }
+        let penalty = 0.03 * log10(Double(votes) / 50_000.0)
+        return max(0.90, 1.0 - penalty)
+    }
+
+    /// Upstream-style scoring: sqrt normalization with saturation curve (diminishing returns)
     private func normalizedScore(tags: [String], counts: [String: Double], maxCount: Double) -> Double {
         guard !tags.isEmpty, maxCount > 0 else { return 0 }
         let sum = tags.reduce(0.0) { partial, tag in
-            partial + (counts[tag, default: 0])
+            let raw = counts[tag, default: 0]
+            return partial + sqrt(raw / maxCount)
         }
-        return sum / (maxCount * Double(tags.count))
+        // Saturation curve: prevents items with many matches from linearly dominating
+        return 1.0 - (1.0 / (1.0 + sum))
     }
 
     private func fuzzyKeywordScore(keywords: [String], counts: [String: Double]) -> Double {
@@ -330,15 +355,13 @@ actor PersonalizedRecommendationService {
         for keyword in keywords {
             var bestMatch = 0.0
             for (userKeyword, weight) in counts {
-                let kwLower = keyword
-                let userLower = userKeyword
-                if kwLower == userLower {
+                if keyword == userKeyword {
                     bestMatch = max(bestMatch, weight)
                     continue
                 }
-                if kwLower.contains(userLower) || userLower.contains(kwLower) {
-                    let kwParts = Set(kwLower.split(separator: " "))
-                    let userParts = Set(userLower.split(separator: " "))
+                if keyword.contains(userKeyword) || userKeyword.contains(keyword) {
+                    let kwParts = Set(keyword.split(separator: " "))
+                    let userParts = Set(userKeyword.split(separator: " "))
                     let overlap = kwParts.intersection(userParts).count
                     let union = max(kwParts.union(userParts).count, 1)
                     let similarity = Double(overlap) / Double(union)
@@ -346,10 +369,12 @@ actor PersonalizedRecommendationService {
                     bestMatch = max(bestMatch, matchScore)
                 }
             }
-            total += bestMatch
+            // sqrt normalization per match
+            total += sqrt(bestMatch / maxCount)
         }
 
-        return total / (Double(keywords.count) * maxCount)
+        // Saturation curve (matches upstream)
+        return 1.0 - (1.0 / (1.0 + total))
     }
 
     private func score(features: TMDBItemFeatures, profile: FeatureProfile, metadata: PlexMetadata) -> Double {
@@ -358,31 +383,35 @@ actor PersonalizedRecommendationService {
         let castScore = normalizedScore(tags: features.cast, counts: profile.cast, maxCount: profile.maxCast)
         let directorScore = normalizedScore(tags: features.directors, counts: profile.directors, maxCount: profile.maxDirector)
 
-        // Redistribute weights if signals are missing (weights similar to upstream)
-        var weights: [Double] = []
-        var signals: [Double] = []
-
-        let components: [(Double, Double)] = [
-            (0.5, keywordScore),
-            (0.25, genreScore),
-            (0.20, castScore),
-            (0.05, directorScore)
+        // Per-item weight redistribution (upstream v2.8+):
+        // First pass: drop components where profile has data but item has zero match
+        // Second pass: redistribute remaining weights proportionally
+        let components: [(weight: Double, score: Double, hasProfileData: Bool)] = [
+            (0.50, keywordScore, !profile.keywords.isEmpty),
+            (0.25, genreScore, !profile.genres.isEmpty),
+            (0.20, castScore, !profile.cast.isEmpty),
+            (0.05, directorScore, !profile.directors.isEmpty)
         ]
 
-        var totalWeight: Double = 0
-        for (w, s) in components where s > 0 {
-            weights.append(w)
-            signals.append(s)
-            totalWeight += w
+        // Only include components that either matched or had no profile data to match against
+        var activeWeight: Double = 0
+        var weightedSum: Double = 0
+        for c in components {
+            if c.score > 0 || !c.hasProfileData {
+                activeWeight += c.weight
+                weightedSum += c.score * c.weight
+            }
         }
 
-        let redistributed = zip(weights, signals).reduce(0.0) { partial, pair in
-            let (w, s) = pair
-            return partial + (s * (w / max(totalWeight, 0.0001)))
-        }
+        let baseScore = activeWeight > 0 ? weightedSum / activeWeight : 0
 
-        let ratingBoost = ((metadata.audienceRating ?? metadata.rating ?? metadata.userRating ?? 0) / 10.0) * 0.1
-        return redistributed + ratingBoost
+        // Rating boost from item's community/audience rating
+        let ratingBoost = ((metadata.audienceRating ?? metadata.rating ?? 0) / 10.0) * 0.1
+
+        // Popularity dampening for very popular content
+        let dampening = popularityDampening(voteCount: features.voteCount)
+
+        return (baseScore + ratingBoost) * dampening
     }
 
     // MARK: - Profile helpers
@@ -414,7 +443,9 @@ actor PersonalizedRecommendationService {
         var profile = FeatureProfile()
         for item in recentWatched {
             let features = await buildFeatures(for: item)
-            let weight = recencyWeight(lastViewedAt: item.lastViewedAt) * rewatchBoost(viewCount: item.viewCount)
+            let weight = recencyWeight(lastViewedAt: item.lastViewedAt)
+                * rewatchBoost(viewCount: item.viewCount)
+                * ratingMultiplier(userRating: item.userRating)
             profile.add(features: features, weight: weight)
         }
 
