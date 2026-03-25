@@ -407,16 +407,17 @@ struct PlexDetailView: View {
                         .animation(.easeOut(duration: 0.5), value: effectiveMetadataVisible)
                     }
                 }
-                .onScrollGeometryChange(for: Bool.self) { geometry in
-                    geometry.contentOffset.y > 10
-                } action: { _, isScrolled in
-                    withAnimation(.easeInOut(duration: 0.7)) {
-                        scrollProgress = isScrolled ? 1 : 0
-                    }
-                    withAnimation(isScrolled ? .easeInOut(duration: 0.45) : .easeOut(duration: 0.12)) {
-                        belowFoldTitleOpacity = isScrolled ? 1 : 0
-                    }
-                    if isScrolled {
+                .onScrollGeometryChange(for: CGFloat.self) { geometry in
+                    geometry.contentOffset.y
+                } action: { _, offset in
+                    // Drive scroll progress continuously from offset so the
+                    // reserve-height padding grows in lockstep with scrolling.
+                    // Episodes stay visually fixed; the logo/material fade in
+                    // proportionally without any compound animation overshoot.
+                    let reserveDistance: CGFloat = 158
+                    scrollProgress = min(1, max(0, offset / reserveDistance))
+                    belowFoldTitleOpacity = min(1, max(0, (offset - 30) / 90))
+                    if offset > 10 {
                         onDetailsBecameVisible?()
                     }
                 }
@@ -524,12 +525,8 @@ struct PlexDetailView: View {
             if newMode == .previewCarousel {
                 displayedItem = nil
                 focusedActionButton = nil
-                // Animate scroll-dependent state back so metadata doesn't pop.
-                // Scroll-to-top resets the position; no .id() swap needed.
-                withAnimation(previewExpandAnimation) {
-                    scrollProgress = 0
-                    belowFoldTitleOpacity = 0
-                }
+                // scrollProgress is scroll-driven; scrollTo resets the offset
+                // which drives scrollProgress back to 0 via onScrollGeometryChange.
                 scrollToTopTrigger.toggle()
             }
         }
@@ -2836,7 +2833,7 @@ struct SeasonPillButton: View {
         .hoverEffectDisabled()
         .focusEffectDisabled()
         .scaleEffect(isFocused ? 1.05 : 1.0)
-        .animation(.spring(response: 0.25, dampingFraction: 0.8), value: isFocused)
+        .animation(.easeOut(duration: 0.2), value: isFocused)
     }
 }
 
@@ -2920,7 +2917,7 @@ struct EpisodeCard: View {
                     // Episode label
                     Text(episodeLabel)
                         .font(.system(size: 15, weight: .medium))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(isFocused ? .black.opacity(0.6) : .white.opacity(0.6))
                         .textCase(.uppercase)
                         .padding(.top, 10)
 
@@ -2934,7 +2931,7 @@ struct EpisodeCard: View {
                     if let summary = episode.summary {
                         Text(summary)
                             .font(.system(size: 16))
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(isFocused ? .black.opacity(0.7) : .white.opacity(0.7))
                             .lineLimit(3)
                             .padding(.top, 1)
                     }
@@ -2944,17 +2941,17 @@ struct EpisodeCard: View {
                         if let date = episode.originallyAvailableAt {
                             Text(formattedDate(date))
                                 .font(.system(size: 14))
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(isFocused ? .black.opacity(0.5) : .white.opacity(0.5))
                         }
                         if let rating = episode.contentRating {
                             Text(rating)
                                 .font(.system(size: 12, weight: .medium))
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(isFocused ? .black.opacity(0.5) : .white.opacity(0.5))
                                 .padding(.horizontal, 5)
                                 .padding(.vertical, 2)
                                 .overlay(
                                     RoundedRectangle(cornerRadius: 3)
-                                        .strokeBorder(.secondary.opacity(0.5), lineWidth: 1)
+                                        .strokeBorder(isFocused ? .black.opacity(0.3) : .white.opacity(0.3), lineWidth: 1)
                                 )
                         }
                     }
@@ -2975,7 +2972,7 @@ struct EpisodeCard: View {
         .modifier(EpisodeFocusModifier(focusedEpisodeId: focusedEpisodeId, episodeRatingKey: episode.ratingKey))
         .hoverEffect(.highlight)
         .scaleEffect(isFocused ? 1.05 : 1.0)
-        .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isFocused)
+        .animation(.easeOut(duration: 0.2), value: isFocused)
         .mediaItemContextMenu(
             item: episode,
             serverURL: serverURL,
