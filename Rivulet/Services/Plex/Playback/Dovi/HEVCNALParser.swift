@@ -49,7 +49,9 @@ struct NALUnit {
         type == HEVCNALType.unspec62.rawValue
     }
 
-    /// Whether this is a Dolby Vision Enhancement Layer NAL
+    /// Whether this is a Dolby Vision Enhancement Layer NAL (type 63 only).
+    /// Note: DV P7 FEL uses normal video NAL types with nuh_layer_id=1,
+    /// so this property alone is insufficient for FEL detection — use layer_id check instead.
     var isEL: Bool {
         type == HEVCNALType.unspec63.rawValue
     }
@@ -111,8 +113,18 @@ final class HEVCNALParser {
     /// - Parameter sampleData: The raw sample data from fMP4
     /// - Returns: The RPU NAL unit if found, nil otherwise
     func findRPU(in sampleData: Data) -> NALUnit? {
-        let units = parseNALUnits(from: sampleData)
-        return units.first(where: { $0.isRPU })
+        guard let rpuRange = findNALRange(in: sampleData, type: HEVCNALType.unspec62.rawValue) else {
+            return nil
+        }
+
+        let nalStart = rpuRange.lowerBound + lengthPrefixSize
+        let nalData = sampleData.subdata(in: nalStart..<rpuRange.upperBound)
+
+        return NALUnit(
+            type: HEVCNALType.unspec62.rawValue,
+            data: nalData,
+            range: rpuRange
+        )
     }
 
     /// Replace the RPU NAL unit in sample data with new RPU data
@@ -159,7 +171,324 @@ final class HEVCNALParser {
     /// - Parameter sampleData: The raw sample data from fMP4
     /// - Returns: true if an RPU NAL unit is present
     func hasRPU(in sampleData: Data) -> Bool {
-        findRPU(in: sampleData) != nil
+        findNALRange(in: sampleData, type: HEVCNALType.unspec62.rawValue) != nil
+    }
+
+    /// Fast scan for RPU NAL (type 62) without allocating NALUnit structs.
+    /// Only reads length prefixes and the first byte of each NAL header.
+    /// - Parameter sampleData: The raw sample data from fMP4
+    /// - Returns: true if a NAL type 62 is present
+    func hasRPUFast(in sampleData: Data) -> Bool {
+        findNALRange(in: sampleData, type: HEVCNALType.unspec62.rawValue) != nil
+    }
+
+    private func findNALRange(in sampleData: Data, type targetType: UInt8) -> Range<Int>? {
+        sampleData.withUnsafeBytes { buffer -> Range<Int>? in
+            guard let base = buffer.baseAddress else { return nil }
+            let count = buffer.count
+            var offset = 0
+
+            while offset + lengthPrefixSize < count {
+                let length = Int(
+                    base.advanced(by: offset)
+                        .loadUnaligned(as: UInt32.self)
+                        .bigEndian
+                )
+                guard length > 0, offset + lengthPrefixSize + length <= count else { break }
+
+                // Read NAL type from first byte: bits 1-6
+                let nalType = (base.load(fromByteOffset: offset + lengthPrefixSize, as: UInt8.self) >> 1) & 0x3F
+                if nalType == targetType {
+                    return offset..<(offset + lengthPrefixSize + length)
+                }
+
+                offset += lengthPrefixSize + length
+            }
+            return nil
+        }
+    }
+
+    /// Strip all Enhancement Layer NAL units from sample data.
+    /// DV Profile 7 is dual-layer (BL + EL + RPU). After converting RPU from P7→P8.1,
+    /// the EL NALs are orphaned and cause VideoToolbox to stutter on Apple TV (which
+    /// only supports single-layer DV profiles 5/8).
+    ///
+    /// EL NALs come in two flavors depending on the muxing:
+    /// - **MEL/interleaved**: NAL type 63 (unspec63) with layer_id=0
+    /// - **FEL**: Normal video NAL types (TRAIL_R, IDR, etc.) with nuh_layer_id=1
+    /// Both must be detected and stripped. RPU (type 62) is always kept.
+    ///
+    /// - Parameter sampleData: Sample data with RPU already converted to P8.1
+    /// - Returns: Sample data with EL NALs removed, or original data if no EL found
+    func stripEnhancementLayer(from sampleData: Data) -> Data {
+        sampleData.withUnsafeBytes { buffer -> Data in
+            guard let base = buffer.baseAddress else { return sampleData }
+            let count = buffer.count
+
+            // Need at least 2 bytes of NAL header to read layer_id
+            guard count > lengthPrefixSize + 2 else { return sampleData }
+
+            // First pass: check if any EL NALs exist (avoid allocation if not needed)
+            var hasEL = false
+            var offset = 0
+            while offset + lengthPrefixSize + 2 <= count {
+                let length = Int(
+                    base.advanced(by: offset)
+                        .loadUnaligned(as: UInt32.self)
+                        .bigEndian
+                )
+                guard length >= 2, offset + lengthPrefixSize + length <= count else { break }
+
+                let byte0 = base.load(fromByteOffset: offset + lengthPrefixSize, as: UInt8.self)
+                let byte1 = base.load(fromByteOffset: offset + lengthPrefixSize + 1, as: UInt8.self)
+                let nalType = (byte0 >> 1) & 0x3F
+                let layerId = (Int(byte0 & 0x01) << 5) | Int((byte1 >> 3) & 0x1F)
+
+                // EL NAL: type 63 (MEL) OR non-zero layer_id (FEL), but never RPU
+                if nalType != HEVCNALType.unspec62.rawValue &&
+                   (nalType == HEVCNALType.unspec63.rawValue || layerId != 0) {
+                    hasEL = true
+                    break
+                }
+                offset += lengthPrefixSize + length
+            }
+
+            guard hasEL else { return sampleData }
+
+            // Second pass: copy only BL + RPU NALs to output
+            var result = Data()
+            result.reserveCapacity(count) // Upper bound; actual will be smaller
+            offset = 0
+
+            while offset + lengthPrefixSize + 2 <= count {
+                let length = Int(
+                    base.advanced(by: offset)
+                        .loadUnaligned(as: UInt32.self)
+                        .bigEndian
+                )
+                guard length >= 2, offset + lengthPrefixSize + length <= count else { break }
+
+                let byte0 = base.load(fromByteOffset: offset + lengthPrefixSize, as: UInt8.self)
+                let byte1 = base.load(fromByteOffset: offset + lengthPrefixSize + 1, as: UInt8.self)
+                let nalType = (byte0 >> 1) & 0x3F
+                let layerId = (Int(byte0 & 0x01) << 5) | Int((byte1 >> 3) & 0x1F)
+                let nalTotalSize = lengthPrefixSize + length
+
+                // Keep: RPU (type 62), or BL NALs (layer_id=0 and not type 63)
+                let isRPU = nalType == HEVCNALType.unspec62.rawValue
+                let isEL = nalType == HEVCNALType.unspec63.rawValue || layerId != 0
+                if isRPU || !isEL {
+                    result.append(
+                        UnsafeBufferPointer(
+                            start: base.advanced(by: offset).assumingMemoryBound(to: UInt8.self),
+                            count: nalTotalSize
+                        )
+                    )
+                }
+
+                offset += nalTotalSize
+            }
+
+            return result
+        }
+    }
+
+    // MARK: - hvcC Parameter Set Extraction
+
+    /// Extract all parameter set NAL units from an hvcC box.
+    /// Returns individual NAL unit data (without length prefix) for VPS/SPS/PPS.
+    ///
+    /// hvcC structure: 22-byte header, numOfArrays (1 byte), then arrays of NALUs.
+    static func extractParameterSets(from hvcCData: Data) -> [Data] {
+        guard hvcCData.count > 23 else { return [] }
+
+        let headerSize = 22
+        let numArrays = Int(hvcCData[headerSize])
+        var offset = headerSize + 1
+        var result: [Data] = []
+
+        for _ in 0..<numArrays {
+            guard offset + 3 <= hvcCData.count else { break }
+            let numNalus = Int(hvcCData.readUInt16BE(at: offset + 1))
+            offset += 3
+
+            for _ in 0..<numNalus {
+                guard offset + 2 <= hvcCData.count else { break }
+                let naluLength = Int(hvcCData.readUInt16BE(at: offset))
+                offset += 2
+                guard offset + naluLength <= hvcCData.count else {
+                    offset += naluLength
+                    continue
+                }
+                result.append(hvcCData[offset..<(offset + naluLength)])
+                offset += naluLength
+            }
+        }
+
+        return result
+    }
+
+    // MARK: - VPS Modification for DV P7→P8.1
+
+    /// Modify VPS NAL units in sample data to indicate single-layer configuration.
+    /// After DV P7→P8.1 conversion, the VPS still describes dual-layer (max_layers_minus1=1).
+    /// This causes VideoToolbox to expect dual-layer data, producing a black screen.
+    /// Setting max_layers_minus1=0 tells VideoToolbox this is single-layer content.
+    ///
+    /// VPS payload layout (after 2-byte NAL header):
+    ///   Byte 0: [vps_id(4)][base_internal(1)][base_avail(1)][max_layers_hi(2)]
+    ///   Byte 1: [max_layers_lo(4)][max_sub_layers(3)][nesting(1)]
+    ///
+    /// - Parameter sampleData: Sample data potentially containing VPS NALs
+    /// - Returns: Modified data with VPS max_layers_minus1 set to 0
+    func modifyVPSForSingleLayer(in sampleData: Data) -> Data {
+        sampleData.withUnsafeBytes { buffer -> Data in
+            guard let base = buffer.baseAddress else { return sampleData }
+            let count = buffer.count
+
+            // First pass: check if any VPS NALs exist with max_layers_minus1 > 0
+            var needsModification = false
+            var offset = 0
+            while offset + lengthPrefixSize + 4 <= count {
+                let length = Int(
+                    base.advanced(by: offset)
+                        .loadUnaligned(as: UInt32.self)
+                        .bigEndian
+                )
+                guard length >= 4, offset + lengthPrefixSize + length <= count else { break }
+
+                let byte0 = base.load(fromByteOffset: offset + lengthPrefixSize, as: UInt8.self)
+                let nalType = (byte0 >> 1) & 0x3F
+
+                if nalType == 32 { // VPS
+                    // Check max_layers_minus1 (6 bits spanning payload bytes 0-1)
+                    let payloadOffset = offset + lengthPrefixSize + 2 // Skip 2-byte NAL header
+                    let vpsByte0 = base.load(fromByteOffset: payloadOffset, as: UInt8.self)
+                    let vpsByte1 = base.load(fromByteOffset: payloadOffset + 1, as: UInt8.self)
+                    let maxLayersHi = vpsByte0 & 0x03
+                    let maxLayersLo = (vpsByte1 >> 4) & 0x0F
+                    let maxLayersMinus1 = (Int(maxLayersHi) << 4) | Int(maxLayersLo)
+
+                    if maxLayersMinus1 > 0 {
+                        needsModification = true
+                        break
+                    }
+                }
+                offset += lengthPrefixSize + length
+            }
+
+            guard needsModification else { return sampleData }
+
+            // Second pass: copy data, modifying VPS NALs
+            var result = Data(sampleData)
+            offset = 0
+            while offset + lengthPrefixSize + 4 <= count {
+                let length = Int(
+                    base.advanced(by: offset)
+                        .loadUnaligned(as: UInt32.self)
+                        .bigEndian
+                )
+                guard length >= 4, offset + lengthPrefixSize + length <= count else { break }
+
+                let byte0 = base.load(fromByteOffset: offset + lengthPrefixSize, as: UInt8.self)
+                let nalType = (byte0 >> 1) & 0x3F
+
+                if nalType == 32 {
+                    let payloadOffset = offset + lengthPrefixSize + 2
+                    // Clear max_layers_minus1: clear bottom 2 bits of payload byte 0,
+                    // clear top 4 bits of payload byte 1
+                    result[payloadOffset] = result[payloadOffset] & 0xFC
+                    result[payloadOffset + 1] = result[payloadOffset + 1] & 0x0F
+                }
+                offset += lengthPrefixSize + length
+            }
+
+            return result
+        }
+    }
+
+    /// Modify VPS in raw hvcC extradata to set max_layers_minus1=0 and strip EL parameter sets.
+    /// The hvcC box contains parameter set arrays; this method:
+    /// 1. Modifies VPS max_layers_minus1 to 0
+    /// 2. Removes parameter sets with nuh_layer_id != 0 (EL sets)
+    ///
+    /// hvcC structure:
+    ///   23 bytes header, then numOfArrays (1 byte)
+    ///   Each array: flags+type (1 byte), numNalus (2 bytes), then NALUs
+    ///   Each NALU: length (2 bytes), data (length bytes)
+    static func cleanHvcCForSingleLayer(_ hvcCData: Data) -> Data {
+        guard hvcCData.count > 23 else { return hvcCData }
+
+        var result = Data()
+        let headerSize = 22 // Everything before numOfArrays
+        result.append(hvcCData[0..<headerSize])
+
+        let numArrays = hvcCData[headerSize]
+        var offset = headerSize + 1
+        var cleanedArrays: [Data] = []
+
+        for _ in 0..<numArrays {
+            guard offset + 3 <= hvcCData.count else { break }
+
+            let arrayHeader = hvcCData[offset]
+            let nalType = arrayHeader & 0x3F
+            let numNalus = Int(hvcCData.readUInt16BE(at: offset + 1))
+            offset += 3
+
+            var keptNalus: [Data] = []
+
+            for _ in 0..<numNalus {
+                guard offset + 2 <= hvcCData.count else { break }
+                let naluLength = Int(hvcCData.readUInt16BE(at: offset))
+                offset += 2
+
+                guard offset + naluLength <= hvcCData.count, naluLength >= 2 else {
+                    offset += naluLength
+                    continue
+                }
+
+                var naluData = Data(hvcCData[offset..<(offset + naluLength)])
+
+                // Check layer_id: byte0 bit0 and byte1 bits 7-3
+                let byte0 = naluData[0]
+                let byte1 = naluData[1]
+                let layerId = (Int(byte0 & 0x01) << 5) | Int((byte1 >> 3) & 0x1F)
+
+                if layerId == 0 {
+                    // VPS (type 32): modify max_layers_minus1 to 0
+                    if nalType == 32, naluData.count >= 4 {
+                        naluData[2] = naluData[2] & 0xFC  // Clear max_layers hi 2 bits
+                        naluData[3] = naluData[3] & 0x0F  // Clear max_layers lo 4 bits
+                    }
+                    keptNalus.append(naluData)
+                }
+                // Skip EL parameter sets (layer_id != 0)
+
+                offset += naluLength
+            }
+
+            // Only include array if it has NALUs left
+            if !keptNalus.isEmpty {
+                var arrayData = Data()
+                arrayData.append(arrayHeader)
+                var count16 = UInt16(keptNalus.count).bigEndian
+                arrayData.append(Data(bytes: &count16, count: 2))
+                for nalu in keptNalus {
+                    var len16 = UInt16(nalu.count).bigEndian
+                    arrayData.append(Data(bytes: &len16, count: 2))
+                    arrayData.append(nalu)
+                }
+                cleanedArrays.append(arrayData)
+            }
+        }
+
+        // Write cleaned arrays
+        result.append(UInt8(cleanedArrays.count))
+        for array in cleanedArrays {
+            result.append(array)
+        }
+
+        return result
     }
 
     /// Get summary of NAL units in sample (for debugging)
@@ -169,6 +498,38 @@ final class HEVCNALParser {
         let units = parseNALUnits(from: sampleData)
         let types = units.map { "NAL\($0.type)" }
         return "[\(types.joined(separator: ", "))]"
+    }
+
+    /// Detailed NAL dump showing type, layer_id, and size for each NAL unit.
+    /// Used to diagnose DV P7 FEL content where EL NALs share BL types but differ by layer_id.
+    func describeDetailed(_ sampleData: Data) -> String {
+        sampleData.withUnsafeBytes { buffer -> String in
+            guard let base = buffer.baseAddress else { return "empty" }
+            let count = buffer.count
+            var descriptions: [String] = []
+            var offset = 0
+
+            while offset + lengthPrefixSize + 2 <= count {
+                let length = Int(
+                    base.advanced(by: offset)
+                        .loadUnaligned(as: UInt32.self)
+                        .bigEndian
+                )
+                guard length >= 2, offset + lengthPrefixSize + length <= count else { break }
+
+                let byte0 = base.load(fromByteOffset: offset + lengthPrefixSize, as: UInt8.self)
+                let byte1 = base.load(fromByteOffset: offset + lengthPrefixSize + 1, as: UInt8.self)
+                let nalType = (byte0 >> 1) & 0x3F
+                let layerId = (Int(byte0 & 0x01) << 5) | Int((byte1 >> 3) & 0x1F)
+
+                let layerStr = layerId > 0 ? " L\(layerId)" : ""
+                descriptions.append("T\(nalType)\(layerStr) \(length)B")
+
+                offset += lengthPrefixSize + length
+            }
+
+            return "[\(descriptions.joined(separator: ", "))]"
+        }
     }
 }
 

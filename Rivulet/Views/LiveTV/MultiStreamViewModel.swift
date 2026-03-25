@@ -24,8 +24,7 @@ final class MultiStreamViewModel: ObservableObject {
         let id = UUID()
         let channel: UnifiedChannel
 
-        let mpvWrapper: MPVPlayerWrapper
-        var playerController: MPVMetalViewController?
+        let rivuletPlayer: RivuletPlayer
 
         var playbackState: UniversalPlaybackState
         var currentProgram: UnifiedProgram?
@@ -34,31 +33,46 @@ final class MultiStreamViewModel: ObservableObject {
         // MARK: - Convenience Accessors
 
         var isPlaying: Bool {
-            mpvWrapper.isPlaying
+            rivuletPlayer.isPlaying
         }
 
         var playbackStatePublisher: AnyPublisher<UniversalPlaybackState, Never> {
-            mpvWrapper.playbackStatePublisher
+            rivuletPlayer.playbackStatePublisher
+        }
+
+        var currentTime: TimeInterval {
+            rivuletPlayer.currentTime
+        }
+
+        var duration: TimeInterval {
+            rivuletPlayer.duration
         }
 
         func play() {
-            mpvWrapper.play()
+            rivuletPlayer.play()
         }
 
         func pause() {
-            mpvWrapper.pause()
+            rivuletPlayer.pause()
         }
 
         func stop() {
-            mpvWrapper.stop()
+            rivuletPlayer.stop()
         }
 
         func setMuted(_ muted: Bool) {
-            mpvWrapper.setMuted(muted)
+            rivuletPlayer.setMuted(muted)
         }
 
         func load(url: URL, headers: [String: String]?) async throws {
-            try await mpvWrapper.load(url: url, headers: headers, startTime: nil)
+            if url.pathExtension.lowercased() == "m3u8" || url.absoluteString.localizedCaseInsensitiveContains(".m3u8") {
+                try await rivuletPlayer.load(url: url, headers: headers, startTime: nil)
+            } else {
+                try await rivuletPlayer.load(
+                    route: .avPlayerDirect(url: url, headers: headers),
+                    startTime: nil
+                )
+            }
         }
     }
 
@@ -128,7 +142,6 @@ final class MultiStreamViewModel: ObservableObject {
     }
 
     var canAddStream: Bool {
-        // MPV uses significant memory per stream
         // Default to 2 streams, allow 4 with user opt-in (may cause crashes)
         let allowFourStreams = UserDefaults.standard.bool(forKey: "allowFourStreams")
         let maxStreams = allowFourStreams ? 4 : 2
@@ -187,7 +200,7 @@ final class MultiStreamViewModel: ObservableObject {
 
         var slot = StreamSlot(
             channel: channel,
-            mpvWrapper: MPVPlayerWrapper(),
+            rivuletPlayer: RivuletPlayer(),
             playbackState: .loading,
             isMuted: isMuted
         )
@@ -477,7 +490,7 @@ final class MultiStreamViewModel: ObservableObject {
 
         var newSlot = StreamSlot(
             channel: channel,
-            mpvWrapper: MPVPlayerWrapper(),
+            rivuletPlayer: RivuletPlayer(),
             playbackState: .loading,
             isMuted: isMuted
         )
@@ -600,7 +613,7 @@ final class MultiStreamViewModel: ObservableObject {
             guard let self,
                   let index = self.streams.firstIndex(where: { $0.id == focusedSlotId }) else { return }
 
-            await self.streams[index].mpvWrapper.seekRelative(by: seconds)
+            await self.streams[index].rivuletPlayer.seekRelative(by: seconds)
             // Ensure stream is playing after seek attempt.
             self.streams[index].play()
         }
@@ -612,8 +625,8 @@ final class MultiStreamViewModel: ObservableObject {
         guard let slot = focusedStream else { return }
 
         let direction = forward ? 1 : -1
-        let slotCurrentTime = slot.mpvWrapper.currentTime
-        let slotDuration = slot.mpvWrapper.duration
+        let slotCurrentTime = slot.currentTime
+        let slotDuration = slot.duration
 
         if !isScrubbing || scrubSlotID != slot.id {
             isScrubbing = true
@@ -643,7 +656,7 @@ final class MultiStreamViewModel: ObservableObject {
             isScrubbing = true
             scrubSlotID = slot.id
             scrubSpeed = 0
-            scrubTime = slot.mpvWrapper.currentTime
+            scrubTime = slot.currentTime
         }
 
         if let duration = focusedStreamDurationForScrub() {
@@ -668,7 +681,7 @@ final class MultiStreamViewModel: ObservableObject {
             guard let self,
                   let index = self.streams.firstIndex(where: { $0.id == scrubSlotID }) else { return }
 
-            await self.streams[index].mpvWrapper.seek(to: targetTime)
+            await self.streams[index].rivuletPlayer.seek(to: targetTime)
             self.streams[index].play()
         }
 
@@ -718,7 +731,7 @@ final class MultiStreamViewModel: ObservableObject {
     private func focusedStreamDurationForScrub() -> TimeInterval? {
         guard let scrubSlotID,
               let index = streams.firstIndex(where: { $0.id == scrubSlotID }) else { return nil }
-        return streams[index].mpvWrapper.duration
+        return streams[index].duration
     }
 
     private func clampedScrubTime(_ time: TimeInterval, duration: TimeInterval) -> TimeInterval {
@@ -726,18 +739,6 @@ final class MultiStreamViewModel: ObservableObject {
             return max(0, min(duration, time))
         }
         return max(0, time)
-    }
-
-    // MARK: - Controller Binding
-
-    func setPlayerController(_ controller: MPVMetalViewController, for slotId: UUID) {
-        guard let index = streams.firstIndex(where: { $0.id == slotId }) else { return }
-
-        streams[index].playerController = controller
-        streams[index].mpvWrapper.setPlayerController(controller)
-
-        // Apply mute state
-        controller.setMuted(streams[index].isMuted)
     }
 
     // MARK: - Controls Visibility

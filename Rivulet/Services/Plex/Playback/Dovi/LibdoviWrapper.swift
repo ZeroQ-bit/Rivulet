@@ -129,8 +129,8 @@ final class LibdoviWrapper {
         let profile = header.pointee.guessed_profile
         let elType: String?
 
-        if let elTypePtr = header.pointee.el_type {
-            elType = String(cString: elTypePtr)
+        if let subprofilePtr = header.pointee.subprofile {
+            elType = String(cString: subprofilePtr)
         } else {
             elType = nil
         }

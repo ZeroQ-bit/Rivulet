@@ -21,6 +21,7 @@ class PlexDataStore: ObservableObject {
     @Published var isLoadingLibraries = false
     @Published var hubsError: String?
     @Published var librariesError: String?
+    @Published private(set) var hasLoadedLibraries = false
 
     /// Per-library hubs for Home screen (keyed by library key)
     @Published var libraryHubs: [String: [PlexHub]] = [:]
@@ -32,6 +33,9 @@ class PlexDataStore: ObservableObject {
 
     /// Increments when library hubs content changes
     @Published private(set) var libraryHubsVersion: UUID = UUID()
+
+    /// Set by PlexHomeView when processed hubs are ready to display
+    @Published var isHomeContentReady = false
 
     // MARK: - Freshness Tracking
 
@@ -147,6 +151,7 @@ class PlexDataStore: ObservableObject {
     // Track if initial load has been attempted
     private var hubsLoadTask: Task<Void, Never>?
     private var librariesLoadTask: Task<Void, Never>?
+    private var libraryHubsLoadTask: Task<Void, Never>?
 
     /// Track whether we've already attempted connection recovery this session
     /// Reset on successful fetch
@@ -299,6 +304,9 @@ class PlexDataStore: ObservableObject {
     /// Called when the user switches Plex Home profiles
     /// Clears all user-specific cached data and reloads content
     func onProfileSwitched() async {
+        // Cancel any in-flight library hub loading
+        libraryHubsLoadTask?.cancel()
+        libraryHubsLoadTask = nil
 
         // Switch library settings to the new user's preferences
         LibrarySettingsManager.shared.onProfileSwitched()
@@ -312,9 +320,11 @@ class PlexDataStore: ObservableObject {
         // Clear in-memory data (libraries may differ per user)
         hubs = []
         libraries = []
+        hasLoadedLibraries = false
         libraryHubs.removeAll()
         hubsVersion = UUID()
         libraryHubsVersion = UUID()
+        isHomeContentReady = false
 
         // Clear on-deck/continue watching cache
         await cacheManager.clearOnDeckCache()
@@ -445,6 +455,12 @@ class PlexDataStore: ObservableObject {
 
     /// Load hubs for each library that should appear on the Home screen
     func loadLibraryHubsIfNeeded() async {
+        // If already loading, wait for that task (deduplication)
+        if let existingTask = libraryHubsLoadTask {
+            await existingTask.value
+            return
+        }
+
         let librariesToLoad = librariesForHomeScreen
 
         // Skip if no libraries configured for Home
@@ -467,87 +483,92 @@ class PlexDataStore: ObservableObject {
         print("📦 PlexDataStore: Loading hubs for \(missingLibraries.count) libraries... (userId: \(userId.map(String.init) ?? "none"))")
         isLoadingLibraryHubs = true
 
-        // Try cache first for each missing library
-        var librariesNeedingFetch: [PlexLibrary] = []
-        for library in missingLibraries {
-            if let cached = await cacheManager.getCachedLibraryHubs(forLibrary: library.key), !cached.isEmpty {
-                libraryHubs[library.key] = cached
-            } else {
-                librariesNeedingFetch.append(library)
+        libraryHubsLoadTask = Task {
+            // Try cache first for each missing library
+            var librariesNeedingFetch: [PlexLibrary] = []
+            for library in missingLibraries {
+                if let cached = await cacheManager.getCachedLibraryHubs(forLibrary: library.key), !cached.isEmpty {
+                    libraryHubs[library.key] = cached
+                } else {
+                    librariesNeedingFetch.append(library)
+                }
             }
-        }
 
-        // If cache provided some data, update UI immediately
-        if librariesNeedingFetch.count < missingLibraries.count {
+            // If cache provided some data, update UI immediately
+            if librariesNeedingFetch.count < missingLibraries.count {
+                libraryHubsVersion = UUID()
+                isLoadingLibraryHubs = false
+            }
+
+            // Fetch remaining libraries from network in parallel
+            if !librariesNeedingFetch.isEmpty {
+                await withTaskGroup(of: (String, String, [PlexHub]?).self) { group in
+                    for library in librariesNeedingFetch {
+                        let sectionId = library.key.replacingOccurrences(of: "/library/sections/", with: "")
+                        group.addTask {
+                            do {
+                                let hubs = try await self.networkManager.getLibraryHubs(
+                                    serverURL: serverURL,
+                                    authToken: token,
+                                    sectionId: sectionId,
+                                    userId: userId,
+                                    count: 24
+                                )
+                                return (library.key, library.title, hubs)
+                            } catch {
+                                print("📦 PlexDataStore: ❌ Failed to load hubs for \(library.title): \(error)")
+                                return (library.key, library.title, nil)
+                            }
+                        }
+                    }
+
+                    for await (key, title, hubs) in group {
+                        if let hubs {
+                            libraryHubs[key] = hubs
+                            recordFetch(for: "libraryHubs:\(key)")
+                        }
+                    }
+                }
+            }
+
+            // Also background-refresh libraries that were served from cache
+            let fetchKeys = Set(librariesNeedingFetch.map { $0.key })
+            let cachedLibraries = missingLibraries.filter { !fetchKeys.contains($0.key) }
+            if !cachedLibraries.isEmpty {
+                await withTaskGroup(of: (String, String, [PlexHub]?).self) { group in
+                    for library in cachedLibraries {
+                        let sectionId = library.key.replacingOccurrences(of: "/library/sections/", with: "")
+                        group.addTask {
+                            do {
+                                let hubs = try await self.networkManager.getLibraryHubs(
+                                    serverURL: serverURL,
+                                    authToken: token,
+                                    sectionId: sectionId,
+                                    userId: userId,
+                                    count: 24
+                                )
+                                return (library.key, library.title, hubs)
+                            } catch {
+                                return (library.key, library.title, nil)
+                            }
+                        }
+                    }
+
+                    for await (key, title, hubs) in group {
+                        if let hubs {
+                            libraryHubs[key] = hubs
+                            recordFetch(for: "libraryHubs:\(key)")
+                        }
+                    }
+                }
+            }
+
             libraryHubsVersion = UUID()
             isLoadingLibraryHubs = false
         }
 
-        // Fetch remaining libraries from network in parallel
-        if !librariesNeedingFetch.isEmpty {
-            await withTaskGroup(of: (String, String, [PlexHub]?).self) { group in
-                for library in librariesNeedingFetch {
-                    let sectionId = library.key.replacingOccurrences(of: "/library/sections/", with: "")
-                    group.addTask {
-                        do {
-                            let hubs = try await self.networkManager.getLibraryHubs(
-                                serverURL: serverURL,
-                                authToken: token,
-                                sectionId: sectionId,
-                                userId: userId,
-                                count: 24
-                            )
-                            return (library.key, library.title, hubs)
-                        } catch {
-                            print("📦 PlexDataStore: ❌ Failed to load hubs for \(library.title): \(error)")
-                            return (library.key, library.title, nil)
-                        }
-                    }
-                }
-
-                for await (key, title, hubs) in group {
-                    if let hubs {
-                        libraryHubs[key] = hubs
-                        recordFetch(for: "libraryHubs:\(key)")
-                    }
-                }
-            }
-        }
-
-        // Also background-refresh libraries that were served from cache
-        let fetchKeys = Set(librariesNeedingFetch.map { $0.key })
-        let cachedLibraries = missingLibraries.filter { !fetchKeys.contains($0.key) }
-        if !cachedLibraries.isEmpty {
-            await withTaskGroup(of: (String, String, [PlexHub]?).self) { group in
-                for library in cachedLibraries {
-                    let sectionId = library.key.replacingOccurrences(of: "/library/sections/", with: "")
-                    group.addTask {
-                        do {
-                            let hubs = try await self.networkManager.getLibraryHubs(
-                                serverURL: serverURL,
-                                authToken: token,
-                                sectionId: sectionId,
-                                userId: userId,
-                                count: 24
-                            )
-                            return (library.key, library.title, hubs)
-                        } catch {
-                            return (library.key, library.title, nil)
-                        }
-                    }
-                }
-
-                for await (key, title, hubs) in group {
-                    if let hubs {
-                        libraryHubs[key] = hubs
-                        recordFetch(for: "libraryHubs:\(key)")
-                    }
-                }
-            }
-        }
-
-        libraryHubsVersion = UUID()
-        isLoadingLibraryHubs = false
+        await libraryHubsLoadTask?.value
+        libraryHubsLoadTask = nil
     }
 
     /// Refresh hubs for all libraries on Home screen
@@ -562,6 +583,7 @@ class PlexDataStore: ObservableObject {
     func loadLibrariesIfNeeded() async {
         // If we already have data, skip
         if !libraries.isEmpty {
+            hasLoadedLibraries = true
             return
         }
 
@@ -597,6 +619,7 @@ class PlexDataStore: ObservableObject {
 
         await librariesLoadTask?.value
         librariesLoadTask = nil
+        hasLoadedLibraries = true
     }
 
     private func fetchLibrariesFromServer(serverURL: String, token: String, updateLoading: Bool) async {
@@ -1037,12 +1060,15 @@ class PlexDataStore: ObservableObject {
         stopPolling()
         hubsLoadTask?.cancel()
         librariesLoadTask?.cancel()
+        libraryHubsLoadTask?.cancel()
         prefetchTask?.cancel()
         hubsLoadTask = nil
         librariesLoadTask = nil
+        libraryHubsLoadTask = nil
         prefetchTask = nil
         hubs = []
         libraries = []
+        isHomeContentReady = false
         hubsError = nil
         librariesError = nil
         isLoadingHubs = false

@@ -15,8 +15,10 @@ final class SubtitleManager: ObservableObject {
     // MARK: - Published State
 
     @Published private(set) var currentCues: [SubtitleCue] = []
+    @Published private(set) var currentBitmapCues: [BitmapSubtitleCue] = []
     @Published private(set) var isLoading = false
     @Published private(set) var error: Error?
+    @Published var diagnosticsEnabled = true
 
     // MARK: - Private State
 
@@ -37,16 +39,22 @@ final class SubtitleManager: ObservableObject {
             let content = try await fetchSubtitleContent(url: url, headers: headers)
             let detectedFormat = format ?? SubtitleFormat(fromURL: url)
 
-            guard let parser = detectedFormat.parser else {
+            let track: SubtitleTrack
+            if let parser = detectedFormat.parser {
+                track = try parser.parse(content)
+            } else {
                 // Try to auto-detect from content
-                let track = try parseWithAutoDetect(content)
-                currentTrack = track
-                isLoading = false
-                return
+                track = try parseWithAutoDetect(content)
             }
 
-            let track = try parser.parse(content)
+            guard !track.cues.isEmpty else {
+                throw SubtitleLoadError.noCues
+            }
+
             currentTrack = track
+            if diagnosticsEnabled {
+                print("🎬 [Subtitles] Loaded \(track.cues.count) cues (\(detectedFormat)) from \(url.lastPathComponent)")
+            }
         } catch {
             self.error = error
             print("🎬 [Subtitles] ❌ Failed to load: \(error.localizedDescription)")
@@ -69,6 +77,9 @@ final class SubtitleManager: ObservableObject {
         do {
             let track = try parser.parse(content)
             currentTrack = track
+            if diagnosticsEnabled {
+                print("🎬 [Subtitles] Loaded \(track.cues.count) cues (\(format)) from content")
+            }
         } catch {
             self.error = error
             print("🎬 [Subtitles] ❌ Parse error: \(error.localizedDescription)")
@@ -79,8 +90,71 @@ final class SubtitleManager: ObservableObject {
     func clear() {
         currentTrack = .empty
         currentCues = []
+        accumulatedCues = []
+        currentBitmapCues = []
+        accumulatedBitmapCues = []
         error = nil
         lastUpdateTime = -1
+    }
+
+    // MARK: - Progressive Cue Addition (for embedded subtitle extraction)
+
+    /// Accumulated cues from inline extraction, sorted on insertion
+    private var accumulatedCues: [SubtitleCue] = []
+
+    /// Accumulated bitmap cues from PGS/DVB-SUB subtitle streams
+    private var accumulatedBitmapCues: [BitmapSubtitleCue] = []
+
+    /// Add a single subtitle cue from an embedded stream (delivered by FFmpeg read loop).
+    /// Rebuilds the subtitle track incrementally. Thread-safe: call from MainActor.
+    func addCue(text: String, startTime: TimeInterval, endTime: TimeInterval) {
+        // Strip HTML tags (<i>, <b>, <font>, etc.) and ASS overrides ({\tag})
+        let cleaned = text
+            .replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression)
+            .replacingOccurrences(of: "\\{\\\\[^}]*\\}", with: "", options: .regularExpression)
+            .replacingOccurrences(of: "\\N", with: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard !cleaned.isEmpty else { return }
+
+        let cue = SubtitleCue(
+            id: accumulatedCues.count,
+            startTime: startTime,
+            endTime: endTime,
+            text: cleaned
+        )
+        accumulatedCues.append(cue)
+
+        // Rebuild track — cues arrive in PTS order from the demuxer, so they're already sorted
+        currentTrack = SubtitleTrack(cues: accumulatedCues)
+    }
+
+    /// Add a bitmap subtitle cue from an embedded PGS/DVB-SUB stream.
+    ///
+    /// PGS subtitles use "display set" semantics: each new cue replaces the previous one.
+    /// Cues with `.infinity` end time are auto-closed when the next cue arrives.
+    /// Cues with empty rects represent "clear screen" events — they close the previous cue
+    /// without adding a new visible entry.
+    func addBitmapCue(_ cue: BitmapSubtitleCue) {
+        // Close any previous open-ended cue (PGS: .infinity sentinel means "until next display set")
+        if let lastIndex = accumulatedBitmapCues.indices.last,
+           accumulatedBitmapCues[lastIndex].endTime.isInfinite {
+            accumulatedBitmapCues[lastIndex].endTime = cue.startTime
+        }
+
+        // Empty rects = PGS "clear screen" — previous cue closed above, nothing more to add
+        guard !cue.rects.isEmpty else {
+            if diagnosticsEnabled {
+                print("🎬 [Subtitles] Bitmap clear at \(String(format: "%.3f", cue.startTime))")
+            }
+            return
+        }
+
+        accumulatedBitmapCues.append(cue)
+        if diagnosticsEnabled {
+            print("🎬 [Subtitles] Bitmap cue \(cue.id): \(cue.rects.count) rect(s) " +
+                  "start=\(String(format: "%.3f", cue.startTime)) end=\(String(format: "%.3f", cue.endTime))")
+        }
     }
 
     // MARK: - Time Updates
@@ -92,11 +166,28 @@ final class SubtitleManager: ObservableObject {
         guard abs(time - lastUpdateTime) > updateThreshold else { return }
         lastUpdateTime = time
 
+        // Text cues
         let newCues = currentTrack.activeCues(at: time)
 
         // Only update if cues actually changed
         if newCues.map(\.id) != currentCues.map(\.id) {
+            let previousCues = currentCues
             currentCues = newCues
+            if diagnosticsEnabled {
+                logCueTransition(time: time, from: previousCues, to: newCues)
+            }
+        }
+
+        // Bitmap cues
+        if !accumulatedBitmapCues.isEmpty {
+            let activeBitmap = accumulatedBitmapCues.filter { $0.isActive(at: time) }
+            if activeBitmap.map(\.id) != currentBitmapCues.map(\.id) {
+                currentBitmapCues = activeBitmap
+            }
+            // Prune old bitmap cues that ended more than 30s ago to avoid unbounded growth
+            accumulatedBitmapCues.removeAll { $0.endTime < time - 30 }
+        } else if !currentBitmapCues.isEmpty {
+            currentBitmapCues = []
         }
     }
 
@@ -123,19 +214,26 @@ final class SubtitleManager: ObservableObject {
 
         // Try UTF-8 first, then Latin-1 as fallback (common for older SRT files)
         if let content = String(data: data, encoding: .utf8) {
-            return content
+            return stripUTF8BOMIfPresent(content)
         }
         if let content = String(data: data, encoding: .isoLatin1) {
-            return content
+            return stripUTF8BOMIfPresent(content)
         }
         if let content = String(data: data, encoding: .windowsCP1252) {
-            return content
+            return stripUTF8BOMIfPresent(content)
         }
 
         throw SubtitleLoadError.invalidEncoding
     }
 
     private func parseWithAutoDetect(_ content: String) throws -> SubtitleTrack {
+        // Try ASS/SSA first when script sections are present.
+        if content.contains("[Script Info]") || content.contains("[Events]") || content.contains("Dialogue:") {
+            if let assTrack = try? ASSParser().parse(content), !assTrack.cues.isEmpty {
+                return assTrack
+            }
+        }
+
         // Try VTT first (has explicit header)
         if content.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("WEBVTT") {
             return try VTTParser().parse(content)
@@ -148,6 +246,40 @@ final class SubtitleManager: ObservableObject {
             throw SubtitleLoadError.unsupportedFormat
         }
     }
+
+    private func logCueTransition(time: TimeInterval, from previous: [SubtitleCue], to current: [SubtitleCue]) {
+        let previousIDs = previous.map(\.id)
+        let currentIDs = current.map(\.id)
+        let added = current.filter { !previousIDs.contains($0.id) }
+        let removed = previous.filter { !currentIDs.contains($0.id) }
+
+        if !added.isEmpty {
+            // for cue in added {
+            //     print(
+            //         "🎬 [Subtitles] SHOW t=\(String(format: "%.3f", time))s " +
+            //         "cue=\(cue.id) start=\(String(format: "%.3f", cue.startTime)) " +
+            //         "end=\(String(format: "%.3f", cue.endTime)) text=\"\(cue.logPreview)\""
+            //     )
+            // }
+        }
+
+        if !removed.isEmpty {
+            // for cue in removed {
+            //     print(
+            //         "🎬 [Subtitles] HIDE t=\(String(format: "%.3f", time))s " +
+            //         "cue=\(cue.id) start=\(String(format: "%.3f", cue.startTime)) " +
+            //         "end=\(String(format: "%.3f", cue.endTime))"
+            //     )
+            // }
+        }
+    }
+
+    private func stripUTF8BOMIfPresent(_ content: String) -> String {
+        if content.hasPrefix("\u{FEFF}") {
+            return String(content.dropFirst())
+        }
+        return content
+    }
 }
 
 // MARK: - Errors
@@ -156,12 +288,22 @@ enum SubtitleLoadError: Error, LocalizedError {
     case httpError(Int)
     case invalidEncoding
     case unsupportedFormat
+    case noCues
 
     var errorDescription: String? {
         switch self {
         case .httpError(let code): return "HTTP error \(code)"
         case .invalidEncoding: return "Could not decode subtitle file"
         case .unsupportedFormat: return "Unsupported subtitle format"
+        case .noCues: return "Subtitle file contained no cues"
         }
+    }
+}
+
+private extension SubtitleCue {
+    var logPreview: String {
+        let singleLine = text.replacingOccurrences(of: "\n", with: " ")
+        if singleLine.count <= 80 { return singleLine }
+        return String(singleLine.prefix(77)) + "..."
     }
 }

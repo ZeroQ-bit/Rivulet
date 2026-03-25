@@ -377,7 +377,18 @@ struct PlayerControlsOverlay: View {
     }
 
     private var audioInfoString: String? {
-        // Prefer stream displayTitle if available (e.g., "English (AAC 7.1)")
+        // Show the currently selected audio track if available
+        if let currentId = viewModel.currentAudioTrackId,
+           let currentTrack = viewModel.audioTracks.first(where: { $0.id == currentId }) {
+            var parts: [String] = []
+            if let lang = currentTrack.language {
+                parts.append(lang)
+            }
+            parts.append(currentTrack.audioFormatString)
+            return parts.joined(separator: " · ")
+        }
+
+        // Fall back to first Plex audio stream displayTitle
         if let audioStream = viewModel.metadata.Media?.first?.Part?.first?.Stream?.first(where: { $0.isAudio }),
            let displayTitle = audioStream.displayTitle {
             return displayTitle
@@ -386,47 +397,15 @@ struct PlayerControlsOverlay: View {
         // Fall back to media-level info
         guard let media = viewModel.metadata.Media?.first else { return nil }
         var parts: [String] = []
-
-        // Codec - handle common fourcc codes
-        if let codec = media.audioCodec?.uppercased() {
-            if codec.contains("TRUEHD") {
-                parts.append("TrueHD")
-            } else if codec.contains("DTS") {
-                if codec.contains("HD") {
-                    parts.append("DTS-HD")
-                } else {
-                    parts.append("DTS")
-                }
-            } else if codec.contains("EAC3") || codec.contains("E-AC-3") {
-                parts.append("Dolby Digital+")
-            } else if codec.contains("AC3") && !codec.contains("EAC3") {
-                parts.append("Dolby Digital")
-            } else if codec.contains("AAC") || codec.contains("MP4A") {
-                parts.append("AAC")
-            } else if codec.contains("FLAC") {
-                parts.append("FLAC")
-            } else if codec.contains("OPUS") {
-                parts.append("Opus")
-            } else if codec.contains("DCA") {
-                parts.append("DTS")
-            } else {
-                parts.append(codec)
-            }
+        if let codec = media.audioCodec {
+            parts.append(codec.uppercased())
         }
-
-        // Channels
         if let channels = media.audioChannels {
-            if channels >= 8 {
-                parts.append("7.1")
-            } else if channels >= 6 {
-                parts.append("5.1")
-            } else if channels == 2 {
-                parts.append("Stereo")
-            } else if channels == 1 {
-                parts.append("Mono")
-            }
+            if channels >= 8 { parts.append("7.1") }
+            else if channels >= 6 { parts.append("5.1") }
+            else if channels == 2 { parts.append("Stereo") }
+            else if channels == 1 { parts.append("Mono") }
         }
-
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 

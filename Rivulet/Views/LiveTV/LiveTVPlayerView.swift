@@ -8,7 +8,6 @@
 import SwiftUI
 import Combine
 
-#if os(tvOS)
 @MainActor
 private final class LiveTVPlaybackInputTarget: PlaybackInputTarget {
     weak var viewModel: MultiStreamViewModel?
@@ -228,15 +227,12 @@ private final class LiveTVPlaybackInputTarget: PlaybackInputTarget {
         }
     }
 }
-#endif
 
 struct LiveTVPlayerView: View {
     @StateObject private var viewModel: MultiStreamViewModel
-    #if os(tvOS)
     @StateObject private var remoteInput = RemoteInputHandler()
     @State private var inputCoordinator = PlaybackInputCoordinator()
     @State private var inputTarget: LiveTVPlaybackInputTarget?
-    #endif
     @AppStorage("confirmExitMultiview") private var confirmExitMultiview = true
     @AppStorage("classicTVMode") private var classicTVMode = false
     @State private var showExitConfirmation = false
@@ -285,7 +281,6 @@ struct LiveTVPlayerView: View {
                     transaction.animation = nil
                 }
 
-            #if os(tvOS)
             if isInteractive && !viewModel.showControls && !viewModel.showChannelPicker && !showExitConfirmation {
                 LiveTVPressCatcher { action in
                     inputCoordinator.handle(action: action, source: .irPress)
@@ -293,7 +288,6 @@ struct LiveTVPlayerView: View {
                 .ignoresSafeArea()
                 .zIndex(50)
             }
-            #endif
 
             // Controls overlay (hidden in classic TV mode and PIP mode)
             if isInteractive && viewModel.showControls && !classicTVMode {
@@ -344,8 +338,7 @@ struct LiveTVPlayerView: View {
         .disabled(!isInteractive)  // Disable focus capture when in PIP mode
         .animation(.easeInOut(duration: 0.25), value: viewModel.showControls)
         .animation(.easeInOut(duration: 0.25), value: showChannelBadges)
-        // Don't animate stream count changes - causes issues with MPV player resizing
-        #if os(tvOS)
+        // Don't animate stream count changes to keep stream surfaces stable during layout changes.
         .onPlayPauseCommand {
             guard isInteractive else { return }  // Ignore when in PIP mode
             inputCoordinator.handle(action: .playPause, source: .swiftUICommand)
@@ -354,7 +347,6 @@ struct LiveTVPlayerView: View {
             guard isInteractive else { return }  // Ignore when in PIP mode
             inputCoordinator.handle(action: .back, source: .swiftUICommand)
         }
-        #endif
         .onChange(of: viewModel.showControls) { _, showControls in
             if showControls {
                 // When controls appear, focus the play/pause button (always index 0)
@@ -397,7 +389,6 @@ struct LiveTVPlayerView: View {
             }
         }
         .onAppear {
-            #if os(tvOS)
             if isInteractive {
                 let target = LiveTVPlaybackInputTarget(viewModel: viewModel)
                 target.canHandleTransport = { [viewModel] in
@@ -435,7 +426,6 @@ struct LiveTVPlayerView: View {
                 }
                 remoteInput.startMonitoring()
             }
-            #endif
             // Start with controls hidden, focus on stream grid
             viewModel.showControls = false
             // Delay focus grab slightly to ensure view is laid out
@@ -447,12 +437,10 @@ struct LiveTVPlayerView: View {
             showFocusBorderTemporarily()
         }
         .onDisappear {
-            #if os(tvOS)
             remoteInput.stopMonitoring()
             remoteInput.reset()
             inputCoordinator.invalidate()
             inputTarget = nil
-            #endif
             channelBadgeTimer?.invalidate()
             focusBorderTimer?.invalidate()
             // Only stop streams if we're actually exiting (not showing confirmation)
@@ -470,7 +458,7 @@ struct LiveTVPlayerView: View {
             }
         }
         .animation(.easeInOut(duration: 0.2), value: showExitConfirmation)
-        .preferredColorScheme(.dark)  // Ensure dark mode for all system UI
+        // System appearance
     }
 
     // MARK: - Stream Content
@@ -496,13 +484,7 @@ struct LiveTVPlayerView: View {
                             // Show focus border when: controls are visible OR the timed focus border is showing
                             isFocused: viewModel.focusedSlotIndex == index && (viewModel.showControls || showFocusBorder),
                             showBorder: viewModel.streamCount > 1,
-                            showChannelBadge: showChannelBadges,
-                            // Keep explicit sizing active for multistream and non-interactive
-                            // PiP mode so the same MPV instance can be resized without rebuild.
-                            containerSize: (viewModel.streamCount > 1 || !isInteractive) ? rect.size : .zero,
-                            onControllerReady: { controller in
-                                viewModel.setPlayerController(controller, for: slot.id)
-                            }
+                            showChannelBadge: showChannelBadges
                         )
                         .id(slot.id)
                         .frame(width: rect.width, height: rect.height)
@@ -532,14 +514,12 @@ struct LiveTVPlayerView: View {
                         // Select pressed - show controls
                         showControlsWithFocus()
                     }
-                    #if os(tvOS)
                     .onMoveCommand { direction in
                         handleStreamNavigation(direction)
                     }
                     .onExitCommand {
                         inputCoordinator.handle(action: .back, source: .swiftUICommand)
                     }
-                    #endif
             }
         }
         .ignoresSafeArea(edges: isInteractive ? .all : [])
@@ -548,8 +528,7 @@ struct LiveTVPlayerView: View {
     private func layoutFrames(for size: CGSize) -> [UUID: CGRect] {
         var frames: [UUID: CGRect] = [:]
 
-        // Single stream: use full screen, no spacing or aspect ratio constraints
-        // (MPV handles letterboxing internally)
+        // Single stream: use full screen, no spacing or aspect ratio constraints.
         if viewModel.streamCount == 1, let slot = viewModel.streams.first {
             frames[slot.id] = CGRect(x: 0, y: 0, width: size.width, height: size.height)
             return frames
@@ -629,7 +608,6 @@ struct LiveTVPlayerView: View {
 
     // MARK: - Stream Navigation (when controls hidden)
 
-    #if os(tvOS)
     private func handleStreamNavigation(_ direction: MoveCommandDirection) {
         guard !viewModel.showControls else { return }
 
@@ -742,7 +720,6 @@ struct LiveTVPlayerView: View {
             viewModel.setFocus(to: newIndex)
         }
     }
-    #endif
 
     private func showControlsWithFocus() {
         // Show focus border on any remote input
@@ -835,7 +812,6 @@ struct LiveTVPlayerView: View {
                     .padding(.bottom, 60)
             }
         }
-        #if os(tvOS)
         .onExitCommand {
             // Menu/Back pressed while controls visible - hide controls
             withAnimation(.easeOut(duration: 0.2)) {
@@ -845,7 +821,6 @@ struct LiveTVPlayerView: View {
                 focusArea = .streamGrid
             }
         }
-        #endif
     }
 
     private var exitConfirmationOverlay: some View {
@@ -935,7 +910,6 @@ struct LiveTVPlayerView: View {
                 in: RoundedRectangle(cornerRadius: 24, style: .continuous)
             )
         }
-        #if os(tvOS)
         .onExitCommand {
             // Menu/Back on confirmation = cancel
             showExitConfirmation = false
@@ -943,7 +917,6 @@ struct LiveTVPlayerView: View {
                 focusArea = .streamGrid
             }
         }
-        #endif
     }
 
     private var topBar: some View {
@@ -1176,7 +1149,6 @@ struct LiveTVPlayerView: View {
         return "\(start) - \(end)"
     }
 
-    #if os(tvOS)
     private func handleExitCommand() {
         // Show focus border on any remote input
         showFocusBorderTemporarily()
@@ -1221,7 +1193,6 @@ struct LiveTVPlayerView: View {
             }
         }
     }
-    #endif
 
     private func dismissPlayer() {
         // Check if we should show confirmation for multiview
@@ -1235,7 +1206,6 @@ struct LiveTVPlayerView: View {
     private func forceExitPlayer() {
         if !hasStoppedStreams {
             hasStoppedStreams = true
-            // Stop streams - MPV cleanup now runs on background thread
             viewModel.stopAllStreams()
         }
         // Dismiss UI after cleanup request is issued

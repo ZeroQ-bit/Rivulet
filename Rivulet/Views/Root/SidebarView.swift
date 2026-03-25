@@ -113,9 +113,6 @@ struct SidebarView: View {
                 }
             }
         }
-        #if !os(tvOS)
-        .listStyle(.sidebar)
-        #endif
         .task {
             if authManager.isAuthenticated {
                 await dataStore.loadLibrariesIfNeeded()

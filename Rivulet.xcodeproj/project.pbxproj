@@ -9,8 +9,13 @@
 /* Begin PBXBuildFile section */
 		A70B443B2F05AF3200DEF5ED /* TVServices.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A70B443A2F05AF3200DEF5ED /* TVServices.framework */; };
 		A70B44422F05AF3200DEF5ED /* TopShelfExtension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = A70B44392F05AF3200DEF5ED /* TopShelfExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
-		A71F81702EFBA6DD00AAC4F6 /* MPVKit in Frameworks */ = {isa = PBXBuildFile; productRef = A71F816F2EFBA6DD00AAC4F6 /* MPVKit */; };
+		A740D1192F59C56300B9820B /* AVKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A740D1182F59C56300B9820B /* AVKit.framework */; };
 		A7F159552F04124A001B2177 /* Sentry in Frameworks */ = {isa = PBXBuildFile; productRef = A7F159542F04124A001B2177 /* Sentry */; };
+		B10000012F7A000100000001 /* Libavformat.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = B10000062F7A000100000001 /* Libavformat.xcframework */; };
+		B10000022F7A000100000001 /* Libavcodec.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = B10000072F7A000100000001 /* Libavcodec.xcframework */; };
+		B10000032F7A000100000001 /* Libavutil.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = B10000082F7A000100000001 /* Libavutil.xcframework */; };
+		B10000042F7A000100000001 /* Libswresample.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = B10000092F7A000100000001 /* Libswresample.xcframework */; };
+		B10000052F7A000100000001 /* Libdovi.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = B100000A2F7A000100000001 /* Libdovi.xcframework */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -48,7 +53,13 @@
 		A70B44392F05AF3200DEF5ED /* TopShelfExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = TopShelfExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		A70B443A2F05AF3200DEF5ED /* TVServices.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = TVServices.framework; path = Library/Frameworks/TVServices.framework; sourceTree = DEVELOPER_DIR; };
 		A72E03DA2EDA297D003A73DA /* Rivulet.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Rivulet.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		A740D1182F59C56300B9820B /* AVKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AVKit.framework; path = Platforms/AppleTVOS.platform/Developer/SDKs/AppleTVOS26.2.sdk/System/Library/Frameworks/AVKit.framework; sourceTree = DEVELOPER_DIR; };
 		A784830A2F062C2000F9E6D0 /* RivuletTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = RivuletTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		B10000062F7A000100000001 /* Libavformat.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = Libavformat.xcframework; path = Frameworks/Libavformat.xcframework; sourceTree = "<group>"; };
+		B10000072F7A000100000001 /* Libavcodec.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = Libavcodec.xcframework; path = Frameworks/Libavcodec.xcframework; sourceTree = "<group>"; };
+		B10000082F7A000100000001 /* Libavutil.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = Libavutil.xcframework; path = Frameworks/Libavutil.xcframework; sourceTree = "<group>"; };
+		B10000092F7A000100000001 /* Libswresample.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = Libswresample.xcframework; path = Frameworks/Libswresample.xcframework; sourceTree = "<group>"; };
+		B100000A2F7A000100000001 /* Libdovi.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = Libdovi.xcframework; path = Frameworks/Libdovi.xcframework; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -105,7 +116,12 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				A71F81702EFBA6DD00AAC4F6 /* MPVKit in Frameworks */,
+				A740D1192F59C56300B9820B /* AVKit.framework in Frameworks */,
+				B10000012F7A000100000001 /* Libavformat.xcframework in Frameworks */,
+				B10000022F7A000100000001 /* Libavcodec.xcframework in Frameworks */,
+				B10000032F7A000100000001 /* Libavutil.xcframework in Frameworks */,
+				B10000042F7A000100000001 /* Libswresample.xcframework in Frameworks */,
+				B10000052F7A000100000001 /* Libdovi.xcframework in Frameworks */,
 				A7F159552F04124A001B2177 /* Sentry in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -144,7 +160,13 @@
 		A7F159532F04124A001B2177 /* Frameworks */ = {
 			isa = PBXGroup;
 			children = (
+				A740D1182F59C56300B9820B /* AVKit.framework */,
 				A70B443A2F05AF3200DEF5ED /* TVServices.framework */,
+				B10000062F7A000100000001 /* Libavformat.xcframework */,
+				B10000072F7A000100000001 /* Libavcodec.xcframework */,
+				B10000082F7A000100000001 /* Libavutil.xcframework */,
+				B10000092F7A000100000001 /* Libswresample.xcframework */,
+				B100000A2F7A000100000001 /* Libdovi.xcframework */,
 			);
 			name = Frameworks;
 			sourceTree = "<group>";
@@ -193,7 +215,6 @@
 			);
 			name = Rivulet;
 			packageProductDependencies = (
-				A71F816F2EFBA6DD00AAC4F6 /* MPVKit */,
 				A7F159542F04124A001B2177 /* Sentry */,
 			);
 			productName = Rivulet;
@@ -256,7 +277,6 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				A700F81A2EFBA1610042C07D /* XCRemoteSwiftPackageReference "sentry-cocoa" */,
-				A71F816E2EFBA6DD00AAC4F6 /* XCLocalSwiftPackageReference "../../MPVKit" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = A72E03DB2EDA297D003A73DA /* Products */;
@@ -337,7 +357,7 @@
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = TopShelfExtension/TopShelfExtension.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 40;
+				CURRENT_PROJECT_VERSION = 43;
 				DEVELOPMENT_TEAM = ZHB786H6YN;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = TopShelfExtension/Info.plist;
@@ -368,7 +388,7 @@
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = TopShelfExtension/TopShelfExtension.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 40;
+				CURRENT_PROJECT_VERSION = 43;
 				DEVELOPMENT_TEAM = ZHB786H6YN;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = TopShelfExtension/Info.plist;
@@ -402,7 +422,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = Rivulet/Rivulet.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 40;
+				CURRENT_PROJECT_VERSION = 43;
 				DEAD_CODE_STRIPPING = YES;
 				DEVELOPMENT_TEAM = ZHB786H6YN;
 				ENABLE_APP_SANDBOX = YES;
@@ -428,18 +448,26 @@
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 26.1;
 				MARKETING_VERSION = 1.0.0;
+				OTHER_LDFLAGS = (
+					"-lbz2",
+					"-liconv",
+					"-lz",
+				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.gstudios.rivulet;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
 				SDKROOT = auto;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SUPPORTED_PLATFORMS = "appletvos appletvsimulator iphoneos iphonesimulator macosx xros xrsimulator";
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) RIVULET_FFMPEG";
+				"SWIFT_ACTIVE_COMPILATION_CONDITIONS[sdk=appletvsimulator*]" = DEBUG;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2,3,7";
+				"VALIDATE_WORKSPACE[sdk=appletvsimulator*]" = NO;
 				XROS_DEPLOYMENT_TARGET = 26.1;
 			};
 			name = Debug;
@@ -451,7 +479,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = Rivulet/Rivulet.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 40;
+				CURRENT_PROJECT_VERSION = 43;
 				DEAD_CODE_STRIPPING = YES;
 				DEVELOPMENT_TEAM = ZHB786H6YN;
 				ENABLE_APP_SANDBOX = YES;
@@ -477,18 +505,26 @@
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 26.1;
 				MARKETING_VERSION = 1.0.0;
+				OTHER_LDFLAGS = (
+					"-lbz2",
+					"-liconv",
+					"-lz",
+				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.gstudios.rivulet;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
 				SDKROOT = auto;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SUPPORTED_PLATFORMS = "appletvos appletvsimulator iphoneos iphonesimulator macosx xros xrsimulator";
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) RIVULET_FFMPEG";
+				"SWIFT_ACTIVE_COMPILATION_CONDITIONS[sdk=appletvsimulator*]" = DEBUG;
 				SWIFT_APPROACHABLE_CONCURRENCY = YES;
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2,3,7";
+				"VALIDATE_WORKSPACE[sdk=appletvsimulator*]" = NO;
 				XROS_DEPLOYMENT_TARGET = 26.1;
 			};
 			name = Release;
@@ -701,13 +737,6 @@
 		};
 /* End XCConfigurationList section */
 
-/* Begin XCLocalSwiftPackageReference section */
-		A71F816E2EFBA6DD00AAC4F6 /* XCLocalSwiftPackageReference "../../MPVKit" */ = {
-			isa = XCLocalSwiftPackageReference;
-			relativePath = ../../MPVKit;
-		};
-/* End XCLocalSwiftPackageReference section */
-
 /* Begin XCRemoteSwiftPackageReference section */
 		A700F81A2EFBA1610042C07D /* XCRemoteSwiftPackageReference "sentry-cocoa" */ = {
 			isa = XCRemoteSwiftPackageReference;
@@ -720,11 +749,6 @@
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
-		A71F816F2EFBA6DD00AAC4F6 /* MPVKit */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = A71F816E2EFBA6DD00AAC4F6 /* XCLocalSwiftPackageReference "../../MPVKit" */;
-			productName = MPVKit;
-		};
 		A7F159542F04124A001B2177 /* Sentry */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = A700F81A2EFBA1610042C07D /* XCRemoteSwiftPackageReference "sentry-cocoa" */;

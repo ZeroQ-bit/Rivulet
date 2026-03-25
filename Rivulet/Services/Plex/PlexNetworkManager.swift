@@ -455,9 +455,12 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
             throw PlexAPIError.notFound
         }
 
-        // Copy librarySectionID from container to item if not present
+        // Copy library section info from container to item if not present
         if item.librarySectionID == nil {
             item.librarySectionID = container.MediaContainer.librarySectionID
+        }
+        if item.librarySectionTitle == nil {
+            item.librarySectionTitle = container.MediaContainer.librarySectionTitle
         }
 
         return item
@@ -1103,10 +1106,9 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
         return components.url
     }
 
-    /// VLC Direct Play - streams the raw file without any transcoding
-    /// VLCKit can play virtually any format: MKV, HEVC, H264, DTS, TrueHD, ASS/SSA subs, etc.
-    /// This is the most efficient option and preserves all original quality/tracks
-    func buildVLCDirectPlayURL(
+    /// Build a direct-play URL for Rivulet's raw-file path.
+    /// This preserves the original bitstreams and keeps startup work on the client side.
+    func buildPlaybackDirectPlayURL(
         serverURL: String,
         authToken: String,
         partKey: String
@@ -1334,7 +1336,7 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
         return components.url
     }
 
-    /// Build HLS URL for AVPlayer with direct stream (remux only, no transcoding)
+    /// Build an HLS playback URL with direct stream (remux only, no transcoding)
     /// This preserves video/audio codecs including Dolby Vision while providing HLS format
     /// Returns both the URL and required HTTP headers (Plex HLS requires auth in headers, not query params)
     /// - Parameter hasHDR: Whether content has HDR (HDR10/HDR10+/HLG/DV) - adds useDoviCodecs=1 for proper TV mode switching
@@ -1364,10 +1366,10 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
          // Stick with "Generic" for non-DV to keep our custom extra profile.
          let clientProfileName = useDolbyVision ? "Plex Apple TV" : "Generic"
 
-        // Client profile matching official Plex tvOS app for optimal AVPlayer compatibility.
-        // Keep our explicit limitations (dvhe/hev1 remap) to ensure Apple-friendly codec tags.
+        // Match the official Plex tvOS profile so the server returns Apple decoder-friendly streams.
+        // Keep our explicit limitations (dvhe/hev1 remap) to ensure compatible codec tags.
         let clientProfile = [
-            // Direct play profiles - tells server what formats AVPlayer can play natively
+            // Direct play profiles - tells the server what formats we can preserve in the HLS remux path
             "add-direct-play-profile(type=videoProfile&protocol=http&container=mp4,mov&videoCodec=h264,mpeg4,hevc&audioCodec=aac,ac3,eac3&subtitleCodec=mov_text,tx3g,ttxt,text,webvtt)",
             "add-direct-play-profile(type=musicProfile&protocol=http&container=flac&audioCodec=flac)",
             "add-direct-play-profile(type=musicProfile&protocol=http&container=mp4&audioCodec=alac)",
@@ -1410,7 +1412,7 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
             // directPlay=1 tells server we CAN direct play mp4/mov - without this, server may transcode instead of remux
             URLQueryItem(name: "directPlay", value: "1"),
             // For MKV+DV, we must force video transcoding (not just remux) to get Apple-compatible codec tags (dvh1/hvc1)
-            // MKV files typically use dvhe/hev1 which AVPlayer cannot decode
+            // MKV files typically use dvhe/hev1 which the tvOS decoder path does not accept here
             URLQueryItem(name: "directStream", value: forceVideoTranscode ? "0" : "1"),
             // directStreamAudio controls whether Plex passes through compatible audio or transcodes it
             // When allowAudioDirectStream=false (e.g., AirPlay/HomePod with multichannel AAC), force transcode
@@ -1441,11 +1443,8 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
 
         components.queryItems = items
 
-        // Add HDR-related parameters for proper DV remuxing and codec signaling
-        // useDoviCodecs=1 ensures Plex remuxes DV content (preserves DV metadata) rather than transcoding
-        // includeCodecs=1 is required with useDoviCodecs for correct HLS manifest generation
-        // Note: Plex outputs dvh1 in the CODECS string which AVPlayer rejects, but we patch the
-        // master playlist before loading (see AVPlayerWrapper) to change dvh1 → hvc1
+        // Add HDR-related parameters for proper DV remuxing and codec signaling.
+        // useDoviCodecs=1 ensures Plex preserves Dolby Vision metadata in the HLS output.
         if hasHDR && useDolbyVision {
             components.queryItems?.append(URLQueryItem(name: "useDoviCodecs", value: "1"))
             components.queryItems?.append(URLQueryItem(name: "includeCodecs", value: "1"))
@@ -1455,6 +1454,33 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
 
         guard let url = components.url else { return nil }
         return (url, headers)
+    }
+
+    /// Set the preferred audio stream on a media part.
+    /// Plex reads this preference when starting a new transcode session.
+    /// Must be called BEFORE starting the transcode for the selection to take effect.
+    func setSelectedAudioStream(
+        serverURL: String,
+        authToken: String,
+        partId: Int,
+        audioStreamID: Int
+    ) async {
+        let urlString = "\(serverURL)/library/parts/\(partId)?audioStreamID=\(audioStreamID)&X-Plex-Token=\(authToken)"
+        guard let url = URL(string: urlString) else {
+            print("[Plex] Failed to build audio stream selection URL")
+            return
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "PUT"
+
+        do {
+            let (_, response) = try await URLSession.shared.data(for: request)
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            print("[Plex] Set audio stream \(audioStreamID) on part \(partId): HTTP \(status)")
+        } catch {
+            print("[Plex] Failed to set audio stream: \(error.localizedDescription)")
+        }
     }
 
     /// Ping the `/decision` endpoint to tell Plex to actually start the transcode/remux session.
@@ -1487,7 +1513,7 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
         }
     }
 
-    /// Warm up a direct-play URL so MPV's first real request sees lower startup latency.
+    /// Warm up a direct-play URL so the first real playback request sees lower startup latency.
     /// This is best-effort and intentionally silent on failures.
     func warmDirectPlayStream(url: URL, headers: [String: String]) async {
         var headRequest = URLRequest(url: url)

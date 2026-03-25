@@ -8,17 +8,181 @@
 import SwiftUI
 import SwiftData
 import Combine
+import os.log
+import UIKit
+
+private let splashLog = Logger(subsystem: "com.rivulet.app", category: "Splash")
 
 struct ContentView: View {
     @Environment(\.modelContext) private var modelContext
 
+    @StateObject private var dataStore = PlexDataStore.shared
+    @StateObject private var authManager = PlexAuthManager.shared
+    #if DEBUG
+    @State private var showSplash = false
+    #else
+    @State private var showSplash = true
+    #endif
+
     var body: some View {
-        #if os(tvOS)
         TVSidebarView()
-            .preferredColorScheme(.dark)  // Force dark mode on tvOS
-        #else
-        NavigationSplitViewContent()
-        #endif
+            .modifier(AutoPlayLauncherModifier())
+            .overlay {
+                if showSplash {
+                    splashOverlay
+                        .transition(.opacity)
+                }
+            }
+            .animation(.easeOut(duration: 0.4), value: showSplash)
+        .onChange(of: authManager.hasCredentials) { _, hasCredentials in
+            splashLog.info("hasCredentials changed to \(hasCredentials)")
+            if !hasCredentials {
+                splashLog.info("No credentials — dismissing splash")
+                showSplash = false
+            }
+        }
+        .onChange(of: dataStore.isHomeContentReady) { _, isReady in
+            splashLog.info("isHomeContentReady changed to \(isReady), showSplash=\(self.showSplash)")
+            if isReady {
+                Task {
+                    try? await Task.sleep(for: .milliseconds(500))
+                    splashLog.info("Debounce complete — isHomeContentReady=\(self.dataStore.isHomeContentReady), showSplash=\(self.showSplash)")
+                    if dataStore.isHomeContentReady {
+                        splashLog.info("Dismissing splash — home content ready")
+                        showSplash = false
+                    }
+                }
+            }
+        }
+        .task {
+            splashLog.info("Splash task started — hasCredentials=\(self.authManager.hasCredentials)")
+            if !authManager.hasCredentials {
+                splashLog.info("No credentials on launch — dismissing splash immediately")
+                showSplash = false
+                return
+            }
+            // Safety timeout
+            try? await Task.sleep(for: .seconds(15))
+            if showSplash {
+                splashLog.warning("Safety timeout reached (15s) — force dismissing splash")
+                showSplash = false
+            }
+        }
+    }
+
+    private var splashOverlay: some View {
+        ZStack {
+            VStack(spacing: 24) {
+                Image(systemName: "play.rectangle.fill")
+                    .font(.system(size: 80))
+                    .foregroundStyle(.white.opacity(0.6))
+
+                ProgressView()
+                    .tint(.white.opacity(0.5))
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(.regularMaterial, ignoresSafeAreaEdges: .all)
+        .allowsHitTesting(true)
+    }
+}
+
+// MARK: - AutoPlay Launcher (Debug Testing)
+
+/// Reads RIVULET_AUTOPLAY env vars (passed via `xcrun devicectl`) and auto-launches playback.
+/// Used for automated playback testing from the CLI.
+private struct AutoPlayLauncherModifier: ViewModifier {
+    @State private var hasLaunched = false
+
+    func body(content: Content) -> some View {
+        content
+            .task {
+                guard !hasLaunched else { return }
+                let env = ProcessInfo.processInfo.environment
+                guard env["RIVULET_AUTOPLAY"] == "1",
+                      let ratingKey = env["RIVULET_AUTOPLAY_KEY"] else { return }
+
+                let testDuration = TimeInterval(env["RIVULET_AUTOPLAY_DURATION"] ?? "45") ?? 45
+                let skipLifecycle = env["RIVULET_AUTOPLAY_SKIP_LIFECYCLE"] == "1"
+
+                hasLaunched = true
+                print("[AutoPlay] Starting: ratingKey=\(ratingKey) duration=\(testDuration)s skipLifecycle=\(skipLifecycle)")
+
+                // Wait for auth to be ready
+                let authManager = PlexAuthManager.shared
+                let deadline = Date().addingTimeInterval(30)
+                while authManager.selectedServerURL == nil || authManager.selectedServerToken == nil {
+                    if Date() > deadline {
+                        print("[AutoPlay] ERROR: Auth not ready after 30s, aborting")
+                        return
+                    }
+                    try? await Task.sleep(nanoseconds: 500_000_000)
+                }
+
+                guard let serverURL = authManager.selectedServerURL,
+                      let authToken = authManager.selectedServerToken else {
+                    print("[AutoPlay] ERROR: No server credentials")
+                    return
+                }
+
+                // Fetch full metadata
+                let networkManager = PlexNetworkManager.shared
+                let metadata: PlexMetadata
+                do {
+                    metadata = try await networkManager.getFullMetadata(
+                        serverURL: serverURL,
+                        authToken: authToken,
+                        ratingKey: ratingKey
+                    )
+                    print("[AutoPlay] Fetched: \(metadata.title ?? "Unknown") (\(metadata.type ?? "?"))")
+                } catch {
+                    print("[AutoPlay] ERROR: Failed to fetch metadata: \(error)")
+                    return
+                }
+
+                // Log DV profile info
+                let dvStream = metadata.Media?.first?.Part?.first?.Stream?.first(where: { $0.isDolbyVision })
+                if let dvProfile = dvStream?.DOVIProfile {
+                    print("[AutoPlay] DV Profile \(dvProfile), BL CompatID \(dvStream?.DOVIBLCompatID ?? -1)")
+                }
+
+                // Create viewModel and present player
+                await MainActor.run {
+                    let viewModel = UniversalPlayerViewModel(
+                        metadata: metadata,
+                        serverURL: serverURL,
+                        authToken: authToken,
+                        startOffset: nil,
+                        shuffledQueue: [],
+                        loadingArtImage: nil,
+                        loadingThumbImage: nil
+                    )
+                    let nativePlayer = NativePlayerViewController(viewModel: viewModel)
+
+                    if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+                       let rootVC = windowScene.windows.first?.rootViewController {
+                        var topVC = rootVC
+                        while let presented = topVC.presentedViewController {
+                            topVC = presented
+                        }
+                        topVC.present(nativePlayer, animated: false)
+                    }
+
+                    // Schedule auto-stop after test duration
+                    Task {
+                        try? await Task.sleep(nanoseconds: UInt64(testDuration) * 1_000_000_000)
+                        print("[AutoPlay] Test duration elapsed (\(testDuration)s), stopping")
+                        viewModel.stopPlayback()
+                        if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+                           let rootVC = windowScene.windows.first?.rootViewController {
+                            rootVC.dismiss(animated: false)
+                        }
+                        try? await Task.sleep(nanoseconds: 1_000_000_000)
+                        print("[AutoPlay] Test complete, exiting")
+                        exit(0)
+                    }
+                }
+            }
     }
 }
 

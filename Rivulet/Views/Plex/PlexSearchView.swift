@@ -79,9 +79,7 @@ struct PlexSearchView: View {
                 }
             }
         }
-        #if os(tvOS)
         .modifier(SearchableModifier(isActive: authManager.isAuthenticated && selectedItem == nil, query: $query))
-        #endif
         .task {
             if authManager.isAuthenticated {
                 await dataStore.loadLibrariesIfNeeded()
@@ -111,37 +109,21 @@ struct PlexSearchView: View {
 
     private var headerView: some View {
         VStack(alignment: .leading, spacing: 10) {
-            #if !os(tvOS)
-            searchField
-            #endif
 
             if let summary = resultSummary {
                 Text(summary)
-                    #if os(tvOS)
                     .font(.system(size: 17, weight: .medium))
-                    #else
-                    .font(.system(size: 15, weight: .medium))
-                    #endif
                     .foregroundStyle(.secondary)
             }
         }
-        #if os(tvOS)
-        .padding(.horizontal, 80)
+        .padding(.horizontal, ScaledDimensions.rowHorizontalPadding)
         .padding(.top, 16)
-        #else
-        .padding(.horizontal, 32)
-        .padding(.top, 32)
-        #endif
     }
 
     private var searchField: some View {
         HStack(spacing: 12) {
             Image(systemName: "magnifyingglass")
-                #if os(tvOS)
                 .font(.system(size: 20, weight: .semibold))
-                #else
-                .font(.system(size: 16, weight: .semibold))
-                #endif
                 .foregroundStyle(.white.opacity(0.7))
 
             TextField("Search your libraries", text: $query)
@@ -163,13 +145,8 @@ struct PlexSearchView: View {
                 .buttonStyle(.plain)
             }
         }
-        #if os(tvOS)
         .padding(.horizontal, 18)
         .padding(.vertical, 14)
-        #else
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
-        #endif
         .background(
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .fill(.white.opacity(0.12))
@@ -178,9 +155,7 @@ struct PlexSearchView: View {
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .stroke(.white.opacity(isSearchFieldFocused ? 0.35 : 0.18), lineWidth: 1)
         )
-        #if os(tvOS)
         .defaultFocus($isSearchFieldFocused, true)
-        #endif
     }
 
     // MARK: - Content Body
@@ -206,7 +181,6 @@ struct PlexSearchView: View {
 
     @ViewBuilder
     private var resultsView: some View {
-        #if os(tvOS)
         VStack(alignment: .leading, spacing: 40) {
             ForEach(groupedResults, id: \.title) { group in
                 MediaRow(
@@ -221,26 +195,6 @@ struct PlexSearchView: View {
             }
         }
         .padding(.bottom, 80)
-        #else
-        VStack(alignment: .leading, spacing: 28) {
-            ForEach(groupedResults, id: \.title) { group in
-                Text(group.title)
-                    .font(.title2)
-                    .fontWeight(.bold)
-                    .padding(.horizontal, 32)
-
-                MediaGrid(
-                    items: group.items,
-                    serverURL: serverURL,
-                    authToken: authToken,
-                    onItemSelected: { item in
-                        selectedItem = item
-                    }
-                )
-            }
-        }
-        .padding(.bottom, 60)
-        #endif
     }
 
     private var groupedResults: [(title: String, items: [PlexMetadata])] {
@@ -335,7 +289,6 @@ struct PlexSearchView: View {
                 .tracking(1)
                 .padding(.horizontal, 4)
 
-            #if os(tvOS)
             // Horizontal scroll for tvOS - searches first, then Clear button
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 16) {
@@ -355,24 +308,6 @@ struct PlexSearchView: View {
                 .padding(.vertical, 12)    // Room for scale effect top/bottom
             }
             .scrollClipDisabled()  // Allow scale overflow
-            #else
-            // Wrap layout for other platforms
-            FlowLayout(spacing: 10) {
-                ForEach(recentSearches, id: \.self) { search in
-                    RecentSearchButton(text: search) {
-                        query = search
-                        submitSearch()
-                    }
-                }
-            }
-
-            Button("Clear All") {
-                clearRecentSearches()
-            }
-            .font(.system(size: 15, weight: .medium))
-            .foregroundStyle(.secondary)
-            .buttonStyle(.plain)
-            #endif
         }
         .frame(maxWidth: 800)
         .padding(.top, 32)
@@ -562,7 +497,6 @@ struct PlexSearchView: View {
     }
 }
 
-#if os(tvOS)
 private struct SearchableModifier: ViewModifier {
     let isActive: Bool
     @Binding var query: String
@@ -575,7 +509,6 @@ private struct SearchableModifier: ViewModifier {
         }
     }
 }
-#endif
 
 // MARK: - Recent Search Button
 
@@ -589,27 +522,14 @@ private struct RecentSearchButton: View {
         Button(action: action) {
             HStack(spacing: 12) {
                 Image(systemName: "clock.arrow.circlepath")
-                    #if os(tvOS)
                     .font(.system(size: 22, weight: .medium))
-                    #else
-                    .font(.system(size: 14, weight: .medium))
-                    #endif
                 Text(text)
-                    #if os(tvOS)
                     .font(.system(size: 26, weight: .medium))
-                    #else
-                    .font(.system(size: 17, weight: .medium))
-                    #endif
                     .lineLimit(1)
             }
             .foregroundStyle(.white)
-            #if os(tvOS)
             .padding(.horizontal, 28)
             .padding(.vertical, 18)
-            #else
-            .padding(.horizontal, 16)
-            .padding(.vertical, 10)
-            #endif
             .background(
                 RoundedRectangle(cornerRadius: 16, style: .continuous)
                     .fill(isFocused ? .white.opacity(0.18) : .white.opacity(0.08))
@@ -622,18 +542,13 @@ private struct RecentSearchButton: View {
                     )
             )
         }
-        #if os(tvOS)
         .buttonStyle(SettingsButtonStyle())
         .focused($isFocused)
         .scaleEffect(isFocused ? 1.02 : 1.0)
         .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isFocused)
-        #else
-        .buttonStyle(.plain)
-        #endif
     }
 }
 
-#if os(tvOS)
 private struct ClearRecentSearchesButton: View {
     let action: () -> Void
 
@@ -668,55 +583,8 @@ private struct ClearRecentSearchesButton: View {
         .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isFocused)
     }
 }
-#endif
 
-#if !os(tvOS)
-// Simple flow layout for non-tvOS platforms
-private struct FlowLayout: Layout {
-    var spacing: CGFloat = 10
-
-    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
-        let width = proposal.width ?? .infinity
-        var height: CGFloat = 0
-        var x: CGFloat = 0
-        var rowHeight: CGFloat = 0
-
-        for subview in subviews {
-            let size = subview.sizeThatFits(.unspecified)
-            if x + size.width > width && x > 0 {
-                height += rowHeight + spacing
-                x = 0
-                rowHeight = 0
-            }
-            x += size.width + spacing
-            rowHeight = max(rowHeight, size.height)
-        }
-        height += rowHeight
-
-        return CGSize(width: width, height: height)
-    }
-
-    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
-        var x = bounds.minX
-        var y = bounds.minY
-        var rowHeight: CGFloat = 0
-
-        for subview in subviews {
-            let size = subview.sizeThatFits(.unspecified)
-            if x + size.width > bounds.maxX && x > bounds.minX {
-                y += rowHeight + spacing
-                x = bounds.minX
-                rowHeight = 0
-            }
-            subview.place(at: CGPoint(x: x, y: y), proposal: .unspecified)
-            x += size.width + spacing
-            rowHeight = max(rowHeight, size.height)
-        }
-    }
-}
-#endif
 
 #Preview {
     PlexSearchView()
-        .preferredColorScheme(.dark)
 }

@@ -115,7 +115,7 @@ struct MediaTrack: Identifiable, Equatable, Sendable {
             return channels
         }
 
-        // Try to parse from track name (MPV often includes "2ch", "6ch", etc.)
+        // Try to parse from track name ("2ch", "6ch", etc. are common)
         let nameLower = name.lowercased()
 
         // Check for explicit channel count patterns

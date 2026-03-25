@@ -13,10 +13,6 @@ struct StreamSlotView: View {
     let isFocused: Bool
     var showBorder: Bool = true
     var showChannelBadge: Bool = true
-    var containerSize: CGSize = .zero  // Explicit size for MPV multi-stream
-    let onControllerReady: (MPVMetalViewController) -> Void
-
-    @State private var playerController: MPVMetalViewController?
 
     private var streamURL: URL? {
         LiveTVDataStore.shared.buildStreamURL(for: slot.channel)
@@ -27,8 +23,6 @@ struct StreamSlotView: View {
             // Background
             Color.black
 
-            // Player view - either MPV or AVPlayer based on slot configuration
-            // Size is handled naturally by SwiftUI layout - the player fills its parent
             if let _ = streamURL {
                 playerView
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -83,11 +77,6 @@ struct StreamSlotView: View {
         }
         .clipped()
         .clipShape(RoundedRectangle(cornerRadius: showBorder ? 8 : 0, style: .continuous))
-        .onChange(of: playerController) { _, controller in
-            if let controller = controller {
-                onControllerReady(controller)
-            }
-        }
     }
 
     // MARK: - Player View
@@ -95,15 +84,8 @@ struct StreamSlotView: View {
     @ViewBuilder
     private var playerView: some View {
         if let url = streamURL {
-            MPVPlayerView(
-                url: url,
-                headers: [:],
-                startTime: nil,
-                delegate: slot.mpvWrapper,
-                isLiveStream: true,
-                containerSize: containerSize,
-                playerController: $playerController
-            )
+            let _ = url
+            SampleBufferDisplayView(player: slot.rivuletPlayer)
         }
     }
 
@@ -256,14 +238,12 @@ struct StreamSlotView: View {
                 groupTitle: "Entertainment",
                 isHD: true
             ),
-            mpvWrapper: MPVPlayerWrapper(),
+            rivuletPlayer: RivuletPlayer(),
             playbackState: .loading,
             isMuted: false
         ),
         index: 0,
-        isFocused: true,
-        containerSize: CGSize(width: 400, height: 300),
-        onControllerReady: { _ in }
+        isFocused: true
     )
     .frame(width: 400, height: 300)
 }

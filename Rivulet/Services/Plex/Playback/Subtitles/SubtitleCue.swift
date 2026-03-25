@@ -63,3 +63,26 @@ struct SubtitleTrack: Sendable {
     /// Empty track
     static let empty = SubtitleTrack(cues: [])
 }
+
+// MARK: - Bitmap Subtitle Types (PGS, DVB-SUB)
+
+/// A single rectangle of bitmap subtitle data (RGBA pixels with position)
+struct BitmapSubtitleRect: Sendable {
+    let imageData: Data   // RGBA pixel data
+    let width: Int
+    let height: Int
+    let x: Int            // Position in video frame
+    let y: Int
+}
+
+/// A bitmap subtitle cue containing one or more positioned image rects
+struct BitmapSubtitleCue: Identifiable, Sendable {
+    let id: Int
+    let startTime: TimeInterval
+    var endTime: TimeInterval   // var: PGS cues use .infinity sentinel, trimmed when next cue arrives
+    let rects: [BitmapSubtitleRect]
+
+    func isActive(at time: TimeInterval) -> Bool {
+        time >= startTime && time < endTime
+    }
+}

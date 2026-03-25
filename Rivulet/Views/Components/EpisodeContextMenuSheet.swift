@@ -7,7 +7,6 @@
 
 import SwiftUI
 
-#if os(tvOS)
 
 /// Context menu sheet for episode actions
 struct EpisodeContextMenuSheet: View {
@@ -308,4 +307,3 @@ private struct ContextMenuActionRow: View {
     }
 }
 
-#endif

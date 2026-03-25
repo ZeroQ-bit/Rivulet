@@ -11,8 +11,7 @@ import SwiftUI
 /// Simple focus memory system for tvOS section focus restoration
 ///
 /// Use this for remembering and restoring focus within sections of a view
-/// (e.g., seasons, episodes, cast & crew). For isolating focus between
-/// completely separate views (sidebar, player, overlays), use FocusScopeManager.
+/// (e.g., seasons, episodes, cast & crew).
 ///
 /// Usage:
 /// ```swift
@@ -78,7 +77,6 @@ extension EnvironmentValues {
 
 // MARK: - View Modifier
 
-#if os(tvOS)
 
 /// View modifier that remembers and restores focus for a section
 ///
@@ -150,4 +148,3 @@ extension View {
     }
 }
 
-#endif

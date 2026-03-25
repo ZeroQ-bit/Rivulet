@@ -5,7 +5,6 @@
 
 import SwiftUI
 
-#if os(tvOS)
 
 /// Display mode for Live TV player in guide view
 enum LiveTVDisplayMode: Equatable {
@@ -19,8 +18,6 @@ struct GuideLayoutView: View {
     var sourceIdFilter: String?
 
     @StateObject private var dataStore = LiveTVDataStore.shared
-    @Environment(\.focusScopeManager) private var focusScopeManager
-    @Environment(\.openSidebar) private var openSidebar
 
     /// Channels filtered by source (if specified)
     private var channels: [UnifiedChannel] {
@@ -46,7 +43,7 @@ struct GuideLayoutView: View {
         GeometryReader { geo in
             ZStack(alignment: .topLeading) {
                 // Background
-                Color.black.ignoresSafeArea()
+                Rectangle().fill(.background).ignoresSafeArea()
 
                 // Guide content - always rendered but visually hidden when fullscreen
                 if channels.isEmpty {
@@ -66,9 +63,6 @@ struct GuideLayoutView: View {
         }
         .onAppear {
             setupStartTime()
-            if !focusScopeManager.isScopeActive(.sidebar) {
-                focusScopeManager.activate(.guide, savingCurrent: true, pushToStack: true)
-            }
         }
         .task {
             if dataStore.channels.isEmpty { await dataStore.loadChannels() }
@@ -86,15 +80,7 @@ struct GuideLayoutView: View {
                 hasFocus = false
             } else if newMode == .hidden {
                 // Player dismissed - focus guide
-                focusScopeManager.activate(.guide, savingCurrent: true, pushToStack: false)
                 hasFocus = true
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                    focusScopeManager.activate(.guide, savingCurrent: true, pushToStack: false)
-                    hasFocus = false
-                    DispatchQueue.main.async {
-                        hasFocus = true
-                    }
-                }
             }
         }
     }
@@ -126,7 +112,6 @@ struct GuideLayoutView: View {
                 displayMode = .hidden
                 activeChannel = nil
                 playerSessionId = UUID()
-                focusScopeManager.activate(.guide, savingCurrent: true, pushToStack: false)
                 hasFocus = false
                 DispatchQueue.main.async {
                     hasFocus = true
@@ -257,10 +242,6 @@ struct GuideLayoutView: View {
         .onExitCommand {
             guard displayMode != .fullscreen else { return }  // Don't handle when player is fullscreen
             hasFocus = false
-            openSidebar()
-        }
-        .onChange(of: focusScopeManager.isScopeActive(.sidebar)) { _, active in
-            if !active && displayMode != .fullscreen { hasFocus = true }
         }
     }
 
@@ -328,10 +309,6 @@ struct GuideLayoutView: View {
                 // Scroll back in time
                 timeOffset -= 1
                 focusedColumn = 0  // Start at first program when scrolling back
-            } else {
-                // At left edge - open sidebar like other views
-                hasFocus = false
-                openSidebar()
             }
         case .right:
             let visibleStart = guideStartTime.addingTimeInterval(Double(timeOffset * 30 * 60))
@@ -583,14 +560,3 @@ private struct TimeLineView: View {
     }
 }
 
-#else
-
-struct GuideLayoutView: View {
-    var sourceIdFilter: String?
-
-    var body: some View {
-        Text("Guide")
-    }
-}
-
-#endif

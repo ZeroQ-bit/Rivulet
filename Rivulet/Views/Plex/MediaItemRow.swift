@@ -19,13 +19,12 @@ struct MediaItemRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text(title)
-                .font(.title2)
-                .fontWeight(.bold)
+                .font(.system(size: ScaledDimensions.sectionTitleSize, weight: .bold))
                 .foregroundStyle(.white)
-                .padding(.horizontal, 48)
+                .padding(.horizontal, ScaledDimensions.rowHorizontalPadding)
 
             ScrollView(.horizontal, showsIndicators: false) {
-                LazyHStack(spacing: 24) {
+                LazyHStack(spacing: ScaledDimensions.rowItemSpacing) {
                     ForEach(items, id: \.ratingKey) { item in
                         Button {
                             onItemSelected?(item)
@@ -36,15 +35,11 @@ struct MediaItemRow: View {
                                 authToken: authToken
                             )
                         }
-                        #if os(tvOS)
                         .buttonStyle(CardButtonStyle())
-                        #else
-                        .buttonStyle(.plain)
-                        #endif
                     }
                 }
-                .padding(.horizontal, 48)
-                .padding(.vertical, 32)  // Room for shadow/focus overflow
+                .padding(.horizontal, ScaledDimensions.rowHorizontalPadding)
+                .padding(.vertical, ScaledDimensions.rowVerticalPadding)
             }
             .scrollClipDisabled()
         }

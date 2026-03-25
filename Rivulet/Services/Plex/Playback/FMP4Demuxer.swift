@@ -141,25 +141,6 @@ final class FMP4Demuxer {
             }
         }
 
-        // Convert DV profiles if converter is enabled
-        if let converter = profileConverter {
-            samples = samples.map { sample in
-                guard sample.isVideo else { return sample }
-                let convertedData = converter.processVideoSample(sample.data)
-                // Always use converted data for video samples when converter is active
-                // (converted RPU may have same byte length as original)
-                return DemuxedSample(
-                    trackID: sample.trackID,
-                    data: convertedData,
-                    pts: sample.pts,
-                    dts: sample.dts,
-                    duration: sample.duration,
-                    isKeyframe: sample.isKeyframe,
-                    isVideo: sample.isVideo
-                )
-            }
-        }
-
         // Sort samples by DTS to interleave video and audio.
         // Without this, all video samples are enqueued before any audio,
         // starving the audio renderer and causing A/V desync.
@@ -176,11 +157,18 @@ final class FMP4Demuxer {
             throw DemuxerError.unknownTrack(sample.trackID)
         }
 
+        // Convert Dolby Vision profile in the per-sample path to avoid
+        // blocking an entire segment before first-frame enqueue.
+        var sampleData = sample.data
+        if sample.isVideo, let converter = profileConverter {
+            sampleData = converter.processVideoSample(sampleData)
+        }
+
         // Create block buffer from sample data
         var blockBuffer: CMBlockBuffer?
-        let dataCount = sample.data.count
+        let dataCount = sampleData.count
 
-        var status = sample.data.withUnsafeBytes { rawBuffer -> OSStatus in
+        var status = sampleData.withUnsafeBytes { rawBuffer -> OSStatus in
             guard let baseAddress = rawBuffer.baseAddress else { return -12700 }
             var localBlockBuffer: CMBlockBuffer?
             let status = CMBlockBufferCreateWithMemoryBlock(

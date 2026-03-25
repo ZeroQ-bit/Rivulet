@@ -41,8 +41,7 @@ struct LiveTVSourceDetailSheet: View {
 
     var body: some View {
         ZStack {
-            // Solid black background
-            Color.black.ignoresSafeArea()
+            Rectangle().fill(.background).ignoresSafeArea()
 
             VStack(spacing: 0) {
                 // Header bar
@@ -76,12 +75,10 @@ struct LiveTVSourceDetailSheet: View {
         } message: {
             Text("This will remove \"\(source.displayName)\" and all its channels from Live TV.")
         }
-        .preferredColorScheme(.dark)  // Ensure dark mode for all system UI
-        #if os(tvOS)
+        // Use system appearance
         .onExitCommand {
             dismiss()
         }
-        #endif
     }
 
     // MARK: - Header Bar
@@ -262,7 +259,7 @@ private struct SourceActionButton: View {
 
             // Chevron
             Image(systemName: "chevron.right")
-                .font(.system(size: 20, weight: .semibold))
+                .font(.system(size: 22, weight: .semibold))
                 .foregroundStyle(.white.opacity(0.4))
         }
         .padding(.horizontal, 24)

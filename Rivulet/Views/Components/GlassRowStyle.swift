@@ -8,7 +8,6 @@
 
 import SwiftUI
 
-#if os(tvOS)
 
 // MARK: - App Store Button Style
 
@@ -54,7 +53,16 @@ struct AppStoreActionButtonStyle: ButtonStyle {
             .foregroundStyle(isFocused ? .black : .white)
             .background(
                 RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .fill(isFocused ? .white : (isPrimary ? .white.opacity(0.2) : .white.opacity(0.1)))
+                    .fill(isFocused ? .white : (isPrimary ? .white.opacity(0.2) : .white.opacity(0.12)))
+            )
+            .background(
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .fill(.ultraThinMaterial)
+                    .opacity(isFocused ? 0 : 1)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .stroke(isFocused ? .clear : .white.opacity(0.2), lineWidth: 0.5)
             )
             .scaleEffect(isFocused ? 1.08 : 1.0)
             .scaleEffect(configuration.isPressed ? 0.95 : 1.0)
@@ -197,4 +205,3 @@ extension View {
     }
 }
 
-#endif

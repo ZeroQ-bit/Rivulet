@@ -7,7 +7,6 @@
 
 import SwiftUI
 
-#if os(tvOS)
 import UIKit
 
 struct LiveTVPressCatcher: UIViewControllerRepresentable {
@@ -104,4 +103,3 @@ final class LiveTVPressCatcherController: UIViewController {
     }
 }
 
-#endif

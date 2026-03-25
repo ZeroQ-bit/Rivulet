@@ -7,8 +7,23 @@
 
 import SwiftUI
 
+enum PlexDetailPresentationMode: Equatable {
+    case previewCarousel
+    case expandedDetail
+}
+
 struct PlexDetailView: View {
     let item: PlexMetadata
+    var presentationMode: PlexDetailPresentationMode = .expandedDetail
+    var backgroundParallaxOffset: CGFloat = 0
+    var showMetadata: Bool = true
+    var showExpandedChrome: Bool = true
+    var showsBackdropLayer: Bool = true
+    var allowVerticalScroll: Bool = true
+    var allowActionRowInteraction: Bool = true
+    var heroBackdropMotionLocked: Bool = false
+    var onPreviewExitRequested: (() -> Void)? = nil
+    var onDetailsBecameVisible: (() -> Void)? = nil
 
     /// Tracks the currently displayed item - allows swapping content in place
     /// When set, this overrides `item` so collection/recommended navigation
@@ -22,7 +37,7 @@ struct PlexDetailView: View {
 
     @Environment(\.dismiss) private var dismiss
     @Environment(\.nestedNavigationState) private var nestedNavState
-    @Environment(\.focusScopeManager) private var focusScopeManager
+    @Environment(\.previewMenuBridge) private var menuBridge
     @StateObject private var authManager = PlexAuthManager.shared
     @State private var seasons: [PlexMetadata] = []
     @State private var selectedSeason: PlexMetadata?
@@ -48,17 +63,14 @@ struct PlexDetailView: View {
     @State private var isLoadingArtistTracks = false
     @State private var showBioSheet = false  // Show artist bio
 
-    #if os(tvOS)
     // Focus state for restoring focus when returning from nested navigation
     @FocusState private var focusedAlbumId: String?
     @FocusState private var focusedTrackId: String?
-    @FocusState private var focusedSeasonId: String?  // Track focused season
     @FocusState private var focusedEpisodeId: String?  // Track focused episode
     @FocusState private var focusedActionButton: String?  // Track focused action button
     @State private var savedAlbumFocus: String?  // Save focus when navigating to album
     @State private var savedTrackFocus: String?  // Save focus when playing track
     @State private var isSummaryExpanded = false  // Expand summary text on focus/click
-    #endif
 
     // New state for cast/crew, collections, and recommendations
     @State private var fullMetadata: PlexMetadata?
@@ -74,7 +86,10 @@ struct PlexDetailView: View {
     @State private var playFromBeginning = false  // For "Play from Beginning" button
     @State private var isLoadingShufflePlay = false
     @State private var shuffledEpisodeQueue: [PlexMetadata] = []
-    @State private var showLogoURL: URL?  // TMDB stylized logo for shows/movies
+    @StateObject private var heroBackdrop = HeroBackdropCoordinator()
+    @State private var scrollProgress: CGFloat = 0  // 0 = at rest (peek), 1 = fully scrolled
+    @State private var belowFoldTitleOpacity: CGFloat = 0
+    @State private var scrollResetID = UUID()
 
     // Navigation state for episode parent navigation
     @State private var navigateToSeason: PlexMetadata?
@@ -82,8 +97,51 @@ struct PlexDetailView: View {
     @State private var navigateToEpisode: PlexMetadata?
     @State private var isLoadingNavigation = false
 
+    // Unified episode list state (all seasons in one scroll)
+    @State private var unifiedEpisodes: [PlexMetadata] = []
+    @State private var episodeScrollTarget: String? = nil
+    @State private var scrollToTopTrigger = false
+
     private let networkManager = PlexNetworkManager.shared
     private let recommendationService = PersonalizedRecommendationService.shared
+    private var isPreviewCarousel: Bool { presentationMode == .previewCarousel }
+    private var isExpandedPreviewFlow: Bool { onPreviewExitRequested != nil && presentationMode == .expandedDetail }
+    private let heroOverlayHorizontalInset: CGFloat = 140
+
+    /// Effective metadata visibility — in preview/carousel flows, gates on
+    /// fullMetadata being loaded so genres, cast, summary all appear together
+    /// instead of popping in piecemeal.
+    private var effectiveMetadataVisible: Bool {
+        guard showMetadata else { return false }
+        if isPreviewCarousel || isExpandedPreviewFlow {
+            return fullMetadata != nil
+        }
+        return true
+    }
+
+    private var heroBrandTitle: String {
+        if currentItem.type == "season" {
+            return (fullMetadata?.seriesTitleForDisplay ?? currentItem.seriesTitleForDisplay)
+                ?? (fullMetadata?.title ?? currentItem.title ?? "Unknown Title")
+        }
+        return fullMetadata?.title ?? currentItem.title ?? "Unknown Title"
+    }
+
+    private var seasonHeroContextLabel: String? {
+        guard currentItem.type == "season" else { return nil }
+        return fullMetadata?.seasonDisplayTitle ?? currentItem.seasonDisplayTitle
+    }
+
+    private var relatedShowRatingKey: String? {
+        switch currentItem.type {
+        case "episode":
+            return fullMetadata?.grandparentRatingKey ?? currentItem.grandparentRatingKey
+        case "season":
+            return fullMetadata?.parentRatingKey ?? currentItem.parentRatingKey
+        default:
+            return nil
+        }
+    }
 
     /// Effective item data - uses fullMetadata for progress/viewOffset when available
     /// This ensures we have the most up-to-date playback position after returning from the player
@@ -140,135 +198,200 @@ struct PlexDetailView: View {
     }
 
     var body: some View {
-        ScrollView(.vertical, showsIndicators: false) {
-            VStack(alignment: .leading, spacing: 0) {
-                // Hero Section with backdrop
-                heroSection
-
-                // Content Section
-                VStack(alignment: .leading, spacing: 32) {
-                    // Title and metadata
-                    headerSection
-
-                    // Action buttons
-                    actionButtons
-
-                    // Up Next caption for shows/seasons (below button row, above description)
-                    if let caption = upNextCaption {
-                        Text(caption)
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
-                    }
-
-                    // Progress bar for in-progress content (movies/episodes)
-                    // Show if not watched and has progress
-                    if !isMusicItem, !isWatched, displayedProgress > 0 {
-                        progressSection(progress: displayedProgress)
-                            .transition(.opacity.animation(.easeOut(duration: 0.3)))
-                    }
-
-                    // Summary (focusable on tvOS so it's a navigation stop between action buttons and rows below)
-                    if let summary = fullMetadata?.summary ?? currentItem.summary, !summary.isEmpty {
-                        #if os(tvOS)
-                        summarySection(summary: summary)
-                        #else
-                        Text(summary)
-                            .font(.body)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(3)
-                        #endif
-                    }
-
-                    // TV Show specific: Seasons and Episodes
-                    // Also show for episodes so users can browse the parent show inline
-                    if currentItem.type == "show" || currentItem.type == "episode" {
-                        seasonSection
-                    }
-
-                    // Season specific: Episodes list (no season picker needed)
-                    if currentItem.type == "season" {
-                        episodeSection
-                    }
-
-                    // Album specific: Tracks
-                    if currentItem.type == "album" {
-                        trackSection
-                    }
-
-                    // Artist specific: Albums
-                    if currentItem.type == "artist" {
-                        albumSection
-                    }
-                }
-                .padding(.horizontal, 48)
-                .padding(.top, 8)
-
-                // Collection Section (for movies that are part of a collection)
-                if !collectionItems.isEmpty, let name = collectionName {
-                    MediaItemRow(
-                        title: name,
-                        items: collectionItems,
-                        serverURL: authManager.selectedServerURL ?? "",
-                        authToken: authManager.selectedServerToken ?? "",
-                        onItemSelected: { selectedItem in
-                            // Replace current view content with crossfade animation
-                            withAnimation(.easeInOut(duration: 0.35)) {
-                                displayedItem = selectedItem
-                            }
+        GeometryReader { geo in
+            let heroHeight = heroContentHeight(for: geo.size.height)
+            ZStack {
+                if showsBackdropLayer {
+                    // Layer 1: Fixed backdrop (doesn't scroll, fills screen)
+                    heroBackdropImage
+                        .offset(x: backgroundParallaxOffset)
+                        .scaleEffect(isPreviewCarousel ? 1.08 : 1.04)
+                        .frame(width: geo.size.width, height: geo.size.height)
+                        .clipped()
+                        .overlay {
+                            Rectangle()
+                                .fill(.regularMaterial)
+                                .opacity(scrollProgress)
                         }
-                    )
-                    .padding(.top, 32)
                 }
 
-                // Recommended Section (TMDB-powered)
-                if !recommendedItems.isEmpty {
-                    MediaItemRow(
-                        title: "Recommended",
-                        items: recommendedItems,
-                        serverURL: authManager.selectedServerURL ?? "",
-                        authToken: authManager.selectedServerToken ?? "",
-                        onItemSelected: { selectedItem in
-                            // Replace current view content with crossfade animation
-                            withAnimation(.easeInOut(duration: 0.35)) {
-                                displayedItem = selectedItem
+                // Fixed vignette for text readability (doesn't scroll)
+                RadialGradient(
+                    colors: [
+                        .clear,
+                        .black.opacity(0.3),
+                        .black.opacity(0.7),
+                    ],
+                    center: .center,
+                    startRadius: geo.size.width * 0.25,
+                    endRadius: geo.size.width * 0.75
+                )
+                .opacity(effectiveMetadataVisible ? 1 : 0)
+                .animation(.easeOut(duration: 0.5), value: effectiveMetadataVisible)
+                .ignoresSafeArea()
+                .allowsHitTesting(false)
+
+                // Bottom gradient for metadata text readability
+                LinearGradient(
+                    stops: [
+                        .init(color: .clear, location: 0.0),
+                        .init(color: .black.opacity(0.35), location: 0.15),
+                        .init(color: .black.opacity(0.7), location: 0.35),
+                        .init(color: .black.opacity(0.88), location: 0.55),
+                        .init(color: .black.opacity(0.95), location: 1.0),
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .frame(height: geo.size.height * 0.65)
+                .frame(maxHeight: .infinity, alignment: .bottom)
+                .opacity(effectiveMetadataVisible ? 1 : 0)
+                .animation(.easeOut(duration: 0.5), value: effectiveMetadataVisible)
+                .ignoresSafeArea()
+                .allowsHitTesting(false)
+
+                // Layer 2: All scrollable content in one continuous flow
+                ScrollViewReader { verticalProxy in
+                ScrollView(.vertical, showsIndicators: false) {
+                    VStack(alignment: .leading, spacing: 0) {
+                        // Metadata pinned near bottom of visible area
+                        heroMetadataOverlay
+                            .opacity(effectiveMetadataVisible ? (1 - scrollProgress) : 0)
+                            .animation(.easeOut(duration: 0.5), value: effectiveMetadataVisible)
+                            .frame(height: heroHeight)
+                            .id("scrollTop")
+
+                        // Below-fold page: ZStack decouples min height from content layout.
+                        // Color.clear sets the height floor; the VStack sits on top
+                        // at its natural size so no extra space leaks into children.
+                        ZStack(alignment: .topLeading) {
+                            // Invisible rect guarantees at least one screen of scroll room
+                            Color.clear.frame(height: geo.size.height)
+
+                            VStack(alignment: .leading, spacing: 0) {
+                                VStack(alignment: .leading, spacing: 32) {
+                                    // TV Show specific: Seasons and Episodes
+                                    if currentItem.type == "show" || currentItem.type == "episode" {
+                                        seasonSection
+                                    }
+
+                                    // Season specific: Episodes list (no season picker needed)
+                                    if currentItem.type == "season" {
+                                        episodeSection
+                                    }
+
+                                    // Album specific: Tracks
+                                    if currentItem.type == "album" {
+                                        trackSection
+                                    }
+
+                                    // Artist specific: Albums
+                                    if currentItem.type == "artist" {
+                                        albumSection
+                                    }
+                                }
+                                .padding(.top, belowFoldHeaderReserveHeight)
+                                .padding(.horizontal, 48)
+                                .allowsHitTesting(!isPreviewCarousel)
+
+                                // Recommended / Related Section
+                                if !recommendedItems.isEmpty {
+                                    MediaItemRow(
+                                        title: "Related",
+                                        items: recommendedItems,
+                                        serverURL: authManager.selectedServerURL ?? "",
+                                        authToken: authManager.selectedServerToken ?? "",
+                                        onItemSelected: { selectedItem in
+                                            withAnimation(.easeInOut(duration: 0.35)) {
+                                                displayedItem = selectedItem
+                                            }
+                                        }
+                                    )
+                                    .padding(.top, 32)
+                                }
+
+                                // Collection Section (for movies that are part of a collection)
+                                if !collectionItems.isEmpty, let name = collectionName {
+                                    MediaItemRow(
+                                        title: name,
+                                        items: collectionItems,
+                                        serverURL: authManager.selectedServerURL ?? "",
+                                        authToken: authManager.selectedServerToken ?? "",
+                                        onItemSelected: { selectedItem in
+                                            withAnimation(.easeInOut(duration: 0.35)) {
+                                                displayedItem = selectedItem
+                                            }
+                                        }
+                                    )
+                                    .padding(.top, 32)
+                                }
+
+                                // Cast & Crew Section
+                                if let metadata = fullMetadata,
+                                   (!metadata.cast.isEmpty || !(metadata.Director?.isEmpty ?? true)) {
+                                    CastCrewRow(
+                                        cast: metadata.cast,
+                                        directors: metadata.Director ?? [],
+                                        serverURL: authManager.selectedServerURL ?? "",
+                                        authToken: authManager.selectedServerToken ?? ""
+                                    )
+                                    .padding(.top, 32)
+                                }
                             }
+                            .fixedSize(horizontal: false, vertical: true)
+
+                            belowFoldTitleLogo
+                                .frame(height: 110)
+                                .padding(.top, 40)
+                                .padding(.bottom, 8)
+                                .opacity(belowFoldTitleOpacity)
+                                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                         }
-                    )
-                    .padding(.top, 32)
+                        .opacity(effectiveMetadataVisible ? 1 : 0)
+                        .animation(.easeOut(duration: 0.5), value: effectiveMetadataVisible)
+                    }
                 }
-
-                // Cast & Crew Section
-                if let metadata = fullMetadata,
-                   (!metadata.cast.isEmpty || !(metadata.Director?.isEmpty ?? true)) {
-                    CastCrewRow(
-                        cast: metadata.cast,
-                        directors: metadata.Director ?? [],
-                        serverURL: authManager.selectedServerURL ?? "",
-                        authToken: authManager.selectedServerToken ?? ""
-                    )
-                    .padding(.top, 32)
+                .onScrollGeometryChange(for: Bool.self) { geometry in
+                    geometry.contentOffset.y > 10
+                } action: { _, isScrolled in
+                    withAnimation(.easeInOut(duration: 0.7)) {
+                        scrollProgress = isScrolled ? 1 : 0
+                    }
+                    withAnimation(isScrolled ? .easeInOut(duration: 0.45) : .easeOut(duration: 0.18)) {
+                        belowFoldTitleOpacity = isScrolled ? 1 : 0
+                    }
+                    if isScrolled {
+                        onDetailsBecameVisible?()
+                    }
                 }
-
-                Spacer()
-                    .frame(height: 60)
+                .id(scrollResetID)
+                .scrollDisabled(isPreviewCarousel || !allowVerticalScroll)
+                .defaultScrollAnchor(.top)
+                .onChange(of: scrollToTopTrigger) { _, _ in
+                    withAnimation(.easeInOut(duration: 0.4)) {
+                        verticalProxy.scrollTo("scrollTop", anchor: .top)
+                    }
+                }
+                } // ScrollViewReader
             }
         }
-        .defaultScrollAnchor(.top)
-        .ignoresSafeArea(edges: .top)
+        .ignoresSafeArea()
         .task(id: currentItem.ratingKey) {
             // Reset state for new item
             seasons = []
             episodes = []
             selectedSeason = nil
+            unifiedEpisodes = []
+            episodeScrollTarget = nil
             fullMetadata = nil
             collectionItems = []
             collectionName = nil
             recommendedItems = []
             nextUpEpisode = nil
-            showLogoURL = nil
-            #if os(tvOS)
             isSummaryExpanded = false
-            #endif
+            scrollProgress = 0
+            belowFoldTitleOpacity = 0
+            syncHeroBackdrop()
 
             // Initialize watched state
             isWatched = currentItem.isWatched
@@ -282,8 +405,8 @@ struct PlexDetailView: View {
             // Load full metadata for cast/crew and trailer
             await loadFullMetadata()
 
-            // Fetch TMDB logo for shows, movies, and episodes
-            await loadShowLogo()
+            // Refresh hero art/logo with the best TMDB/TVDB data now that metadata is loaded.
+            await refreshHeroBackdropAssets()
 
             // Load collection and recommendations for movies
             if currentItem.type == "movie" {
@@ -301,12 +424,13 @@ struct PlexDetailView: View {
             // Load seasons for TV shows
             if currentItem.type == "show" {
                 await loadSeasons()
-                // Determine the "next up" episode for the Play button
+                await loadAllEpisodes()
                 await loadNextUpEpisode()
             }
 
             // Load episodes for seasons
             if currentItem.type == "season" {
+                await loadSeasonsForCurrentSeason()
                 await loadEpisodesForSeason()
                 // Determine the "next up" episode for the Play button
                 await loadNextUpEpisode()
@@ -315,6 +439,7 @@ struct PlexDetailView: View {
             // Load seasons for episodes (show parent show's seasons inline)
             if currentItem.type == "episode" {
                 await loadSeasonsForEpisode()
+                await loadAllEpisodes()
             }
 
             // Load tracks for albums
@@ -327,42 +452,67 @@ struct PlexDetailView: View {
                 await loadAlbums()
             }
         }
-        #if os(tvOS)
+        .onChange(of: presentationMode) { _, newMode in
+            if newMode == .previewCarousel {
+                displayedItem = nil
+                focusedActionButton = nil
+                scrollProgress = 0
+                belowFoldTitleOpacity = 0
+                scrollResetID = UUID()
+            }
+        }
+        .onChange(of: heroBackdropMotionLocked) { _, locked in
+            heroBackdrop.setMotionLocked(locked)
+        }
+        .onChange(of: showExpandedChrome) { _, isVisible in
+            guard isVisible, isExpandedPreviewFlow else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) {
+                focusedActionButton = "play"
+            }
+        }
+        .onChange(of: focusedEpisodeId) { _, newId in
+            // Sync season pill when user navigates across season boundary
+            guard let newId,
+                  let episode = unifiedEpisodes.first(where: { $0.ratingKey == newId }),
+                  episode.parentRatingKey != selectedSeason?.ratingKey,
+                  let newSeason = seasons.first(where: { $0.ratingKey == episode.parentRatingKey }) else { return }
+            selectedSeason = newSeason
+        }
+        .onAppear {
+            guard isExpandedPreviewFlow, let bridge = menuBridge else { return }
+            bridge.interceptHandler = { [self] in
+                if navigateToAlbum != nil {
+                    navigateToAlbum = nil
+                    return true
+                } else if navigateToSeason != nil {
+                    navigateToSeason = nil
+                    return true
+                } else if navigateToShow != nil {
+                    navigateToShow = nil
+                    return true
+                } else if navigateToEpisode != nil {
+                    navigateToEpisode = nil
+                    return true
+                } else if scrollProgress > 0 || focusedEpisodeId != nil {
+                    scrollToTopTrigger.toggle()
+                    focusedEpisodeId = nil
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                        focusedActionButton = "play"
+                    }
+                    return true
+                }
+                return false
+            }
+        }
+        .onDisappear {
+            guard isExpandedPreviewFlow else { return }
+            menuBridge?.interceptHandler = nil
+        }
         .onChange(of: showPlayer) { _, shouldShow in
             if shouldShow {
                 presentPlayer()
             }
         }
-        #else
-        .fullScreenCover(isPresented: $showPlayer) {
-            // Play the selected episode/track if available, otherwise play the main item (movie/album)
-            // Use prefetched full metadata for episodes (has Stream data for DV detection)
-            let playItem: PlexMetadata = if let episode = selectedEpisode {
-                // Use prefetched full metadata if available
-                if let ratingKey = episode.ratingKey, let fullEpisode = fullEpisodeMetadata[ratingKey] {
-                    fullEpisode
-                } else {
-                    episode
-                }
-            } else if selectedTrack != nil {
-                selectedTrack!
-            } else {
-                // For main item (movie), prefer fullMetadata as it has Stream data for DV/HDR detection
-                fullMetadata ?? item
-            }
-            // Use fullMetadata for updated viewOffset when playing the main item (not episodes/tracks)
-            let viewOffset = (selectedEpisode == nil && selectedTrack == nil)
-                ? (fullMetadata?.viewOffset ?? playItem.viewOffset)
-                : playItem.viewOffset
-            let resumeOffset = playFromBeginning ? nil : (Double(viewOffset ?? 0) / 1000.0)
-            // Use wrapper to capture last-played metadata for auto-play detection
-            PlayerViewWrapper(
-                playItem: playItem,
-                startOffset: resumeOffset != nil && resumeOffset! > 0 ? resumeOffset : nil,
-                lastPlayedMetadata: $lastPlayedMetadata
-            )
-        }
-        #endif
         .fullScreenCover(isPresented: $showTrailerPlayer) {
             // Play trailer using the same player as regular content
             if let metadata = trailerMetadata {
@@ -422,27 +572,24 @@ struct PlexDetailView: View {
                     }
 
                     // For show/season detail pages, also refresh episode list and next-up
-                    if currentItem.type == "show" || currentItem.type == "season" {
-                        if let season = selectedSeason {
-                            await loadEpisodes(for: season)
-                        }
+                    if currentItem.type == "show" {
+                        await loadAllEpisodes()
+                        await loadNextUpEpisode()
+                    } else if currentItem.type == "season" {
+                        await loadEpisodesForSeason()
                         await loadNextUpEpisode()
                     }
                 }
             }
         }
-        .navigationDestination(item: $navigateToAlbum) { album in
-            PlexDetailView(item: album)
-        }
-        .navigationDestination(item: $navigateToSeason) { season in
-            PlexDetailView(item: season)
-        }
-        .navigationDestination(item: $navigateToShow) { show in
-            PlexDetailView(item: show)
-        }
-        .navigationDestination(item: $navigateToEpisode) { episode in
-            PlexDetailView(item: episode)
-        }
+        // Navigation destinations only in standard flow (not preview overlay — no NavigationStack there)
+        .modifier(NavigationDestinationsModifier(
+            navigateToAlbum: $navigateToAlbum,
+            navigateToSeason: $navigateToSeason,
+            navigateToShow: $navigateToShow,
+            navigateToEpisode: $navigateToEpisode,
+            isEnabled: onPreviewExitRequested == nil
+        ))
         // Update goBackAction when viewing nested album
         .onChange(of: navigateToAlbum) { oldAlbum, newAlbum in
             if newAlbum != nil {
@@ -459,7 +606,6 @@ struct PlexDetailView: View {
                     dismiss()
                 }
             }
-            #if os(tvOS)
             // Restore focus when returning from album
             if oldAlbum != nil && newAlbum == nil, let savedFocus = savedAlbumFocus {
                 // Delay slightly to let the view update
@@ -467,9 +613,7 @@ struct PlexDetailView: View {
                     focusedAlbumId = savedFocus
                 }
             }
-            #endif
         }
-        #if os(tvOS)
         // Restore track focus when returning from player
         .onChange(of: showPlayer) { wasPlaying, isPlaying in
             if wasPlaying && !isPlaying, let savedFocus = savedTrackFocus {
@@ -479,119 +623,330 @@ struct PlexDetailView: View {
                 }
             }
         }
-        #endif
     }
 
-    // MARK: - Hero Section
+    private func heroContentHeight(for fullHeight: CGFloat) -> CGFloat {
+        let shelfPeek: CGFloat
+        switch currentItem.type {
+        case "show", "season", "episode":
+            // TV detail surfaces should all expose the shelf at the same shallow depth.
+            shelfPeek = 160
+        default:
+            shelfPeek = 220
+        }
 
-    private var heroSection: some View {
-        ZStack(alignment: .bottomLeading) {
-            // Background art with squircle corners
-            CachedAsyncImage(url: artURL) { phase in
-                switch phase {
-                case .success(let image):
-                    image
-                        .resizable()
-                        .aspectRatio(contentMode: .fill)
-                case .empty, .failure:
-                    Rectangle()
-                        .fill(
-                            LinearGradient(
-                                colors: [Color.blue.opacity(0.3), Color.black],
-                                startPoint: .top,
-                                endPoint: .bottom
-                            )
-                        )
-                }
-            }
-            .id(artURL)
-            .transition(.opacity)
-            .frame(height: 600)
-            .clipped()
-            .clipShape(RoundedRectangle(cornerRadius: 32, style: .continuous))
-            .overlay {
-                // Gradient overlay for text readability
-                LinearGradient(
-                    colors: [.clear, .black.opacity(0.7), .black],
-                    startPoint: .top,
-                    endPoint: .bottom
+        return max(0, fullHeight - shelfPeek)
+    }
+
+    private var belowFoldHeaderReserveHeight: CGFloat {
+        158 * scrollProgress
+    }
+
+    // MARK: - Hero Components (Apple TV+ style — backdrop fixed, content scrolls over)
+
+    /// Fixed backdrop image (behind everything, doesn't scroll)
+    private var heroBackdropImage: some View {
+        HeroBackdropImage(
+            url: heroBackdrop.session.displayedBackdropURL,
+            animationDuration: isPreviewCarousel ? 0.38 : 0.26
+        ) {
+            Rectangle()
+                .fill(
+                    LinearGradient(
+                        colors: [Color.blue.opacity(0.3), Color.black],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
                 )
-                .clipShape(RoundedRectangle(cornerRadius: 32, style: .continuous))
-            }
-            .overlay {
-                // TMDB logo centered in hero for shows/movies
-                if currentItem.type != "episode", let logoURL = showLogoURL {
-                    CachedAsyncImage(url: logoURL) { phase in
-                        switch phase {
-                        case .success(let image):
-                            image
-                                .resizable()
-                                .aspectRatio(contentMode: .fit)
-                                .shadow(color: .black.opacity(0.8), radius: 20, x: 0, y: 4)
-                        default:
-                            Color.clear
-                        }
-                    }
-                    .frame(maxWidth: 700, maxHeight: 200)
-                }
-            }
-            // GPU-accelerated shadow: blur is hardware-accelerated, unlike .shadow() with large radius
-            .background(
-                RoundedRectangle(cornerRadius: 32, style: .continuous)
-                    .fill(.black)
-                    .blur(radius: 20)
-                    .offset(y: 10)
-                    .opacity(0.5)
-            )
-            .padding(.horizontal, 48)
+        }
+        .animation(.easeOut(duration: isPreviewCarousel ? 0.46 : 0.48), value: backgroundParallaxOffset)
+    }
 
-            // Poster overlay - right aligned, larger with squircle corners
-            HStack(alignment: .bottom, spacing: 32) {
+    /// Gradient overlay for hero text readability (scrolls with content)
+    private var heroGradient: some View {
+        LinearGradient(
+            stops: [
+                .init(color: .clear, location: 0.3),
+                .init(color: .black.opacity(0.5), location: 0.55),
+                .init(color: .black.opacity(0.85), location: 0.75),
+                .init(color: .black, location: 1.0),
+            ],
+            startPoint: .top,
+            endPoint: .bottom
+        )
+    }
+
+    /// Metadata overlay (title, genres, quality, buttons, cast) positioned at bottom of hero
+    private var heroMetadataOverlay: some View {
+        GeometryReader { metaGeo in
+            VStack(alignment: .leading, spacing: 10) {
                 Spacer()
 
-                CachedAsyncImage(url: posterURL) { phase in
+                // Text content — fixed height so buttons/peek distance
+                // stays constant regardless of description length, logo vs title, etc.
+                VStack(alignment: .leading, spacing: 14) {
+                    // TMDB logo or title — fixed height so content below is always
+                    // at the same position regardless of logo aspect ratio
+                    Group {
+                        if let logoURL = heroBackdrop.session.logoURL {
+                            CachedAsyncImage(url: logoURL) { phase in
+                                switch phase {
+                                case .success(let image):
+                                    image
+                                        .resizable()
+                                        .aspectRatio(contentMode: .fit)
+                                        .shadow(color: .black.opacity(0.8), radius: 20, x: 0, y: 4)
+                                default:
+                                    heroTitleText
+                                }
+                            }
+                        } else {
+                            heroTitleText
+                        }
+                    }
+                    .frame(maxWidth: 520, alignment: .leading)
+                    .frame(height: 120, alignment: .bottomLeading)
+
+                    // Genre + content rating row
+                    heroMetadataRow
+
+                    // Description area (narrower than full metadata block, per Apple TV+ reference)
+                    VStack(alignment: .leading, spacing: 4) {
+                        if currentItem.type == "episode" {
+                            if let epString = currentItem.episodeString {
+                                let title = currentItem.title ?? ""
+                                let header = epString + (title.isEmpty ? "" : " · \(title)")
+                                let desc = fullMetadata?.summary ?? currentItem.summary ?? ""
+                                (Text(header).bold() + Text(desc.isEmpty ? "" : ":  \(desc)"))
+                                    .font(.caption)
+                                    .foregroundStyle(.white)
+                                    .lineLimit(3)
+                            }
+                        } else if currentItem.type == "show" || currentItem.type == "season" {
+                            if let tagline = fullMetadata?.tagline ?? currentItem.tagline {
+                                Text(tagline)
+                                    .font(.caption)
+                                    .italic()
+                                    .foregroundStyle(.white.opacity(0.9))
+                            }
+                            if let summary = fullMetadata?.summary ?? currentItem.summary, !summary.isEmpty {
+                                Text(summary)
+                                    .font(.caption)
+                                    .foregroundStyle(.white.opacity(0.85))
+                                    .lineLimit(3)
+                            }
+                        } else {
+                            if let tagline = fullMetadata?.tagline ?? currentItem.tagline {
+                                Text(tagline)
+                                    .font(.caption)
+                                    .italic()
+                                    .foregroundStyle(.white.opacity(0.9))
+                            } else if let summary = fullMetadata?.summary ?? currentItem.summary, !summary.isEmpty {
+                                Text(summary)
+                                    .font(.caption)
+                                    .foregroundStyle(.white.opacity(0.85))
+                                    .lineLimit(3)
+                            }
+                        }
+                    }
+                    .frame(maxWidth: 560, alignment: .leading)
+
+                    // Year · Duration · Quality badges
+                    heroQualityRow
+
+                    // Up Next caption
+                    if let caption = upNextCaption {
+                        Text(caption)
+                            .font(.caption)
+                            .foregroundStyle(.white.opacity(0.7))
+                    }
+                }
+                .frame(height: 420, alignment: .bottomLeading)
+                .frame(maxWidth: 760, alignment: .leading)
+
+                // Bottom row: buttons (left) + starring (right) — full width
+                // Always in tree to avoid layout shift; opacity-controlled
+                HStack(alignment: .bottom, spacing: 0) {
+                    actionButtons
+                        .onMoveCommand { direction in
+                            if direction == .up,
+                               isExpandedPreviewFlow,
+                               scrollProgress == 0 {
+                                onPreviewExitRequested?()
+                            }
+                        }
+
+                    Spacer(minLength: 40)
+
+                    // Starring (comma-separated, right-aligned)
+                    if let roles = (fullMetadata ?? currentItem).Role, !roles.isEmpty {
+                        let topCast = roles.prefix(3).compactMap { $0.tag }
+                        if !topCast.isEmpty {
+                            Text("Starring \(topCast.joined(separator: ", "))")
+                                .font(.caption)
+                                .foregroundStyle(.white.opacity(0.85))
+                                .lineLimit(3)
+                                .multilineTextAlignment(.trailing)
+                                .frame(maxWidth: 460, alignment: .trailing)
+                        }
+                    }
+                }
+                .padding(.top, 24)
+                .opacity(effectiveMetadataVisible ? 1 : 0)
+                .allowsHitTesting(allowActionRowInteraction)
+            }
+            .padding(.horizontal, heroOverlayHorizontalInset)
+        }
+        .animation(.easeInOut(duration: 0.3), value: currentItem.ratingKey)
+    }
+
+    // MARK: - Below-fold Title Logo (centered, Apple TV+ style)
+
+    private var belowFoldTitleLogo: some View {
+        Group {
+            if let logoURL = heroBackdrop.session.logoURL {
+                CachedAsyncImage(url: logoURL) { phase in
                     switch phase {
                     case .success(let image):
                         image
                             .resizable()
-                            .aspectRatio(contentMode: .fill)
-                    case .empty:
-                        Rectangle()
-                            .fill(Color(white: 0.15))
-                            .overlay { ProgressView().tint(.white.opacity(0.3)) }
-                    case .failure:
-                        Rectangle()
-                            .fill(
-                                LinearGradient(
-                                    colors: [Color(white: 0.18), Color(white: 0.12)],
-                                    startPoint: .top,
-                                    endPoint: .bottom
-                                )
-                            )
-                            .overlay {
-                                Image(systemName: iconForType)
-                                    .font(.system(size: 50, weight: .light))
-                                    .foregroundStyle(.white.opacity(0.4))
-                            }
+                            .aspectRatio(contentMode: .fit)
+                    default:
+                        Text(heroBrandTitle)
+                            .font(.system(size: 42, weight: .bold))
+                            .foregroundStyle(.primary)
                     }
                 }
-                .id(posterURL)
-                .transition(.opacity)
-                .frame(width: 400, height: isMusicItem ? 400 : 600)
-                .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-                // GPU-accelerated shadow
-                .background(
-                    RoundedRectangle(cornerRadius: 20, style: .continuous)
-                        .fill(.black)
-                        .blur(radius: 20)
-                        .offset(y: 10)
-                        .opacity(0.5)
-                )
+                .frame(maxWidth: 680, maxHeight: 126)
+            } else {
+                Text(heroBrandTitle)
+                    .font(.system(size: 42, weight: .bold))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
             }
-            .padding(.horizontal, 96) // Inset from hero edges
-            .padding(.bottom, isMusicItem ? -40 : -140) // Overlap below hero section
         }
-        .animation(.easeInOut(duration: 0.3), value: currentItem.ratingKey)
+        .frame(maxWidth: .infinity, alignment: .center)
+    }
+
+    // MARK: - Hero Sub-components
+
+    private var heroTitleText: some View {
+        Text(heroBrandTitle)
+            .font(.system(size: 52, weight: .bold))
+            .foregroundStyle(.white)
+            .shadow(color: .black.opacity(0.5), radius: 10, x: 0, y: 4)
+    }
+
+    /// Genre tags + content rating badge (Apple TV+ style: "TV Show · Adventure · Sci-Fi [TV-14]")
+    private var heroMetadataRow: some View {
+        HStack(spacing: 8) {
+            // Build label parts with dot separators
+            let parts = heroMetadataParts
+            ForEach(Array(parts.enumerated()), id: \.offset) { index, part in
+                if index > 0 {
+                    Text("·")
+                }
+                Text(part)
+            }
+
+            // Content rating badge (bordered, at end)
+            if let contentRating = fullMetadata?.contentRating ?? currentItem.contentRating {
+                Text(contentRating)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 4, style: .continuous)
+                            .stroke(Color.white.opacity(0.5), lineWidth: 1)
+                    }
+            }
+        }
+        .font(.caption)
+        .foregroundStyle(.white.opacity(0.85))
+    }
+
+    private var heroMetadataParts: [String] {
+        var parts: [String] = []
+
+        // Type label: prefer library section title, fall back to content type
+        if let library = (fullMetadata ?? currentItem).librarySectionTitle {
+            parts.append(library)
+        } else if currentItem.type == "show" || currentItem.type == "episode" || currentItem.type == "season" {
+            parts.append("TV Show")
+        } else if currentItem.type == "movie" {
+            parts.append("Movie")
+        }
+
+        // Genres (up to 2 — keeps the row concise alongside the type label and rating badge)
+        let genreSource = fullMetadata ?? currentItem
+        if let genres = genreSource.Genre?.prefix(2) {
+            for genre in genres {
+                if let tag = genre.tag {
+                    parts.append(tag)
+                }
+            }
+        }
+
+        return parts
+    }
+
+    /// Year, duration, quality badges row (Apple TV+ style: "2023 · 49 min [4K] [DV] [5.1]")
+    private var heroQualityRow: some View {
+        HStack(spacing: 8) {
+            // Year · Duration with dot separator
+            let year = fullMetadata?.year ?? currentItem.year
+            let duration = fullMetadata?.durationFormatted ?? currentItem.durationFormatted
+
+            if let year {
+                Text(String(year))
+            }
+            if year != nil && duration != nil {
+                Text("·")
+            }
+            if let duration {
+                Text(duration)
+            }
+
+            if let rating = fullMetadata?.rating ?? currentItem.rating {
+                HStack(spacing: 4) {
+                    Image(systemName: "star.fill")
+                        .foregroundStyle(.yellow)
+                    Text(String(format: "%.1f", rating))
+                }
+            }
+
+            // Quality badges
+            if let videoQuality = fullMetadata?.videoQualityDisplay ?? currentItem.videoQualityDisplay {
+                QualityBadge(text: videoQuality)
+            }
+            if let hdrFormat = fullMetadata?.hdrFormatDisplay ?? currentItem.hdrFormatDisplay {
+                QualityBadge(text: hdrFormat)
+            }
+            if let audioFormat = fullMetadata?.audioFormatDisplay ?? currentItem.audioFormatDisplay {
+                QualityBadge(text: audioFormat)
+            }
+        }
+        .font(.caption.bold())
+        .foregroundStyle(.white)
+    }
+
+    /// Small badge for quality indicators (4K, DV, Atmos, etc.)
+    private struct QualityBadge: View {
+        let text: String
+        var body: some View {
+            Text(text)
+                .font(.caption)
+                .fontWeight(.semibold)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .background(
+                    RoundedRectangle(cornerRadius: 4, style: .continuous)
+                        .fill(.white.opacity(0.15))
+                )
+                .overlay {
+                    RoundedRectangle(cornerRadius: 4, style: .continuous)
+                        .stroke(.white.opacity(0.3), lineWidth: 0.5)
+                }
+        }
     }
 
     /// Check if this is a music item (album, artist, track)
@@ -687,110 +1042,10 @@ struct PlexDetailView: View {
         }
     }
 
-    // MARK: - Header Section
+    // MARK: - Summary Section (Full, below fold)
 
-    private var headerSection: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            // Spacer for poster overlap (minimal - just enough to clear poster bottom)
-            Spacer()
-                .frame(height: isMusicItem ? 20 : 40)
-
-            Text(fullMetadata?.title ?? currentItem.title ?? "Unknown Title")
-                .font(.title2)
-                .fontWeight(.semibold)
-
-            HStack(spacing: 16) {
-                if let year = fullMetadata?.year ?? currentItem.year {
-                    Text(String(year))
-                }
-
-                if let contentRating = fullMetadata?.contentRating ?? currentItem.contentRating {
-                    Text(contentRating)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 2)
-                        .overlay {
-                            RoundedRectangle(cornerRadius: 4, style: .continuous)
-                                .stroke(Color.secondary.opacity(0.6), lineWidth: 1)
-                        }
-                }
-
-                if let duration = fullMetadata?.durationFormatted ?? currentItem.durationFormatted {
-                    Text(duration)
-                }
-
-                if let rating = fullMetadata?.rating ?? currentItem.rating {
-                    HStack(spacing: 4) {
-                        Image(systemName: "star.fill")
-                            .foregroundStyle(.yellow)
-                        Text(String(format: "%.1f", rating))
-                    }
-                }
-
-                // Use fullMetadata for media info since hub items don't include Stream data
-                if let videoQuality = fullMetadata?.videoQualityDisplay ?? currentItem.videoQualityDisplay {
-                    Text(videoQuality)
-                }
-
-                if let hdrFormat = fullMetadata?.hdrFormatDisplay ?? currentItem.hdrFormatDisplay {
-                    Text(hdrFormat)
-                }
-
-                if let audioFormat = fullMetadata?.audioFormatDisplay ?? currentItem.audioFormatDisplay {
-                    Text(audioFormat)
-                }
-            }
-            .font(.subheadline)
-            .foregroundStyle(.secondary)
-
-            if let tagline = fullMetadata?.tagline ?? currentItem.tagline {
-                Text(tagline)
-                    .font(.subheadline)
-                    .italic()
-                    .foregroundStyle(.secondary)
-            }
-        }
-    }
-
-    // MARK: - Action Button Constants
-
-    private let actionButtonHeight: CGFloat = 66
-    private let actionButtonWidth: CGFloat = 220
-
-    // MARK: - Progress Section
-
-    private func progressSection(progress: Double) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            // Progress bar
-            GeometryReader { geo in
-                ZStack(alignment: .leading) {
-                    // Background track
-                    RoundedRectangle(cornerRadius: 4, style: .continuous)
-                        .fill(Color.white.opacity(0.2))
-
-                    // Progress fill
-                    RoundedRectangle(cornerRadius: 4, style: .continuous)
-                        .fill(Color.blue)
-                        .frame(width: geo.size.width * progress)
-                        .animation(.easeOut(duration: 0.5), value: progress)
-                }
-            }
-            .frame(height: 6)
-
-            // Time remaining text (hide when animating to 100%)
-            if progress < 1, let remaining = effectiveItem.remainingTimeFormatted {
-                Text("\(remaining) remaining")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .frame(maxWidth: 500)
-    }
-
-    // MARK: - Summary Section (tvOS)
-
-    #if os(tvOS)
     @ViewBuilder
-    private func summarySection(summary: String) -> some View {
+    private func fullSummarySection(summary: String) -> some View {
         Button {
             withAnimation(.easeInOut(duration: 0.25)) {
                 isSummaryExpanded.toggle()
@@ -804,89 +1059,70 @@ struct PlexDetailView: View {
         }
         .buttonStyle(.plain)
     }
-    #endif
 
-    // MARK: - Action Buttons
+    // MARK: - Action Buttons (Apple TV+ style)
+
+    private let pillButtonHeight: CGFloat = 66
+    private let circleButtonSize: CGFloat = 66
 
     private var actionButtons: some View {
-        HStack(spacing: 16) {
-            // Play button for movies, shows, albums
-            // Play All button for artists
+        HStack(spacing: 18) {
+            // Primary play button with inline progress + time remaining
             if currentItem.type == "artist" {
                 Button {
-                    Task {
-                        await playAllArtistTracks()
-                    }
+                    Task { await playAllArtistTracks() }
                 } label: {
-                    HStack(spacing: 8) {
+                    HStack(spacing: 10) {
                         if isLoadingArtistTracks {
-                            ProgressView()
-                                .tint(.white)
+                            ProgressView().tint(.white)
                         } else {
                             Image(systemName: "play.fill")
                         }
                         Text("Play All")
                     }
-                    .font(.system(size: 20, weight: .semibold))
-                    .frame(width: actionButtonWidth, height: actionButtonHeight)
+                    .font(.system(size: 22, weight: .semibold))
+                    .padding(.horizontal, 32)
+                    .frame(height: pillButtonHeight)
                 }
-                #if os(tvOS)
-                .buttonStyle(AppStoreActionButtonStyle(isFocused: focusedActionButton == "play"))
+                .buttonStyle(AppStoreActionButtonStyle(isFocused: focusedActionButton == "play", cornerRadius: pillButtonHeight / 2))
                 .focused($focusedActionButton, equals: "play")
-                #else
-                .buttonStyle(.borderedProminent)
-                #endif
                 .disabled(isLoadingArtistTracks)
             } else if currentItem.type == "album" {
                 Button {
-                    if let firstTrack = tracks.first {
-                        selectedTrack = firstTrack
-                    }
+                    if let firstTrack = tracks.first { selectedTrack = firstTrack }
                     showPlayer = true
                 } label: {
-                    HStack(spacing: 8) {
+                    HStack(spacing: 10) {
                         Image(systemName: "play.fill")
                         Text("Play Album")
                     }
-                    .font(.system(size: 20, weight: .semibold))
-                    .frame(width: actionButtonWidth, height: actionButtonHeight)
+                    .font(.system(size: 22, weight: .semibold))
+                    .padding(.horizontal, 32)
+                    .frame(height: pillButtonHeight)
                 }
-                #if os(tvOS)
-                .buttonStyle(AppStoreActionButtonStyle(isFocused: focusedActionButton == "play"))
+                .buttonStyle(AppStoreActionButtonStyle(isFocused: focusedActionButton == "play", cornerRadius: pillButtonHeight / 2))
                 .focused($focusedActionButton, equals: "play")
-                #else
-                .buttonStyle(.borderedProminent)
-                #endif
                 .disabled(tracks.isEmpty)
             } else if currentItem.type == "show" || currentItem.type == "season" {
-                // TV Show/Season: Play button uses nextUpEpisode
                 Button {
-                    if let episode = nextUpEpisode {
-                        selectedEpisode = episode
-                    }
+                    if let episode = nextUpEpisode { selectedEpisode = episode }
                     playFromBeginning = false
                     showPlayer = true
                 } label: {
-                    HStack(spacing: 8) {
-                        Image(systemName: "play.fill")
-                        Text(showPlayButtonLabel)
-                    }
-                    .font(.system(size: 20, weight: .semibold))
-                    .frame(width: actionButtonWidth, height: actionButtonHeight)
+                    playButtonLabel(text: showPlayButtonLabel, isFocused: focusedActionButton == "play")
+                        .font(.system(size: 22, weight: .semibold))
+                        .padding(.horizontal, 32)
+                        .frame(height: pillButtonHeight)
                 }
-                #if os(tvOS)
-                .buttonStyle(AppStoreActionButtonStyle(isFocused: focusedActionButton == "play"))
+                .buttonStyle(AppStoreActionButtonStyle(isFocused: focusedActionButton == "play", cornerRadius: pillButtonHeight / 2))
                 .focused($focusedActionButton, equals: "play")
-                #else
-                .buttonStyle(.borderedProminent)
-                #endif
                 .disabled(nextUpEpisode == nil)
 
-                // Shuffle Play button
+                // Shuffle
                 Button {
                     Task { await shufflePlay() }
                 } label: {
-                    HStack(spacing: 8) {
+                    HStack(spacing: 10) {
                         if isLoadingShufflePlay {
                             ProgressView().tint(.white)
                         } else {
@@ -894,386 +1130,217 @@ struct PlexDetailView: View {
                         }
                         Text("Shuffle")
                     }
-                    .font(.system(size: 20, weight: .semibold))
-                    .frame(width: actionButtonWidth, height: actionButtonHeight)
+                    .font(.system(size: 22, weight: .semibold))
+                    .padding(.horizontal, 32)
+                    .frame(height: pillButtonHeight)
                 }
-                #if os(tvOS)
-                .buttonStyle(AppStoreActionButtonStyle(isFocused: focusedActionButton == "shuffle", isPrimary: false))
+                .buttonStyle(AppStoreActionButtonStyle(isFocused: focusedActionButton == "shuffle", cornerRadius: pillButtonHeight / 2, isPrimary: false))
                 .focused($focusedActionButton, equals: "shuffle")
-                #else
-                .buttonStyle(.bordered)
-                #endif
                 .disabled(isLoadingShufflePlay)
             } else if currentItem.type != "track" {
-                // Movies/Episodes: Standard Play/Resume button
+                // Movies/Episodes: Play button with progress bar + time remaining
                 Button {
                     playFromBeginning = false
                     showPlayer = true
                 } label: {
-                    HStack(spacing: 8) {
-                        Image(systemName: "play.fill")
-                        Text(effectiveItem.isInProgress ? "Resume" : "Play")
-                    }
-                    .font(.system(size: 20, weight: .semibold))
-                    .frame(width: actionButtonWidth, height: actionButtonHeight)
+                    playButtonLabel(text: effectiveItem.isInProgress ? "Resume" : "Play", isFocused: focusedActionButton == "play")
+                        .font(.system(size: 22, weight: .semibold))
+                        .padding(.horizontal, 32)
+                        .frame(height: pillButtonHeight)
                 }
-                #if os(tvOS)
-                .buttonStyle(AppStoreActionButtonStyle(isFocused: focusedActionButton == "play"))
+                .buttonStyle(AppStoreActionButtonStyle(isFocused: focusedActionButton == "play", cornerRadius: pillButtonHeight / 2))
                 .focused($focusedActionButton, equals: "play")
-                #else
-                .buttonStyle(.borderedProminent)
-                #endif
-
-                // Restart button (only for in-progress content)
-                if effectiveItem.isInProgress {
-                    Button {
-                        playFromBeginning = true
-                        showPlayer = true
-                    } label: {
-                        HStack(spacing: 8) {
-                            Image(systemName: "arrow.counterclockwise")
-                            Text("Restart")
-                        }
-                        .font(.system(size: 20, weight: .semibold))
-                        .frame(width: actionButtonWidth, height: actionButtonHeight)
-                    }
-                    #if os(tvOS)
-                    .buttonStyle(AppStoreActionButtonStyle(isFocused: focusedActionButton == "restart", isPrimary: false))
-                    .focused($focusedActionButton, equals: "restart")
-                    #else
-                    .buttonStyle(.bordered)
-                    #endif
-                }
             }
 
-            // For music: Star rating toggle (5 stars or no rating)
-            // For other content: Watched toggle button
+            // Watched toggle — perfect circle checkmark button
+            if !isMusicItem {
+                Button {
+                    Task { await toggleWatched() }
+                } label: {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 24, weight: .semibold))
+                        .frame(width: circleButtonSize, height: circleButtonSize)
+                }
+                .buttonStyle(AppStoreActionButtonStyle(isFocused: focusedActionButton == "watched", cornerRadius: circleButtonSize / 2, isPrimary: false))
+                .focused($focusedActionButton, equals: "watched")
+            }
+
+            // Music: Star rating — perfect circle
             if isMusicItem {
                 Button {
-                    Task {
-                        await toggleStarRating()
-                    }
+                    Task { await toggleStarRating() }
                 } label: {
                     Image(systemName: isStarred ? "star.fill" : "star")
-                        .font(.system(size: 30, weight: .medium))
-                        #if os(tvOS)
-                        // Black when focused, yellow when starred, gray when not starred
-                        .foregroundStyle(focusedActionButton == "star" ? .black : (isStarred ? .yellow : .secondary))
-                        #else
-                        .foregroundStyle(isStarred ? .yellow : .secondary)
-                        #endif
-                        .frame(width: actionButtonWidth, height: actionButtonHeight)
+                        .font(.system(size: 24, weight: .semibold))
+                        .frame(width: circleButtonSize, height: circleButtonSize)
                 }
-                #if os(tvOS)
-                .buttonStyle(AppStoreActionButtonStyle(isFocused: focusedActionButton == "star", isPrimary: false))
+                .buttonStyle(AppStoreActionButtonStyle(isFocused: focusedActionButton == "star", cornerRadius: circleButtonSize / 2, isPrimary: false))
                 .focused($focusedActionButton, equals: "star")
-                #else
-                .buttonStyle(.bordered)
-                #endif
-            } else {
-                #if os(tvOS)
-                Button {
-                    Task {
-                        await toggleWatched()
-                    }
-                } label: {
-                    HStack(spacing: 8) {
-                        Image(systemName: isWatched ? "checkmark.circle.fill" : "circle")
-                        Text(isWatched ? "Watched" : "Unwatched")
-                    }
-                    // Black when focused (for visibility on white bg), green when watched + unfocused, white when unwatched + unfocused
-                    .foregroundStyle(focusedActionButton == "watched" ? .black : (isWatched ? .green : .white))
-                    .font(.system(size: 20, weight: .semibold))
-                    .lineLimit(1)
-                    .frame(width: actionButtonWidth, height: actionButtonHeight)
-                }
-                .buttonStyle(AppStoreActionButtonStyle(isFocused: focusedActionButton == "watched", isPrimary: false))
-                .focused($focusedActionButton, equals: "watched")
-                #else
-                Button {
-                    Task {
-                        await toggleWatched()
-                    }
-                } label: {
-                    HStack(spacing: 8) {
-                        Image(systemName: isWatched ? "checkmark.circle.fill" : "circle")
-                        Text(isWatched ? "Watched" : "Unwatched")
-                    }
-                    .foregroundStyle(isWatched ? .green : .primary)
-                    .font(.system(size: 20, weight: .semibold))
-                    .lineLimit(1)
-                    .frame(width: actionButtonWidth, height: actionButtonHeight)
-                }
-                .buttonStyle(.bordered)
-                #endif
             }
 
-            // Show button (for seasons)
-            if currentItem.type == "season", currentItem.parentRatingKey != nil {
-                Button {
-                    Task { await navigateToParentShowFromSeason() }
-                } label: {
-                    HStack(spacing: 8) {
-                        Image(systemName: "tv")
-                        Text("Show")
-                    }
-                    .font(.system(size: 20, weight: .semibold))
-                    .frame(width: actionButtonWidth, height: actionButtonHeight)
-                }
-                #if os(tvOS)
-                .buttonStyle(AppStoreActionButtonStyle(isFocused: focusedActionButton == "showFromSeason", isPrimary: false))
-                .focused($focusedActionButton, equals: "showFromSeason")
-                #else
-                .buttonStyle(.bordered)
-                #endif
-                .disabled(isLoadingNavigation)
-            }
-
-            // Info button for artists with bio
+            // Info button for artists — perfect circle
             if currentItem.type == "artist", let summary = fullMetadata?.summary ?? currentItem.summary, !summary.isEmpty {
                 Button {
                     showBioSheet = true
                 } label: {
-                    Label("Info", systemImage: "info.circle")
-                        .font(.system(size: 24, weight: .medium))
-                        .frame(width: actionButtonWidth, height: actionButtonHeight)
+                    Image(systemName: "info.circle")
+                        .font(.system(size: 24, weight: .semibold))
+                        .frame(width: circleButtonSize, height: circleButtonSize)
                 }
-                #if os(tvOS)
-                .buttonStyle(AppStoreActionButtonStyle(isFocused: focusedActionButton == "info", isPrimary: false))
+                .buttonStyle(AppStoreActionButtonStyle(isFocused: focusedActionButton == "info", cornerRadius: circleButtonSize / 2, isPrimary: false))
                 .focused($focusedActionButton, equals: "info")
-                #else
-                .buttonStyle(.bordered)
-                #endif
             }
 
-            // Trailer button (only show if available, not for music)
+            // Trailer button — perfect circle
             if !isMusicItem, fullMetadata?.trailer != nil {
                 Button {
-                    Task {
-                        await loadAndPlayTrailer()
-                    }
+                    Task { await loadAndPlayTrailer() }
                 } label: {
-                    Label("Watch Trailer", systemImage: "film")
-                        .font(.system(size: 24, weight: .medium))
-                        .frame(width: actionButtonWidth, height: actionButtonHeight)
+                    Image(systemName: "film")
+                        .font(.system(size: 24, weight: .semibold))
+                        .frame(width: circleButtonSize, height: circleButtonSize)
                 }
-                #if os(tvOS)
-                .buttonStyle(AppStoreActionButtonStyle(isFocused: focusedActionButton == "trailer", isPrimary: false))
+                .buttonStyle(AppStoreActionButtonStyle(isFocused: focusedActionButton == "trailer", cornerRadius: circleButtonSize / 2, isPrimary: false))
                 .focused($focusedActionButton, equals: "trailer")
-                #else
-                .buttonStyle(.bordered)
-                #endif
-            }
-
-            Spacer()
-
-            // Progress info on the right (not for music)
-            if !isMusicItem, let progress = effectiveItem.viewOffsetFormatted, effectiveItem.isInProgress {
-                Text("\(progress) watched")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
             }
         }
-        #if os(tvOS)
+        .disabled(!allowActionRowInteraction)
         .focusSection()
-        #endif
+    }
+
+    /// Play button label with inline progress bar + time remaining (Apple TV+ style)
+    private func playButtonLabel(text: String, isFocused: Bool = false) -> some View {
+        let trackColor = isFocused ? Color.black.opacity(0.2) : Color.white.opacity(0.3)
+        let fillColor = isFocused ? Color.black : Color.white
+
+        return HStack(spacing: 10) {
+            Image(systemName: "play.fill")
+
+            // Progress bar (always shown — full track for unwatched, partial for in-progress)
+            ZStack(alignment: .leading) {
+                RoundedRectangle(cornerRadius: 3, style: .continuous)
+                    .fill(trackColor)
+                    .frame(width: 80, height: 5)
+                if displayedProgress > 0 {
+                    RoundedRectangle(cornerRadius: 3, style: .continuous)
+                        .fill(fillColor)
+                        .frame(width: 80 * displayedProgress, height: 5)
+                }
+            }
+
+            // Time: remaining if in progress, total duration otherwise
+            if effectiveItem.isInProgress, let remaining = effectiveItem.remainingTimeFormatted {
+                Text(remaining)
+            } else if let duration = effectiveItem.durationFormatted {
+                Text(duration)
+            } else {
+                Text(text)
+            }
+        }
     }
 
     // MARK: - Season Section (TV Shows)
 
     private var seasonSection: some View {
-        VStack(alignment: .leading, spacing: 24) {
-            // Show the parent show title (or logo) when viewing an episode
-            if currentItem.type == "episode", let showTitle = currentItem.grandparentTitle {
-                if let logoURL = showLogoURL {
-                    CachedAsyncImage(url: logoURL) { phase in
-                        switch phase {
-                        case .success(let image):
-                            image
-                                .resizable()
-                                .aspectRatio(contentMode: .fit)
-                        default:
-                            Text(showTitle)
-                                .font(.title2)
-                                .fontWeight(.semibold)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    .frame(maxWidth: 600, maxHeight: 180)
-                    .frame(maxWidth: .infinity, alignment: .center)
-                    .padding(.top, 32)
-                } else {
-                    Text(showTitle)
-                        .font(.title2)
-                        .fontWeight(.semibold)
-                        .foregroundStyle(.secondary)
-                        .padding(.top, 32)
-                }
-            }
-
+        VStack(alignment: .leading, spacing: 12) {
             if isLoadingSeasons {
                 ProgressView("Loading seasons...")
             } else if !seasons.isEmpty {
-                #if os(tvOS)
-                // tvOS: Split pane for multi-season, flat episode list for single season
-                if seasons.count > 1 {
-                    SeasonEpisodeSplitPane(
-                        seasons: seasons,
-                        selectedSeason: $selectedSeason,
-                        episodes: episodes,
-                        isLoadingEpisodes: isLoadingEpisodes,
-                        currentItemRatingKey: currentItem.ratingKey,
-                        currentItemType: currentItem.type,
-                        serverURL: authManager.selectedServerURL ?? "",
-                        authToken: authManager.selectedServerToken ?? "",
-                        onSeasonSelected: { season in
-                            Task { await loadEpisodes(for: season) }
-                        },
-                        onEpisodePlay: { episode in
-                            selectedEpisode = episode
-                            playFromBeginning = false
-                            showPlayer = true
-                        },
-                        onEpisodeRefresh: { ratingKey in
-                            await refreshEpisodeWatchStatus(ratingKey: ratingKey)
-                        },
-                        onEpisodeShowInfo: { episode in
-                            navigateToEpisode = episode
-                        }
-                    )
-                } else {
-                    // Single season: episode list only
-                    seasonSectionEpisodeList
-                }
-                #else
-                // Non-tvOS: horizontal poster carousel + vertical episode list
-                if seasons.count > 1 {
-                    Text("Seasons")
-                        .font(.title2)
-                        .fontWeight(.bold)
-                        .padding(.top, 16)
-
-                    ScrollViewReader { proxy in
-                        ScrollView(.horizontal, showsIndicators: false) {
-                            HStack(spacing: 24) {
-                                ForEach(seasons, id: \.ratingKey) { season in
-                                    SeasonPosterCard(
-                                        season: season,
-                                        isSelected: selectedSeason?.ratingKey == season.ratingKey,
-                                        serverURL: authManager.selectedServerURL ?? "",
-                                        authToken: authManager.selectedServerToken ?? ""
-                                    ) {
-                                        selectedSeason = season
-                                        Task {
-                                            await loadEpisodes(for: season)
-                                        }
-                                    }
-                                    .id(season.ratingKey)
-                                }
-                            }
-                            .padding(.horizontal, 48)
-                            .padding(.vertical, 32)
-                        }
-                        .onChange(of: selectedSeason?.ratingKey) { oldKey, newKey in
-                            guard let key = newKey else { return }
-                            if oldKey == nil {
-                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                                    proxy.scrollTo(key, anchor: .center)
-                                }
-                            } else {
-                                withAnimation {
-                                    proxy.scrollTo(key, anchor: .center)
-                                }
-                            }
+                SeasonPillBar(
+                    seasons: seasons,
+                    selectedSeason: $selectedSeason,
+                    onSeasonSelected: { season in
+                        // Scroll episode list to this season's first episode
+                        if let firstEp = unifiedEpisodes.first(where: { $0.parentRatingKey == season.ratingKey }),
+                           let epKey = firstEp.ratingKey {
+                            episodeScrollTarget = epKey
                         }
                     }
-                    .padding(.horizontal, -48)
-                    .scrollClipDisabled()
-                    .focusSection()
+                )
+                .opacity(scrollProgress)
+                .onMoveCommand { direction in
+                    if direction == .up {
+                        scrollToTopTrigger.toggle()
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                            focusedActionButton = "play"
+                        }
+                    }
                 }
 
-                // Non-tvOS episode list
-                seasonSectionEpisodeList
-                #endif
+                // Unified horizontal episode cards across all seasons
+                unifiedEpisodeList
             }
         }
     }
 
-    /// Shared episode list used by single-season tvOS path and all non-tvOS paths
-    private var seasonSectionEpisodeList: some View {
-        Group {
-            let episodeCount = selectedSeason?.leafCount ?? 0
-            if isLoadingEpisodes && episodeCount > 0 {
-                Text("Episodes")
-                    .font(.title2)
-                    .fontWeight(.bold)
-                    .padding(.top, seasons.count > 1 ? 16 : 0)
+    private var shouldUseSingleSeasonPillHeaderInSeasonDetail: Bool {
+        currentItem.type == "season" && seasons.count == 1
+    }
 
-                LazyVStack(spacing: 16) {
-                    ForEach(1...episodeCount, id: \.self) { index in
-                        SkeletonEpisodeRow(episodeNumber: index)
-                    }
-                }
-                #if os(tvOS)
-                .padding(.horizontal, 8)
-                #endif
-            } else if isLoadingEpisodes {
+    private var seasonDetailHeaderPills: [PlexMetadata] {
+        let matchingSeason = seasons.filter { $0.ratingKey == currentItem.ratingKey }
+        if !matchingSeason.isEmpty {
+            return matchingSeason
+        }
+        return [selectedSeason ?? currentItem]
+    }
+
+    /// Unified horizontal episode card row across all seasons
+    private var unifiedEpisodeList: some View {
+        Group {
+            if unifiedEpisodes.isEmpty && isLoadingEpisodes {
                 ProgressView("Loading episodes...")
                     .padding(.top, 20)
-            } else if !episodes.isEmpty {
-                Text("Episodes")
-                    .font(.title2)
-                    .fontWeight(.bold)
-                    .padding(.top, seasons.count > 1 ? 16 : 0)
+            } else if !unifiedEpisodes.isEmpty {
+                ScrollViewReader { proxy in
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        LazyHStack(spacing: 0) {
+                            ForEach(Array(unifiedEpisodes.enumerated()), id: \.element.ratingKey) { index, episode in
+                                let isSeasonBoundary = index > 0 && episode.parentRatingKey != unifiedEpisodes[index - 1].parentRatingKey
+                                let leadingPad: CGFloat = index == 0 ? 48 : (isSeasonBoundary ? 56 : 24)
 
-                LazyVStack(spacing: 16) {
-                    ForEach(episodes, id: \.ratingKey) { episode in
-                        let isCurrentEpisode = currentItem.type == "episode" && episode.ratingKey == currentItem.ratingKey
-                        #if os(tvOS)
-                        EpisodeRow(
-                            episode: episode,
-                            serverURL: authManager.selectedServerURL ?? "",
-                            authToken: authManager.selectedServerToken ?? "",
-                            isCurrent: isCurrentEpisode,
-                            focusedEpisodeId: $focusedEpisodeId,
-                            onPlay: {
-                                selectedEpisode = episode
-                                playFromBeginning = false
-                                showPlayer = true
-                            },
-                            onRefreshNeeded: {
-                                await refreshEpisodeWatchStatus(ratingKey: episode.ratingKey)
-                            },
-                            onShowInfo: {
-                                navigateToEpisode = episode
+                                EpisodeCard(
+                                    episode: episode,
+                                    serverURL: authManager.selectedServerURL ?? "",
+                                    authToken: authManager.selectedServerToken ?? "",
+                                    focusedEpisodeId: $focusedEpisodeId,
+                                    showSeasonPrefix: seasons.count > 1,
+                                    onPlay: {
+                                        selectedEpisode = episode
+                                        playFromBeginning = false
+                                        showPlayer = true
+                                    },
+                                    onRefreshNeeded: {
+                                        await refreshEpisodeWatchStatus(ratingKey: episode.ratingKey)
+                                    },
+                                    onShowInfo: {
+                                        navigateToEpisode = episode
+                                    }
+                                )
+                                .padding(.leading, leadingPad)
+                                .padding(.trailing, index == unifiedEpisodes.count - 1 ? 48 : 0)
+                                .id(episode.ratingKey)
                             }
-                        )
-                        #else
-                        EpisodeRow(
-                            episode: episode,
-                            serverURL: authManager.selectedServerURL ?? "",
-                            authToken: authManager.selectedServerToken ?? "",
-                            isCurrent: isCurrentEpisode,
-                            onPlay: {
-                                selectedEpisode = episode
-                                playFromBeginning = false
-                                showPlayer = true
-                            },
-                            onRefreshNeeded: {
-                                await refreshEpisodeWatchStatus(ratingKey: episode.ratingKey)
-                            },
-                            onShowInfo: {
-                                navigateToEpisode = episode
-                            }
-                        )
-                        #endif
+                        }
+                        .padding(.vertical, 16)
+                    }
+                    .scrollClipDisabled()
+                    .focusSection()
+                    .onMoveCommand { direction in
+                        guard direction == .up, seasons.count <= 1 else { return }
+                        scrollToTopTrigger.toggle()
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                            focusedActionButton = "play"
+                        }
+                    }
+                    .onChange(of: episodeScrollTarget) { _, target in
+                        guard let target else { return }
+                        withAnimation(.easeInOut(duration: 0.3)) {
+                            proxy.scrollTo(target, anchor: .leading)
+                        }
+                        episodeScrollTarget = nil
                     }
                 }
-                #if os(tvOS)
-                .padding(.horizontal, 8)
-                .focusSection()
-                .remembersFocus(key: "detailEpisodes", focusedId: $focusedEpisodeId)
-                #endif
             }
         }
     }
@@ -1282,58 +1349,51 @@ struct PlexDetailView: View {
 
     private var episodeSection: some View {
         VStack(alignment: .leading, spacing: 24) {
-            if isLoadingEpisodes {
+            if isLoadingEpisodes || isLoadingSeasons {
                 ProgressView("Loading episodes...")
             } else if !episodes.isEmpty {
-                Text("Episodes")
-                    .font(.title2)
-                    .fontWeight(.bold)
-
-                LazyVStack(spacing: 16) {
-                    ForEach(episodes, id: \.ratingKey) { episode in
-                        #if os(tvOS)
-                        EpisodeRow(
-                            episode: episode,
-                            serverURL: authManager.selectedServerURL ?? "",
-                            authToken: authManager.selectedServerToken ?? "",
-                            focusedEpisodeId: $focusedEpisodeId,
-                            onPlay: {
-                                selectedEpisode = episode
-                                playFromBeginning = false
-                                showPlayer = true
-                            },
-                            onRefreshNeeded: {
-                                await refreshEpisodeWatchStatus(ratingKey: episode.ratingKey)
-                            },
-                            onShowInfo: {
-                                navigateToEpisode = episode
-                            }
-                        )
-                        #else
-                        EpisodeRow(
-                            episode: episode,
-                            serverURL: authManager.selectedServerURL ?? "",
-                            authToken: authManager.selectedServerToken ?? "",
-                            onPlay: {
-                                selectedEpisode = episode
-                                playFromBeginning = false
-                                showPlayer = true
-                            },
-                            onRefreshNeeded: {
-                                await refreshEpisodeWatchStatus(ratingKey: episode.ratingKey)
-                            },
-                            onShowInfo: {
-                                navigateToEpisode = episode
-                            }
-                        )
-                        #endif
-                    }
+                if shouldUseSingleSeasonPillHeaderInSeasonDetail {
+                    SeasonPillBar(
+                        seasons: seasonDetailHeaderPills,
+                        selectedSeason: $selectedSeason,
+                        onSeasonSelected: { _ in }
+                    )
+                    .opacity(scrollProgress)
+                } else {
+                    Text("Episodes")
+                        .font(.title2)
+                        .fontWeight(.bold)
+                        .padding(.leading, 48)
                 }
-                #if os(tvOS)
-                .padding(.horizontal, 8)  // Room for focus scale effect
+
+                ScrollView(.horizontal, showsIndicators: false) {
+                    LazyHStack(spacing: 24) {
+                        ForEach(episodes, id: \.ratingKey) { episode in
+                            EpisodeCard(
+                                episode: episode,
+                                serverURL: authManager.selectedServerURL ?? "",
+                                authToken: authManager.selectedServerToken ?? "",
+                                focusedEpisodeId: $focusedEpisodeId,
+                                onPlay: {
+                                    selectedEpisode = episode
+                                    playFromBeginning = false
+                                    showPlayer = true
+                                },
+                                onRefreshNeeded: {
+                                    await refreshEpisodeWatchStatus(ratingKey: episode.ratingKey)
+                                },
+                                onShowInfo: {
+                                    navigateToEpisode = episode
+                                }
+                            )
+                        }
+                    }
+                    .padding(.horizontal, 48)
+                    .padding(.vertical, 16)
+                }
+                .scrollClipDisabled()
                 .focusSection()
                 .remembersFocus(key: "detailEpisodes", focusedId: $focusedEpisodeId)
-                #endif
             }
         }
     }
@@ -1351,7 +1411,6 @@ struct PlexDetailView: View {
 
                 LazyVStack(spacing: 12) {
                     ForEach(Array(tracks.enumerated()), id: \.element.ratingKey) { index, track in
-                        #if os(tvOS)
                         AlbumTrackRow(
                             track: track,
                             trackNumber: track.index ?? (index + 1),
@@ -1364,22 +1423,9 @@ struct PlexDetailView: View {
                                 showPlayer = true
                             }
                         )
-                        #else
-                        AlbumTrackRow(
-                            track: track,
-                            trackNumber: track.index ?? (index + 1),
-                            serverURL: authManager.selectedServerURL ?? "",
-                            authToken: authManager.selectedServerToken ?? ""
-                        ) {
-                            selectedTrack = track
-                            showPlayer = true
-                        }
-                        #endif
                     }
                 }
-                #if os(tvOS)
                 .padding(.horizontal, 8)  // Room for focus scale effect
-                #endif
             }
         }
     }
@@ -1397,7 +1443,6 @@ struct PlexDetailView: View {
 
                 LazyVStack(spacing: 16) {
                     ForEach(albums, id: \.ratingKey) { album in
-                        #if os(tvOS)
                         AlbumRowButton(
                             album: album,
                             serverURL: authManager.selectedServerURL ?? "",
@@ -1408,31 +1453,16 @@ struct PlexDetailView: View {
                                 navigateToAlbum = album
                             }
                         )
-                        #else
-                        Button {
-                            navigateToAlbum = album
-                        } label: {
-                            ArtistAlbumRow(
-                                album: album,
-                                serverURL: authManager.selectedServerURL ?? "",
-                                authToken: authManager.selectedServerToken ?? ""
-                            )
-                        }
-                        .buttonStyle(.plain)
-                        #endif
                     }
                 }
-                #if os(tvOS)
                 .padding(.horizontal, 8)  // Room for focus scale effect
                 .focusSection()
-                #endif
             }
         }
     }
 
     // MARK: - Player Presentation (tvOS)
 
-    #if os(tvOS)
     /// Present player using UIViewController to intercept Menu button
     private func presentPlayer() {
         // Get images and metadata, then present player
@@ -1465,8 +1495,27 @@ struct PlexDetailView: View {
             } else if selectedTrack != nil {
                 playItem = selectedTrack!
             } else {
-                // For main item (movie), prefer fullMetadata as it has Stream data for DV/HDR detection
-                playItem = fullMetadata ?? item
+                // For main item (movie), ensure full metadata with Stream data for DV/HDR detection.
+                // Hub metadata often lacks Stream details needed for Dolby Vision profile detection.
+                if let fm = fullMetadata, fm.Media?.first?.Part?.first?.Stream != nil {
+                    playItem = fm
+                } else if let serverURL = authManager.selectedServerURL,
+                          let token = authManager.selectedServerToken,
+                          let ratingKey = item.ratingKey {
+                    do {
+                        let metadata = try await networkManager.getFullMetadata(
+                            serverURL: serverURL,
+                            authToken: token,
+                            ratingKey: ratingKey
+                        )
+                        fullMetadata = metadata
+                        playItem = metadata
+                    } catch {
+                        playItem = fullMetadata ?? item
+                    }
+                } else {
+                    playItem = fullMetadata ?? item
+                }
             }
 
             // Use fullMetadata for updated viewOffset when playing the main item (not episodes/tracks)
@@ -1492,32 +1541,19 @@ struct PlexDetailView: View {
                     loadingArtImage: artImage,
                     loadingThumbImage: thumbImage
                 )
-                let inputCoordinator = PlaybackInputCoordinator()
-
-                // Create view with the external viewModel
-                let playerView = UniversalPlayerView(viewModel: viewModel, inputCoordinator: inputCoordinator)
-
-                // Create container that intercepts Menu button, passing the same viewModel
-                let container = PlayerContainerViewController(
-                    rootView: playerView,
-                    viewModel: viewModel,
-                    inputCoordinator: inputCoordinator
-                )
-
-                // Update SwiftUI state when player is dismissed
-                container.onDismiss = { [weak viewModel] in
+                let nativePlayer = NativePlayerViewController(viewModel: viewModel)
+                nativePlayer.onDismiss = { [weak viewModel] in
                     lastPlayedMetadata = viewModel?.metadata
                     showPlayer = false
                 }
 
-                // Present from top-most view controller
                 if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
                    let rootVC = windowScene.windows.first?.rootViewController {
                     var topVC = rootVC
                     while let presented = topVC.presentedViewController {
                         topVC = presented
                     }
-                    topVC.present(container, animated: true)
+                    topVC.present(nativePlayer, animated: true)
                 }
             }
         }
@@ -1525,24 +1561,12 @@ struct PlexDetailView: View {
 
     /// Get art and poster images for the player loading screen (from cache or fetch)
     private func getPlayerImages(for metadata: PlexMetadata) async -> (UIImage?, UIImage?) {
-        guard let serverURL = authManager.selectedServerURL,
-              let token = authManager.selectedServerToken else { return (nil, nil) }
+        guard let request = playerHeroBackdropRequest(for: metadata) else {
+            return (nil, nil)
+        }
 
-        // For episodes, use the show's art (displayed on detail page)
-        let art = (metadata.type == "episode" && selectedEpisode != nil) ? currentItem.bestArt : metadata.bestArt
-        let thumb = metadata.thumb ?? metadata.bestThumb
-
-        // Build URLs
-        let artURL = art.flatMap { URL(string: "\(serverURL)\($0)?X-Plex-Token=\(token)") }
-        let thumbURL = thumb.flatMap { URL(string: "\(serverURL)\($0)?X-Plex-Token=\(token)") }
-
-        // Fetch both images concurrently (from cache or network)
-        async let artTask: UIImage? = artURL != nil ? ImageCacheManager.shared.image(for: artURL!) : nil
-        async let thumbTask: UIImage? = thumbURL != nil ? ImageCacheManager.shared.image(for: thumbURL!) : nil
-
-        return await (artTask, thumbTask)
+        return await HeroBackdropResolver.shared.playerLoadingImages(for: request)
     }
-    #endif
 
     // MARK: - Data Loading
 
@@ -1560,11 +1584,14 @@ struct PlexDetailView: View {
             // Pre-warm from cached data immediately
             if cached.type == "movie" || cached.type == "episode" {
                 preWarmStreamURL(for: cached, serverURL: serverURL, authToken: token)
-                MPVPrewarmService.shared.prewarmIfNeeded(forLiveStream: false)
             }
 
             // If cache is fresh enough, skip the network request entirely
             if PlexDataStore.shared.isFullMetadataFresh(for: ratingKey) {
+                // Still need to backfill genres for episodes from parent show
+                if cached.type == "episode", (cached.Genre == nil || cached.Genre?.isEmpty == true) {
+                    await backfillParentGenres(serverURL: serverURL, authToken: token)
+                }
                 isLoadingExtras = false
                 return
             }
@@ -1572,11 +1599,23 @@ struct PlexDetailView: View {
 
         // Fetch from network (either no cache or stale cache)
         do {
-            let metadata = try await networkManager.getFullMetadata(
+            var metadata = try await networkManager.getFullMetadata(
                 serverURL: serverURL,
                 authToken: token,
                 ratingKey: ratingKey
             )
+
+            // Episodes don't carry Genre — backfill from parent show
+            if metadata.type == "episode", (metadata.Genre == nil || metadata.Genre?.isEmpty == true),
+               let showKey = metadata.grandparentRatingKey ?? currentItem.grandparentRatingKey {
+                if let showMeta = try? await networkManager.getFullMetadata(
+                    serverURL: serverURL, authToken: token, ratingKey: showKey
+                ) {
+                    metadata.Genre = showMeta.Genre
+                    metadata.contentRating = metadata.contentRating ?? showMeta.contentRating
+                }
+            }
+
             fullMetadata = metadata
             PlexDataStore.shared.cacheFullMetadata(metadata, for: ratingKey)
 
@@ -1584,10 +1623,6 @@ struct PlexDetailView: View {
             // This reduces startup latency when user presses Play
             if metadata.type == "movie" || metadata.type == "episode" {
                 preWarmStreamURL(for: metadata, serverURL: serverURL, authToken: token)
-
-                // Pre-warm MPV context (mirrors stream URL pattern)
-                // This initializes Vulkan/MoltenVK while user is still on detail view
-                MPVPrewarmService.shared.prewarmIfNeeded(forLiveStream: false)
             }
         } catch {
             print("Failed to load full metadata: \(error)")
@@ -1596,58 +1631,119 @@ struct PlexDetailView: View {
         isLoadingExtras = false
     }
 
-    /// Fetch the stylized logo image URL from TMDB for the title display
-    private func loadShowLogo() async {
-        // For shows: use the show's TMDB ID directly
-        // For episodes: fetch the parent show's metadata to get its guid/TMDB ID
-        // For movies: use the movie's TMDB ID
-        let tmdbId: Int?
-        let mediaType: TMDBMediaType
+    /// Backfill genres from parent show for episodes that don't carry their own
+    private func backfillParentGenres(serverURL: String, authToken: String) async {
+        guard var current = fullMetadata, current.type == "episode",
+              let showKey = current.grandparentRatingKey ?? currentItem.grandparentRatingKey else { return }
 
-        switch currentItem.type {
-        case "show":
-            mediaType = .tv
-            if let id = fullMetadata?.tmdbId ?? currentItem.tmdbId {
-                tmdbId = id
-            } else {
-                tmdbId = await resolveTmdbIdViaTvdb(metadata: fullMetadata ?? currentItem, type: .tv)
-            }
-        case "episode":
-            // Episode metadata doesn't include grandparentGuid, so fetch the show's metadata
-            mediaType = .tv
-            tmdbId = await resolveShowTmdbId()
-        case "movie":
-            mediaType = .movie
-            if let id = fullMetadata?.tmdbId ?? currentItem.tmdbId {
-                tmdbId = id
-            } else {
-                tmdbId = await resolveTmdbIdViaTvdb(metadata: fullMetadata ?? currentItem, type: .movie)
-            }
-        default:
-            return
+        if let showMeta = try? await networkManager.getFullMetadata(
+            serverURL: serverURL, authToken: authToken, ratingKey: showKey
+        ) {
+            current.Genre = showMeta.Genre
+            current.contentRating = current.contentRating ?? showMeta.contentRating
+            fullMetadata = current
+            PlexDataStore.shared.cacheFullMetadata(current, for: current.ratingKey ?? "")
         }
-
-        guard let tmdbId else {
-            return
-        }
-
-        let url = await TMDBClient.shared.fetchLogoURL(tmdbId: tmdbId, type: mediaType)
-        showLogoURL = url
     }
 
-    /// Resolve the TMDB ID for the parent show of an episode.
-    /// Tries grandparentGuid first, then fetches the show's metadata,
+    private func syncHeroBackdrop(tmdbIdOverride: Int? = nil, tvdbIdOverride: Int? = nil) {
+        let request = currentHeroBackdropRequest(
+            tmdbIdOverride: tmdbIdOverride,
+            tvdbIdOverride: tvdbIdOverride
+        )
+        heroBackdrop.load(request: request, motionLocked: heroBackdropMotionLocked)
+    }
+
+    private func refreshHeroBackdropAssets() async {
+        switch currentItem.type {
+        case "show":
+            if let tmdbId = fullMetadata?.tmdbId ?? currentItem.tmdbId {
+                syncHeroBackdrop(tmdbIdOverride: tmdbId)
+            } else if let tvdbId = fullMetadata?.tvdbId ?? currentItem.tvdbId {
+                syncHeroBackdrop(tvdbIdOverride: tvdbId)
+            } else {
+                syncHeroBackdrop()
+            }
+        case "movie":
+            if let tmdbId = fullMetadata?.tmdbId ?? currentItem.tmdbId {
+                syncHeroBackdrop(tmdbIdOverride: tmdbId)
+            } else if let tvdbId = fullMetadata?.tvdbId ?? currentItem.tvdbId {
+                syncHeroBackdrop(tvdbIdOverride: tvdbId)
+            } else {
+                syncHeroBackdrop()
+            }
+        case "episode", "season":
+            if let tmdbId = await resolveRelatedShowTmdbId() {
+                syncHeroBackdrop(tmdbIdOverride: tmdbId)
+            } else {
+                syncHeroBackdrop()
+            }
+        default:
+            syncHeroBackdrop()
+        }
+    }
+
+    private func currentHeroBackdropRequest(
+        tmdbIdOverride: Int? = nil,
+        tvdbIdOverride: Int? = nil
+    ) -> HeroBackdropRequest? {
+        guard let serverURL = authManager.selectedServerURL,
+              let token = authManager.selectedServerToken else { return nil }
+
+        let mediaTypeOverride: TMDBMediaType?
+        switch currentItem.type {
+        case "movie":
+            mediaTypeOverride = .movie
+        case "show", "season", "episode":
+            mediaTypeOverride = .tv
+        default:
+            mediaTypeOverride = nil
+        }
+
+        return currentItem.heroBackdropRequest(
+            serverURL: serverURL,
+            authToken: token,
+            tmdbIdOverride: tmdbIdOverride,
+            tvdbIdOverride: tvdbIdOverride,
+            mediaTypeOverride: mediaTypeOverride
+        )
+    }
+
+    private func playerHeroBackdropRequest(for metadata: PlexMetadata) -> HeroBackdropRequest? {
+        guard let serverURL = authManager.selectedServerURL,
+              let token = authManager.selectedServerToken else { return nil }
+
+        let backdropSource = (metadata.type == "episode" && selectedEpisode != nil) ? currentItem : metadata
+        let baseRequest = backdropSource.heroBackdropRequest(
+            serverURL: serverURL,
+            authToken: token
+        )
+
+        let thumbPath = metadata.thumb ?? metadata.bestThumb
+        let thumbURL = thumbPath.flatMap { URL(string: "\(serverURL)\($0)?X-Plex-Token=\(token)") }
+
+        return HeroBackdropRequest(
+            cacheKey: metadata.ratingKey ?? baseRequest.cacheKey,
+            plexBackdropURL: baseRequest.plexBackdropURL,
+            plexThumbnailURL: thumbURL,
+            tmdbId: baseRequest.tmdbId,
+            tvdbId: baseRequest.tvdbId,
+            mediaType: baseRequest.mediaType,
+            preferredBackdropSize: baseRequest.preferredBackdropSize
+        )
+    }
+
+    /// Resolve the TMDB ID for the related show of an episode or season.
+    /// Tries the local show guid first, then fetches the show's metadata,
     /// and falls back to TVDB→TMDB conversion for legacy Plex agents.
-    private func resolveShowTmdbId() async -> Int? {
-        // Try extracting from grandparentGuid if available
-        if let id = fullMetadata?.showTmdbId ?? currentItem.showTmdbId {
+    private func resolveRelatedShowTmdbId() async -> Int? {
+        if let id = fullMetadata?.parentShowTmdbId ?? currentItem.parentShowTmdbId {
             return id
         }
 
-        // Fetch the show's metadata using grandparentRatingKey
         guard let serverURL = authManager.selectedServerURL,
               let token = authManager.selectedServerToken,
-              let showRatingKey = fullMetadata?.grandparentRatingKey ?? currentItem.grandparentRatingKey else {
+              let showRatingKey = relatedShowRatingKey else {
             return nil
         }
 
@@ -1674,19 +1770,13 @@ struct PlexDetailView: View {
         }
     }
 
-    /// Convert a TVDB ID to TMDB ID for items using legacy Plex agents
-    private func resolveTmdbIdViaTvdb(metadata: PlexMetadata, type: TMDBMediaType) async -> Int? {
-        guard let tvdbId = metadata.tvdbId else { return nil }
-        return await TMDBClient.shared.findTmdbId(tvdbId: tvdbId, type: type)
-    }
-
     /// Pre-compute and cache stream URL to reduce player startup latency
     private func preWarmStreamURL(for metadata: PlexMetadata, serverURL: String, authToken: String) {
         guard let ratingKey = metadata.ratingKey,
               let partKey = metadata.Media?.first?.Part?.first?.key else { return }
 
-        // Build direct play URL (most common case for MPV)
-        if let url = networkManager.buildVLCDirectPlayURL(
+        // Build direct play URL for playback prewarming
+        if let url = networkManager.buildPlaybackDirectPlayURL(
             serverURL: serverURL,
             authToken: authToken,
             partKey: partKey
@@ -1766,7 +1856,25 @@ struct PlexDetailView: View {
             }
         }
 
-        // No OnDeck episode - search for first in-progress or unwatched episode across all seasons
+        // No OnDeck episode - search unifiedEpisodes if available
+        if !unifiedEpisodes.isEmpty {
+            let candidate = unifiedEpisodes.first(where: { $0.isInProgress })
+                ?? unifiedEpisodes.first(where: { !$0.isWatched })
+                ?? unifiedEpisodes.first
+
+            if let candidate, let ratingKey = candidate.ratingKey {
+                do {
+                    nextUpEpisode = try await networkManager.getFullMetadata(
+                        serverURL: serverURL, authToken: token, ratingKey: ratingKey
+                    )
+                } catch {
+                    nextUpEpisode = candidate
+                }
+            }
+            return
+        }
+
+        // Fallback: per-season API calls (unifiedEpisodes not yet loaded)
         for season in seasons {
             guard let seasonRatingKey = season.ratingKey else { continue }
 
@@ -2042,7 +2150,6 @@ struct PlexDetailView: View {
             // Auto-select first season
             if let first = fetchedSeasons.first {
                 selectedSeason = first
-                await loadEpisodes(for: first)
             }
         } catch {
             print("Failed to load seasons: \(error)")
@@ -2073,11 +2180,9 @@ struct PlexDetailView: View {
             if let currentSeasonKey = currentItem.parentRatingKey,
                let currentSeason = fetchedSeasons.first(where: { $0.ratingKey == currentSeasonKey }) {
                 selectedSeason = currentSeason
-                await loadEpisodes(for: currentSeason)
             } else if let first = fetchedSeasons.first {
                 // Fallback to first season
                 selectedSeason = first
-                await loadEpisodes(for: first)
             }
         } catch {
             print("Failed to load seasons for episode: \(error)")
@@ -2086,12 +2191,79 @@ struct PlexDetailView: View {
         isLoadingSeasons = false
     }
 
-    private func loadEpisodes(for season: PlexMetadata) async {
+    /// Load sibling seasons when viewing a season so single-season shows can
+    /// keep the season-pill header pattern instead of falling back to `Episodes`.
+    private func loadSeasonsForCurrentSeason() async {
+        guard let serverURL = authManager.selectedServerURL,
+              let token = authManager.selectedServerToken,
+              let showRatingKey = currentItem.parentRatingKey else { return }
+
+        isLoadingSeasons = true
+
+        do {
+            let fetchedSeasons = try await networkManager.getChildren(
+                serverURL: serverURL,
+                authToken: token,
+                ratingKey: showRatingKey
+            )
+            seasons = fetchedSeasons
+
+            if let currentSeasonKey = currentItem.ratingKey,
+               let currentSeason = fetchedSeasons.first(where: { $0.ratingKey == currentSeasonKey }) {
+                selectedSeason = currentSeason
+            } else if let first = fetchedSeasons.first {
+                selectedSeason = first
+            }
+        } catch {
+            print("Failed to load sibling seasons for season detail: \(error)")
+        }
+
+        isLoadingSeasons = false
+    }
+
+    /// Load all episodes across all seasons using getAllLeaves (single API call)
+    private func loadAllEpisodes() async {
+        guard let serverURL = authManager.selectedServerURL,
+              let token = authManager.selectedServerToken else { return }
+
+        let ratingKey: String?
+        if currentItem.type == "show" {
+            ratingKey = currentItem.ratingKey
+        } else if currentItem.type == "episode" {
+            ratingKey = currentItem.grandparentRatingKey
+        } else {
+            return
+        }
+
+        guard let ratingKey else { return }
+
+        isLoadingEpisodes = true
+
+        do {
+            let allEps = try await networkManager.getAllLeaves(
+                serverURL: serverURL,
+                authToken: token,
+                ratingKey: ratingKey
+            )
+            unifiedEpisodes = allEps
+        } catch {
+            print("Failed to load all episodes: \(error)")
+        }
+
+        isLoadingEpisodes = false
+    }
+
+    /// Load episodes for a season.
+    /// - Parameter crossfade: When true, keeps old episodes visible and crossfades to new ones
+    ///   instead of showing a loading indicator. Used for season switching.
+    private func loadEpisodes(for season: PlexMetadata, crossfade: Bool = false) async {
         guard let serverURL = authManager.selectedServerURL,
               let token = authManager.selectedServerToken,
               let ratingKey = season.ratingKey else { return }
 
-        isLoadingEpisodes = true
+        if !crossfade {
+            isLoadingEpisodes = true
+        }
 
         do {
             let fetchedEpisodes = try await networkManager.getChildren(
@@ -2099,7 +2271,13 @@ struct PlexDetailView: View {
                 authToken: token,
                 ratingKey: ratingKey
             )
-            episodes = fetchedEpisodes
+            if crossfade {
+                withAnimation(.easeInOut(duration: 0.35)) {
+                    episodes = fetchedEpisodes
+                }
+            } else {
+                episodes = fetchedEpisodes
+            }
             // Note: Full metadata is fetched on-demand when user plays an episode
             // to avoid N+1 API calls (Fixes RIVULET-V)
         } catch {
@@ -2152,6 +2330,12 @@ struct PlexDetailView: View {
             if let index = episodes.firstIndex(where: { $0.ratingKey == ratingKey }) {
                 episodes[index].viewCount = updatedMetadata.viewCount
                 episodes[index].viewOffset = updatedMetadata.viewOffset
+            }
+
+            // Also update in unified episodes
+            if let index = unifiedEpisodes.firstIndex(where: { $0.ratingKey == ratingKey }) {
+                unifiedEpisodes[index].viewCount = updatedMetadata.viewCount
+                unifiedEpisodes[index].viewOffset = updatedMetadata.viewOffset
             }
 
             // Also update prefetched metadata
@@ -2219,13 +2403,6 @@ struct PlexDetailView: View {
 
     // MARK: - URL Helpers
 
-    private var artURL: URL? {
-        guard let art = currentItem.bestArt,
-              let serverURL = authManager.selectedServerURL,
-              let token = authManager.selectedServerToken else { return nil }
-        return URL(string: "\(serverURL)\(art)?X-Plex-Token=\(token)")
-    }
-
     /// Poster URL - uses grandparent poster for episodes (series poster)
     private var posterURL: URL? {
         let thumb: String?
@@ -2251,22 +2428,27 @@ struct PlexDetailView: View {
     }
 }
 
-// MARK: - Season/Episode Split Pane (tvOS)
+// MARK: - Season Poster Bar (tvOS)
 
-#if os(tvOS)
 
-/// Text-based season row for the left pane of the split layout
-struct SeasonListRow: View {
+/// Season poster card for the horizontal bar. Click selects, focus only highlights.
+struct SeasonBarCard: View {
     let season: PlexMetadata
     let isSelected: Bool
     let serverURL: String
     let authToken: String
-    var onRefreshNeeded: MediaItemRefreshCallback?
-    @FocusState.Binding var focusedSeasonId: String?
+    let onSelect: () -> Void
+
+    @Environment(\.uiScale) private var scale
+
+    private var posterWidth: CGFloat { ScaledDimensions.posterWidth * scale }
+    private var posterHeight: CGFloat { ScaledDimensions.posterHeight * scale }
+    private var cornerRadius: CGFloat { ScaledDimensions.posterCornerRadius }
+    private var titleSize: CGFloat { ScaledDimensions.posterTitleSize * scale }
+    private var subtitleSize: CGFloat { ScaledDimensions.posterSubtitleSize * scale }
 
     @FocusState private var isFocused: Bool
 
-    /// Season is fully watched when all episodes have been viewed
     private var isFullyWatched: Bool {
         guard let leafCount = season.leafCount,
               let viewedLeafCount = season.viewedLeafCount,
@@ -2276,338 +2458,123 @@ struct SeasonListRow: View {
 
     private var seasonLabel: String {
         if let index = season.index {
-            return String(format: "Season %02d", index)
+            if index == 0 { return "Specials" }
+            return "Season \(index)"
         }
         return season.title ?? "Season"
     }
 
     var body: some View {
-        Button {
-            // No-op: selection happens on focus
-        } label: {
-            HStack(spacing: 14) {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(seasonLabel)
-                        .font(.system(size: 30, weight: isSelected ? .semibold : .regular))
-                        .lineLimit(1)
-
-                    if let leafCount = season.leafCount {
-                        Text("\(leafCount) episodes")
-                            .font(.system(size: 24))
-                            .foregroundStyle(.white.opacity(0.5))
+        Button(action: onSelect) {
+            VStack(spacing: 10) {
+                // Season poster
+                posterImage
+                    .frame(width: posterWidth, height: posterHeight)
+                    .overlay(alignment: .topTrailing) {
+                        if isFullyWatched {
+                            WatchedCornerTag()
+                        }
                     }
-                }
-
-                Spacer(minLength: 4)
-
-                // Fully-watched checkmark
-                if isFullyWatched {
-                    Image(systemName: "checkmark.circle.fill")
-                        .foregroundStyle(.green)
-                        .font(.system(size: 22))
-                }
-
-                // Selected indicator dot
-                if isSelected {
-                    Circle()
-                        .fill(.white)
-                        .frame(width: 8, height: 8)
-                }
-            }
-            .foregroundStyle(.white.opacity(isFocused || isSelected ? 1.0 : 0.6))
-            .padding(.horizontal, 18)
-            .padding(.vertical, 18)
-            .background(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .fill(isFocused ? .white.opacity(0.18) : isSelected ? .white.opacity(0.10) : .white.opacity(0.06))
+                    .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
                     .overlay(
-                        RoundedRectangle(cornerRadius: 16, style: .continuous)
-                            .strokeBorder(
-                                isFocused ? .white.opacity(0.25) : .white.opacity(0.06),
-                                lineWidth: 1
-                            )
+                        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                            .strokeBorder(isSelected ? .white : .clear, lineWidth: 3)
                     )
-            )
+
+                // Season label
+                Text(seasonLabel)
+                    .font(.system(size: titleSize, weight: isSelected ? .semibold : .regular))
+                    .foregroundStyle(.white.opacity(isSelected || isFocused ? 1.0 : 0.6))
+                    .lineLimit(1)
+            }
         }
         .buttonStyle(CardButtonStyle())
         .focused($isFocused)
-        .focused($focusedSeasonId, equals: season.ratingKey)
-        .scaleEffect(isFocused ? 1.02 : 1.0)
+        .hoverEffect(.highlight)
+        .scaleEffect(isFocused ? 1.05 : 1.0)
         .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isFocused)
-        .mediaItemContextMenu(
-            item: season,
-            serverURL: serverURL,
-            authToken: authToken,
-            onRefreshNeeded: onRefreshNeeded
-        )
+    }
+
+    private var posterImage: some View {
+        CachedAsyncImage(url: posterURL) { phase in
+            switch phase {
+            case .success(let image):
+                image
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+            case .empty:
+                Rectangle()
+                    .fill(Color(white: 0.15))
+                    .overlay { ProgressView().tint(.white.opacity(0.3)) }
+            case .failure:
+                Rectangle()
+                    .fill(
+                        LinearGradient(
+                            colors: [Color(white: 0.18), Color(white: 0.12)],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                    )
+                    .overlay {
+                        Image(systemName: "number.square")
+                            .font(.system(size: 28, weight: .light))
+                            .foregroundStyle(.white.opacity(0.3))
+                    }
+            }
+        }
+    }
+
+    private var posterURL: URL? {
+        guard let thumb = season.thumb else { return nil }
+        return URL(string: "\(serverURL)\(thumb)?X-Plex-Token=\(authToken)")
     }
 }
 
-/// Split-pane layout: seasons on left, episodes on right (Apple Settings style)
-/// A large season poster is right-aligned and extends above the column.
-struct SeasonEpisodeSplitPane: View {
-    private enum FocusColumn {
-        case seasons
-        case episodes
-    }
-
+/// Horizontal scrollable row of season poster cards. Click-to-select only.
+struct SeasonPosterBar: View {
     let seasons: [PlexMetadata]
     @Binding var selectedSeason: PlexMetadata?
-    let episodes: [PlexMetadata]
-    let isLoadingEpisodes: Bool
-    var currentItemRatingKey: String?
-    var currentItemType: String?
     let serverURL: String
     let authToken: String
     let onSeasonSelected: (PlexMetadata) -> Void
-    let onEpisodePlay: (PlexMetadata) -> Void
-    let onEpisodeRefresh: (String?) async -> Void
-    let onEpisodeShowInfo: (PlexMetadata) -> Void
 
     @FocusState private var focusedSeasonId: String?
-    @FocusState private var focusedEpisodeId: String?
-    @Namespace private var splitPaneNamespace
-
-    /// Tracks the displayed season key for crossfade transitions.
-    /// Updated after fade-out completes so the new content fades in.
-    @State private var displayedSeasonKey: String?
-    @State private var episodeListOpacity: Double = 1
-    @State private var lastFocusedColumn: FocusColumn?
-    @State private var hasHandledEntryFocus = false
-    @State private var hasFocusedEpisodeInCurrentEntry = false
-    @State private var pendingEntryRedirect = false
-    @State private var focusExitResetTask: Task<Void, Never>?
-
-    /// Episode that should receive default focus when entering the split pane.
-    /// Prefer the current episode when visible, otherwise the first episode.
-    private var preferredEpisodeRatingKey: String? {
-        if currentItemType == "episode",
-           let currentItemRatingKey,
-           episodes.contains(where: { $0.ratingKey == currentItemRatingKey }) {
-            return currentItemRatingKey
-        }
-        return episodes.first?.ratingKey
-    }
-
-    /// Entry focus target for split pane navigation.
-    /// Use first episode row because it's guaranteed to be on-screen/materialized
-    /// in the LazyVStack when entering from above.
-    private var entryEpisodeRatingKey: String? {
-        episodes.first?.ratingKey
-    }
-
-    #if DEBUG
-    private func debugFocusLog(_ event: String, extra: String = "") {
-        let columnDescription: String
-        switch lastFocusedColumn {
-        case .seasons: columnDescription = "seasons"
-        case .episodes: columnDescription = "episodes"
-        case nil: columnDescription = "nil"
-        }
-
-        let suffix = extra.isEmpty ? "" : " | \(extra)"
-        print(
-            "🎯 [SplitFocus] \(event) | season=\(focusedSeasonId ?? "nil") episode=\(focusedEpisodeId ?? "nil") selected=\(selectedSeason?.ratingKey ?? "nil") preferred=\(preferredEpisodeRatingKey ?? "nil") entry=\(entryEpisodeRatingKey ?? "nil") handled=\(hasHandledEntryFocus) focusedEpisodeInEntry=\(hasFocusedEpisodeInCurrentEntry) pending=\(pendingEntryRedirect) column=\(columnDescription)\(suffix)"
-        )
-    }
-    #else
-    private func debugFocusLog(_ event: String, extra: String = "") {}
-    #endif
-
-    /// Attempts to route focus to the preferred episode row. Returns true if applied.
-    private func redirectFocusToPreferredEpisodeIfAvailable() -> Bool {
-        guard let defaultEpisodeRatingKey = entryEpisodeRatingKey else {
-            debugFocusLog("redirectSkipped", extra: "reason=noPreferredEpisode")
-            return false
-        }
-        var transaction = Transaction()
-        transaction.disablesAnimations = true
-        withTransaction(transaction) {
-            focusedEpisodeId = defaultEpisodeRatingKey
-        }
-        lastFocusedColumn = .episodes
-        pendingEntryRedirect = false
-        debugFocusLog("redirectApplied", extra: "targetEpisode=\(defaultEpisodeRatingKey)")
-        return true
-    }
-
-    /// Debounced reset to avoid treating transient "both nil" focus transitions as a true exit.
-    private func scheduleSplitFocusResetCheck() {
-        debugFocusLog("resetScheduled")
-        focusExitResetTask?.cancel()
-        focusExitResetTask = Task {
-            try? await Task.sleep(nanoseconds: 150_000_000)
-            guard !Task.isCancelled else { return }
-            await MainActor.run {
-                guard focusedSeasonId == nil, focusedEpisodeId == nil else { return }
-                hasHandledEntryFocus = false
-                hasFocusedEpisodeInCurrentEntry = false
-                pendingEntryRedirect = false
-                lastFocusedColumn = nil
-                debugFocusLog("resetApplied")
-            }
-        }
-    }
 
     var body: some View {
-        HStack(alignment: .top, spacing: 32) {
-            // Left pane: Season list
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Seasons")
-                    .font(.title2)
-                    .fontWeight(.bold)
-                    .padding(.leading, 18)
-                    .padding(.bottom, 4)
-
-                ForEach(seasons, id: \.ratingKey) { season in
-                    SeasonListRow(
-                        season: season,
-                        isSelected: selectedSeason?.ratingKey == season.ratingKey,
-                        serverURL: serverURL,
-                        authToken: authToken,
-                        onRefreshNeeded: { await onEpisodeRefresh(nil) },
-                        focusedSeasonId: $focusedSeasonId
-                    )
+        ScrollViewReader { proxy in
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 20) {
+                    ForEach(seasons, id: \.ratingKey) { season in
+                        SeasonBarCard(
+                            season: season,
+                            isSelected: selectedSeason?.ratingKey == season.ratingKey,
+                            serverURL: serverURL,
+                            authToken: authToken,
+                            onSelect: {
+                                selectedSeason = season
+                                onSeasonSelected(season)
+                            }
+                        )
+                        .focused($focusedSeasonId, equals: season.ratingKey)
+                        .id(season.ratingKey)
+                    }
                 }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 16)
             }
-            .frame(width: 300)
+            .scrollClipDisabled()
             .focusSection()
-            // Keep remembering season focus, but don't restore-on-entry because
-            // entry should route to episodes in this split pane.
-            .remembersFocus(key: "splitSeasons", focusedId: $focusedSeasonId, restoreOnEntry: false)
-
-            // Right pane: Episodes list (preferred default focus)
-            VStack(alignment: .leading, spacing: 0) {
-                episodeListContent
-                    .opacity(episodeListOpacity)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .focusSection()
-            .prefersDefaultFocus(in: splitPaneNamespace)
-        }
-        .focusScope(splitPaneNamespace)
-        .onAppear {
-            displayedSeasonKey = selectedSeason?.ratingKey
-            hasHandledEntryFocus = false
-            hasFocusedEpisodeInCurrentEntry = false
-            pendingEntryRedirect = false
-            lastFocusedColumn = nil
-            focusExitResetTask?.cancel()
-            debugFocusLog("onAppear")
-        }
-        .onChange(of: focusedSeasonId) { oldSeasonId, newSeasonId in
-            debugFocusLog("seasonFocusChanged", extra: "old=\(oldSeasonId ?? "nil") new=\(newSeasonId ?? "nil")")
-            guard let newSeasonId else {
-                scheduleSplitFocusResetCheck()
-                return
-            }
-            focusExitResetTask?.cancel()
-
-            // Route to episodes until we've actually focused an episode in this entry.
-            // Once episode focus has happened, LEFT navigation to seasons stays intact.
-            let shouldRouteToEpisodes = focusedEpisodeId == nil && !hasFocusedEpisodeInCurrentEntry
-            if shouldRouteToEpisodes {
-                hasHandledEntryFocus = true
-                debugFocusLog("entryRoutingAttempt")
-                if redirectFocusToPreferredEpisodeIfAvailable() {
-                    return
+            .remembersFocus(key: "seasonPosters", focusedId: $focusedSeasonId)
+            .onChange(of: selectedSeason?.ratingKey) { _, newKey in
+                guard let key = newKey else { return }
+                withAnimation {
+                    proxy.scrollTo(key, anchor: .center)
                 }
-                // Episodes not ready yet (or empty). Defer a single redirect until they load.
-                pendingEntryRedirect = true
-                debugFocusLog("entryRoutingDeferred")
-            }
-
-            lastFocusedColumn = .seasons
-
-            guard let season = seasons.first(where: { $0.ratingKey == newSeasonId }),
-                  season.ratingKey != selectedSeason?.ratingKey else { return }
-            // Yield to let FocusMemory redirect settle before acting.
-            Task { @MainActor in
-                guard focusedSeasonId == newSeasonId,
-                      season.ratingKey != selectedSeason?.ratingKey else { return }
-                debugFocusLog("seasonSelectionStarted", extra: "season=\(newSeasonId)")
-                FocusMemory.shared.forget(key: "splitEpisodes")
-
-                // Fade out current episode list
-                withAnimation(.easeOut(duration: 0.2)) {
-                    episodeListOpacity = 0
-                }
-
-                selectedSeason = season
-                onSeasonSelected(season)
-                debugFocusLog("seasonSelectionTriggeredLoad", extra: "season=\(newSeasonId)")
-            }
-        }
-        .onChange(of: focusedEpisodeId) { oldEpisodeId, newEpisodeId in
-            debugFocusLog("episodeFocusChanged", extra: "old=\(oldEpisodeId ?? "nil") new=\(newEpisodeId ?? "nil")")
-            if newEpisodeId != nil {
-                focusExitResetTask?.cancel()
-                hasHandledEntryFocus = true
-                hasFocusedEpisodeInCurrentEntry = true
-                pendingEntryRedirect = false
-                lastFocusedColumn = .episodes
-                return
-            }
-            scheduleSplitFocusResetCheck()
-        }
-        .onChange(of: episodes) { _, _ in
-            // New episodes loaded — fade in
-            withAnimation(.easeIn(duration: 0.3)) {
-                episodeListOpacity = 1
-            }
-            displayedSeasonKey = selectedSeason?.ratingKey
-            debugFocusLog("episodesUpdated", extra: "count=\(episodes.count)")
-
-            // If entry landed in seasons before episodes were available, apply deferred redirect now.
-            if pendingEntryRedirect,
-               focusedEpisodeId == nil,
-               focusedSeasonId != nil {
-                debugFocusLog("deferredRoutingAttempt")
-                _ = redirectFocusToPreferredEpisodeIfAvailable()
             }
         }
     }
-
-    @ViewBuilder
-    private var episodeListContent: some View {
-        let episodeCount = selectedSeason?.leafCount ?? 0
-        if isLoadingEpisodes && episodeCount > 0 {
-            LazyVStack(spacing: 16) {
-                ForEach(0..<episodeCount, id: \.self) { index in
-                    SkeletonEpisodeRow(episodeNumber: index + 1)
-                }
-            }
-            .padding(.horizontal, 8)
-        } else if isLoadingEpisodes {
-            ProgressView("Loading episodes...")
-                .padding(.top, 20)
-        } else if !episodes.isEmpty {
-            LazyVStack(spacing: 16) {
-                let defaultEpisodeRatingKey = entryEpisodeRatingKey
-                ForEach(episodes, id: \.ratingKey) { episode in
-                    let isCurrentEpisode = currentItemType == "episode" && episode.ratingKey == currentItemRatingKey
-                    EpisodeRow(
-                        episode: episode,
-                        serverURL: serverURL,
-                        authToken: authToken,
-                        isCurrent: isCurrentEpisode,
-                        focusedEpisodeId: $focusedEpisodeId,
-                        onPlay: { onEpisodePlay(episode) },
-                        onRefreshNeeded: { await onEpisodeRefresh(episode.ratingKey) },
-                        onShowInfo: { onEpisodeShowInfo(episode) }
-                    )
-                    .prefersDefaultFocus(defaultEpisodeRatingKey == episode.ratingKey, in: splitPaneNamespace)
-                }
-            }
-            .padding(.horizontal, 8)
-            .focusSection()
-            .remembersFocus(key: "splitEpisodes", focusedId: $focusedEpisodeId)
-        }
-    }
-
 }
 
-#endif
 
 // MARK: - Season Poster Card
 
@@ -2616,26 +2583,16 @@ struct SeasonPosterCard: View {
     let isSelected: Bool
     let serverURL: String
     let authToken: String
-    #if os(tvOS)
     var focusedSeasonId: FocusState<String?>.Binding?
-    #endif
     let onSelect: () -> Void
 
     @Environment(\.uiScale) private var scale
 
-    #if os(tvOS)
     private var posterWidth: CGFloat { ScaledDimensions.posterWidth * scale }
     private var posterHeight: CGFloat { ScaledDimensions.posterHeight * scale }
     private var cornerRadius: CGFloat { ScaledDimensions.posterCornerRadius }
     private var titleSize: CGFloat { ScaledDimensions.posterTitleSize * scale }
     private var subtitleSize: CGFloat { ScaledDimensions.posterSubtitleSize * scale }
-    #else
-    private let posterWidth: CGFloat = 140
-    private let posterHeight: CGFloat = 210
-    private let cornerRadius: CGFloat = 12
-    private let titleSize: CGFloat = 15
-    private let subtitleSize: CGFloat = 13
-    #endif
 
     /// Season is fully watched when all episodes have been viewed
     private var isFullyWatched: Bool {
@@ -2658,7 +2615,6 @@ struct SeasonPosterCard: View {
                         }
                     }
                     .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
-                    #if os(tvOS)
                     .overlay(
                         RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                             .strokeBorder(isSelected ? Color.blue : Color.clear, lineWidth: 4)
@@ -2666,12 +2622,6 @@ struct SeasonPosterCard: View {
                     .hoverEffect(.highlight)  // Native tvOS focus effect - scales poster AND badge
                     .shadow(color: .black.opacity(0.35), radius: 8, x: 0, y: 6)
                     .padding(.bottom, 10)  // Space for hover scale effect
-                    #else
-                    .overlay(
-                        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                            .strokeBorder(isSelected ? Color.blue : Color.clear, lineWidth: 3)
-                    )
-                    #endif
 
                 // Season label
                 VStack(spacing: 4) {
@@ -2687,12 +2637,8 @@ struct SeasonPosterCard: View {
                 }
             }
         }
-        #if os(tvOS)
         .buttonStyle(CardButtonStyle())
         .modifier(SeasonFocusModifier(focusedSeasonId: focusedSeasonId, seasonRatingKey: season.ratingKey))
-        #else
-        .buttonStyle(.plain)
-        #endif
     }
 
     private var seasonLabel: String {
@@ -2738,6 +2684,261 @@ struct SeasonPosterCard: View {
     }
 }
 
+// MARK: - Scroll Offset Tracking
+
+private struct ScrollOffsetKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
+    }
+}
+
+// MARK: - Season Pill Bar
+
+/// Horizontal row of capsule/pill buttons for season selection (Apple TV+ style)
+struct SeasonPillBar: View {
+    let seasons: [PlexMetadata]
+    @Binding var selectedSeason: PlexMetadata?
+    let onSeasonSelected: (PlexMetadata) -> Void
+
+    @FocusState private var focusedSeasonId: String?
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 12) {
+                ForEach(seasons, id: \.ratingKey) { season in
+                    let isSelected = selectedSeason?.ratingKey == season.ratingKey
+                    SeasonPillButton(
+                        label: seasonLabel(for: season),
+                        isSelected: isSelected,
+                        action: {
+                            selectedSeason = season
+                            onSeasonSelected(season)
+                        }
+                    )
+                    .focused($focusedSeasonId, equals: season.ratingKey)
+                    .id(season.ratingKey)
+                }
+            }
+            .padding(.horizontal, 48)
+            .padding(.vertical, 8)
+        }
+        .scrollClipDisabled()
+        .focusSection()
+    }
+
+    private func seasonLabel(for season: PlexMetadata) -> String {
+        if let index = season.index {
+            if index == 0 { return "Specials" }
+            return "Season \(index)"
+        }
+        return season.title ?? "Season"
+    }
+}
+
+/// Individual season pill button
+struct SeasonPillButton: View {
+    let label: String
+    let isSelected: Bool
+    let action: () -> Void
+
+    @FocusState private var isFocused: Bool
+
+    var body: some View {
+        Button(action: action) {
+            Text(label)
+                .font(.system(size: 24, weight: isSelected ? .semibold : .regular))
+                .foregroundStyle(isFocused ? .black : .white)
+                .padding(.horizontal, 20)
+                .padding(.vertical, 10)
+                .background(
+                    Capsule()
+                        .fill(isFocused ? .white : (isSelected ? .white.opacity(0.2) : .clear))
+                )
+                .overlay(
+                    Capsule()
+                        .strokeBorder(isSelected && !isFocused ? .white.opacity(0.4) : .clear, lineWidth: 1)
+                )
+        }
+        .buttonStyle(.plain)
+        .focused($isFocused)
+        .hoverEffectDisabled()
+        .focusEffectDisabled()
+        .scaleEffect(isFocused ? 1.05 : 1.0)
+        .animation(.spring(response: 0.25, dampingFraction: 0.8), value: isFocused)
+    }
+}
+
+// MARK: - Episode Card (Horizontal)
+
+/// Apple TV+ style episode card for horizontal scrolling rows
+struct EpisodeCard: View {
+    let episode: PlexMetadata
+    let serverURL: String
+    let authToken: String
+    var focusedEpisodeId: FocusState<String?>.Binding?
+    var showSeasonPrefix: Bool = false
+    let onPlay: () -> Void
+    var onRefreshNeeded: MediaItemRefreshCallback? = nil
+    var onShowInfo: MediaItemNavigationCallback? = nil
+
+    @FocusState private var isFocused: Bool
+
+    private let cardWidth: CGFloat = 340
+    private let thumbHeight: CGFloat = 192
+
+    var body: some View {
+        Button(action: onPlay) {
+            VStack(alignment: .leading, spacing: 0) {
+                // Thumbnail
+                CachedAsyncImage(url: thumbURL) { phase in
+                    switch phase {
+                    case .success(let image):
+                        image
+                            .resizable()
+                            .aspectRatio(contentMode: .fill)
+                    case .empty:
+                        Rectangle()
+                            .fill(Color(white: 0.15))
+                            .overlay { ProgressView().tint(.white.opacity(0.3)) }
+                    case .failure:
+                        Rectangle()
+                            .fill(Color(white: 0.15))
+                            .overlay {
+                                Image(systemName: "play.rectangle")
+                                    .foregroundStyle(.white.opacity(0.3))
+                            }
+                    }
+                }
+                .frame(width: cardWidth, height: thumbHeight)
+                .clipped()
+                .overlay(alignment: .bottomLeading) {
+                    // Duration pill
+                    if let duration = episode.durationFormatted {
+                        HStack(spacing: 4) {
+                            Image(systemName: "play.fill")
+                                .font(.system(size: 10))
+                            Text(duration)
+                                .font(.system(size: 14, weight: .medium))
+                        }
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(.black.opacity(0.6))
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                        .padding(8)
+                    }
+                }
+                .overlay(alignment: .bottom) {
+                    // Progress bar
+                    if let progress = episode.watchProgress, progress > 0 && progress < 1 {
+                        GeometryReader { geo in
+                            VStack {
+                                Spacer()
+                                ZStack(alignment: .leading) {
+                                    Rectangle().fill(.black.opacity(0.5)).frame(height: 3)
+                                    Rectangle().fill(.blue).frame(width: geo.size.width * progress, height: 3)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Metadata below thumbnail
+                VStack(alignment: .leading, spacing: 4) {
+                    // Episode label
+                    Text(episodeLabel)
+                        .font(.system(size: 15, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .textCase(.uppercase)
+                        .padding(.top, 10)
+
+                    // Title
+                    Text(episode.title ?? "Episode")
+                        .font(.system(size: 20, weight: .bold))
+                        .foregroundStyle(isFocused ? .black : .white)
+                        .lineLimit(1)
+
+                    // Summary
+                    if let summary = episode.summary {
+                        Text(summary)
+                            .font(.system(size: 16))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(3)
+                            .padding(.top, 1)
+                    }
+
+                    // Date + Content Rating
+                    HStack(spacing: 6) {
+                        if let date = episode.originallyAvailableAt {
+                            Text(formattedDate(date))
+                                .font(.system(size: 14))
+                                .foregroundStyle(.secondary)
+                        }
+                        if let rating = episode.contentRating {
+                            Text(rating)
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(.secondary)
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 2)
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 3)
+                                        .strokeBorder(.secondary.opacity(0.5), lineWidth: 1)
+                                )
+                        }
+                    }
+                    .padding(.top, 2)
+                }
+                .padding(.horizontal, 10)
+                .padding(.bottom, 12)
+            }
+            .frame(width: cardWidth)
+            .background(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(isFocused ? .white.opacity(0.18) : .white.opacity(0.08))
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .focused($isFocused)
+        .modifier(EpisodeFocusModifier(focusedEpisodeId: focusedEpisodeId, episodeRatingKey: episode.ratingKey))
+        .hoverEffect(.highlight)
+        .scaleEffect(isFocused ? 1.05 : 1.0)
+        .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isFocused)
+        .mediaItemContextMenu(
+            item: episode,
+            serverURL: serverURL,
+            authToken: authToken,
+            source: .other,
+            onRefreshNeeded: onRefreshNeeded,
+            onShowInfo: onShowInfo
+        )
+    }
+
+    private var episodeLabel: String {
+        if showSeasonPrefix, let epString = episode.episodeString {
+            return epString
+        }
+        if let index = episode.index {
+            return "Episode \(index)"
+        }
+        return episode.episodeString ?? "Episode"
+    }
+
+    private var thumbURL: URL? {
+        guard let thumb = episode.thumb else { return nil }
+        return URL(string: "\(serverURL)\(thumb)?X-Plex-Token=\(authToken)")
+    }
+
+    private func formattedDate(_ dateString: String) -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+        guard let date = formatter.date(from: dateString) else { return dateString }
+        formatter.dateFormat = "MMM d, yyyy"
+        return formatter.string(from: date)
+    }
+}
+
 // MARK: - Episode Row
 
 struct EpisodeRow: View {
@@ -2745,17 +2946,13 @@ struct EpisodeRow: View {
     let serverURL: String
     let authToken: String
     var isCurrent: Bool = false  // Indicates this is the episode currently being viewed
-    #if os(tvOS)
     var focusedEpisodeId: FocusState<String?>.Binding?
-    #endif
     let onPlay: () -> Void
     var onPlayFromBeginning: (() -> Void)? = nil
     var onRefreshNeeded: MediaItemRefreshCallback? = nil
     var onShowInfo: MediaItemNavigationCallback? = nil
 
-    #if os(tvOS)
     @FocusState private var isFocused: Bool
-    #endif
 
     var body: some View {
         Button(action: onPlay) {
@@ -2776,11 +2973,7 @@ struct EpisodeRow: View {
                             }
                     }
                 }
-                #if os(tvOS)
                 .frame(width: 240, height: 135)
-                #else
-                .frame(width: 200, height: 112)
-                #endif
                 .clipShape(RoundedRectangle(cornerRadius: 8))
                 .overlay(alignment: .bottom) {
                     // Progress bar
@@ -2804,39 +2997,23 @@ struct EpisodeRow: View {
                 VStack(alignment: .leading, spacing: 5) {
                     if let epString = episode.episodeString {
                         Text(epString)
-                            #if os(tvOS)
                             .font(.system(size: 26))
-                            #else
-                            .font(.caption)
-                            #endif
                             .foregroundStyle(.secondary)
                     }
 
                     Text(episode.title ?? "Episode")
-                        #if os(tvOS)
                         .font(.system(size: 30, weight: .medium))
-                        #else
-                        .font(.headline)
-                        #endif
                         .lineLimit(1)
 
                     if let duration = episode.durationFormatted {
                         Text(duration)
-                            #if os(tvOS)
                             .font(.system(size: 26))
-                            #else
-                            .font(.caption)
-                            #endif
                             .foregroundStyle(.secondary)
                     }
 
                     if let summary = episode.summary {
                         Text(summary)
-                            #if os(tvOS)
                             .font(.system(size: 26))
-                            #else
-                            .font(.caption)
-                            #endif
                             .foregroundStyle(.secondary)
                             .lineLimit(2)
                     }
@@ -2847,12 +3024,7 @@ struct EpisodeRow: View {
                 // Current episode indicator (when viewing episode detail)
                 if isCurrent {
                     Text("VIEWING")
-                        #if os(tvOS)
                         .font(.system(size: 16, weight: .semibold))
-                        #else
-                        .font(.caption2)
-                        .fontWeight(.semibold)
-                        #endif
                         .foregroundStyle(.white)
                         .padding(.horizontal, 10)
                         .padding(.vertical, 5)
@@ -2866,12 +3038,9 @@ struct EpisodeRow: View {
                 if episode.isWatched {
                     Image(systemName: "checkmark.circle.fill")
                         .foregroundStyle(.green)
-                        #if os(tvOS)
                         .font(.system(size: 24))
-                        #endif
                 }
             }
-            #if os(tvOS)
             .padding(.vertical, 18)
             .padding(.horizontal, 22)
             .background(
@@ -2885,23 +3054,12 @@ struct EpisodeRow: View {
                             )
                     )
             )
-            #else
-            .padding()
-            .background(
-                RoundedRectangle(cornerRadius: 12)
-                    .fill(Color.secondary.opacity(0.1))
-            )
-            #endif
         }
-        #if os(tvOS)
         .buttonStyle(CardButtonStyle())
         .focused($isFocused)
         .modifier(EpisodeFocusModifier(focusedEpisodeId: focusedEpisodeId, episodeRatingKey: episode.ratingKey))
         .scaleEffect(isFocused ? 1.02 : 1.0)
         .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isFocused)
-        #else
-        .buttonStyle(.plain)
-        #endif
         .mediaItemContextMenu(
             item: episode,
             serverURL: serverURL,
@@ -2918,7 +3076,6 @@ struct EpisodeRow: View {
     }
 }
 
-#if os(tvOS)
 /// Helper modifier to apply focus binding to episode rows
 struct EpisodeFocusModifier: ViewModifier {
     var focusedEpisodeId: FocusState<String?>.Binding?
@@ -2932,7 +3089,6 @@ struct EpisodeFocusModifier: ViewModifier {
         }
     }
 }
-#endif
 
 // MARK: - Skeleton Episode Row
 
@@ -2945,11 +3101,7 @@ struct SkeletonEpisodeRow: View {
             // Placeholder thumbnail
             Rectangle()
                 .fill(Color(white: 0.15))
-                #if os(tvOS)
                 .frame(width: 240, height: 135)
-                #else
-                .frame(width: 200, height: 112)
-                #endif
                 .clipShape(RoundedRectangle(cornerRadius: 8))
                 .overlay {
                     ProgressView()
@@ -2959,35 +3111,22 @@ struct SkeletonEpisodeRow: View {
             VStack(alignment: .leading, spacing: 5) {
                 // Episode number placeholder
                 Text("Episode \(episodeNumber)")
-                    #if os(tvOS)
                     .font(.system(size: 22))
-                    #else
-                    .font(.caption)
-                    #endif
                     .foregroundStyle(.white.opacity(0.3))
 
                 // Title placeholder
                 RoundedRectangle(cornerRadius: 4)
                     .fill(Color.white.opacity(0.1))
-                    #if os(tvOS)
                     .frame(width: 220, height: 26)
-                    #else
-                    .frame(width: 150, height: 18)
-                    #endif
 
                 // Duration placeholder
                 RoundedRectangle(cornerRadius: 4)
                     .fill(Color.white.opacity(0.08))
-                    #if os(tvOS)
                     .frame(width: 90, height: 22)
-                    #else
-                    .frame(width: 60, height: 14)
-                    #endif
             }
 
             Spacer()
         }
-        #if os(tvOS)
         .padding(.vertical, 18)
         .padding(.horizontal, 22)
         .background(
@@ -2998,13 +3137,6 @@ struct SkeletonEpisodeRow: View {
                         .strokeBorder(.white.opacity(0.06), lineWidth: 1)
                 )
         )
-        #else
-        .padding()
-        .background(
-            RoundedRectangle(cornerRadius: 12)
-                .fill(Color.secondary.opacity(0.05))
-        )
-        #endif
     }
 }
 
@@ -3015,10 +3147,8 @@ struct AlbumTrackRow: View {
     let trackNumber: Int
     let serverURL: String
     let authToken: String
-    #if os(tvOS)
     var focusedId: FocusState<String?>.Binding?
     @FocusState private var isFocused: Bool
-    #endif
     let onPlay: () -> Void
 
     var body: some View {
@@ -3026,37 +3156,24 @@ struct AlbumTrackRow: View {
             HStack(spacing: 16) {
                 // Track number
                 Text("\(trackNumber)")
-                    #if os(tvOS)
                     .font(.system(size: 22, weight: .medium, design: .monospaced))
-                    #else
-                    .font(.system(size: 18, weight: .medium, design: .monospaced))
-                    #endif
                     .foregroundStyle(.secondary)
                     .frame(width: 40, alignment: .trailing)
 
                 VStack(alignment: .leading, spacing: 4) {
                     Text(track.title ?? "Track \(trackNumber)")
-                        #if os(tvOS)
                         .font(.system(size: 22, weight: .medium))
-                        #else
-                        .font(.headline)
-                        #endif
                         .lineLimit(1)
 
                     if let duration = track.durationFormatted {
                         Text(duration)
-                            #if os(tvOS)
                             .font(.system(size: 18))
-                            #else
-                            .font(.caption)
-                            #endif
                             .foregroundStyle(.secondary)
                     }
                 }
 
                 Spacer()
             }
-            #if os(tvOS)
             .padding(.vertical, 16)
             .padding(.horizontal, 20)
             .background(
@@ -3070,28 +3187,15 @@ struct AlbumTrackRow: View {
                             )
                     )
             )
-            #else
-            .padding(.vertical, 12)
-            .padding(.horizontal, 16)
-            .background(
-                RoundedRectangle(cornerRadius: 12)
-                    .fill(Color.secondary.opacity(0.1))
-            )
-            #endif
         }
-        #if os(tvOS)
         .buttonStyle(CardButtonStyle())
         .modifier(TrackFocusModifier(focusedId: focusedId, trackRatingKey: track.ratingKey))
         .focused($isFocused)
         .scaleEffect(isFocused ? 1.02 : 1.0)
         .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isFocused)
-        #else
-        .buttonStyle(.plain)
-        #endif
     }
 }
 
-#if os(tvOS)
 /// Helper view for album rows with proper focus tracking
 struct AlbumRowButton: View {
     let album: PlexMetadata
@@ -3146,7 +3250,6 @@ struct SeasonFocusModifier: ViewModifier {
         }
     }
 }
-#endif
 
 // MARK: - Artist Album Row
 
@@ -3154,9 +3257,7 @@ struct ArtistAlbumRow: View {
     let album: PlexMetadata
     let serverURL: String
     let authToken: String
-    #if os(tvOS)
     var isFocused: Bool = false
-    #endif
 
     var body: some View {
         HStack(spacing: 16) {
@@ -3181,20 +3282,12 @@ struct ArtistAlbumRow: View {
                         }
                 }
             }
-            #if os(tvOS)
             .frame(width: 80, height: 80)
-            #else
-            .frame(width: 60, height: 60)
-            #endif
             .clipShape(RoundedRectangle(cornerRadius: 8))
 
             VStack(alignment: .leading, spacing: 4) {
                 Text(album.title ?? "Unknown Album")
-                    #if os(tvOS)
                     .font(.system(size: 22, weight: .medium))
-                    #else
-                    .font(.headline)
-                    #endif
                     .lineLimit(1)
 
                 HStack(spacing: 8) {
@@ -3205,17 +3298,12 @@ struct ArtistAlbumRow: View {
                         Text("\(trackCount) tracks")
                     }
                 }
-                #if os(tvOS)
                 .font(.system(size: 18))
-                #else
-                .font(.caption)
-                #endif
                 .foregroundStyle(.secondary)
             }
 
             Spacer()
         }
-        #if os(tvOS)
         .padding(.vertical, 16)
         .padding(.horizontal, 20)
         .background(
@@ -3229,14 +3317,6 @@ struct ArtistAlbumRow: View {
                         )
                 )
         )
-        #else
-        .padding(.vertical, 12)
-        .padding(.horizontal, 16)
-        .background(
-            RoundedRectangle(cornerRadius: 12)
-                .fill(Color.secondary.opacity(0.1))
-        )
-        #endif
     }
 
     private var thumbURL: URL? {
@@ -3253,7 +3333,6 @@ struct ArtistBioSheet: View {
     let thumbURL: URL?
 
     @Environment(\.dismiss) private var dismiss
-    #if os(tvOS)
     @FocusState private var focusedParagraph: Int?
 
     /// Split bio into small chunks for smooth scrolling
@@ -3288,10 +3367,8 @@ struct ArtistBioSheet: View {
 
         return chunks.isEmpty ? [bio] : chunks
     }
-    #endif
 
     var body: some View {
-        #if os(tvOS)
         // tvOS: Scrollable view with focusable paragraphs
         ScrollView(.vertical, showsIndicators: false) {
             VStack(spacing: 40) {
@@ -3351,67 +3428,14 @@ struct ArtistBioSheet: View {
             }
             .padding(8) // Room for scale effect
         }
-        .background(Color(white: 0.12))
         .onExitCommand {
             dismiss()
         }
-        #else
-        NavigationStack {
-            ScrollView(.vertical, showsIndicators: false) {
-                VStack(spacing: 32) {
-                    // Artist image
-                    if let url = thumbURL {
-                        CachedAsyncImage(url: url) { phase in
-                            switch phase {
-                            case .success(let image):
-                                image
-                                    .resizable()
-                                    .aspectRatio(contentMode: .fill)
-                            case .empty:
-                                Rectangle()
-                                    .fill(Color(white: 0.15))
-                                    .overlay { ProgressView().tint(.white.opacity(0.3)) }
-                            case .failure:
-                                Rectangle()
-                                    .fill(Color(white: 0.15))
-                                    .overlay {
-                                        Image(systemName: "music.mic")
-                                            .font(.system(size: 40, weight: .light))
-                                            .foregroundStyle(.white.opacity(0.4))
-                                    }
-                            }
-                        }
-                        .frame(width: 150, height: 150)
-                        .clipShape(Circle())
-                    }
-
-                    // Bio text
-                    Text(bio)
-                        .font(.body)
-                        .foregroundStyle(.white.opacity(0.9))
-                        .multilineTextAlignment(.leading)
-                        .lineSpacing(6)
-                }
-                .padding()
-            }
-            .background(Color(white: 0.12))
-            .navigationTitle(artistName)
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("Done") {
-                        dismiss()
-                    }
-                }
-            }
-        }
-        #endif
     }
 }
 
 // MARK: - Bio Sheet Helper Views (tvOS)
 
-#if os(tvOS)
 /// Focusable text chunk - minimal styling for continuous reading
 private struct BioParagraphRow: View {
     let text: String
@@ -3465,36 +3489,9 @@ private struct BioDoneButton: View {
         .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isFocused)
     }
 }
-#endif
 
 // MARK: - Player View Wrapper (non-tvOS)
 
-#if !os(tvOS)
-/// Wraps UniversalPlayerView to capture the viewModel's final metadata on dismiss,
-/// enabling auto-play episode tracking back to the detail view.
-private struct PlayerViewWrapper: View {
-    @StateObject private var viewModel: UniversalPlayerViewModel
-    @Binding var lastPlayedMetadata: PlexMetadata?
-
-    init(playItem: PlexMetadata, startOffset: TimeInterval?, lastPlayedMetadata: Binding<PlexMetadata?>) {
-        let authManager = PlexAuthManager.shared
-        _viewModel = StateObject(wrappedValue: UniversalPlayerViewModel(
-            metadata: playItem,
-            serverURL: authManager.selectedServerURL ?? "",
-            authToken: authManager.selectedServerToken ?? "",
-            startOffset: startOffset
-        ))
-        _lastPlayedMetadata = lastPlayedMetadata
-    }
-
-    var body: some View {
-        UniversalPlayerView(viewModel: viewModel)
-            .onDisappear {
-                lastPlayedMetadata = viewModel.metadata
-            }
-    }
-}
-#endif
 
 #Preview {
     let sampleMovie = PlexMetadata(
@@ -3510,4 +3507,36 @@ private struct PlayerViewWrapper: View {
     )
 
     PlexDetailView(item: sampleMovie)
+}
+
+// MARK: - Navigation Destinations Modifier
+
+/// Conditionally applies .navigationDestination modifiers.
+/// Disabled in preview overlay flow (no NavigationStack ancestor).
+private struct NavigationDestinationsModifier: ViewModifier {
+    @Binding var navigateToAlbum: PlexMetadata?
+    @Binding var navigateToSeason: PlexMetadata?
+    @Binding var navigateToShow: PlexMetadata?
+    @Binding var navigateToEpisode: PlexMetadata?
+    let isEnabled: Bool
+
+    func body(content: Content) -> some View {
+        if isEnabled {
+            content
+                .navigationDestination(item: $navigateToAlbum) { album in
+                    PlexDetailView(item: album)
+                }
+                .navigationDestination(item: $navigateToSeason) { season in
+                    PlexDetailView(item: season)
+                }
+                .navigationDestination(item: $navigateToShow) { show in
+                    PlexDetailView(item: show)
+                }
+                .navigationDestination(item: $navigateToEpisode) { episode in
+                    PlexDetailView(item: episode)
+                }
+        } else {
+            content
+        }
+    }
 }

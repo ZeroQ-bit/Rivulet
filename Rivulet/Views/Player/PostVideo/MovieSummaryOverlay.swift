@@ -24,11 +24,9 @@ struct MovieSummaryOverlay: View {
         return "\(minutes)m"
     }
 
-    #if os(tvOS)
     private func setDefaultFocus() {
         focusedButton = .close
     }
-    #endif
 
     /// Background image (art preferred, fallback to thumb)
     private var backgroundImage: UIImage? {
@@ -113,7 +111,6 @@ struct MovieSummaryOverlay: View {
                 Spacer()
             }
         }
-        #if os(tvOS)
         .focusScope(buttonNamespace)
         .focusSection()
         .onAppear {
@@ -123,7 +120,6 @@ struct MovieSummaryOverlay: View {
             // Back button returns to fullscreen video, doesn't exit player
             viewModel.dismissPostVideo()
         }
-        #endif
     }
 }
 
@@ -194,11 +190,7 @@ struct MovieRecommendationCard: View {
             .scaleEffect(isFocused ? 1.08 : 1.0)
             .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isFocused)
         }
-        #if os(tvOS)
         .buttonStyle(CardButtonStyle())
-        #else
-        .buttonStyle(.plain)
-        #endif
         .focused($isFocused)
     }
 }

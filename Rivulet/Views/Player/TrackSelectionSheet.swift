@@ -53,12 +53,10 @@ struct TrackSelectionSheet: View {
                             onSelect(nil)
                             dismiss()
                         }
-                        #if os(tvOS)
                         .onPlayPauseCommand {
                             onSelect(nil)
                             dismiss()
                         }
-                        #endif
                     }
 
                     // Track options
@@ -75,12 +73,10 @@ struct TrackSelectionSheet: View {
                             onSelect(track.id)
                             dismiss()
                         }
-                        #if os(tvOS)
                         .onPlayPauseCommand {
                             onSelect(track.id)
                             dismiss()
                         }
-                        #endif
                     }
                 }
                 .padding(24)
@@ -95,11 +91,9 @@ struct TrackSelectionSheet: View {
                 focusedTrackId = selectedTrackId ?? tracks.first?.id
             }
         }
-        #if os(tvOS)
         .onExitCommand {
             dismiss()
         }
-        #endif
     }
 
     private func trackSubtitle(for track: MediaTrack) -> String? {
@@ -171,5 +165,4 @@ private struct TrackRow: View {
         onSelect: { id in
         }
     )
-    .preferredColorScheme(.dark)
 }

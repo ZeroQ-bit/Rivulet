@@ -2,7 +2,7 @@
 //  UniversalPlayerViewModel.swift
 //  Rivulet
 //
-//  ViewModel managing playback state using MPV player
+//  ViewModel managing playback state with RivuletPlayer
 //
 
 import SwiftUI
@@ -10,6 +10,7 @@ import Combine
 import UIKit
 import Sentry
 import AVFoundation
+import AVKit
 
 // MARK: - Subtitle Preference
 
@@ -88,6 +89,16 @@ enum SubtitlePreferenceManager {
             UserDefaults.standard.set(newValue.codec, forKey: codecKey)
             UserDefaults.standard.set(newValue.preferHearingImpaired, forKey: hearingImpairedKey)
         }
+    }
+
+    /// Whether user has explicitly set subtitle preferences.
+    /// If false, playback should honor stream defaults/forced tracks.
+    static var hasStoredPreference: Bool {
+        UserDefaults.standard.object(forKey: enabledKey) != nil ||
+        UserDefaults.standard.object(forKey: languageKey) != nil ||
+        UserDefaults.standard.object(forKey: codecKey) != nil ||
+        UserDefaults.standard.object(forKey: hearingImpairedKey) != nil ||
+        UserDefaults.standard.object(forKey: "subtitlePreference") != nil
     }
 
     /// Find best matching subtitle track based on preference
@@ -257,13 +268,6 @@ enum SeekIndicator: Equatable {
     }
 }
 
-/// Player engine type for video playback
-enum PlayerType: Equatable {
-    case mpv
-    case avplayer
-    case dvSampleBuffer  // AVSampleBufferDisplayLayer pipeline for DV profiles AVPlayer rejects
-}
-
 @MainActor
 final class UniversalPlayerViewModel: ObservableObject {
 
@@ -394,25 +398,38 @@ final class UniversalPlayerViewModel: ObservableObject {
 
     // MARK: - Player Instance
 
-    /// The player engine being used for this playback session
-    /// Published so the view can react to fallback from AVPlayer to MPV
-    @Published private(set) var playerType: PlayerType = .mpv
+    /// AVPlayer used for all playback paths (direct, remuxed HLS, Plex HLS)
+    @Published private(set) var player: AVPlayer?
 
-    /// MPV player (used for most content)
-    /// Published so the view can react to fallback from AVPlayer to MPV
-    @Published private(set) var mpvPlayerWrapper: MPVPlayerWrapper?
+    /// Local remux server for MKV/DTS/DV content
+    private var remuxServer: LocalRemuxServer?
+    private var remuxSession: FFmpegRemuxSession?
 
-    /// AVPlayer (used for Dolby Vision when enabled)
-    @Published private(set) var avPlayerWrapper: AVPlayerWrapper?
+    /// DV HLS proxy for Plex HLS DV codec patching
+    private var dvProxyServer: DVHLSProxyServer?
 
-    /// DVSampleBufferPlayer (used for DV profiles AVPlayer rejects: Profile 8 CompatID 6, Profile 7 MEL)
-    @Published private(set) var dvSampleBufferPlayer: DVSampleBufferPlayer?
+    /// HLS manifest enricher — injects audio/subtitle track labels into the master playlist.
+    /// Must be retained for the lifetime of the AVURLAsset.
+    private var hlsManifestEnricher: HLSManifestEnricher?
 
-    /// Whether DV profile conversion (P7/P8.6 → P8.1) is needed for DVSampleBufferPlayer
+    /// KVO observers
+    private var rateObservation: NSKeyValueObservation?
+    private var timeControlObservation: NSKeyValueObservation?
+    private var itemStatusObservation: NSKeyValueObservation?
+    private var timeObserver: Any?
+    // Non-isolated reference for cleanup in deinit
+    private nonisolated(unsafe) var _playerForCleanup: AVPlayer?
+    private nonisolated(unsafe) var _timeObserverForCleanup: Any?
+
+    /// Whether DV profile conversion (P7/P8.6 → P8.1) is needed
     private var requiresProfileConversion = false
 
-    /// Subtitle manager for DVSampleBufferPlayer (handles external subtitle rendering)
+    /// Stub — legacy RivuletPlayer removed. Returns nil so all guard-let paths bail safely.
+    private var rivuletPlayer: RivuletPlayer? { nil }
+
+    /// Subtitle manager for custom subtitle rendering.
     let subtitleManager = SubtitleManager()
+    private let subtitleClockSync = SubtitleClockSyncController()
 
     // MARK: - Metadata
 
@@ -452,14 +469,23 @@ final class UniversalPlayerViewModel: ObservableObject {
 
     let loadingArtImage: UIImage?
     let loadingThumbImage: UIImage?
+    /// Season/show poster fetched for Now Playing artwork (episodes only)
+    private var seasonPosterImage: UIImage?
 
     // MARK: - Stream URL (computed once)
 
     @Published private(set) var streamURL: URL?
     private(set) var streamHeaders: [String: String] = [:]
-    private let allowAudioDirectStream: Bool
     /// Plex transcode session ID, extracted from HLS stream URL for cleanup on stop
     private var plexSessionId: String?
+    /// Playback startup/fallback plan for Rivulet direct-play-first policy.
+    private var playbackPlan: PlaybackPlan?
+    /// Optional prebuilt HLS fallback URL/headers to reduce fallback startup latency.
+    private var rivuletFallbackURL: URL?
+    private var rivuletFallbackHeaders: [String: String] = [:]
+    /// One-shot direct-play -> HLS fallback guards (prevents loops).
+    private var hasAttemptedRivuletHLSFallback = false
+    private var isAttemptingRivuletHLSFallback = false
 
     // MARK: - Shuffled Queue
 
@@ -491,11 +517,7 @@ final class UniversalPlayerViewModel: ObservableObject {
         self.shuffledQueue = shuffledQueue
         self.loadingArtImage = loadingArtImage
         self.loadingThumbImage = loadingThumbImage
-        self.allowAudioDirectStream = UniversalPlayerViewModel.isAudioDirectStreamCapable(metadata)
 
-        // Determine which player to use based on content and settings
-        let useAVPlayerForDV = UserDefaults.standard.bool(forKey: "useAVPlayerForDolbyVision")
-        let useAVPlayerForAll = UserDefaults.standard.bool(forKey: "useAVPlayerForAllVideos")
         let isAirPlayRoute = Self.isAirPlayOutput()
         let hasDolbyVision = metadata.hasDolbyVision
 
@@ -506,88 +528,20 @@ final class UniversalPlayerViewModel: ObservableObject {
         let videoStreams = metadata.Media?.first?.Part?.first?.Stream?.filter { $0.isVideo } ?? []
         let dvStream = videoStreams.first { ($0.DOVIProfile != nil) || ($0.DOVIPresent == true) }
 
-        // Check DV profile compatibility for AVPlayer + HLS proxy approach.
-        // The proxy patches dvh1→hvc1 in the HLS manifest so AVPlayer accepts the stream,
-        // while the hardware DV decoder processes RPU NAL units from the bitstream.
-        // Profile 7 (MEL) fails with -11855 "Cannot Decode" — AVPlayer can't handle the MEL
-        // enhancement layer structure, so it falls back to MPV for HDR10/SDR playback.
-        // Profile 8 with BL CompatID 6 fails with -11821 — the base layer has no standard
-        // HDR10 compatibility, and AVPlayer can't decode it even without DV codec tags.
         let dvProfile = dvStream?.DOVIProfile
         let doviBLCompatID = dvStream?.DOVIBLCompatID
-        let isCompatibleDVProfile: Bool = {
-            // If Plex metadata doesn't report profile yet, assume compatible and let fallbacks handle errors.
-            guard let dvProfile else { return true }
+        let requiresDVProfileConversion = hasDolbyVision &&
+            ((dvProfile == 7) || (dvProfile == 8 && doviBLCompatID == 6))
 
-            // Profile 5: Single-layer DV (streaming), always works
-            if dvProfile == 5 { return true }
+        print("[PlayerSelect] settings: rivulet=true avDV=false avAll=false " +
+              "content: DV=\(hasDolbyVision) profile=\(dvProfile ?? -1) blCompat=\(doviBLCompatID ?? -1) " +
+              "container=\(container) airPlay=\(isAirPlayRoute) compatDV=\(!requiresDVProfileConversion)")
 
-            // Profile 8: Works only with HDR10-compatible base layer (BL CompatID 1 or 4).
-            // CompatID 6 = no HDR10 base, AVPlayer can't decode the non-standard base layer.
-            if dvProfile == 8 {
-                let compatID = doviBLCompatID ?? 1 // Default to compatible if not reported
-                return compatID == 1 || compatID == 4
-            }
+        self.requiresProfileConversion = requiresDVProfileConversion
 
-            return false
-        }()
-
-        // For DV content via AVPlayer:
-        // - MP4/MOV containers: Direct play works
-        // - MKV containers: Plex HLS remux handles container conversion
-        let canUseAVPlayerForDV = hasDolbyVision && isCompatibleDVProfile
-
-        // Check if this incompatible DV profile could use the AVSBDL pipeline instead
-        // Profile 8 CompatID 6 and Profile 7 (MEL) are candidates for the sample buffer approach
-        let canUseDVSampleBuffer: Bool = {
-            guard useAVPlayerForDV && hasDolbyVision && !isCompatibleDVProfile else { return false }
-            guard let dvProfile else { return false }
-            // Profile 8 with CompatID 6 (non-standard base layer)
-            if dvProfile == 8 && (doviBLCompatID == 6) { return true }
-            // Profile 7 (MEL enhancement layer) — experimental
-            if dvProfile == 7 { return true }
-            return false
-        }()
-
-        // Use AVPlayer if:
-        // 1. "Use AVPlayer for All Videos" is enabled, OR
-        // 2. "Use AVPlayer for DV" is enabled AND content has compatible DV profile
-        if useAVPlayerForAll || (useAVPlayerForDV && canUseAVPlayerForDV) {
-            if useAVPlayerForAll {
-            } else {
-            }
-            self.playerType = .avplayer
-            self.avPlayerWrapper = AVPlayerWrapper()
-            self.mpvPlayerWrapper = nil
-        } else if canUseDVSampleBuffer {
-            // Use DVSampleBufferPlayer for DV profiles that AVPlayer rejects
-            // This bypasses AVPlayer's HLS parser and feeds dvh1-tagged sample buffers
-            // directly to AVSampleBufferDisplayLayer / VideoToolbox
-            self.playerType = .dvSampleBuffer
-            self.dvSampleBufferPlayer = DVSampleBufferPlayer()
-            self.mpvPlayerWrapper = nil
-            self.avPlayerWrapper = nil
-
-            // Enable profile conversion for P7 or P8 CompatID 6
-            // These profiles need on-the-fly RPU conversion to P8.1 for Apple TV compatibility
-            self.requiresProfileConversion = (dvProfile == 7) || (dvProfile == 8 && doviBLCompatID == 6)
-        } else {
-            self.playerType = .mpv
-            self.mpvPlayerWrapper = MPVPlayerWrapper()
-            self.avPlayerWrapper = nil
-
-            // Show notice explaining why we're using MPV instead of AVPlayer for DV
-            if useAVPlayerForDV && hasDolbyVision && !isCompatibleDVProfile {
-                showCompatibilityNotice("DV Profile \(dvProfile ?? 0) not supported by AVPlayer — playing HDR")
-            }
-        }
+        print("[PlayerSelect] → AVPlayer (primary)")
 
         setupPlayer()
-
-        // Prepare stream URL asynchronously (may need to fetch full metadata for audio)
-        Task { @MainActor in
-            await prepareStreamURL()
-        }
 
         addPlaybackSelectionBreadcrumb(reason: "init")
     }
@@ -633,18 +587,7 @@ final class UniversalPlayerViewModel: ObservableObject {
         let networkManager = PlexNetworkManager.shared
 
         guard let ratingKey = metadata.ratingKey else { return }
-
-        // Check if we have a pre-warmed URL in the cache (from PlexDetailView)
-        // This saves 100-500ms by avoiding URL construction at startup
-        if playerType == .mpv, let cached = StreamURLCache.shared.get(ratingKey: ratingKey) {
-            streamURL = cached.url
-            streamHeaders = cached.headers
-            StreamURLCache.shared.remove(ratingKey: ratingKey)  // One-time use
-            Task(priority: .utility) {
-                await networkManager.warmDirectPlayStream(url: cached.url, headers: cached.headers)
-            }
-            return
-        }
+        let cachedDirectPlay = StreamURLCache.shared.get(ratingKey: ratingKey)
 
         // Fetch full metadata if Media array is missing (needed for info overlay display)
         // This happens when starting playback from Continue Watching or other hubs with minimal metadata
@@ -652,178 +595,77 @@ final class UniversalPlayerViewModel: ObservableObject {
             await fetchFullMetadataIfNeeded()
         }
 
-        // Check if this is audio content
-        let isAudio = metadata.type == "track" || metadata.type == "album" || metadata.type == "artist"
+        let routingContext = ContentRoutingContext(
+            metadata: metadata,
+            serverURL: URL(string: serverURL)!,
+            authToken: authToken,
+            requiresProfileConversion: requiresProfileConversion,
+            playbackPolicy: .directPlayFirst
+        )
+        let plan = ContentRouter.plan(for: routingContext)
+        playbackPlan = plan
+        rivuletFallbackURL = nil
+        rivuletFallbackHeaders = [:]
 
-        // AVPlayer: Check if source is compatible for true direct play (no server processing)
-        // Otherwise fall back to HLS remux which handles container conversion and codec tag fixes
-        if playerType == .avplayer {
-            let container = metadata.Media?.first?.container?.lowercased() ?? ""
-
-            // Check if the source file is already AVPlayer-compatible
-            if isAVPlayerDirectPlayCompatible(metadata), let partKey = metadata.Media?.first?.Part?.first?.key {
-                // True direct play - no server processing needed
-                if let url = networkManager.buildVLCDirectPlayURL(
-                    serverURL: serverURL,
-                    authToken: authToken,
-                    partKey: partKey
-                ) {
-                    streamURL = url
-                    streamHeaders = [
-                        "X-Plex-Token": authToken,
-                        "X-Plex-Client-Identifier": PlexAPI.clientIdentifier,
-                        "X-Plex-Platform": PlexAPI.platform,
-                        "X-Plex-Device": PlexAPI.deviceName,
-                        "X-Plex-Product": PlexAPI.productName
-                    ]
-                    return
+        switch plan.primary {
+        case .avPlayerDirect(let url, let headers):
+            // AVPlayer direct — use the URL from the plan
+            if let cached = cachedDirectPlay {
+                streamURL = cached.url
+                streamHeaders = cached.headers
+                StreamURLCache.shared.remove(ratingKey: ratingKey)
+                Task(priority: .utility) {
+                    await networkManager.warmDirectPlayStream(url: cached.url, headers: cached.headers)
+                }
+            } else {
+                streamURL = url
+                streamHeaders = headers ?? rivuletDirectPlayHeaders()
+                Task(priority: .utility) {
+                    await networkManager.warmDirectPlayStream(url: url, headers: headers ?? [:])
                 }
             }
 
-            // Not direct-play compatible - use HLS remux
-            // This handles: MKV containers, incompatible codecs, DTS/TrueHD audio, bad codec tags (dvhe/hev1)
-            // Note: For MKV + DV, player selection should have routed to MPV (more reliable)
-            // This path is hit when "Use AVPlayer for All" is enabled
+            if plan.fallbacks.contains(where: { if case .hls = $0 { return true } else { return false } }),
+               let preparedFallback = buildRivuletHLSURL(offset: startOffset) {
+                rivuletFallbackURL = preparedFallback.url
+                rivuletFallbackHeaders = preparedFallback.headers
+            }
 
-            // For DV content via HLS remux, Plex handles container conversion
-            let useDV = metadata.hasDolbyVision
-            isUsingDolbyVisionHLS = useDV
+        case .localRemux(let url, let headers, _):
+            // Local remux — use the raw file URL from the plan
+            streamURL = url
+            streamHeaders = headers ?? rivuletDirectPlayHeaders()
 
-            if let result = networkManager.buildHLSDirectPlayURL(
-                serverURL: serverURL,
-                authToken: authToken,
-                ratingKey: ratingKey,
-                offsetMs: Int((startOffset ?? 0) * 1000),
-                hasHDR: metadata.hasHDR,
-                useDolbyVision: useDV,
-                forceVideoTranscode: false,  // avoid transcoding; rely on DV remux + codec tag fixes
-                allowAudioDirectStream: allowAudioDirectStream
-            ) {
+            if plan.fallbacks.contains(where: { if case .hls = $0 { return true } else { return false } }),
+               let preparedFallback = buildRivuletHLSURL(offset: startOffset) {
+                rivuletFallbackURL = preparedFallback.url
+                rivuletFallbackHeaders = preparedFallback.headers
+            }
+
+        case .hls:
+            if let result = buildRivuletHLSURL(offset: startOffset) {
                 streamURL = result.url
                 streamHeaders = result.headers
-                plexSessionId = URLComponents(url: result.url, resolvingAgainstBaseURL: false)?
-                    .queryItems?.first(where: { $0.name == "session" })?.value
-            }
-
-            return
-        }
-
-        // DVSampleBuffer: Use HLS remux URL (same as AVPlayer DV path) but feed segments manually
-        if playerType == .dvSampleBuffer {
-            isUsingDolbyVisionHLS = true
-
-            if let result = networkManager.buildHLSDirectPlayURL(
-                serverURL: serverURL,
-                authToken: authToken,
-                ratingKey: ratingKey,
-                offsetMs: Int((startOffset ?? 0) * 1000),
-                hasHDR: metadata.hasHDR,
-                useDolbyVision: true,
-                forceVideoTranscode: false,
-                allowAudioDirectStream: allowAudioDirectStream
-            ) {
-                streamURL = result.url
-                streamHeaders = result.headers
-                // Extract session ID from URL for cleanup on stop
-                plexSessionId = URLComponents(url: result.url, resolvingAgainstBaseURL: false)?
-                    .queryItems?.first(where: { $0.name == "session" })?.value
-            }
-            return
-        }
-
-        // MPV: Use true direct play - stream raw file without any transcoding
-        // MPV can handle MKV, HEVC, H264, DTS, TrueHD, ASS/SSA subs natively with HDR passthrough
-
-        // Try to get partKey from existing metadata
-        var partKey = metadata.Media?.first?.Part?.first?.key
-
-        // For audio content, if partKey is missing, fetch full metadata to get it
-        if isAudio && partKey == nil {
-            do {
-                let fullMetadata = try await networkManager.getMetadata(
-                    serverURL: serverURL,
-                    authToken: authToken,
-                    ratingKey: ratingKey
-                )
-                partKey = fullMetadata.Media?.first?.Part?.first?.key
-            } catch {
-                // Continue with fallback
-            }
-        }
-
-        if let partKey = partKey {
-            streamURL = networkManager.buildVLCDirectPlayURL(
-                serverURL: serverURL,
-                authToken: authToken,
-                partKey: partKey
-            )
-        } else {
-            // Fallback to direct stream if no part key available
-            streamURL = networkManager.buildDirectStreamURL(
-                serverURL: serverURL,
-                authToken: authToken,
-                ratingKey: ratingKey,
-                offsetMs: Int((startOffset ?? 0) * 1000),
-                isAudio: isAudio
-            )
-        }
-
-        streamHeaders = [
-            "X-Plex-Token": authToken,
-            "X-Plex-Client-Identifier": PlexAPI.clientIdentifier,
-            "X-Plex-Platform": PlexAPI.platform,
-            "X-Plex-Device": PlexAPI.deviceName,
-            "X-Plex-Product": PlexAPI.productName
-        ]
-
-        if let url = streamURL {
-            let headers = streamHeaders
-            Task(priority: .utility) {
-                await networkManager.warmDirectPlayStream(url: url, headers: headers)
+                plexSessionId = result.sessionId
             }
         }
     }
 
-    /// Check if the source file is compatible with AVPlayer for true direct play (no server processing).
-    /// Returns true if the file can be played directly without remuxing or transcoding.
-    private func isAVPlayerDirectPlayCompatible(_ metadata: PlexMetadata) -> Bool {
-        guard let media = metadata.Media?.first,
-              let part = media.Part?.first else { return false }
-
-        // AVPlayer-compatible containers: mp4, mov, m4v
-        let container = media.container?.lowercased() ?? ""
-        guard ["mp4", "mov", "m4v"].contains(container) else { return false }
-
-        // Check video codec - must be h264 or hevc
-        let videoStream = part.Stream?.first { $0.isVideo }
-        let videoCodec = videoStream?.codec?.lowercased() ?? ""
-        guard ["h264", "hevc"].contains(videoCodec) else { return false }
-
-        // Check for incompatible codec tags that need remuxing
-        // dvhe and hev1 need to be converted to dvh1 and hvc1 for tvOS compatibility
-        let codecTag = videoStream?.codecID?.lowercased() ?? ""
-        if codecTag == "dvhe" || codecTag == "hev1" { return false }
-
-        // Check audio codec - must be aac, ac3, or eac3
-        // DTS and TrueHD require transcoding (handled by HLS remux path)
-        let audioStream = part.Stream?.first { $0.isAudio }
-        let audioCodec = audioStream?.codec?.lowercased() ?? ""
-        guard ["aac", "ac3", "eac3"].contains(audioCodec) else { return false }
-
-        return true
-    }
-
-    /// Determines whether audio can be safely direct-streamed to AVPlayer.
-    /// DTS/TrueHD should be transcoded to avoid playback failures in DV manifests.
-    /// Multichannel AAC should be transcoded when output is AirPlay (HomePod only supports Dolby surround formats).
+    /// Determines whether audio can be safely direct-streamed on the HLS path.
+    /// DTS/TrueHD should be transcoded by Plex. Multichannel AAC should be
+    /// transcoded when output is AirPlay stereo.
     private static func isAudioDirectStreamCapable(_ metadata: PlexMetadata) -> Bool {
-        guard let audioStream = metadata.Media?
-            .first?
-            .Part?
-            .first?
-            .Stream?
-            .first(where: { $0.isAudio }),
-              let audioCodec = audioStream.codec?.lowercased() else {
+        // Try stream-level codec first, fall back to media-level
+        let audioCodec: String
+        let channelCount: Int
+        if let audioStream = metadata.Media?.first?.Part?.first?.Stream?.first(where: { $0.isAudio }),
+           let streamCodec = audioStream.codec?.lowercased() {
+            audioCodec = streamCodec
+            channelCount = audioStream.channels ?? 2
+        } else if let mediaCodec = metadata.Media?.first?.audioCodec?.lowercased() {
+            audioCodec = mediaCodec
+            channelCount = metadata.Media?.first?.audioChannels ?? 2
+        } else {
             // Unknown codec - prefer safety and allow server to transcode
             return false
         }
@@ -840,7 +682,6 @@ final class UniversalPlayerViewModel: ObservableObject {
 
         // For AAC, check if it's multichannel AND output is AirPlay (HomePod)
         // HomePod supports Dolby Digital surround but NOT multichannel AAC
-        let channelCount = audioStream.channels ?? 2
         if audioCodec == "aac" && channelCount > 2 {
             if isAirPlayOutput() {
                 return false
@@ -850,202 +691,175 @@ final class UniversalPlayerViewModel: ObservableObject {
         return true
     }
 
-    /// Check if the current audio output is AirPlay (HomePod)
-    /// HomePod supports Dolby Atmos/5.1/7.1 but only in Dolby Digital formats, not multichannel AAC
+    /// Route-aware audio direct-stream decision for each HLS URL build path.
+    /// Must be evaluated at runtime (not cached) because AirPlay routes can change.
+    private func allowAudioDirectStreamDecision(reason: String) -> Bool {
+        let allow = Self.isAudioDirectStreamCapable(metadata)
+        let audioStream = metadata.Media?.first?.Part?.first?.Stream?.first(where: { $0.isAudio })
+        let codec = audioStream?.codec?.lowercased()
+            ?? metadata.Media?.first?.audioCodec?.lowercased()
+            ?? "unknown"
+        let channels = audioStream?.channels
+            ?? metadata.Media?.first?.audioChannels
+            ?? 0
+        let routeSnapshot = PlaybackAudioSessionConfigurator.currentRouteAudioSnapshot(
+            owner: "UniversalPlayerViewModel",
+            reason: "hls_audio_policy_\(reason)"
+        )
+
+        print(
+            "[HLSAudioPolicy] reason=\(reason) allowAudioDirectStream=\(allow) " +
+            "codec=\(codec) channels=\(channels) airPlay=\(routeSnapshot.isAirPlay) " +
+            "maxOutCh=\(routeSnapshot.maximumOutputChannels)"
+        )
+        return allow
+    }
+
+    /// Check if the current audio output is AirPlay.
     private static func isAirPlayOutput() -> Bool {
         guard PlaybackAudioSessionConfigurator.isAirPlayRouteActive() else {
             return false
         }
 
         let session = AVAudioSession.sharedInstance()
-        if let output = session.currentRoute.outputs.first(where: { $0.portType == .airPlay }) {
-        } else {
-        }
+        _ = session.currentRoute.outputs.first(where: { $0.portType == .airPlay })
         return true
     }
 
     private func bindPlayerState() {
-        // Get the appropriate publisher based on player type
-        let statePublisher: AnyPublisher<UniversalPlaybackState, Never>
-        let timePublisher: AnyPublisher<TimeInterval, Never>
-        let errorPublisher: AnyPublisher<PlayerError, Never>
+        // Nothing to bind at init — observers are set up in setupAVPlayerObservers()
+        // when the player is created during startPlayback()
+    }
 
-        switch playerType {
-        case .mpv:
-            guard let mpv = mpvPlayerWrapper else { return }
-            statePublisher = mpv.playbackStatePublisher
-            timePublisher = mpv.timePublisher
-            errorPublisher = mpv.errorPublisher
-        case .avplayer:
-            guard let avp = avPlayerWrapper else { return }
-            statePublisher = avp.playbackStatePublisher
-            timePublisher = avp.timePublisher
-            errorPublisher = avp.errorPublisher
-        case .dvSampleBuffer:
-            guard let dvp = dvSampleBufferPlayer else { return }
-            statePublisher = dvp.playbackStatePublisher
-            timePublisher = dvp.timePublisher
-            errorPublisher = dvp.errorPublisher
-        }
+    // MARK: - AVPlayer Observation (standard KVO)
 
-        statePublisher
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] state in
-                self?.playbackState = state
-                self?.isBuffering = state == .buffering
+    /// Set up KVO observers on the current AVPlayer + AVPlayerItem.
+    private func setupAVPlayerObservers() {
+        guard let player = player else { return }
 
-                // Auto-hide controls when playing
-                if state == .playing {
-                    // Track that playback has started at least once (for HLS restart logic)
-                    self?.hasPlaybackEverStarted = true
-                    self?.startControlsHideTimer()
-                    // Prevent screensaver during playback
-                    UIApplication.shared.isIdleTimerDisabled = true
-                    // Cancel paused poster timer and hide poster when resuming
-                    self?.cancelPausedPosterTimer()
-                } else {
-                    self?.controlsTimer?.invalidate()
-                    // Re-enable screensaver when not playing
-                    if state == .paused || state == .ended || state == .idle {
-                        UIApplication.shared.isIdleTimerDisabled = false
-                    }
-                    // Start paused poster timer when paused
-                    if state == .paused {
-                        self?.startPausedPosterTimer()
-                    } else {
-                        // Cancel timer for any other non-playing state
-                        self?.cancelPausedPosterTimer()
-                    }
-                }
-
-                // Handle video end - show post-video summary
-                if state == .ended {
-                    Task { await self?.handlePlaybackEnded() }
-                }
-            }
-            .store(in: &cancellables)
-
-        timePublisher
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] time in
+        // Rate changes → play/pause state
+        rateObservation = player.observe(\.rate, options: [.new]) { [weak self] player, _ in
+            Task { @MainActor [weak self] in
                 guard let self else { return }
-                self.currentTime = time
-                // Also update duration from wrapper
-                switch self.playerType {
-                case .mpv:
-                    if let wrapper = self.mpvPlayerWrapper, wrapper.duration > 0 {
-                        self.duration = wrapper.duration
-                    }
-                case .avplayer:
-                    if let wrapper = self.avPlayerWrapper, wrapper.duration > 0 {
-                        self.duration = wrapper.duration
-                    }
-                case .dvSampleBuffer:
-                    if let wrapper = self.dvSampleBufferPlayer, wrapper.duration > 0 {
-                        self.duration = wrapper.duration
-                    }
-                    // Update subtitle manager for DV player
-                    self.subtitleManager.update(time: time)
+                if player.rate > 0 {
+                    self.updatePlaybackState(.playing)
+                } else if self.playbackState == .playing {
+                    self.updatePlaybackState(.paused)
                 }
-                // Check for markers at current time
-                self.checkMarkers(at: time)
             }
-            .store(in: &cancellables)
+        }
 
-        errorPublisher
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] error in
+        // Buffering detection
+        timeControlObservation = player.observe(\.timeControlStatus, options: [.new]) { [weak self] player, _ in
+            Task { @MainActor [weak self] in
                 guard let self else { return }
-                self.errorMessage = error.userFacingDescription
+                switch player.timeControlStatus {
+                case .waitingToPlayAtSpecifiedRate:
+                    self.updatePlaybackState(.buffering)
+                case .playing:
+                    if self.playbackState == .buffering {
+                        self.updatePlaybackState(.playing)
+                    }
+                case .paused:
+                    break  // Handled by rate observer
+                @unknown default:
+                    break
+                }
+            }
+        }
 
-                // Handle AVPlayer errors with fallbacks
-                if self.playerType == .avplayer {
-                    print("🎬 [Error] AVPlayer failed: \(error.technicalDescription)")
-
-                    // Check if this is a codec/rendering issue (likely DV HLS remux problem)
-                    let isCodecError = if case .codecUnsupported = error { true } else { false }
-
-                    Task {
-                        // For AVPlayer codec/rendering errors with DV content, try HDR10 fallback first
-                        if self.playerType == .avplayer && isCodecError && self.isUsingDolbyVisionHLS && !self.hasAttemptedHDR10Fallback {
-                            print("🎬 [Fallback] DV HLS rendering failed - attempting HDR10 base layer fallback...")
-                            do {
-                                try await self.fallbackToHDR10()
-                                self.errorMessage = nil
-                                return
-                            } catch {
-                                print("🎬 [Fallback] HDR10 fallback failed: \(error.localizedDescription)")
-                                // Fall through to MPV fallback
-                            }
-                        }
-
-                        // For AVPlayer: try restarting the HLS session first before falling back to MPV
-                        if self.playerType == .avplayer && self.hasPlaybackEverStarted && !self.hasAttemptedHLSRestart && !isCodecError {
-                            do {
-                                try await self.restartHLSSession()
-                                self.errorMessage = nil
-                                return
-                            } catch {
-                                print("🎬 [Restart] HLS restart failed: \(error.localizedDescription)")
-                                // Fall through to MPV fallback
-                            }
-                        }
-
-                        // Fall back to MPV if other fallbacks failed or weren't attempted
-                        if !self.hasAttemptedMPVFallback {
-                            print("🎬 [Fallback] Attempting fallback to MPV player...")
-                            do {
-                                try await self.fallbackToMPV()
-                                self.errorMessage = nil
-                            } catch {
-                                print("🎬 [Fallback] MPV fallback also failed: \(error.localizedDescription)")
-                            }
-                        }
+        // Player item status → ready/failed
+        if let item = player.currentItem {
+            itemStatusObservation = item.observe(\.status, options: [.new]) { [weak self] item, _ in
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    switch item.status {
+                    case .readyToPlay:
+                        let dur = item.duration.seconds
+                        if dur.isFinite { self.duration = dur }
+                        self.updateTrackLists()
+                    case .failed:
+                        let message = item.error?.localizedDescription ?? "Playback failed"
+                        self.errorMessage = PlayerError.loadFailed(message).userFacingDescription
+                        self.updatePlaybackState(.failed(.loadFailed(message)))
+                    case .unknown:
+                        break
+                    @unknown default:
+                        break
                     }
                 }
             }
-            .store(in: &cancellables)
 
-        // Auto-update tracks when player reports them
-        if let mpv = mpvPlayerWrapper {
-            mpv.tracksPublisher
-                .receive(on: DispatchQueue.main)
-                .sink { [weak self] in
-                    self?.updateTrackLists()
+            // End of playback
+            NotificationCenter.default.addObserver(
+                forName: .AVPlayerItemDidPlayToEndTime,
+                object: item,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    self?.updatePlaybackState(.ended)
                 }
-                .store(in: &cancellables)
+            }
         }
 
-        if let avp = avPlayerWrapper {
-            avp.tracksPublisher
-                .receive(on: DispatchQueue.main)
-                .sink { [weak self] in
-                    self?.updateTrackLists()
-                }
-                .store(in: &cancellables)
+        // Time updates (every 0.5s)
+        let interval = CMTime(seconds: 0.5, preferredTimescale: 600)
+        let observer = player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] time in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.currentTime = time.seconds
+                self.checkMarkers(at: time.seconds)
+            }
+        }
+        timeObserver = observer
+        _timeObserverForCleanup = observer
+    }
+
+    /// Tear down AVPlayer observers.
+    private func teardownAVPlayerObservers() {
+        rateObservation?.invalidate()
+        rateObservation = nil
+        timeControlObservation?.invalidate()
+        timeControlObservation = nil
+        itemStatusObservation?.invalidate()
+        itemStatusObservation = nil
+        if let timeObserver, let player {
+            player.removeTimeObserver(timeObserver)
+        }
+        timeObserver = nil
+        NotificationCenter.default.removeObserver(self, name: .AVPlayerItemDidPlayToEndTime, object: nil)
+    }
+
+    /// Update playback state with side effects (controls, screensaver, post-video).
+    private func updatePlaybackState(_ state: UniversalPlaybackState) {
+        playbackState = state
+        isBuffering = state == .buffering
+
+        if state == .playing {
+            startControlsHideTimer()
+            UIApplication.shared.isIdleTimerDisabled = true
+            cancelPausedPosterTimer()
+        } else {
+            controlsTimer?.invalidate()
+            if state == .paused || state == .ended || state == .idle {
+                UIApplication.shared.isIdleTimerDisabled = false
+            }
+            if state == .paused {
+                startPausedPosterTimer()
+            } else {
+                cancelPausedPosterTimer()
+            }
         }
 
-        if let dvp = dvSampleBufferPlayer {
-            dvp.tracksPublisher
-                .receive(on: DispatchQueue.main)
-                .sink { [weak self] in
-                    self?.updateTrackLists()
-                }
-                .store(in: &cancellables)
+        if state == .ended {
+            Task { await handlePlaybackEnded() }
         }
     }
 
     // MARK: - Computed Properties
 
     var isPlaying: Bool {
-        switch playerType {
-        case .mpv:
-            return mpvPlayerWrapper?.isPlaying ?? false
-        case .avplayer:
-            return avPlayerWrapper?.isPlaying ?? false
-        case .dvSampleBuffer:
-            return dvSampleBufferPlayer?.isPlaying ?? false
-        }
+        (player?.rate ?? 0) > 0
     }
 
     /// Log the selection decision to Sentry for debugging DV routing.
@@ -1056,7 +870,7 @@ final class UniversalPlayerViewModel: ObservableObject {
         let breadcrumb = Breadcrumb(level: .info, category: "playback.selection")
         breadcrumb.message = "Playback selection (\(reason))"
         breadcrumb.data = [
-            "player": playerType == .avplayer ? "avplayer" : playerType == .dvSampleBuffer ? "dvSampleBuffer" : "mpv",
+            "player": "avplayer",
             "has_dv": metadata.hasDolbyVision,
             "dv_profile": dvStream?.DOVIProfile ?? -1,
             "dv_bl_compat": dvStream?.DOVIBLCompatID ?? -1,
@@ -1064,7 +878,7 @@ final class UniversalPlayerViewModel: ObservableObject {
             "video_codec": dvStream?.codec ?? "unknown",
             "audio_codec": audioStream?.codec ?? "unknown",
             "container": metadata.Media?.first?.container ?? "unknown",
-            "allow_audio_direct_stream": allowAudioDirectStream
+            "allow_audio_direct_stream": allowAudioDirectStreamDecision(reason: "selection_breadcrumb")
         ]
         SentrySDK.addBreadcrumb(breadcrumb)
     }
@@ -1075,224 +889,67 @@ final class UniversalPlayerViewModel: ObservableObject {
         // Reset error state and retry
         errorMessage = nil
         playbackState = .loading
+        hasAttemptedRivuletHLSFallback = false
+        isAttemptingRivuletHLSFallback = false
 
         // Stop existing player before retrying
-        mpvPlayerWrapper?.stop()
-        avPlayerWrapper?.stop()
+        stopPlayback()
+        subtitleClockSync.stop()
 
         await startPlayback()
     }
 
     func startPlayback() async {
+        if streamURL == nil {
+            await prepareStreamURL()
+        }
+
         guard let url = streamURL else {
             errorMessage = "No stream URL available"
             playbackState = .failed(.invalidURL)
             return
         }
+        hasAttemptedRivuletHLSFallback = false
+        isAttemptingRivuletHLSFallback = false
 
         addPlaybackSelectionBreadcrumb(reason: "startPlayback")
 
-        // Fetch detailed metadata with markers if not already present
-        if metadata.Marker == nil || metadata.Marker?.isEmpty == true {
+        // Fetch detailed metadata if markers or chapters are missing
+        let hasMarkers = !(metadata.Marker ?? []).isEmpty
+        let hasChapters = !(metadata.Media?.first?.Part?.first?.Chapter ?? []).isEmpty
+        let hasStreamDetails = metadata.Media?.first?.Part?.first?.Stream?.isEmpty == false
+        if !hasMarkers || !hasChapters || !hasStreamDetails {
             await fetchMarkersIfNeeded()
         }
 
+        // Fetch season/show poster for Now Playing artwork (episodes)
+        await fetchSeasonPosterIfNeeded()
+
         do {
-            switch playerType {
-            case .mpv:
-                guard let mpv = mpvPlayerWrapper else { return }
+            DisplayCriteriaManager.shared.configureForContent(
+                videoStream: metadata.primaryVideoStream
+            )
 
-                // Configure display criteria to enable Match Frame Rate and Match Dynamic Range
-                // For DV content, MPV plays HDR10 fallback (can't decode DV enhancement layer)
-                #if os(tvOS)
-                DisplayCriteriaManager.shared.configureForContent(
-                    videoStream: metadata.primaryVideoStream,
-                    forceHDR10Fallback: metadata.hasDolbyVision  // MPV can't play DV
-                )
-                #endif
+            let plan = playbackPlan ?? ContentRouter.plan(for: ContentRoutingContext(
+                metadata: metadata,
+                serverURL: URL(string: serverURL)!,
+                authToken: authToken,
+                requiresProfileConversion: requiresProfileConversion,
+                playbackPolicy: .directPlayFirst
+            ))
+            try await startWithFallback(plan: plan, startTime: startOffset)
 
-                // Wait for HLS transcode to be ready before loading (same as AVPlayer path)
-                // Without this, MPV may try to load the manifest before Plex starts transcoding
-                let isHLSStream = url.absoluteString.contains(".m3u8")
-                if isHLSStream {
-                    let transcodeReady = await waitForHLSTranscodeReady(url: url, headers: streamHeaders)
-                    if !transcodeReady {
-                        throw PlayerError.loadFailed("HLS transcode session failed to start")
-                    }
-                }
-
-                try await mpv.load(url: url, headers: streamHeaders, startTime: startOffset)
-                mpv.play()
-                self.duration = mpv.duration
-                updateTrackLists()
-
-            case .avplayer:
-                guard let avp = avPlayerWrapper else { return }
-
-                // Configure display criteria for AVPlayer (HDR/DV mode switching)
-                // Unlike MPV, AVPlayer CAN play DV — no need to force HDR10 fallback
-                #if os(tvOS)
-                DisplayCriteriaManager.shared.configureForContent(
-                    videoStream: metadata.primaryVideoStream
-                )
-                #endif
-
-                // Set expected aspect ratio from source metadata for verification
-                if let videoStream = metadata.Media?.first?.Part?.first?.Stream?.first(where: { $0.isVideo }),
-                   let width = videoStream.width, let height = videoStream.height, height > 0 {
-                    avp.setExpectedAspectRatio(width: width, height: height)
-                }
-
-                // Only do HLS preflight check for transcode URLs (not direct play)
-                let isHLSStream = url.absoluteString.contains(".m3u8")
-                if isHLSStream {
-                    // Wait for HLS transcode to be ready before loading
-                    // Plex needs time to start the transcode session and generate segments
-                    let transcodeReady = await waitForHLSTranscodeReady(url: url, headers: streamHeaders)
-                    if !transcodeReady {
-                        throw PlayerError.loadFailed("HLS transcode session failed to start")
-                    }
-                } else {
-                }
-
-                // For AVPlayer, seek to start offset after loading if needed
-                // Pass isDolbyVision flag to enable HLS codec patching (hvc1 -> dvh1)
-                try await avp.load(url: url, headers: streamHeaders, isDolbyVision: isUsingDolbyVisionHLS)
-                if let offset = startOffset, offset > 0 {
-                    await avp.seek(to: offset)
-                }
-                avp.play()
-                self.duration = avp.duration
-
-            case .dvSampleBuffer:
-                guard let dvp = dvSampleBufferPlayer else { return }
-
-                // Configure display criteria for DV (same as AVPlayer DV path)
-                #if os(tvOS)
-                DisplayCriteriaManager.shared.configureForContent(
-                    videoStream: metadata.primaryVideoStream
-                )
-                #endif
-
-                // Wait for HLS transcode to be ready
-                let isHLSStream = url.absoluteString.contains(".m3u8")
-                if isHLSStream {
-                    let transcodeReady = await waitForHLSTranscodeReady(url: url, headers: streamHeaders)
-                    if !transcodeReady {
-                        throw PlayerError.loadFailed("HLS transcode session failed to start")
-                    }
-                }
-
-                // Load via sample buffer pipeline, with one full retry on a fresh Plex session.
-                // The init segment can timeout if the server is still busy (e.g. returning 500s,
-                // cleaning up a previous transcode, or slow to start muxing a large MKV).
-                do {
-                    try await dvp.load(url: url, headers: streamHeaders, startTime: startOffset, requiresProfileConversion: requiresProfileConversion)
-                } catch {
-                    print("🎬 [DVSampleBuffer] First load attempt failed: \(error.localizedDescription)")
-                    print("🎬 [DVSampleBuffer] Stopping old session and retrying with fresh session...")
-
-                    // Kill the old Plex session and create a fresh one
-                    dvp.prepareForReuse()
-                    if let oldSessionId = plexSessionId {
-                        await PlexNetworkManager.shared.stopTranscodeSession(
-                            serverURL: serverURL, authToken: authToken, sessionId: oldSessionId
-                        )
-                    }
-
-                    // Wait for the server to clean up
-                    try? await Task.sleep(nanoseconds: 3_000_000_000)
-
-                    // Ping /decision to kick-start the server's remux engine.
-                    // Some content (e.g. certain DV MKV files) won't start muxing without this.
-                    // Use a throwaway URL for decision so it doesn't invalidate our actual session.
-                    let networkManager = PlexNetworkManager.shared
-                    if let decisionURL = networkManager.buildHLSDirectPlayURL(
-                        serverURL: serverURL,
-                        authToken: authToken,
-                        ratingKey: metadata.ratingKey ?? "",
-                        offsetMs: Int((startOffset ?? 0) * 1000),
-                        hasHDR: metadata.hasHDR,
-                        useDolbyVision: true,
-                        forceVideoTranscode: false,
-                        allowAudioDirectStream: allowAudioDirectStream
-                    ) {
-                        await PlexNetworkManager.shared.startTranscodeDecision(
-                            hlsURL: decisionURL.url, headers: decisionURL.headers
-                        )
-                        // Stop the decision session so it doesn't interfere
-                        if let decisionSessionId = URLComponents(url: decisionURL.url, resolvingAgainstBaseURL: false)?
-                            .queryItems?.first(where: { $0.name == "session" })?.value {
-                            await PlexNetworkManager.shared.stopTranscodeSession(
-                                serverURL: serverURL, authToken: authToken, sessionId: decisionSessionId
-                            )
-                        }
-                    }
-
-                    // Build the actual retry URL (fresh session ID)
-                    guard let result = networkManager.buildHLSDirectPlayURL(
-                        serverURL: serverURL,
-                        authToken: authToken,
-                        ratingKey: metadata.ratingKey ?? "",
-                        offsetMs: Int((startOffset ?? 0) * 1000),
-                        hasHDR: metadata.hasHDR,
-                        useDolbyVision: true,
-                        forceVideoTranscode: false,
-                        allowAudioDirectStream: allowAudioDirectStream
-                    ) else {
-                        throw PlayerError.loadFailed("Failed to build retry HLS URL")
-                    }
-
-                    streamURL = result.url
-                    streamHeaders = result.headers
-                    plexSessionId = URLComponents(url: result.url, resolvingAgainstBaseURL: false)?
-                        .queryItems?.first(where: { $0.name == "session" })?.value
-
-                    let retryReady = await waitForHLSTranscodeReady(url: result.url, headers: result.headers)
-                    if !retryReady {
-                        throw PlayerError.loadFailed("HLS transcode session failed to start on retry")
-                    }
-
-                    try await dvp.load(url: result.url, headers: result.headers, startTime: startOffset, requiresProfileConversion: requiresProfileConversion)
-                }
-
-                dvp.play()
-                self.duration = dvp.duration
+            player?.play()
+            if let dur = player?.currentItem?.duration.seconds, dur.isFinite {
+                self.duration = dur
             }
+            updateTrackLists()
 
             // Preload thumbnails for scrubbing
             preloadThumbnails()
 
             startControlsHideTimer()
         } catch {
-            // If AVPlayer failed, try falling back to MPV
-            if playerType == .avplayer {
-                print("🎬 [Fallback] AVPlayer failed to load: \(error.localizedDescription)")
-                print("🎬 [Fallback] Attempting fallback to MPV player...")
-
-                // Capture the failure to Sentry before fallback
-                SentrySDK.capture(error: error) { scope in
-                    scope.setTag(value: "playback", key: "component")
-                    scope.setTag(value: "avplayer", key: "player_type")
-                    scope.setTag(value: "fallback_triggered", key: "fallback_status")
-                    scope.setExtra(value: url.absoluteString, key: "stream_url")
-                    scope.setExtra(value: self.metadata.title ?? "unknown", key: "media_title")
-                    scope.setExtra(value: self.metadata.type ?? "unknown", key: "media_type")
-                    scope.setExtra(value: self.metadata.ratingKey ?? "unknown", key: "rating_key")
-                    scope.setExtra(value: self.startOffset ?? 0, key: "start_offset")
-                }
-
-                // Attempt MPV fallback
-                do {
-                    try await fallbackToMPV()
-                    return  // Success - don't show error
-                } catch {
-                    print("🎬 [Fallback] MPV fallback also failed: \(error)")
-                    // Fall through to show the original error
-                }
-            }
-
-            // Show user-friendly message, but keep technical details for Sentry
             let technicalError = error.localizedDescription
             if let playerError = error as? PlayerError {
                 errorMessage = playerError.userFacingDescription
@@ -1301,10 +958,9 @@ final class UniversalPlayerViewModel: ObservableObject {
             }
             playbackState = .failed(.loadFailed(technicalError))
 
-            // Capture playback load failure to Sentry
             SentrySDK.capture(error: error) { scope in
                 scope.setTag(value: "playback", key: "component")
-                scope.setTag(value: self.playerType == .avplayer ? "avplayer" : self.playerType == .dvSampleBuffer ? "dvSampleBuffer" : "mpv", key: "player_type")
+                scope.setTag(value: "avplayer", key: "player_type")
                 scope.setExtra(value: url.absoluteString, key: "stream_url")
                 scope.setExtra(value: self.metadata.title ?? "unknown", key: "media_title")
                 scope.setExtra(value: self.metadata.type ?? "unknown", key: "media_type")
@@ -1314,10 +970,517 @@ final class UniversalPlayerViewModel: ObservableObject {
         }
     }
 
+    // MARK: - Rivulet Direct-Play-First Fallback
+
+    /// Build standard direct-play headers for FFmpeg requests.
+    private func rivuletDirectPlayHeaders() -> [String: String] {
+        [
+            "X-Plex-Token": authToken,
+            "X-Plex-Client-Identifier": PlexAPI.clientIdentifier,
+            "X-Plex-Platform": PlexAPI.platform,
+            "X-Plex-Device": PlexAPI.deviceName,
+            "X-Plex-Product": PlexAPI.productName
+        ]
+    }
+
+    /// Build an HLS URL and headers for Rivulet fallback at the requested offset.
+    private func buildRivuletHLSURL(offset: TimeInterval?) -> (url: URL, headers: [String: String], sessionId: String?)? {
+        guard let ratingKey = metadata.ratingKey else { return nil }
+        guard let result = PlexNetworkManager.shared.buildHLSDirectPlayURL(
+            serverURL: serverURL,
+            authToken: authToken,
+            ratingKey: ratingKey,
+            offsetMs: Int((offset ?? 0) * 1000),
+            hasHDR: metadata.hasHDR,
+            useDolbyVision: metadata.hasDolbyVision,
+            allowAudioDirectStream: allowAudioDirectStreamDecision(reason: "rivulet_hls_fallback_build")
+        ) else {
+            return nil
+        }
+        let sessionId = URLComponents(url: result.url, resolvingAgainstBaseURL: false)?
+            .queryItems?.first(where: { $0.name == "session" })?.value
+        return (url: result.url, headers: result.headers, sessionId: sessionId)
+    }
+
+    private func classifyDirectPlayFailure(_ error: Error) -> DirectPlayFailureKind {
+        if let playerError = error as? PlayerError {
+            switch playerError {
+            case .codecUnsupported:
+                return .unsupportedCodec
+            case .networkError:
+                return .network
+            case .loadFailed(let message):
+                let lower = message.lowercased()
+                if lower.contains("unsupported codec") { return .unsupportedCodec }
+                if lower.contains("open input") || lower.contains("stream info") ||
+                    lower.contains("no codec parameters") || lower.contains("invalid stream") {
+                    return .demuxInit
+                }
+                if lower.contains("formatdescription") || lower.contains("samplebuffer") ||
+                    lower.contains("decoder") || lower.contains("decode") {
+                    return .decodeInit
+                }
+                return .runtimeFatal
+            case .invalidURL:
+                return .demuxInit
+            case .unknown:
+                return .unknown
+            }
+        }
+
+        let lower = error.localizedDescription.lowercased()
+        if lower.contains("network") || lower.contains("timed out") || lower.contains("connection") {
+            return .network
+        }
+        if lower.contains("unsupported codec") {
+            return .unsupportedCodec
+        }
+        return .unknown
+    }
+
+    /// Load content using the appropriate path from the playback plan.
+    ///
+    /// Three paths:
+    /// 1. **AVPlayer direct** — AVPlayer opens Plex URL directly (MP4/MOV + native audio)
+    /// 2. **Local remux** — FFmpegRemuxSession → LocalRemuxServer → AVPlayer (MKV, DTS, DV P7)
+    /// 3. **Plex HLS** — AVPlayer opens Plex HLS URL
+    private func startWithFallback(plan: PlaybackPlan, startTime: TimeInterval?) async throws {
+        switch plan.primary {
+        case .avPlayerDirect(let url, let headers):
+            let directURL = streamURL ?? url
+            let directHeaders = streamHeaders.isEmpty ? (headers ?? rivuletDirectPlayHeaders()) : streamHeaders
+            try loadAVPlayer(url: directURL, headers: directHeaders)
+
+            if let startTime, startTime > 0 {
+                await player?.seek(to: CMTime(seconds: startTime, preferredTimescale: 600))
+            }
+
+        case .localRemux(let url, let headers, _):
+            let remuxURL = streamURL ?? url
+            let remuxHeaders = streamHeaders.isEmpty ? (headers ?? rivuletDirectPlayHeaders()) : streamHeaders
+            try await loadWithRemuxServer(sourceURL: remuxURL, headers: remuxHeaders)
+
+            if let startTime, startTime > 0 {
+                await player?.seek(to: CMTime(seconds: startTime, preferredTimescale: 600))
+            }
+
+        case .hls:
+            if streamURL == nil, let builtHLS = buildRivuletHLSURL(offset: startTime) {
+                streamURL = builtHLS.url
+                streamHeaders = builtHLS.headers
+                plexSessionId = builtHLS.sessionId
+            }
+            guard let hlsURL = streamURL else {
+                throw PlayerError.loadFailed("Unable to build HLS URL")
+            }
+
+            let transcodeReady = await waitForHLSTranscodeReady(url: hlsURL, headers: streamHeaders)
+            if !transcodeReady {
+                throw PlayerError.loadFailed("HLS transcode session failed to start")
+            }
+
+            // Log the HLS master manifest for debugging track labels and I-frame playlists
+            await logHLSManifest(url: hlsURL, headers: streamHeaders)
+
+            try loadAVPlayer(url: hlsURL, headers: streamHeaders)
+
+            if let startTime, startTime > 0 {
+                await player?.seek(to: CMTime(seconds: startTime, preferredTimescale: 600))
+            }
+        }
+    }
+
+    // MARK: - HLS Manifest Debugging
+
+    /// Fetch and log the HLS master manifest to inspect track labels and I-frame playlists.
+    private func logHLSManifest(url: URL, headers: [String: String]) async {
+        var request = URLRequest(url: url)
+        for (key, value) in headers {
+            request.setValue(value, forHTTPHeaderField: key)
+        }
+        do {
+            let (data, _) = try await URLSession.shared.data(for: request)
+            if let manifest = String(data: data, encoding: .utf8) {
+                print("[HLS Manifest] ===== Master Playlist =====")
+                for line in manifest.components(separatedBy: "\n") {
+                    print("[HLS Manifest] \(line)")
+                }
+                print("[HLS Manifest] ===== End =====")
+
+                // Quick summary
+                let hasIFrame = manifest.contains("EXT-X-I-FRAME")
+                let audioTags = manifest.components(separatedBy: "\n").filter { $0.contains("TYPE=AUDIO") }
+                let subtitleTags = manifest.components(separatedBy: "\n").filter { $0.contains("TYPE=SUBTITLES") }
+                print("[HLS Manifest] I-Frame playlist: \(hasIFrame ? "YES" : "NO")")
+                print("[HLS Manifest] Audio tracks: \(audioTags.count)")
+                print("[HLS Manifest] Subtitle tracks: \(subtitleTags.count)")
+
+                // Also fetch and log keyframe playlist if present
+                if let iframeLine = manifest.components(separatedBy: "\n")
+                    .first(where: { $0.contains("EXT-X-I-FRAME-STREAM-INF") }),
+                   let uriRange = iframeLine.range(of: "URI=\""),
+                   let endQuote = iframeLine[uriRange.upperBound...].firstIndex(of: "\"") {
+                    let keyframeRelative = String(iframeLine[uriRange.upperBound..<endQuote])
+                    let keyframeURL: URL?
+                    if keyframeRelative.contains("://") {
+                        keyframeURL = URL(string: keyframeRelative)
+                    } else {
+                        keyframeURL = URL(string: keyframeRelative, relativeTo: url.deletingLastPathComponent())
+                    }
+                    if let kfURL = keyframeURL {
+                        var kfRequest = URLRequest(url: kfURL)
+                        for (key, value) in headers { kfRequest.setValue(value, forHTTPHeaderField: key) }
+                        if let (kfData, _) = try? await URLSession.shared.data(for: kfRequest),
+                           let kfManifest = String(data: kfData, encoding: .utf8) {
+                            let kfLines = kfManifest.components(separatedBy: "\n")
+                            print("[HLS Manifest] ===== Keyframe Playlist (\(kfLines.count) lines) =====")
+                            for line in kfLines.prefix(20) { print("[HLS Manifest/KF] \(line)") }
+                            if kfLines.count > 20 { print("[HLS Manifest/KF] ... (\(kfLines.count - 20) more lines)") }
+                        }
+                    }
+                }
+            }
+        } catch {
+            print("[HLS Manifest] Failed to fetch: \(error.localizedDescription)")
+        }
+    }
+
+    // MARK: - AVPlayer Creation
+
+    /// Create an AVPlayer for a URL (direct play or HLS).
+    private func loadAVPlayer(url: URL, headers: [String: String]?) throws {
+        teardownAVPlayerObservers()
+        player?.pause()
+        hlsManifestEnricher = nil
+
+        let asset: AVURLAsset
+
+        // For HLS URLs, use the manifest enricher to inject audio/subtitle track labels.
+        // The enricher intercepts ONLY the master playlist (custom scheme), patches it,
+        // and rewrites all sub-URLs to absolute HTTP so AVPlayer fetches them directly.
+        if url.path.contains("start.m3u8") || url.pathExtension == "m3u8",
+           let headers = headers {
+            let enricher = HLSManifestEnricher(metadata: metadata, headers: headers, originalURL: url)
+            if let enrichedURL = enricher.enrichedURL(from: url) {
+                hlsManifestEnricher = enricher
+                asset = AVURLAsset(url: enrichedURL)
+                asset.resourceLoader.setDelegate(enricher, queue: DispatchQueue(label: "com.rivulet.hls-enricher"))
+            } else {
+                var options: [String: Any] = [:]
+                options["AVURLAssetHTTPHeaderFieldsKey"] = headers
+                asset = AVURLAsset(url: url, options: options)
+            }
+        } else {
+            var options: [String: Any] = [:]
+            if let headers = headers, !headers.isEmpty {
+                options["AVURLAssetHTTPHeaderFieldsKey"] = headers
+            }
+            asset = AVURLAsset(url: url, options: options)
+        }
+
+        let item = AVPlayerItem(asset: asset)
+
+        // Feed metadata to AVPlayerViewController (info panel + Now Playing)
+        item.externalMetadata = buildExternalMetadata()
+        if let markers = buildNavigationMarkers() {
+            item.navigationMarkerGroups = markers
+        }
+
+        if let existing = player {
+            existing.replaceCurrentItem(with: item)
+        } else {
+            let newPlayer = AVPlayer(playerItem: item)
+            player = newPlayer
+            _playerForCleanup = newPlayer
+        }
+
+        setupAVPlayerObservers()
+        updatePlaybackState(.loading)
+    }
+
+    // MARK: - AVPlayerItem Metadata
+
+    /// Build external metadata for AVPlayerViewController info panel and Now Playing.
+    private func buildExternalMetadata() -> [AVMetadataItem] {
+        var items: [AVMetadataItem] = []
+
+        // Title
+        let displayTitle: String
+        if metadata.type == "episode" {
+            let seasonNum = metadata.parentIndex ?? 0
+            let episodeNum = metadata.index ?? 0
+            let epTitle = metadata.title ?? ""
+            displayTitle = "S\(seasonNum) E\(episodeNum) · \(epTitle)"
+        } else {
+            displayTitle = metadata.title ?? ""
+        }
+        items.append(makeMetadataItem(.commonIdentifierTitle, value: displayTitle))
+
+        // Show name (for episodes)
+        if metadata.type == "episode", let showName = metadata.grandparentTitle {
+            items.append(makeMetadataItem(
+                .iTunesMetadataTrackSubTitle,
+                value: showName
+            ))
+        }
+
+        // Description
+        if let summary = metadata.summary {
+            items.append(makeMetadataItem(.commonIdentifierDescription, value: summary))
+        }
+
+        // Genre
+        if let genres = metadata.Genre, !genres.isEmpty {
+            let genreString = genres.compactMap(\.tag).joined(separator: ", ")
+            if !genreString.isEmpty {
+                items.append(makeMetadataItem(.quickTimeMetadataGenre, value: genreString))
+            }
+        }
+
+        // Content rating
+        if let rating = metadata.contentRating {
+            items.append(makeMetadataItem(
+                .iTunesMetadataContentRating,
+                value: rating
+            ))
+        }
+
+        // Year
+        if let year = metadata.year {
+            items.append(makeMetadataItem(
+                .commonIdentifierCreationDate,
+                value: String(year)
+            ))
+        }
+
+        // Artwork — for episodes use season/show poster, for movies use poster/backdrop
+        if let image = nowPlayingArtwork(),
+           let jpegData = image.jpegData(compressionQuality: 0.85) {
+            items.append(makeMetadataItem(.commonIdentifierArtwork, value: jpegData))
+        }
+
+        // Audio format description — helps AVPlayerViewController label the audio track
+        let audioDesc = buildAudioDescription()
+        if !audioDesc.isEmpty {
+            items.append(makeMetadataItem(
+                .quickTimeMetadataInformation,
+                value: audioDesc
+            ))
+        }
+
+        return items
+    }
+
+    /// Select the best artwork image for Now Playing.
+    /// Episodes: season poster → show poster → episode thumb → backdrop
+    /// Movies: poster (thumb) → backdrop
+    private func nowPlayingArtwork() -> UIImage? {
+        if metadata.type == "episode" {
+            // Prefer season/show poster over episode screenshot for Now Playing
+            if let poster = seasonPosterImage { return poster }
+        }
+        return loadingThumbImage ?? loadingArtImage
+    }
+
+    /// Fetch the season or show poster for episode Now Playing artwork.
+    /// Called before building external metadata so the image is ready.
+    private func fetchSeasonPosterIfNeeded() async {
+        guard metadata.type == "episode" else { return }
+
+        // Try season poster first, then show poster
+        let posterPath = metadata.parentThumb ?? metadata.grandparentThumb
+        guard let path = posterPath else { return }
+
+        let urlString = "\(serverURL)\(path)?X-Plex-Token=\(authToken)"
+        guard let url = URL(string: urlString) else { return }
+
+        do {
+            let (data, _) = try await URLSession.shared.data(from: url)
+            if let image = UIImage(data: data) {
+                seasonPosterImage = image
+            }
+        } catch {
+            // Fall through to episode thumb/backdrop
+        }
+    }
+
+    /// Build a human-readable audio description from metadata.
+    private func buildAudioDescription() -> String {
+        let codec = metadata.Media?.first?.audioCodec?.uppercased() ?? ""
+        let channels = metadata.Media?.first?.audioChannels ?? 0
+
+        guard !codec.isEmpty else { return "" }
+
+        let codecName: String
+        switch codec {
+        case "EAC3", "EC-3": codecName = "Dolby Digital+"
+        case "AC3": codecName = "Dolby Digital"
+        case "AAC": codecName = "AAC"
+        case "DTS": codecName = "DTS"
+        case "DTS-HD", "DTSHD": codecName = "DTS-HD MA"
+        case "TRUEHD", "MLP": codecName = "Dolby TrueHD"
+        case "FLAC": codecName = "FLAC"
+        default: codecName = codec
+        }
+
+        let channelDesc: String
+        switch channels {
+        case 8: channelDesc = "7.1"
+        case 6: channelDesc = "5.1"
+        case 2: channelDesc = "Stereo"
+        case 1: channelDesc = "Mono"
+        default: channelDesc = channels > 0 ? "\(channels)ch" : ""
+        }
+
+        if channelDesc.isEmpty {
+            return codecName
+        }
+        return "\(codecName) \(channelDesc)"
+    }
+
+    /// Build navigation markers from Plex chapters (preferred) or intro/credits markers (fallback).
+    private func buildNavigationMarkers() -> [AVNavigationMarkersGroup]? {
+        // Prefer real chapters from the media file
+        let chapters = metadata.Media?.first?.Part?.first?.Chapter ?? []
+        if !chapters.isEmpty {
+            let timedGroups: [AVTimedMetadataGroup] = chapters.compactMap { chapter in
+                guard let startMs = chapter.startTimeOffset,
+                      let endMs = chapter.endTimeOffset else { return nil }
+
+                let start = CMTime(value: CMTimeValue(startMs), timescale: 1000)
+                let end = CMTime(value: CMTimeValue(endMs), timescale: 1000)
+                let range = CMTimeRange(start: start, end: end)
+
+                let title = chapter.tag ?? "Chapter \(chapter.index ?? 0)"
+                let titleItem = makeMetadataItem(.commonIdentifierTitle, value: title)
+                return AVTimedMetadataGroup(items: [titleItem], timeRange: range)
+            }
+            if !timedGroups.isEmpty {
+                print("[Chapters] Using \(timedGroups.count) file chapters")
+                return [AVNavigationMarkersGroup(title: nil, timedNavigationMarkers: timedGroups)]
+            }
+        }
+
+        // Fall back to Plex markers (intro, credits)
+        guard let markers = metadata.Marker, !markers.isEmpty else { return nil }
+
+        let timedGroups: [AVTimedMetadataGroup] = markers.compactMap { marker in
+            guard let startMs = marker.startTimeOffset,
+                  let endMs = marker.endTimeOffset else { return nil }
+
+            let start = CMTime(value: CMTimeValue(startMs), timescale: 1000)
+            let end = CMTime(value: CMTimeValue(endMs), timescale: 1000)
+            let range = CMTimeRange(start: start, end: end)
+
+            let titleItem = makeMetadataItem(.commonIdentifierTitle, value: marker.type?.capitalized ?? "Marker")
+            return AVTimedMetadataGroup(items: [titleItem], timeRange: range)
+        }
+
+        guard !timedGroups.isEmpty else { return nil }
+        print("[Chapters] Using \(timedGroups.count) Plex markers (no file chapters)")
+        return [AVNavigationMarkersGroup(title: nil, timedNavigationMarkers: timedGroups)]
+    }
+
+    /// Helper to create an AVMutableMetadataItem.
+    private func makeMetadataItem(_ identifier: AVMetadataIdentifier, value: Any) -> AVMetadataItem {
+        let item = AVMutableMetadataItem()
+        item.identifier = identifier
+        item.value = value as? NSCopying & NSObjectProtocol
+        item.extendedLanguageTag = "und"
+        return item.copy() as! AVMetadataItem
+    }
+
+    /// Create remux session + local server, then point AVPlayer at localhost HLS.
+    private func loadWithRemuxServer(sourceURL: URL, headers: [String: String]?) async throws {
+        // Stop previous remux infrastructure
+        stopRemuxServer()
+
+        let session = FFmpegRemuxSession()
+        self.remuxSession = session
+
+        let sessionInfo = try await session.open(url: sourceURL, headers: headers)
+
+        // Preflight: validate FFmpeg can produce valid fMP4 before starting server
+        let initData = try await session.generateInitSegment()
+        guard initData.count > 8 else {
+            throw PlayerError.loadFailed("Init segment invalid (\(initData.count) bytes)")
+        }
+
+        let server = LocalRemuxServer(session: session, sessionInfo: sessionInfo)
+        self.remuxServer = server
+
+        let localURL = try server.start()
+        print("[Player] Remux server started: \(localURL), init segment: \(initData.count) bytes")
+
+        try loadAVPlayer(url: localURL, headers: nil)
+    }
+
+    /// Stop remux server and session.
+    private func stopRemuxServer() {
+        remuxServer?.stop()
+        remuxServer = nil
+        if let session = remuxSession {
+            Task { await session.close() }
+        }
+        remuxSession = nil
+    }
+
+    /// One-shot fallback path to Plex HLS.
+    private func attemptRivuletHLSFallback(
+        resumeTime: TimeInterval,
+        reason: String,
+        failureKind: DirectPlayFailureKind
+    ) async throws {
+        guard !isAttemptingRivuletHLSFallback else {
+            throw PlayerError.loadFailed("HLS fallback already in progress")
+        }
+        guard !hasAttemptedRivuletHLSFallback else {
+            throw PlayerError.loadFailed("Already attempted HLS fallback")
+        }
+
+        isAttemptingRivuletHLSFallback = true
+        hasAttemptedRivuletHLSFallback = true
+        defer { isAttemptingRivuletHLSFallback = false }
+
+        print("[Fallback] Failed (\(failureKind.rawValue), reason=\(reason)) → HLS")
+
+        let fallback: (url: URL, headers: [String: String], sessionId: String?)?
+        if resumeTime <= 0.5, let prebuiltURL = rivuletFallbackURL, !rivuletFallbackHeaders.isEmpty {
+            let sessionId = URLComponents(url: prebuiltURL, resolvingAgainstBaseURL: false)?
+                .queryItems?.first(where: { $0.name == "session" })?.value
+            fallback = (prebuiltURL, rivuletFallbackHeaders, sessionId)
+        } else {
+            fallback = buildRivuletHLSURL(offset: resumeTime)
+        }
+
+        guard let fallback else {
+            throw PlayerError.loadFailed("Unable to build HLS fallback URL")
+        }
+
+        // Stop current player
+        teardownAVPlayerObservers()
+        player?.pause()
+        stopRemuxServer()
+
+        streamURL = fallback.url
+        streamHeaders = fallback.headers
+        plexSessionId = fallback.sessionId
+
+        let transcodeReady = await waitForHLSTranscodeReady(url: fallback.url, headers: fallback.headers)
+        if !transcodeReady {
+            throw PlayerError.loadFailed("HLS transcode session failed to start")
+        }
+
+        try loadAVPlayer(url: fallback.url, headers: fallback.headers)
+        if resumeTime > 0 {
+            await player?.seek(to: CMTime(seconds: resumeTime, preferredTimescale: 600))
+        }
+    }
+
     // MARK: - HLS Transcode Preflight
 
-    /// Wait for the HLS transcode session to be ready before loading into AVPlayer
-    /// Plex needs time to start the transcoder and generate the initial manifest AND segments
+    /// Wait for the HLS transcode session to be ready before loading playback.
+    /// Plex needs time to start the transcoder and generate the initial manifest and segments.
     /// This method verifies both the manifest and at least one segment are accessible
     /// - Parameters:
     ///   - url: The HLS manifest URL
@@ -1360,17 +1523,17 @@ final class UniversalPlayerViewModel: ObservableObject {
                             } else if hasHeader {
                                 // Has header but no content yet
                             } else {
-                                print("🎬 [AVPlayer] Preflight: Invalid manifest content")
+                                print("🎬 [HLSPreflight] Invalid manifest content")
                             }
                         }
                     } else if httpResponse.statusCode == 404 || httpResponse.statusCode == 503 {
                         // Transcode not started yet
                     } else {
-                        print("🎬 [AVPlayer] Preflight: Unexpected status \(httpResponse.statusCode)")
+                        print("🎬 [HLSPreflight] Unexpected status \(httpResponse.statusCode)")
                     }
                 }
             } catch {
-                print("🎬 [AVPlayer] Preflight error: \(error.localizedDescription)")
+                print("🎬 [HLSPreflight] Error: \(error.localizedDescription)")
             }
 
             // Wait before retrying (increasing delay: 0.5s, 1s, 1.5s, 2s, 2.5s, 3s, 3.5s, 4s)
@@ -1380,7 +1543,7 @@ final class UniversalPlayerViewModel: ObservableObject {
             }
         }
 
-        print("🎬 [AVPlayer] Preflight: Transcode failed to start after 8 attempts")
+        print("🎬 [HLSPreflight] Transcode failed to start after 8 attempts")
         return false
     }
 
@@ -1402,7 +1565,7 @@ final class UniversalPlayerViewModel: ObservableObject {
         }
 
         guard let variant = variantURL else {
-            print("🎬 [AVPlayer] Preflight: No variant playlist URL found in master")
+            print("🎬 [HLSPreflight] No variant playlist URL found in master")
             return nil
         }
 
@@ -1434,301 +1597,23 @@ final class UniversalPlayerViewModel: ObservableObject {
                 return false
             }
         } catch {
-            print("🎬 [AVPlayer] Preflight: Failed to fetch variant: \(error.localizedDescription)")
+            print("🎬 [HLSPreflight] Failed to fetch variant: \(error.localizedDescription)")
             return false
         }
     }
 
-    // MARK: - AVPlayer HLS Restart and Fallbacks
-
-    /// Tracks whether we've already attempted HLS session restart (to prevent loops)
-    private var hasAttemptedHLSRestart = false
-
-    /// Tracks whether we've already attempted HDR10 fallback for DV content (to prevent loops)
-    private var hasAttemptedHDR10Fallback = false
-
-    /// Tracks whether we're currently using DV mode (useDoviCodecs=1) for HLS
-    private var isUsingDolbyVisionHLS = false
-
-    /// Tracks whether we've already attempted fallback (to prevent loops)
-    private var hasAttemptedMPVFallback = false
-
-    /// Tracks whether playback has successfully started at least once
-    /// Used to distinguish initial load failures from mid-playback failures (e.g., after pause)
-    private var hasPlaybackEverStarted = false
-
-    /// Restart the HLS session when it expires (e.g., after long pause)
-    /// This re-requests the HLS URL from Plex and reloads AVPlayer at the same position
-    private func restartHLSSession() async throws {
-        guard !hasAttemptedHLSRestart else {
-            throw PlayerError.loadFailed("Already attempted HLS restart")
-        }
-        hasAttemptedHLSRestart = true
-
-        // Save current position to restore after restart
-        let savedPosition = currentTime
-
-        // Stop current AVPlayer
-        avPlayerWrapper?.stop()
-        avPlayerWrapper = nil
-
-        // Create new AVPlayer instance
-        let newAVPlayer = AVPlayerWrapper()
-        avPlayerWrapper = newAVPlayer
-
-        // Rebind to new player's publishers
-        cancellables.removeAll()
-        bindPlayerState()
-
-        // Rebuild HLS URL with current position as offset
-        let networkManager = PlexNetworkManager.shared
-        guard let ratingKey = metadata.ratingKey else {
-            throw PlayerError.loadFailed("Missing rating key")
-        }
-
-        if let result = networkManager.buildHLSDirectPlayURL(
-            serverURL: serverURL,
-            authToken: authToken,
-            ratingKey: ratingKey,
-            offsetMs: Int(savedPosition * 1000),
-            hasHDR: metadata.hasHDR,
-            // No transcoding — rely on DV remux and codec tag fixes
-            forceVideoTranscode: false,
-            allowAudioDirectStream: allowAudioDirectStream
-        ) {
-            streamURL = result.url
-            streamHeaders = result.headers
-        } else {
-            throw PlayerError.loadFailed("Could not build HLS URL")
-        }
-
-        guard let url = streamURL else {
-            throw PlayerError.loadFailed("No stream URL available")
-        }
-
-        // Load the new stream (offset is already baked into the HLS URL)
-        // Warm up the transcode session to avoid 404s on initial segments
-        let isHLS = url.absoluteString.contains(".m3u8")
-        if isHLS {
-            let ready = await waitForHLSTranscodeReady(url: url, headers: streamHeaders)
-            if !ready {
-                throw PlayerError.loadFailed("HLS transcode session failed to start on restart")
-            }
-        }
-
-        try await newAVPlayer.load(url: url, headers: streamHeaders, isLive: false, isDolbyVision: isUsingDolbyVisionHLS)
-        newAVPlayer.play()
-
-        // Update duration from new player
-        if newAVPlayer.duration > 0 {
-            duration = newAVPlayer.duration
-        }
-
-        updateTrackLists()
-        startControlsHideTimer()
-
-    }
-
-    /// Fall back from Dolby Vision HLS to HDR10 base layer when DV remux fails
-    /// This is a workaround for Plex's broken DV HLS remux from MKV sources
-    /// By requesting without useDoviCodecs=1, we get the HDR10 base layer which AVPlayer can handle
-    private func fallbackToHDR10() async throws {
-        guard !hasAttemptedHDR10Fallback else {
-            throw PlayerError.loadFailed("Already attempted HDR10 fallback")
-        }
-        hasAttemptedHDR10Fallback = true
-        isUsingDolbyVisionHLS = false
-
-        // Save current position to restore after restart
-        let savedPosition = currentTime
-
-        // Stop current AVPlayer
-        avPlayerWrapper?.stop()
-        avPlayerWrapper = nil
-
-        // Create new AVPlayer instance
-        let newAVPlayer = AVPlayerWrapper()
-        avPlayerWrapper = newAVPlayer
-
-        // Set expected aspect ratio for the new player
-        if let videoStream = metadata.Media?.first?.Part?.first?.Stream?.first(where: { $0.isVideo }),
-           let width = videoStream.width, let height = videoStream.height, height > 0 {
-            newAVPlayer.setExpectedAspectRatio(width: width, height: height)
-        }
-
-        // Rebind to new player's publishers
-        cancellables.removeAll()
-        bindPlayerState()
-
-        // Rebuild HLS URL WITHOUT useDoviCodecs - get HDR10 base layer only
-        let networkManager = PlexNetworkManager.shared
-        guard let ratingKey = metadata.ratingKey else {
-            throw PlayerError.loadFailed("Missing rating key")
-        }
-
-        if let result = networkManager.buildHLSDirectPlayURL(
-            serverURL: serverURL,
-            authToken: authToken,
-            ratingKey: ratingKey,
-            offsetMs: Int(savedPosition * 1000),
-            hasHDR: metadata.hasHDR,
-            useDolbyVision: false,  // Key difference: no useDoviCodecs=1
-            forceVideoTranscode: false,
-            allowAudioDirectStream: allowAudioDirectStream
-        ) {
-            streamURL = result.url
-            streamHeaders = result.headers
-        } else {
-            throw PlayerError.loadFailed("Could not build HDR10 HLS URL")
-        }
-
-        guard let url = streamURL else {
-            throw PlayerError.loadFailed("No stream URL available")
-        }
-
-        // Warm up the HLS transcode (HDR10) before loading to avoid 404s
-        if url.absoluteString.contains(".m3u8") {
-            let ready = await waitForHLSTranscodeReady(url: url, headers: streamHeaders)
-            if !ready {
-                throw PlayerError.loadFailed("HLS transcode session failed to start for HDR10 fallback")
-            }
-        }
-
-        // Load the new stream (HDR10 fallback - no codec patching needed)
-        try await newAVPlayer.load(url: url, headers: streamHeaders, isLive: false, isDolbyVision: false)
-        newAVPlayer.play()
-
-        // Update duration from new player
-        if newAVPlayer.duration > 0 {
-            duration = newAVPlayer.duration
-        }
-
-        updateTrackLists()
-        startControlsHideTimer()
-
-        // Show notice explaining the fallback (this is a Plex issue, not our bug)
-        showCompatibilityNotice("Playing HDR10 (Plex can't remux DV from MKV)")
-
-    }
-
-    /// Fall back from AVPlayer to MPV when AVPlayer fails to load
-    /// This creates an MPV player, rebuilds the stream URL for direct play, and retries
-    private func fallbackToMPV() async throws {
-        guard !hasAttemptedMPVFallback else {
-            throw PlayerError.loadFailed("Already attempted MPV fallback")
-        }
-        hasAttemptedMPVFallback = true
-
-        // Stop current player and Plex transcode session
-        avPlayerWrapper?.stop()
-        avPlayerWrapper = nil
-        dvSampleBufferPlayer?.stop()
-        dvSampleBufferPlayer = nil
-        if let sessionId = plexSessionId {
-            plexSessionId = nil
-            await PlexNetworkManager.shared.stopTranscodeSession(
-                serverURL: serverURL, authToken: authToken, sessionId: sessionId
-            )
-        }
-
-        // Switch to MPV
-        playerType = .mpv
-        mpvPlayerWrapper = MPVPlayerWrapper()
-
-        // Cancel existing subscriptions and rebind to MPV
-        cancellables.removeAll()
-        bindPlayerState()
-
-        // Rebuild stream URL for MPV (direct play instead of HLS)
-        let networkManager = PlexNetworkManager.shared
-        guard let ratingKey = metadata.ratingKey else {
-            throw PlayerError.loadFailed("Missing rating key")
-        }
-
-        let partKey = metadata.Media?.first?.Part?.first?.key
-
-        if let partKey = partKey {
-            streamURL = networkManager.buildVLCDirectPlayURL(
-                serverURL: serverURL,
-                authToken: authToken,
-                partKey: partKey
-            )
-        } else {
-            streamURL = networkManager.buildDirectStreamURL(
-                serverURL: serverURL,
-                authToken: authToken,
-                ratingKey: ratingKey,
-                offsetMs: Int((startOffset ?? 0) * 1000),
-                isAudio: false
-            )
-        }
-
-        streamHeaders = [
-            "X-Plex-Token": authToken,
-            "X-Plex-Client-Identifier": PlexAPI.clientIdentifier,
-            "X-Plex-Platform": PlexAPI.platform,
-            "X-Plex-Device": PlexAPI.deviceName,
-            "X-Plex-Product": PlexAPI.productName
-        ]
-
-        guard let url = streamURL else {
-            throw PlayerError.loadFailed("Could not build MPV stream URL")
-        }
-
-        // Show notice to user about the fallback
-        // Use appropriate message based on which setting was enabled
-        let useAVPlayerForAll = UserDefaults.standard.bool(forKey: "useAVPlayerForAllVideos")
-        if useAVPlayerForAll {
-            showCompatibilityNotice("AVPlayer failed — falling back to MPV")
-        } else {
-            showCompatibilityNotice("AVPlayer failed — falling back to standard HDR")
-        }
-
-        // Load and play with MPV
-        guard let mpv = mpvPlayerWrapper else {
-            throw PlayerError.loadFailed("MPV player not available")
-        }
-
-        // Configure display criteria to enable Match Frame Rate and Match Dynamic Range
-        // For DV content, MPV plays HDR10 fallback (can't decode DV enhancement layer)
-        #if os(tvOS)
-        DisplayCriteriaManager.shared.configureForContent(
-            videoStream: metadata.primaryVideoStream,
-            forceHDR10Fallback: metadata.hasDolbyVision  // MPV can't play DV
-        )
-        #endif
-
-        try await mpv.load(url: url, headers: streamHeaders, startTime: startOffset)
-        mpv.play()
-        self.duration = mpv.duration
-        updateTrackLists()
-
-        preloadThumbnails()
-        startControlsHideTimer()
-
-    }
-
-    /// Called when the MPV view controller is created
-    func setPlayerController(_ controller: MPVMetalViewController) {
-        mpvPlayerWrapper?.setPlayerController(controller)
-    }
-
-    /// Request track enumeration (lazy loading for faster startup).
-    /// Should be called when info panel is opened (tracks are deferred until needed).
-    func requestTrackEnumeration() {
-        mpvPlayerWrapper?.requestTrackEnumeration()
-    }
-
     func stopPlayback() {
-        switch playerType {
-        case .mpv:
-            mpvPlayerWrapper?.stop()
-        case .avplayer:
-            avPlayerWrapper?.stop()
-        case .dvSampleBuffer:
-            dvSampleBufferPlayer?.stop()
-            subtitleManager.clear()
-        }
+        subtitleClockSync.stop()
+        teardownAVPlayerObservers()
+        player?.pause()
+        player?.replaceCurrentItem(with: nil)
+        player = nil
+        _playerForCleanup = nil
+        stopRemuxServer()
+        dvProxyServer?.stop()
+        dvProxyServer = nil
+        hlsManifestEnricher = nil
+        subtitleManager.clear()
 
         // Stop the Plex transcode session so the server frees resources immediately.
         // Without this, switching between DV files can timeout waiting for the init segment
@@ -1750,9 +1635,7 @@ final class UniversalPlayerViewModel: ObservableObject {
         hideCompatibilityNotice()
 
         // Reset display criteria to default (allows TV to return to normal mode)
-        #if os(tvOS)
         DisplayCriteriaManager.shared.reset()
-        #endif
 
         // Re-enable screensaver
         UIApplication.shared.isIdleTimerDisabled = false
@@ -1760,55 +1643,36 @@ final class UniversalPlayerViewModel: ObservableObject {
 
     func togglePlayPause() {
         hidePausedPoster()
-        switch playerType {
-        case .mpv:
-            if mpvPlayerWrapper?.isPlaying == true {
-                mpvPlayerWrapper?.pause()
-            } else {
-                mpvPlayerWrapper?.play()
-            }
-        case .avplayer:
-            if avPlayerWrapper?.isPlaying == true {
-                avPlayerWrapper?.pause()
-            } else {
-                avPlayerWrapper?.play()
-            }
-        case .dvSampleBuffer:
-            if dvSampleBufferPlayer?.isPlaying == true {
-                dvSampleBufferPlayer?.pause()
-            } else {
-                dvSampleBufferPlayer?.play()
-            }
+        if isPlaying {
+            activePlayer_pause()
+        } else {
+            activePlayer_play()
         }
         showControlsTemporarily()
     }
 
     /// Resume playback (used by remote commands)
     func resume() {
-        pausedDueToAppInactive = false  // User explicitly resumed, allow normal playback
+        pausedDueToAppInactive = false
         hidePausedPoster()
-        switch playerType {
-        case .mpv:
-            mpvPlayerWrapper?.play()
-        case .avplayer:
-            avPlayerWrapper?.play()
-        case .dvSampleBuffer:
-            dvSampleBufferPlayer?.play()
-        }
+        activePlayer_play()
         showControlsTemporarily()
     }
 
     /// Pause playback (used by remote commands)
     func pause() {
-        switch playerType {
-        case .mpv:
-            mpvPlayerWrapper?.pause()
-        case .avplayer:
-            avPlayerWrapper?.pause()
-        case .dvSampleBuffer:
-            dvSampleBufferPlayer?.pause()
-        }
+        activePlayer_pause()
         showControlsTemporarily()
+    }
+
+    // MARK: - Active Player Helpers
+
+    private func activePlayer_play() {
+        player?.play()
+    }
+
+    private func activePlayer_pause() {
+        player?.pause()
     }
 
     // MARK: - Info Panel Navigation
@@ -1822,31 +1686,16 @@ final class UniversalPlayerViewModel: ObservableObject {
     }
 
     func seek(to time: TimeInterval) async {
-        switch playerType {
-        case .mpv:
-            await mpvPlayerWrapper?.seek(to: time)
-        case .avplayer:
-            await avPlayerWrapper?.seek(to: time)
-        case .dvSampleBuffer:
-            await dvSampleBufferPlayer?.seek(to: time)
-            subtitleManager.didSeek()
-        }
+        await player?.seek(to: CMTime(seconds: time, preferredTimescale: 600))
+        subtitleClockSync.didSeek()
         showControlsTemporarily()
     }
 
     func seekRelative(by seconds: TimeInterval) async {
         hidePausedPoster()
-        switch playerType {
-        case .mpv:
-            await mpvPlayerWrapper?.seekRelative(by: seconds)
-        case .avplayer:
-            // AVPlayer doesn't have seekRelative, so calculate new time
-            let newTime = max(0, min(duration, currentTime + seconds))
-            await avPlayerWrapper?.seek(to: newTime)
-        case .dvSampleBuffer:
-            await dvSampleBufferPlayer?.seekRelative(by: seconds)
-            subtitleManager.didSeek()
-        }
+        let targetTime = max(0, min(currentTime + seconds, duration))
+        await player?.seek(to: CMTime(seconds: targetTime, preferredTimescale: 600))
+        subtitleClockSync.didSeek()
         showControlsTemporarily()
 
         // Show seek indicator for tap-to-skip
@@ -2099,14 +1948,7 @@ final class UniversalPlayerViewModel: ObservableObject {
     // MARK: - Track Selection
 
     func selectAudioTrack(id: Int) {
-        // Select on the active player
-        if mpvPlayerWrapper != nil {
-            mpvPlayerWrapper?.selectAudioTrack(id: id)
-        } else if avPlayerWrapper != nil {
-            avPlayerWrapper?.selectAudioTrack(id: id)
-        } else if dvSampleBufferPlayer != nil {
-            dvSampleBufferPlayer?.selectAudioTrack(id: id)
-        }
+        // TODO: AVPlayer audio track selection via AVMediaSelectionGroup
         currentAudioTrackId = id
 
         // Save preference
@@ -2115,29 +1957,98 @@ final class UniversalPlayerViewModel: ObservableObject {
         }
     }
 
+    /// Switch audio track for RivuletPlayer HLS path by rebuilding the Plex transcode session.
+    /// Sets the preferred audio stream on the Plex server, then starts a fresh transcode session.
+    private func switchHLSAudioTrack(plexStreamId: Int) async {
+        guard let rp = rivuletPlayer, rp.activePipeline == .hls else { return }
+
+        let resumeTime = currentTime
+        let wasPlaying = rp.isPlaying
+
+        print("🎬 [AudioSwitch] Switching HLS audio to stream \(plexStreamId) at \(String(format: "%.1f", resumeTime))s")
+
+        // Stop the current Plex transcode session
+        rp.stop()
+        if let sessionId = plexSessionId {
+            await PlexNetworkManager.shared.stopTranscodeSession(
+                serverURL: serverURL, authToken: authToken, sessionId: sessionId
+            )
+            plexSessionId = nil
+        }
+
+        guard let ratingKey = metadata.ratingKey else { return }
+        let networkManager = PlexNetworkManager.shared
+
+        // Tell Plex which audio stream to use BEFORE starting the new transcode.
+        // Plex reads this preference when building the transcode session.
+        if let partId = metadata.Media?.first?.Part?.first?.id {
+            await networkManager.setSelectedAudioStream(
+                serverURL: serverURL,
+                authToken: authToken,
+                partId: partId,
+                audioStreamID: plexStreamId
+            )
+        }
+
+        // Build new HLS URL (Plex will use the audio stream we just set)
+        guard let result = networkManager.buildHLSDirectPlayURL(
+            serverURL: serverURL,
+            authToken: authToken,
+            ratingKey: ratingKey,
+            offsetMs: Int(resumeTime * 1000),
+            hasHDR: metadata.hasHDR,
+            useDolbyVision: metadata.hasDolbyVision,
+            allowAudioDirectStream: allowAudioDirectStreamDecision(reason: "rivulet_hls_audio_switch")
+        ) else {
+            print("🎬 [AudioSwitch] Failed to build HLS URL")
+            return
+        }
+
+        streamURL = result.url
+        streamHeaders = result.headers
+        plexSessionId = URLComponents(url: result.url, resolvingAgainstBaseURL: false)?
+            .queryItems?.first(where: { $0.name == "session" })?.value
+
+        // Wait for the new transcode to be ready
+        let transcodeReady = await waitForHLSTranscodeReady(url: result.url, headers: result.headers)
+        if !transcodeReady {
+            print("🎬 [AudioSwitch] New transcode session failed to start")
+            errorMessage = "Failed to switch audio track"
+            return
+        }
+
+        // Reload with new URL
+        do {
+            try await rp.loadHLSWithConversion(
+                url: result.url,
+                headers: result.headers,
+                startTime: resumeTime,
+                requiresProfileConversion: requiresProfileConversion
+            )
+            if wasPlaying {
+                rp.play()
+            }
+            self.duration = rp.duration
+            print("🎬 [AudioSwitch] Switched to audio stream \(plexStreamId) successfully")
+        } catch {
+            print("🎬 [AudioSwitch] Failed to reload with new audio: \(error)")
+            errorMessage = "Failed to switch audio track"
+        }
+    }
+
     /// Select audio track without saving preference (for auto-selection)
     private func selectAudioTrackWithoutSaving(id: Int) {
-        if mpvPlayerWrapper != nil {
-            mpvPlayerWrapper?.selectAudioTrack(id: id)
-        } else if avPlayerWrapper != nil {
-            avPlayerWrapper?.selectAudioTrack(id: id)
-        } else if dvSampleBufferPlayer != nil {
-            dvSampleBufferPlayer?.selectAudioTrack(id: id)
+        if let rp = rivuletPlayer {
+            rp.selectAudioTrack(plexTrackId: id, plexAudioTracks: audioTracks)
+            if rp.activePipeline == .hls {
+                Task { await switchHLSAudioTrack(plexStreamId: id) }
+            }
         }
         currentAudioTrackId = id
     }
 
     func selectSubtitleTrack(id: Int?) {
-        // Select on the active player
-        if mpvPlayerWrapper != nil {
-            mpvPlayerWrapper?.selectSubtitleTrack(id: id)
-        } else if avPlayerWrapper != nil {
-            avPlayerWrapper?.selectSubtitleTrack(id: id)
-        } else if dvSampleBufferPlayer != nil {
-            dvSampleBufferPlayer?.selectSubtitleTrack(id: id)
-            // Load external subtitles for DV player
-            loadExternalSubtitleForDVPlayer(trackId: id)
-        }
+        // TODO: AVPlayer subtitle selection via AVMediaSelectionGroup
         currentSubtitleTrackId = id
 
         // Save preference
@@ -2148,52 +2059,118 @@ final class UniversalPlayerViewModel: ObservableObject {
         }
     }
 
-    /// Load external subtitle file for DVSampleBufferPlayer
-    private func loadExternalSubtitleForDVPlayer(trackId: Int?) {
-        guard dvSampleBufferPlayer != nil else { return }
+    /// Load subtitle content for the active Rivulet playback pipeline.
+    private func loadSubtitleForRivuletPlayer(trackId: Int?) {
+        guard rivuletPlayer != nil else { return }
 
         // Clear subtitles if no track selected
         guard let trackId = trackId,
               let track = subtitleTracks.first(where: { $0.id == trackId }) else {
             subtitleManager.clear()
+            // Stop FFmpeg subtitle stream and callback for Rivulet
+            if let rp = rivuletPlayer {
+                rp.deselectEmbeddedSubtitle()
+                rp.onSubtitleCue = nil
+                rp.onBitmapSubtitleCue = nil
+            }
             return
         }
 
-        // Check if this is a text-based subtitle we can render
-        let supportedCodecs = ["srt", "subrip", "vtt", "webvtt", "ass", "ssa"]
-        guard let codec = track.codec?.lowercased(),
-              supportedCodecs.contains(codec) else {
-            print("🎬 [Subtitles] Unsupported format for DV player: \(track.codec ?? "unknown")")
-            subtitleManager.clear()
-            return
+        // For RivuletPlayer in DirectPlay mode, enable inline subtitle extraction via FFmpeg.
+        // The read loop delivers subtitle cues as it encounters them (no second HTTP connection).
+        // Falls back to Plex URL for external sidecar subs if FFmpeg has no subtitle tracks.
+        if let rp = rivuletPlayer, rp.activePipeline == .directPlay {
+            let ffmpegSubs = rp.ffmpegSubtitleTracks
+            if !ffmpegSubs.isEmpty {
+                print("🎬 [Subtitles] Enabling inline embedded subtitle for track \(trackId) (FFmpeg has \(ffmpegSubs.count) sub tracks)")
+                subtitleManager.clear()
+                rp.onSubtitleCue = { [weak self] text, start, end in
+                    self?.subtitleManager.addCue(text: text, startTime: start, endTime: end)
+                }
+                rp.onBitmapSubtitleCue = { [weak self] cue in
+                    self?.subtitleManager.addBitmapCue(cue)
+                }
+
+                // Select the subtitle stream in the demuxer.
+                // Returns false if the track is external (not in the container) —
+                // fall through to Plex URL fetch in that case.
+                if rp.selectEmbeddedSubtitle(plexTrackId: trackId, plexSubtitleTracks: subtitleTracks) {
+                    return
+                }
+
+                // Embedded mapping failed — clean up the callbacks before falling through
+                rp.onSubtitleCue = nil
+                rp.onBitmapSubtitleCue = nil
+            }
+
+            // No embedded match — try Plex URL (external sidecar subs)
+            print("🎬 [Subtitles] Track \(trackId) not embedded in container, trying Plex URL")
         }
 
-        // Get subtitle URL from Plex
-        let subtitleURLString: String
-        if let trackKey = track.subtitleKey {
-            // Direct key available
-            subtitleURLString = serverURL + trackKey
-        } else {
-            // No direct key available - subtitle is likely embedded in the container.
-            // Plex doesn't provide a direct download endpoint for embedded subtitles.
-            // They can only be extracted during transcode playback.
-            print("🎬 [Subtitles] Track \(trackId) has no key - embedded subtitles not supported in DV player")
-            print("🎬 [Subtitles] Tip: Use external sidecar .srt files (same name as video) for DV playback")
-            subtitleManager.clear()
-            return
-        }
-        guard let subtitleURL = URL(string: subtitleURLString) else {
-            print("🎬 [Subtitles] Invalid subtitle URL: \(subtitleURLString)")
-            subtitleManager.clear()
-            return
+        loadSubtitleFromPlexURL(trackId: trackId, track: track)
+    }
+
+    /// Load subtitle from Plex server URL for external sidecar subtitles.
+    private func loadSubtitleFromPlexURL(trackId: Int, track: MediaTrack) {
+        let codec = track.codec?.lowercased()
+        let supportedCodecs = ["srt", "subrip", "vtt", "webvtt", "ass", "ssa", "mov_text", "tx3g"]
+        let isLikelyTextSubtitle = codec.map { supportedCodecs.contains($0) } ?? true
+        if let codec, !isLikelyTextSubtitle {
+            print("🎬 [Subtitles] Non-text or unsupported subtitle codec '\(codec)' - attempting SRT conversion fallback")
         }
 
-        // Load the subtitle file
+        let hintedFormat: SubtitleFormat? = isLikelyTextSubtitle ? SubtitleFormat(from: codec) : .srt
         let headers = ["X-Plex-Token": authToken]
-        let format = SubtitleFormat(from: codec)
 
-        Task {
-            await subtitleManager.load(url: subtitleURL, headers: headers, format: format)
+        // Build candidate subtitle URLs.
+        // 1) Use direct track key when available.
+        // 2) Include explicit SRT conversion for track key.
+        // 3) Fallback to /library/streams/{id} variants.
+        var candidateURLStrings: [String] = []
+        if let trackKey = track.subtitleKey {
+            let isAbsolute = trackKey.hasPrefix("http://") || trackKey.hasPrefix("https://")
+            let baseKeyURL = isAbsolute ? trackKey : (serverURL + trackKey)
+            candidateURLStrings.append(baseKeyURL)
+
+            // Explicit conversion endpoint for codecs we cannot parse directly.
+            let separator = baseKeyURL.contains("?") ? "&" : "?"
+            candidateURLStrings.append(baseKeyURL + "\(separator)format=srt")
+        }
+        candidateURLStrings.append("\(serverURL)/library/streams/\(trackId)")
+        candidateURLStrings.append("\(serverURL)/library/streams/\(trackId)?format=srt")
+
+        // Preserve order but avoid duplicate network requests.
+        var seen = Set<String>()
+        candidateURLStrings = candidateURLStrings.filter { seen.insert($0).inserted }
+
+        let candidateURLs = candidateURLStrings.compactMap(URL.init(string:))
+        guard !candidateURLs.isEmpty else {
+            print("🎬 [Subtitles] Could not build subtitle URL candidates for track \(trackId)")
+            subtitleManager.clear()
+            return
+        }
+
+        Task { @MainActor in
+            var loaded = false
+            for candidateURL in candidateURLs {
+                let formatHintForCandidate: SubtitleFormat? =
+                    candidateURL.query?.localizedCaseInsensitiveContains("format=srt") == true ? .srt : hintedFormat
+                await subtitleManager.load(url: candidateURL, headers: headers, format: formatHintForCandidate)
+                if subtitleManager.error == nil {
+                    loaded = true
+                    print("🎬 [Subtitles] Loaded subtitle track \(trackId) from \(candidateURL.absoluteString)")
+                    break
+                }
+                print(
+                    "🎬 [Subtitles] Candidate failed for track \(trackId): \(candidateURL.absoluteString) " +
+                    "(\(subtitleManager.error?.localizedDescription ?? "unknown error"))"
+                )
+            }
+
+            if !loaded {
+                print("🎬 [Subtitles] Failed to load subtitle track \(trackId) from all candidate URLs")
+                subtitleManager.clear()
+            }
         }
     }
 
@@ -2205,62 +2182,41 @@ final class UniversalPlayerViewModel: ObservableObject {
         let previousSubtitleCount = subtitleTracks.count
         let previousAudioCount = audioTracks.count
 
-        var newAudioTracks: [MediaTrack]
-        var newSubtitleTracks: [MediaTrack]
-        var newCurrentAudioTrackId: Int?
-        var newCurrentSubtitleTrackId: Int?
+        let newAudioTracks: [MediaTrack]
+        let newSubtitleTracks: [MediaTrack]
+        let newCurrentAudioTrackId: Int?
+        let newCurrentSubtitleTrackId: Int?
 
-        // Get tracks from the active player
-        if let mpv = mpvPlayerWrapper {
-            newAudioTracks = mpv.audioTracks
-            newSubtitleTracks = mpv.subtitleTracks
-            newCurrentAudioTrackId = mpv.currentAudioTrackId
-            newCurrentSubtitleTrackId = mpv.currentSubtitleTrackId
-
-            // Enrich MPV tracks with Plex stream metadata (for channel info, etc.)
-            if let streams = metadata.Media?.first?.Part?.first?.Stream {
-                newAudioTracks = enrichTracksWithPlexStreams(newAudioTracks, plexStreams: streams, type: .audio)
-                newSubtitleTracks = enrichTracksWithPlexStreams(newSubtitleTracks, plexStreams: streams, type: .subtitle)
-            }
-        } else if let avp = avPlayerWrapper {
-            // Use AVPlayer's actual tracks (these are the ones that work for selection)
-            // but enrich with Plex metadata for better display names
-            newAudioTracks = avp.audioTracks
-            newSubtitleTracks = avp.subtitleTracks
-            newCurrentAudioTrackId = avp.currentAudioTrackId
-            newCurrentSubtitleTrackId = avp.currentSubtitleTrackId
-
-            // Enrich AVPlayer tracks with Plex stream metadata for better display names
-            if let streams = metadata.Media?.first?.Part?.first?.Stream {
-                newAudioTracks = enrichTracksWithPlexStreams(newAudioTracks, plexStreams: streams, type: .audio)
-                newSubtitleTracks = enrichTracksWithPlexStreams(newSubtitleTracks, plexStreams: streams, type: .subtitle)
-            }
-        } else if dvSampleBufferPlayer != nil {
-            // DVSampleBufferPlayer doesn't report tracks properly - use Plex metadata directly
-            // This gives us all audio/subtitle tracks with proper displayTitles
-            if let streams = metadata.Media?.first?.Part?.first?.Stream {
-                newAudioTracks = streams.filter { $0.isAudio }.map { MediaTrack(from: $0) }
-                newSubtitleTracks = streams.filter { $0.isSubtitle }.map { MediaTrack(from: $0) }
-
-                // Set current track to default or first
-                newCurrentAudioTrackId = newAudioTracks.first(where: { $0.isDefault })?.id ?? newAudioTracks.first?.id
-                newCurrentSubtitleTrackId = newSubtitleTracks.first(where: { $0.isDefault })?.id
-            } else {
-                // Fallback to player-reported tracks if no Plex metadata
-                newAudioTracks = dvSampleBufferPlayer!.audioTracks
-                newSubtitleTracks = dvSampleBufferPlayer!.subtitleTracks
-                newCurrentAudioTrackId = dvSampleBufferPlayer!.currentAudioTrackId
-                newCurrentSubtitleTrackId = dvSampleBufferPlayer!.currentSubtitleTrackId
-            }
+        if let streams = metadata.Media?.first?.Part?.first?.Stream {
+            newAudioTracks = streams.filter { $0.isAudio }.map { MediaTrack(from: $0) }
+            newSubtitleTracks = streams.filter { $0.isSubtitle }.map { MediaTrack(from: $0) }
+            let selectedAudioId = streams.first(where: { $0.isAudio && $0.selected == true })?.id
+            let selectedSubtitleId = streams.first(where: { $0.isSubtitle && $0.selected == true })?.id
+            newCurrentAudioTrackId = selectedAudioId ??
+                newAudioTracks.first(where: { $0.isDefault })?.id ??
+                newAudioTracks.first?.id
+            newCurrentSubtitleTrackId = selectedSubtitleId ??
+                newSubtitleTracks.first(where: { $0.isForced })?.id ??
+                newSubtitleTracks.first(where: { $0.isDefault })?.id
         } else {
-            // No active player
-            return
+            // AVPlayer track enumeration would go here — for now use empty
+            newAudioTracks = []
+            newSubtitleTracks = []
+            newCurrentAudioTrackId = nil
+            newCurrentSubtitleTrackId = nil
         }
 
         audioTracks = newAudioTracks
         subtitleTracks = newSubtitleTracks
-        currentAudioTrackId = newCurrentAudioTrackId
-        currentSubtitleTrackId = newCurrentSubtitleTrackId
+
+        // Only update current track IDs on first population.
+        // After tracks are populated, the user's explicit selections take precedence.
+        if previousAudioCount == 0 {
+            currentAudioTrackId = newCurrentAudioTrackId
+        }
+        if previousSubtitleCount == 0 {
+            currentSubtitleTrackId = newCurrentSubtitleTrackId
+        }
 
         // Apply saved audio preference when tracks are first available
         if !hasAppliedAudioPreference && !audioTracks.isEmpty && previousAudioCount == 0 {
@@ -2335,6 +2291,18 @@ final class UniversalPlayerViewModel: ObservableObject {
 
     /// Apply saved subtitle preference
     private func applySubtitlePreference() {
+        // No explicit user preference yet: honor selected/default stream behavior.
+        if !SubtitlePreferenceManager.hasStoredPreference {
+            if currentSubtitleTrackId == nil,
+               let forcedTrack = subtitleTracks.first(where: { $0.isForced }) {
+                selectSubtitleTrackWithoutSaving(id: forcedTrack.id)
+            } else if let activeSubtitleTrackId = currentSubtitleTrackId {
+                // For custom renderers, selecting can require explicit file fetch/load.
+                loadSubtitleForRivuletPlayer(trackId: activeSubtitleTrackId)
+            }
+            return
+        }
+
         let preference = SubtitlePreferenceManager.current
 
         if !preference.enabled {
@@ -2354,15 +2322,24 @@ final class UniversalPlayerViewModel: ObservableObject {
 
     /// Select subtitle track without saving preference (for auto-selection)
     private func selectSubtitleTrackWithoutSaving(id: Int?) {
-        if mpvPlayerWrapper != nil {
-            mpvPlayerWrapper?.selectSubtitleTrack(id: id)
-        } else if avPlayerWrapper != nil {
-            avPlayerWrapper?.selectSubtitleTrack(id: id)
-        } else if dvSampleBufferPlayer != nil {
-            dvSampleBufferPlayer?.selectSubtitleTrack(id: id)
-            loadExternalSubtitleForDVPlayer(trackId: id)
+        if rivuletPlayer != nil {
+            rivuletPlayer?.selectSubtitleTrack(id: id)
+            loadSubtitleForRivuletPlayer(trackId: id)
         }
         currentSubtitleTrackId = id
+    }
+
+    private func configureSubtitleClockSyncForCurrentPlayer() {
+        guard let rp = rivuletPlayer else {
+            subtitleClockSync.stop()
+            return
+        }
+        subtitleClockSync.start(
+            owner: "Rivulet",
+            subtitleManager: subtitleManager,
+            timeProvider: { rp.renderer.displayTime },
+            isPlayingProvider: { rp.isPlaying }
+        )
     }
 
     // MARK: - Controls Visibility
@@ -2762,8 +2739,23 @@ final class UniversalPlayerViewModel: ObservableObject {
             // Update metadata with markers from detailed fetch
             if let markers = detailedMetadata.Marker, !markers.isEmpty {
                 metadata.Marker = markers
-            } else {
             }
+
+            // Update Media (includes Part with chapters and stream details)
+            // Hub items often lack Part/Stream/Chapter data
+            if let media = detailedMetadata.Media, !media.isEmpty {
+                let chapters = media.first?.Part?.first?.Chapter ?? []
+                let hadChapters = metadata.Media?.first?.Part?.first?.Chapter?.isEmpty == false
+                metadata.Media = media
+                if !chapters.isEmpty && !hadChapters {
+                    print("[Chapters] Fetched \(chapters.count) chapters from detailed metadata")
+                }
+            }
+
+            // Fill in missing display info (summary, genres, etc.)
+            if metadata.summary == nil { metadata.summary = detailedMetadata.summary }
+            if metadata.Genre == nil { metadata.Genre = detailedMetadata.Genre }
+            if metadata.contentRating == nil { metadata.contentRating = detailedMetadata.contentRating }
         } catch {
             print("⏭️ [Skip] Failed to fetch detailed metadata: \(error)")
         }
@@ -3030,7 +3022,7 @@ final class UniversalPlayerViewModel: ObservableObject {
         // Build stream URL for next episode
         let metadata = preloadedNextMetadata ?? next
         if let partKey = metadata.Media?.first?.Part?.first?.key {
-            preloadedNextStreamURL = networkManager.buildVLCDirectPlayURL(
+            preloadedNextStreamURL = networkManager.buildPlaybackDirectPlayURL(
                 serverURL: serverURL,
                 authToken: authToken,
                 partKey: partKey
@@ -3186,6 +3178,15 @@ final class UniversalPlayerViewModel: ObservableObject {
     // MARK: - Cleanup
 
     deinit {
+        // Clean up AVPlayer time observer (must happen synchronously in deinit)
+        if let timeObserver = _timeObserverForCleanup, let player = _playerForCleanup {
+            player.removeTimeObserver(timeObserver)
+        }
+        NotificationCenter.default.removeObserver(self, name: .AVPlayerItemDidPlayToEndTime, object: nil)
+
+        Task { @MainActor [subtitleClockSync] in
+            subtitleClockSync.stop()
+        }
         controlsTimer?.invalidate()
         scrubTimer?.invalidate()
         countdownTimer?.invalidate()

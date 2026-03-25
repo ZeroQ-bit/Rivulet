@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import CoreGraphics
 
 /// Overlay view that displays current subtitle cues
 struct SubtitleOverlayView: View {
@@ -16,20 +17,30 @@ struct SubtitleOverlayView: View {
 
     var body: some View {
         GeometryReader { geometry in
-            VStack {
-                Spacer()
-
-                if !subtitleManager.currentCues.isEmpty {
-                    VStack(spacing: 4) {
-                        ForEach(subtitleManager.currentCues) { cue in
-                            SubtitleTextView(text: cue.text)
-                        }
+            ZStack {
+                // Bitmap subtitle cues (PGS, DVB-SUB) — positioned absolutely
+                ForEach(subtitleManager.currentBitmapCues) { cue in
+                    ForEach(Array(cue.rects.enumerated()), id: \.offset) { _, rect in
+                        BitmapSubtitleRectView(rect: rect, viewSize: geometry.size)
                     }
-                    .padding(.horizontal, 60)
-                    .padding(.bottom, bottomOffset)
                 }
+
+                // Text subtitle cues — anchored to bottom
+                VStack {
+                    Spacer()
+
+                    if !subtitleManager.currentCues.isEmpty {
+                        VStack(spacing: 4) {
+                            ForEach(subtitleManager.currentCues) { cue in
+                                SubtitleTextView(text: cue.text)
+                            }
+                        }
+                        .padding(.horizontal, 60)
+                        .padding(.bottom, bottomOffset)
+                    }
+                }
+                .frame(width: geometry.size.width, height: geometry.size.height)
             }
-            .frame(width: geometry.size.width, height: geometry.size.height)
         }
         .allowsHitTesting(false)  // Don't interfere with player controls
     }
@@ -55,11 +66,64 @@ private struct SubtitleTextView: View {
     }
 
     private var subtitleFontSize: CGFloat {
-        #if os(tvOS)
         return 42
-        #else
-        return 24
-        #endif
+    }
+}
+
+/// Renders a single bitmap subtitle rect as a CGImage, positioned in video coordinates
+private struct BitmapSubtitleRectView: View {
+    let rect: BitmapSubtitleRect
+    let viewSize: CGSize
+
+    /// PGS coordinates are typically in 1920x1080 video resolution space
+    private let referenceWidth: CGFloat = 1920
+    private let referenceHeight: CGFloat = 1080
+
+    var body: some View {
+        if let image = createImage() {
+            let scaleX = viewSize.width / referenceWidth
+            let scaleY = viewSize.height / referenceHeight
+            let scaledWidth = CGFloat(rect.width) * scaleX
+            let scaledHeight = CGFloat(rect.height) * scaleY
+            let scaledX = CGFloat(rect.x) * scaleX
+            let scaledY = CGFloat(rect.y) * scaleY
+
+            Image(decorative: image, scale: 1.0)
+                .resizable()
+                .frame(width: scaledWidth, height: scaledHeight)
+                .position(x: scaledX + scaledWidth / 2, y: scaledY + scaledHeight / 2)
+        }
+    }
+
+    private func createImage() -> CGImage? {
+        let width = rect.width
+        let height = rect.height
+        guard width > 0, height > 0 else { return nil }
+
+        let bytesPerPixel = 4
+        let bytesPerRow = width * bytesPerPixel
+        let expectedSize = height * bytesPerRow
+        guard rect.imageData.count >= expectedSize else { return nil }
+
+        return rect.imageData.withUnsafeBytes { rawBuf -> CGImage? in
+            guard let baseAddress = rawBuf.baseAddress else { return nil }
+
+            guard let provider = CGDataProvider(data: rect.imageData as CFData) else { return nil }
+
+            return CGImage(
+                width: width,
+                height: height,
+                bitsPerComponent: 8,
+                bitsPerPixel: 32,
+                bytesPerRow: bytesPerRow,
+                space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.last.rawValue),
+                provider: provider,
+                decode: nil,
+                shouldInterpolate: true,
+                intent: .defaultIntent
+            )
+        }
     }
 }
 

@@ -97,11 +97,7 @@ struct PlexAuthView: View {
                 authManager.cancelAuthentication()
                 dismiss()
             }
-            #if os(tvOS)
             .buttonStyle(AppStoreButtonStyle())
-            #else
-            .buttonStyle(.bordered)
-            #endif
         }
     }
 
@@ -133,11 +129,7 @@ struct PlexAuthView: View {
                 authManager.reset()
                 dismiss()
             }
-            #if os(tvOS)
             .buttonStyle(AppStoreButtonStyle())
-            #else
-            .buttonStyle(.bordered)
-            #endif
         }
     }
 
@@ -193,11 +185,7 @@ struct PlexAuthView: View {
                     await authManager.startPINAuthentication()
                 }
             }
-            #if os(tvOS)
             .buttonStyle(AppStoreButtonStyle())
-            #else
-            .buttonStyle(.borderedProminent)
-            #endif
         }
     }
 
@@ -252,7 +240,7 @@ struct ServerRowButton: View {
                 Spacer()
 
                 Image(systemName: "chevron.right")
-                    .font(.system(size: 16, weight: .semibold))
+                    .font(.system(size: 22, weight: .semibold))
                     .foregroundStyle(.secondary)
             }
             .padding(.horizontal, 20)

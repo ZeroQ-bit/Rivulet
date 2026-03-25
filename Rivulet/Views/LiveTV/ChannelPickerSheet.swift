@@ -101,11 +101,7 @@ struct ChannelPickerSheet: View {
                     .font(.system(size: 32))
                     .foregroundStyle(.white.opacity(0.6))
             }
-            #if os(tvOS)
             .buttonStyle(.card)
-            #else
-            .buttonStyle(.plain)
-            #endif
         }
     }
 

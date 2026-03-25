@@ -7,6 +7,9 @@
 
 import SwiftUI
 import Combine
+import os.log
+
+private let homeLog = Logger(subsystem: "com.rivulet.app", category: "PlexHome")
 
 struct PlexHomeView: View {
     @StateObject private var dataStore = PlexDataStore.shared
@@ -14,8 +17,6 @@ struct PlexHomeView: View {
     @AppStorage("showHomeHero") private var showHomeHero = false
     @AppStorage("enablePersonalizedRecommendations") private var enablePersonalizedRecommendations = false
     @Environment(\.nestedNavigationState) private var nestedNavState
-    @Environment(\.focusScopeManager) private var focusScopeManager
-    @Environment(\.isSidebarVisible) private var isSidebarVisible
     @State private var selectedItem: PlexMetadata?
     @State private var heroItem: PlexMetadata?
     @State private var cachedProcessedHubs: [PlexHub] = []  // Memoized to avoid recalculation on every render
@@ -23,6 +24,10 @@ struct PlexHomeView: View {
     @State private var isLoadingRecommendations = false
     @State private var recommendationsError: String?
     @FocusState private var focusedItemId: String?  // Tracks focused item by "context:itemId" format
+    @State private var rowPreviewRequest: PreviewRequest?
+    @State private var previewRestoreTarget: PreviewSourceTarget?
+    @State private var capturedSourceFrames: [PreviewSourceTarget: CGRect] = [:]
+    @State private var showPreviewCover = false
 
     private let recommendationService = PersonalizedRecommendationService.shared
     private let recommendationsContentType: RecommendationContentType = .moviesAndShows
@@ -153,9 +158,12 @@ struct PlexHomeView: View {
                 }
             }
             .onAppear {
+                homeLog.info("PlexHomeView onAppear — cachedHubs=\(self.cachedProcessedHubs.count), dataStoreHubs=\(self.dataStore.hubs.count)")
                 // Initial computation of processed hubs
                 if cachedProcessedHubs.isEmpty && !dataStore.hubs.isEmpty {
                     cachedProcessedHubs = computeProcessedHubs(from: dataStore.hubs)
+                    homeLog.info("Computed \(self.cachedProcessedHubs.count) processed hubs on appear, setting isHomeContentReady=\(!self.cachedProcessedHubs.isEmpty)")
+                    dataStore.isHomeContentReady = !cachedProcessedHubs.isEmpty
                 }
                 // Only select hero if we don't have one yet
                 if heroItem == nil {
@@ -170,7 +178,6 @@ struct PlexHomeView: View {
                 // Initialize Home visibility for libraries if not configured
                 guard !dataStore.libraries.isEmpty else { return }
                 dataStore.librarySettings.initializeHomeVisibility(for: dataStore.libraries)
-                await dataStore.loadLibraryHubsIfNeeded()
             }
             .onChange(of: dataStore.hubsVersion) { _, _ in
                 // Recompute cached hubs when global hub data changes (for Continue Watching)
@@ -189,6 +196,10 @@ struct PlexHomeView: View {
                 cachedProcessedHubs = computeProcessedHubs(from: dataStore.hubs)
                 Task { await dataStore.loadLibraryHubsIfNeeded() }
             }
+            .onChange(of: cachedProcessedHubs.isEmpty) { _, isEmpty in
+                homeLog.info("cachedProcessedHubs.isEmpty changed to \(isEmpty) (count: \(self.cachedProcessedHubs.count))")
+                dataStore.isHomeContentReady = !isEmpty
+            }
             .onChange(of: enablePersonalizedRecommendations) { _, _ in
                 handleRecommendationsToggle()
             }
@@ -205,54 +216,26 @@ struct PlexHomeView: View {
             .navigationDestination(item: $selectedItem) { item in
                 PlexDetailView(item: item)
             }
+            .overlayPreferenceValue(PreviewSourceFramePreferenceKey.self) { anchors in
+                // Resolve anchor frames into CGRects
+                GeometryReader { proxy in
+                    Color.clear
+                        .hidden()
+                        .task(id: anchors.count) {
+                            capturedSourceFrames = Dictionary(uniqueKeysWithValues: anchors.map { ($0.key, proxy[$0.value]) })
+                        }
+                }
+                .allowsHitTesting(false)
+            }
+            .onChange(of: showPreviewCover) { _, isShowing in
+                if isShowing, let request = rowPreviewRequest {
+                    presentPreview(request: request)
+                }
+            }
         }
-        // Tell parent we're in nested navigation when viewing detail
         .onChange(of: selectedItem) { _, newValue in
-            let isNested = newValue != nil
-            nestedNavState.isNested = isNested
-            if isNested {
-                // Set the go back action to clear selectedItem
-                nestedNavState.goBackAction = { [weak nestedNavState] in
-                    selectedItem = nil
-                    nestedNavState?.isNested = false
-                }
-            } else {
-                nestedNavState.goBackAction = nil
-            }
-        }
-        // Save focus when it changes (only when content scope is active)
-        .onChange(of: focusedItemId) { _, newValue in
-            guard focusScopeManager.isScopeActive(.content) else {
-                // Scope not active, don't track focus changes
-                return
-            }
-            if let newValue {
-                // Parse context:itemId format and save to focus manager
-                let parts = newValue.split(separator: ":", maxSplits: 1)
-                if parts.count == 2 {
-                    focusScopeManager.setFocus(
-                        itemId: String(parts[1]),
-                        context: String(parts[0]),
-                        scope: .content
-                    )
-                } else {
-                    focusScopeManager.setFocus(itemId: newValue, scope: .content)
-                }
-            }
-        }
-        // Restore focus when scope becomes active
-        .onChange(of: focusScopeManager.restoreTrigger) { _, _ in
-            // Only restore focus if not in nested navigation (detail view)
-            if selectedItem == nil,
-               focusScopeManager.isScopeActive(.content),
-               let savedItem = focusScopeManager.focusedItem {
-                // Reconstruct the composite ID
-                if let context = savedItem.context {
-                    focusedItemId = "\(context):\(savedItem.itemId)"
-                } else {
-                    focusedItemId = savedItem.itemId
-                }
-            }
+            print("[PlexHome] selectedItem changed: \(newValue?.title ?? "nil") (ratingKey: \(newValue?.ratingKey ?? "nil"))")
+            updateNestedNavigationState()
         }
         // Handle navigation from player (Go to Season / Go to Show)
         .onReceive(NotificationCenter.default.publisher(for: .navigateToContent)) { notification in
@@ -273,6 +256,104 @@ struct PlexHomeView: View {
                     print("❌ [Navigation] Failed to fetch metadata for ratingKey \(ratingKey): \(error)")
                 }
             }
+        }
+    }
+
+    // MARK: - Direct Playback (Continue Watching)
+
+    /// Play an item directly without navigating to detail view
+    private func playItemDirectly(_ item: PlexMetadata) {
+        Task {
+            guard let serverURL = authManager.selectedServerURL,
+                  let token = authManager.selectedServerToken else { return }
+
+            let (artImage, thumbImage) = await getPlayerImages(for: item, serverURL: serverURL, authToken: token)
+
+            await MainActor.run {
+                let resumeOffset = item.viewOffset.map { Double($0) / 1000.0 }
+
+                let viewModel = UniversalPlayerViewModel(
+                    metadata: item,
+                    serverURL: serverURL,
+                    authToken: token,
+                    startOffset: resumeOffset != nil && resumeOffset! > 0 ? resumeOffset : nil,
+                    loadingArtImage: artImage,
+                    loadingThumbImage: thumbImage
+                )
+                let nativePlayer = NativePlayerViewController(viewModel: viewModel)
+                nativePlayer.onDismiss = {
+                    Task {
+                        await dataStore.refreshHubs()
+                    }
+                }
+
+                if let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+                   let rootVC = scene.windows.first?.rootViewController {
+                    var topVC = rootVC
+                    while let presented = topVC.presentedViewController {
+                        topVC = presented
+                    }
+                    topVC.present(nativePlayer, animated: true)
+                }
+            }
+        }
+    }
+
+    /// Get art and poster images for the player loading screen
+    private func getPlayerImages(for metadata: PlexMetadata, serverURL: String, authToken: String) async -> (UIImage?, UIImage?) {
+        let request = metadata.heroBackdropRequest(
+            serverURL: serverURL,
+            authToken: authToken
+        )
+        return await HeroBackdropResolver.shared.playerLoadingImages(for: request)
+    }
+
+    // MARK: - Preview Presentation (UIKit Modal)
+
+    private func presentPreview(request: PreviewRequest) {
+        let menuBridge = PreviewMenuBridge()
+
+        let previewContent = PreviewOverlayHost(
+            request: request,
+            sourceFrames: capturedSourceFrames,
+            serverURL: authManager.selectedServerURL ?? "",
+            authToken: authManager.selectedServerToken ?? "",
+            onDismiss: { [weak menuBridge] sourceTarget in
+                _ = menuBridge  // prevent retain cycle warning
+                previewRestoreTarget = sourceTarget
+                // Find and dismiss the preview VC
+                if let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+                   let rootVC = scene.windows.first?.rootViewController {
+                    var topVC = rootVC
+                    while let presented = topVC.presentedViewController {
+                        topVC = presented
+                    }
+                    if let previewVC = topVC as? PreviewContainerViewController {
+                        previewVC.dismissPreview()
+                    }
+                }
+            },
+            menuBridge: menuBridge
+        )
+
+        let container = PreviewContainerViewController(
+            content: previewContent,
+            menuHandler: {
+                menuBridge.triggerMenu()
+            }
+        )
+        container.onDismiss = {
+            showPreviewCover = false
+            rowPreviewRequest = nil
+        }
+
+        if let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+           let rootVC = scene.windows.first?.rootViewController {
+            var topVC = rootVC
+            while let presented = topVC.presentedViewController {
+                topVC = presented
+            }
+            topVC.present(container, animated: false)
         }
     }
 
@@ -343,6 +424,24 @@ struct PlexHomeView: View {
         }
     }
 
+    private func homeRowID(for hub: PlexHub, index: Int) -> String {
+        let identifier = hub.hubIdentifier ?? hub.key ?? hub.hubKey ?? hub.title ?? "row"
+        return "home:\(index):\(identifier)"
+    }
+
+    private func updateNestedNavigationState() {
+        let isNested = selectedItem != nil
+        nestedNavState.isNested = isNested
+        if isNested {
+            nestedNavState.goBackAction = { [weak nestedNavState] in
+                selectedItem = nil
+                nestedNavState?.isNested = false
+            }
+        } else {
+            nestedNavState.goBackAction = nil
+        }
+    }
+
     // MARK: - Content View
 
     private var contentView: some View {
@@ -372,19 +471,33 @@ struct PlexHomeView: View {
                         if let items = hub.Metadata, !items.isEmpty {
                             let isContinueWatching = isContinueWatchingHub(hub)
                             InfiniteContentRow(
+                                rowID: homeRowID(for: hub, index: index),
                                 title: hub.title ?? "Unknown",
                                 initialItems: items,
                                 hubKey: hub.key ?? hub.hubKey,
                                 hubIdentifier: hub.hubIdentifier,
                                 serverURL: authManager.selectedServerURL ?? "",
                                 authToken: authManager.selectedServerToken ?? "",
+                                isContinueWatching: isContinueWatching,
                                 contextMenuSource: isContinueWatching ? .continueWatching : .other,
                                 onItemSelected: { item in
                                     selectedItem = item
                                 },
+                                onPlayItem: { item in
+                                    playItemDirectly(item)
+                                },
+                                onGoToItem: { item in
+                                    selectedItem = item
+                                },
                                 onRefreshNeeded: {
                                     await dataStore.refreshHubs()
-                                }
+                                },
+                                onPreviewRequested: isContinueWatching ? nil : { request in
+                                    homeLog.info("[Preview] Opening carousel: \(request.items.count) items, tapped index=\(request.selectedIndex), title=\(request.items[request.selectedIndex].title ?? "?")")
+                                    rowPreviewRequest = request
+                                    showPreviewCover = true
+                                },
+                                restorePreviewFocusTarget: $previewRestoreTarget
                             )
                         }
                     }
@@ -399,10 +512,6 @@ struct PlexHomeView: View {
             }
         }
         .scrollClipDisabled()  // Allow shadow overflow
-        #if os(tvOS)
-        .ignoresSafeArea(edges: .top)
-        .defaultFocus($focusedItemId, "hero")  // Set initial focus to hero
-        #endif
     }
 
     // MARK: - Connection Error Banner
@@ -445,7 +554,7 @@ struct PlexHomeView: View {
                         .strokeBorder(.yellow.opacity(0.3), lineWidth: 1)
                 )
         )
-        .padding(.horizontal, 80)
+        .padding(.horizontal, ScaledDimensions.rowHorizontalPadding)
         .padding(.top, 100)  // Below safe area
         .padding(.bottom, 20)
     }
@@ -481,7 +590,7 @@ struct PlexHomeView: View {
                 }
                 Spacer()
             }
-            .padding(.horizontal, 80)
+            .padding(.horizontal, ScaledDimensions.rowHorizontalPadding)
             .padding(.top, 24)
         } else if let error = recommendationsError {
             HStack(spacing: 12) {
@@ -501,10 +610,11 @@ struct PlexHomeView: View {
                 }
                 .buttonStyle(AppStoreButtonStyle())
             }
-            .padding(.horizontal, 80)
+            .padding(.horizontal, ScaledDimensions.rowHorizontalPadding)
             .padding(.vertical, 12)
         } else if !recommendations.isEmpty {
             InfiniteContentRow(
+                rowID: "home:recommendations",
                 title: "Personalized Recommendations",
                 initialItems: recommendations,
                 hubKey: nil,
@@ -517,7 +627,12 @@ struct PlexHomeView: View {
                 },
                 onRefreshNeeded: {
                     await refreshRecommendations(force: true)
-                }
+                },
+                onPreviewRequested: { request in
+                    rowPreviewRequest = request
+                    showPreviewCover = true
+                },
+                restorePreviewFocusTarget: $previewRestoreTarget
             )
         }
     }
@@ -610,11 +725,7 @@ struct HeroView<FocusTarget: Hashable>: View {
     let authToken: String
     let onSelect: () -> Void
 
-    @Environment(\.openSidebar) private var openSidebar
-    @Environment(\.isSidebarVisible) private var isSidebarVisible
-
-    // Hero art image loaded at full size with guaranteed off-main-thread decoding
-    @State private var heroArtImage: UIImage?
+    @StateObject private var heroBackdrop = HeroBackdropCoordinator()
 
     // Focus binding - supports both Bool and enum-based patterns
     private let focusBinding: FocusBinding<FocusTarget>
@@ -664,54 +775,25 @@ struct HeroView<FocusTarget: Hashable>: View {
         }
     }
 
-    private var artURL: URL? {
-        // Prefer art (backdrop) over thumb (poster)
-        let path = item.art ?? item.thumb
-        guard let path else { return nil }
-        var urlString = "\(serverURL)\(path)"
-        if !urlString.contains("X-Plex-Token") {
-            urlString += urlString.contains("?") ? "&" : "?"
-            urlString += "X-Plex-Token=\(authToken)"
-        }
-        return URL(string: urlString)
+    private var heroBackdropRequest: HeroBackdropRequest {
+        item.heroBackdropRequest(
+            serverURL: serverURL,
+            authToken: authToken
+        )
     }
 
     var body: some View {
-        #if os(tvOS)
         heroButtonView
-            .task(id: artURL) {
-                await loadHeroArt()
+            .task(id: heroBackdropRequest) {
+                heroBackdrop.load(request: heroBackdropRequest, motionLocked: false)
             }
-        #else
-        heroContentView
-            .frame(height: 400)
-            .task(id: artURL) {
-                await loadHeroArt()
-            }
-        #endif
-    }
-
-    /// Load hero art at full size with guaranteed off-main-thread decoding
-    private func loadHeroArt() async {
-        guard let url = artURL else {
-            heroArtImage = nil
-            return
-        }
-        heroArtImage = await ImageCacheManager.shared.imageFullSize(for: url)
     }
 
     private var heroContentView: some View {
         GeometryReader { geo in
             ZStack(alignment: .bottomLeading) {
                 // Background art - full width edge to edge
-                // Uses imageFullSize() for guaranteed off-main-thread PNG decoding (fixes RIVULET-C)
-                if let heroArtImage {
-                    Image(uiImage: heroArtImage)
-                        .resizable()
-                        .aspectRatio(contentMode: .fill)
-                        .frame(width: geo.size.width, height: geo.size.height)
-                        .clipped()
-                } else {
+                HeroBackdropImage(url: heroBackdrop.session.displayedBackdropURL) {
                     Rectangle()
                         .fill(
                             LinearGradient(
@@ -721,6 +803,8 @@ struct HeroView<FocusTarget: Hashable>: View {
                             )
                         )
                 }
+                .frame(width: geo.size.width, height: geo.size.height)
+                .clipped()
 
                 // Gradient overlay for text legibility (simplified 2-stop gradient)
                 LinearGradient(
@@ -773,7 +857,6 @@ struct HeroView<FocusTarget: Hashable>: View {
                             .frame(maxWidth: 800, alignment: .leading)
                     }
 
-                    #if os(tvOS)
                     // More Info indicator
                     HStack(spacing: 10) {
                         Image(systemName: "info.circle.fill")
@@ -790,7 +873,6 @@ struct HeroView<FocusTarget: Hashable>: View {
                     )
                     .opacity(isFocused ? 1 : 0.7)
                     .padding(.top, 8)
-                    #endif
                 }
                 .padding(.horizontal, 80)
                 .padding(.bottom, 70)
@@ -798,7 +880,6 @@ struct HeroView<FocusTarget: Hashable>: View {
         }
     }
 
-    #if os(tvOS)
     @ViewBuilder
     private var heroButtonView: some View {
         switch focusBinding {
@@ -822,13 +903,6 @@ struct HeroView<FocusTarget: Hashable>: View {
             )
             .scaleEffect(isFocused ? 1.02 : 1.0)
             .animation(.easeOut(duration: 0.1), value: isFocused)  // Faster de-focus
-            .onMoveCommand { direction in
-                // Ignore input when sidebar is visible
-                guard !isSidebarVisible else { return }
-                if direction == .left {
-                    openSidebar()
-                }
-            }
 
         case .enumTarget(let binding, let target):
             Button(action: onSelect) {
@@ -849,16 +923,8 @@ struct HeroView<FocusTarget: Hashable>: View {
             )
             .scaleEffect(isFocused ? 1.02 : 1.0)
             .animation(.easeOut(duration: 0.1), value: isFocused)  // Faster de-focus
-            .onMoveCommand { direction in
-                // Ignore input when sidebar is visible
-                guard !isSidebarVisible else { return }
-                if direction == .left {
-                    openSidebar()
-                }
-            }
         }
     }
-    #endif
 
     private func formatDuration(_ ms: Int) -> String {
         let minutes = ms / 60000
@@ -870,6 +936,104 @@ struct HeroView<FocusTarget: Hashable>: View {
         return "\(mins)m"
     }
 
+}
+
+// MARK: - Continue Watching Context Menu
+
+/// Switches between a custom Continue Watching context menu and the standard one
+struct ContinueWatchingContextMenuModifier: ViewModifier {
+    let item: PlexMetadata
+    let serverURL: String
+    let authToken: String
+    let isContinueWatching: Bool
+    let contextMenuSource: MediaItemContextSource
+    var onGoToItem: ((PlexMetadata) -> Void)?
+    var onRefreshNeeded: MediaItemRefreshCallback?
+
+    @State private var isPerformingAction = false
+    private let networkManager = PlexNetworkManager.shared
+    private let dataStore = PlexDataStore.shared
+
+    func body(content: Content) -> some View {
+        if isContinueWatching {
+            content.contextMenu {
+                // Go to Episode
+                Button {
+                    onGoToItem?(item)
+                } label: {
+                    Label("Go to Episode", systemImage: "info.circle")
+                }
+
+                Divider()
+
+                // Mark as Watched
+                Button {
+                    performAction(optimisticWatched: true) {
+                        try await networkManager.markWatched(
+                            serverURL: serverURL,
+                            authToken: authToken,
+                            ratingKey: item.ratingKey ?? ""
+                        )
+                    }
+                } label: {
+                    Label("Mark as Watched", systemImage: "rectangle.badge.checkmark")
+                }
+
+                // Remove from Continue Watching
+                Button {
+                    performAction {
+                        try await networkManager.removeFromContinueWatching(
+                            serverURL: serverURL,
+                            authToken: authToken,
+                            ratingKey: item.ratingKey ?? ""
+                        )
+                    }
+                } label: {
+                    Label("Remove from Continue Watching", systemImage: "trash")
+                }
+
+                Divider()
+
+                // Refresh Metadata
+                Button {
+                    performAction {
+                        try await networkManager.refreshMetadata(
+                            serverURL: serverURL,
+                            authToken: authToken,
+                            ratingKey: item.ratingKey ?? ""
+                        )
+                    }
+                } label: {
+                    Label("Refresh Metadata", systemImage: "arrow.clockwise")
+                }
+            }
+        } else {
+            content.mediaItemContextMenu(
+                item: item,
+                serverURL: serverURL,
+                authToken: authToken,
+                source: contextMenuSource,
+                onRefreshNeeded: onRefreshNeeded
+            )
+        }
+    }
+
+    private func performAction(optimisticWatched: Bool? = nil, _ action: @escaping () async throws -> Void) {
+        guard !isPerformingAction else { return }
+        isPerformingAction = true
+        Task {
+            do {
+                try await action()
+                if let watched = optimisticWatched, let ratingKey = item.ratingKey {
+                    await MainActor.run {
+                        dataStore.updateItemWatchStatus(ratingKey: ratingKey, watched: watched)
+                    }
+                }
+                await onRefreshNeeded?()
+            } catch {}
+            isPerformingAction = false
+        }
+    }
 }
 
 // MARK: - Content Row (replaces MediaRow for Home)
@@ -885,13 +1049,13 @@ struct ContentRow: View {
         VStack(alignment: .leading, spacing: 24) {
             // Section title
             Text(title)
-                .font(.system(size: 28, weight: .semibold))
+                .font(.system(size: ScaledDimensions.sectionTitleSize, weight: .semibold))
                 .foregroundStyle(.white.opacity(0.9))
-                .padding(.horizontal, 80)
+                .padding(.horizontal, ScaledDimensions.rowHorizontalPadding)
 
             // Horizontal scroll of posters
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 24) {
+                HStack(spacing: ScaledDimensions.rowItemSpacing) {
                     ForEach(items, id: \.ratingKey) { item in
                         Button {
                             onItemSelected?(item)
@@ -902,15 +1066,11 @@ struct ContentRow: View {
                                 authToken: authToken
                             )
                         }
-                        #if os(tvOS)
                         .buttonStyle(CardButtonStyle())
-                        #else
-                        .buttonStyle(.plain)
-                        #endif
                     }
                 }
-                .padding(.horizontal, 80)
-                .padding(.vertical, 32)  // Room for scale effect and shadow
+                .padding(.horizontal, ScaledDimensions.rowHorizontalPadding)
+                .padding(.vertical, ScaledDimensions.rowVerticalPadding)  // Room for scale effect and shadow
             }
             .scrollClipDisabled()  // Allow shadow overflow
         }
@@ -921,19 +1081,21 @@ struct ContentRow: View {
 
 /// A content row that loads more items as the user scrolls near the end
 struct InfiniteContentRow: View {
+    let rowID: String
     let title: String
     let initialItems: [PlexMetadata]
     let hubKey: String?  // The hub's key for fetching more items
     let hubIdentifier: String?  // The hub's identifier (e.g., "home.movies.recent") - needed for /hubs/items endpoint
     let serverURL: String
     let authToken: String
+    var isContinueWatching: Bool = false
     var contextMenuSource: MediaItemContextSource = .other
     var onItemSelected: ((PlexMetadata) -> Void)?
+    var onPlayItem: ((PlexMetadata) -> Void)?
+    var onGoToItem: ((PlexMetadata) -> Void)?
     var onRefreshNeeded: MediaItemRefreshCallback?
-
-    @Environment(\.openSidebar) private var openSidebar
-    @Environment(\.focusScopeManager) private var focusScopeManager
-    @Environment(\.isSidebarVisible) private var isSidebarVisible
+    var onPreviewRequested: ((PreviewRequest) -> Void)?
+    var restorePreviewFocusTarget: Binding<PreviewSourceTarget?> = .constant(nil)
 
     @State private var items: [PlexMetadata] = []
     @State private var isLoadingMore = false
@@ -943,7 +1105,19 @@ struct InfiniteContentRow: View {
 
     /// Create a unique focus ID for an item in this row
     private func focusId(for item: PlexMetadata) -> String {
-        "\(title):\(item.ratingKey ?? "")"
+        focusId(forItemID: sourceItemID(for: item))
+    }
+
+    private func focusId(forItemID itemID: String) -> String {
+        "\(rowID):\(itemID)"
+    }
+
+    private func sourceItemID(for item: PlexMetadata, index: Int? = nil) -> String {
+        if let ratingKey = item.ratingKey {
+            return ratingKey
+        }
+        let suffix = index.map(String.init) ?? "unknown"
+        return "\(rowID)-\(suffix)"
     }
 
     private let networkManager = PlexNetworkManager.shared
@@ -973,48 +1147,68 @@ struct InfiniteContentRow: View {
             // Section title with item count
             HStack(spacing: 12) {
                 Text(title)
-                    .font(.system(size: 40, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.9))
+                    .font(.system(size: 28, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.6))
 
                 if let total = totalSize, total > items.count {
                     Text("\(items.count) of \(total)")
-                        .font(.system(size: 19, weight: .medium))
-                        .foregroundStyle(.white.opacity(0.4))
+                        .font(.system(size: 17, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.3))
                 } else if hasReachedEnd && items.count > pageSize {
                     Text("All \(items.count)")
-                        .font(.system(size: 19, weight: .medium))
-                        .foregroundStyle(.white.opacity(0.4))
+                        .font(.system(size: 17, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.3))
                 }
             }
-            .padding(.horizontal, 80)
+            .padding(.horizontal, ScaledDimensions.rowHorizontalPadding)
 
             // Horizontal scroll of posters with infinite loading
             ScrollView(.horizontal, showsIndicators: false) {
-                LazyHStack(spacing: 24) {  // Lazy to avoid laying out hundreds of offscreen posters
+                LazyHStack(spacing: ScaledDimensions.rowItemSpacing) {  // Lazy to avoid laying out hundreds of offscreen posters
                     ForEach(Array(items.enumerated()), id: \.element.ratingKey) { index, item in
                         Button {
-                            onItemSelected?(item)
+                            if isContinueWatching {
+                                onPlayItem?(item)
+                            } else if let onPreviewRequested {
+                                onPreviewRequested(
+                                    PreviewRequest(
+                                        items: items,
+                                        selectedIndex: index,
+                                        sourceRowID: rowID,
+                                        sourceItemID: sourceItemID(for: item, index: index)
+                                    )
+                                )
+                            } else {
+                                onItemSelected?(item)
+                            }
                         } label: {
-                            MediaPosterCard(
-                                item: item,
-                                serverURL: serverURL,
-                                authToken: authToken
-                            )
+                            if isContinueWatching {
+                                ContinueWatchingCard(
+                                    item: item,
+                                    serverURL: serverURL,
+                                    authToken: authToken,
+                                    isFocused: focusedItemId == focusId(for: item)
+                                )
+                            } else {
+                                MediaPosterCard(
+                                    item: item,
+                                    serverURL: serverURL,
+                                    authToken: authToken
+                                )
+                            }
                         }
-                        #if os(tvOS)
+                        .previewSourceAnchor(rowID: rowID, itemID: sourceItemID(for: item, index: index))
                         .buttonStyle(CardButtonStyle())
                         .focused($focusedItemId, equals: focusId(for: item))
-                        .modifier(LeftEdgeSidebarTrigger(isFirstItem: index == 0, openSidebar: openSidebar))
-                        #else
-                        .buttonStyle(.plain)
-                        #endif
-                        .mediaItemContextMenu(
+                        .modifier(ContinueWatchingContextMenuModifier(
                             item: item,
                             serverURL: serverURL,
                             authToken: authToken,
-                            source: contextMenuSource,
+                            isContinueWatching: isContinueWatching,
+                            contextMenuSource: contextMenuSource,
+                            onGoToItem: onGoToItem,
                             onRefreshNeeded: onRefreshNeeded
-                        )
+                        ))
                         .onAppear {
                             // Load more when user is 5 items from the end
                             if index >= items.count - 5 {
@@ -1032,8 +1226,8 @@ struct InfiniteContentRow: View {
                         endIndicator
                     }
                 }
-                .padding(.horizontal, 80)
-                .padding(.vertical, 32)  // Room for scale effect and shadow
+                .padding(.horizontal, ScaledDimensions.rowHorizontalPadding)
+                .padding(.vertical, ScaledDimensions.rowVerticalPadding)  // Room for scale effect and shadow
             }
             .scrollClipDisabled()  // Allow shadow overflow
         }
@@ -1064,34 +1258,19 @@ struct InfiniteContentRow: View {
                 }
             }
         }
+        .onChange(of: restorePreviewFocusTarget.wrappedValue) { _, target in
+            guard let target, target.rowID == rowID else { return }
+
+            let targetFocusID = focusId(forItemID: target.itemID)
+            guard items.contains(where: { sourceItemID(for: $0) == target.itemID }) else { return }
+
+            focusedItemId = nil
+            DispatchQueue.main.async {
+                focusedItemId = targetFocusID
+                restorePreviewFocusTarget.wrappedValue = nil
+            }
+        }
         .focusSection()
-        #if os(tvOS)
-        // Save focus when it changes (only when content scope is active)
-        .onChange(of: focusedItemId) { _, newValue in
-            guard focusScopeManager.isScopeActive(.content) else { return }
-            if let newValue {
-                // Parse context:itemId format
-                let parts = newValue.split(separator: ":", maxSplits: 1)
-                if parts.count == 2 {
-                    focusScopeManager.setFocus(
-                        itemId: String(parts[1]),
-                        context: String(parts[0]),
-                        scope: .content
-                    )
-                }
-            }
-        }
-        // Restore focus when scope becomes active
-        .onChange(of: focusScopeManager.restoreTrigger) { _, _ in
-            guard focusScopeManager.isScopeActive(.content),
-                  let savedItem = focusScopeManager.focusedItem,
-                  savedItem.context == title else { return }
-            // Check if this row contains the saved item
-            if items.contains(where: { $0.ratingKey == savedItem.itemId }) {
-                focusedItemId = "\(title):\(savedItem.itemId)"
-            }
-        }
-        #endif
     }
 
     /// Skeleton placeholder card shown while loading more items
@@ -1099,32 +1278,33 @@ struct InfiniteContentRow: View {
         skeletonPosterCard
     }
 
-    /// Single skeleton poster card matching MediaPosterCard dimensions
+    /// Single skeleton card matching the appropriate card dimensions
     private var skeletonPosterCard: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            // Poster placeholder - square for music, rectangle for video
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(.white.opacity(0.08))
-                #if os(tvOS)
-                .frame(width: 220, height: isMusicRow ? 220 : 330)
-                #else
-                .frame(width: 180, height: isMusicRow ? 180 : 270)
-                #endif
+        Group {
+            if isContinueWatching {
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(.white.opacity(0.08))
+                    .frame(
+                        width: ScaledDimensions.continueWatchingWidth,
+                        height: ScaledDimensions.continueWatchingHeight
+                    )
+            } else {
+                VStack(alignment: .leading, spacing: 12) {
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .fill(.white.opacity(0.08))
+                        .frame(width: 220, height: isMusicRow ? 220 : 330)
 
-            // Title placeholder
-            VStack(alignment: .leading, spacing: 6) {
-                RoundedRectangle(cornerRadius: 4, style: .continuous)
-                    .fill(.white.opacity(0.06))
-                    .frame(width: 160, height: 14)
-                RoundedRectangle(cornerRadius: 4, style: .continuous)
-                    .fill(.white.opacity(0.04))
-                    .frame(width: 100, height: 12)
+                    VStack(alignment: .leading, spacing: 6) {
+                        RoundedRectangle(cornerRadius: 4, style: .continuous)
+                            .fill(.white.opacity(0.06))
+                            .frame(width: 160, height: 14)
+                        RoundedRectangle(cornerRadius: 4, style: .continuous)
+                            .fill(.white.opacity(0.04))
+                            .frame(width: 100, height: 12)
+                    }
+                    .frame(height: 52, alignment: .top)
+                }
             }
-            #if os(tvOS)
-            .frame(height: 52, alignment: .top)
-            #else
-            .frame(height: 44, alignment: .top)
-            #endif
         }
     }
 
@@ -1195,31 +1375,6 @@ struct InfiniteContentRow: View {
     }
 }
 
-// MARK: - Left Edge Sidebar Trigger Modifier
-
-/// A modifier that only adds onMoveCommand to the first item in a row
-struct LeftEdgeSidebarTrigger: ViewModifier {
-    let isFirstItem: Bool
-    let openSidebar: () -> Void
-
-    @Environment(\.isSidebarVisible) private var isSidebarVisible
-
-    func body(content: Content) -> some View {
-        if isFirstItem {
-            content.onMoveCommand { direction in
-                // Ignore input when sidebar is visible
-                guard !isSidebarVisible else { return }
-                if direction == .left {
-                    openSidebar()
-                }
-            }
-        } else {
-            content
-        }
-    }
-}
-
 #Preview {
     PlexHomeView()
-        .preferredColorScheme(.dark)
 }
