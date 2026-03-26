@@ -9,17 +9,23 @@ import SwiftUI
 
 struct IPTVSettingsView: View {
     @Binding var focusedSettingId: String?
+    var onNavigateToSource: ((LiveTVDataStore.LiveTVSourceInfo) -> Void)?
+    var onNavigateToAddSource: (() -> Void)?
     @StateObject private var dataStore = LiveTVDataStore.shared
     @StateObject private var authManager = PlexAuthManager.shared
-    @State private var showAddSourceSheet = false
-    @State private var selectedSourceForDetail: LiveTVDataStore.LiveTVSourceInfo?
     @State private var plexDVRAvailable: Bool = false
     @State private var isCheckingPlexDVR: Bool = false
     @State private var isAddingPlexLiveTV: Bool = false
     @State private var plexAddError: String?
 
-    init(focusedSettingId: Binding<String?> = .constant(nil)) {
+    init(
+        focusedSettingId: Binding<String?> = .constant(nil),
+        onNavigateToSource: ((LiveTVDataStore.LiveTVSourceInfo) -> Void)? = nil,
+        onNavigateToAddSource: (() -> Void)? = nil
+    ) {
         self._focusedSettingId = focusedSettingId
+        self.onNavigateToSource = onNavigateToSource
+        self.onNavigateToAddSource = onNavigateToAddSource
     }
 
     var body: some View {
@@ -27,7 +33,7 @@ struct IPTVSettingsView: View {
             ForEach(dataStore.sources) { source in
                 LiveTVSourceRow(
                     source: source,
-                    action: { selectedSourceForDetail = source },
+                    action: { onNavigateToSource?(source) },
                     onFocusChange: { if $0 { focusedSettingId = descriptorKey(for: source) } }
                 )
             }
@@ -37,7 +43,7 @@ struct IPTVSettingsView: View {
                 iconColor: .blue,
                 title: "Add Live TV Source",
                 subtitle: "",
-                action: { showAddSourceSheet = true },
+                action: { onNavigateToAddSource?() },
                 onFocusChange: { if $0 { focusedSettingId = "addLiveTVSource" } }
             )
 
@@ -61,12 +67,6 @@ struct IPTVSettingsView: View {
             } else {
                 plexDVRAvailable = false
             }
-        }
-        .fullScreenCover(isPresented: $showAddSourceSheet) {
-            AddLiveTVSourceSheet()
-        }
-        .fullScreenCover(item: $selectedSourceForDetail) { source in
-            LiveTVSourceDetailSheet(source: source)
         }
     }
 

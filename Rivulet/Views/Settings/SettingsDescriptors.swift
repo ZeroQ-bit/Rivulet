@@ -255,6 +255,71 @@ enum SettingsDescriptorStore {
             iconColor: .orange,
             description: "Your Plex server has Live TV available. Tap to automatically add it as a source."
         ),
+        "refreshChannels": SettingDescriptor(
+            icon: "arrow.clockwise",
+            iconColor: .blue,
+            description: "Reload the channel list and EPG data from this source."
+        ),
+        "removeSource": SettingDescriptor(
+            icon: "trash",
+            iconColor: .red,
+            description: "Remove this Live TV source and all its channels."
+        ),
+        "addPlexLiveTV": SettingDescriptor(
+            icon: "play.rectangle.fill",
+            iconColor: .orange,
+            description: "Add Live TV channels from your Plex server's DVR tuners."
+        ),
+        "addDispatcharrSource": SettingDescriptor(
+            icon: "server.rack",
+            iconColor: .blue,
+            description: "Connect to a server that provides M3U playlists and EPG data, like Dispatcharr or Threadfin."
+        ),
+        "addM3USource": SettingDescriptor(
+            icon: "list.bullet.rectangle",
+            iconColor: .green,
+            description: "Add any M3U or M3U8 playlist URL for IPTV channels."
+        ),
+        "addPlexConfirm": SettingDescriptor(
+            icon: "play.rectangle.fill",
+            iconColor: .orange,
+            description: "Tap to add Live TV channels from your Plex server."
+        ),
+        "serverURL": SettingDescriptor(
+            icon: "globe",
+            iconColor: .blue,
+            description: "The base URL of your M3U server."
+        ),
+        "displayNameField": SettingDescriptor(
+            icon: "textformat",
+            iconColor: .purple,
+            description: "A display name for this source in the sidebar."
+        ),
+        "apiTokenField": SettingDescriptor(
+            icon: "key",
+            iconColor: .orange,
+            description: "Optional API token for authenticated servers."
+        ),
+        "m3uURLField": SettingDescriptor(
+            icon: "list.bullet.rectangle",
+            iconColor: .green,
+            description: "URL to your M3U or M3U8 playlist file."
+        ),
+        "epgURLField": SettingDescriptor(
+            icon: "calendar",
+            iconColor: .orange,
+            description: "Optional XMLTV EPG URL for program guide data."
+        ),
+        "validateServer": SettingDescriptor(
+            icon: "checkmark.circle",
+            iconColor: .blue,
+            description: "Test the connection to your server before adding."
+        ),
+        "addSourceConfirm": SettingDescriptor(
+            icon: "plus.circle.fill",
+            iconColor: .green,
+            description: "Add this source and start loading channels."
+        ),
 
         // MARK: About
         "changelog": SettingDescriptor(
@@ -284,6 +349,11 @@ enum SettingsDescriptorStore {
         case .audioLanguagePicker: return ("waveform", .cyan)
         case .subtitlesPicker: return ("captions.bubble", .yellow)
         case .autoplayCountdownPicker: return ("forward.end.alt", .purple)
+        case .liveTVSourceDetail: return ("tv.and.mediabox", .blue)
+        case .addLiveTVSource: return ("plus.circle.fill", .blue)
+        case .addPlexLiveTV: return ("play.rectangle.fill", .orange)
+        case .addDispatcharrSource: return ("server.rack", .blue)
+        case .addM3USource: return ("list.bullet.rectangle", .green)
         }
     }
 }

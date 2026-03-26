@@ -13,6 +13,8 @@ enum SettingsPage: Hashable, CaseIterable {
     case root
     case appearance, playback, liveTV, servers, about
     case plex, iptv, libraries, cache, userProfiles
+    case liveTVSourceDetail
+    case addLiveTVSource, addPlexLiveTV, addDispatcharrSource, addM3USource
     case displaySizePicker, audioLanguagePicker, subtitlesPicker, autoplayCountdownPicker
 
     var title: String {
@@ -25,6 +27,11 @@ enum SettingsPage: Hashable, CaseIterable {
         case .about: return "About"
         case .plex: return "Plex Server"
         case .iptv: return "Live TV Sources"
+        case .liveTVSourceDetail: return "Source Details"
+        case .addLiveTVSource: return "Add Live TV Source"
+        case .addPlexLiveTV: return "Add Plex Live TV"
+        case .addDispatcharrSource: return "Add M3U Server"
+        case .addM3USource: return "Add M3U Playlist"
         case .libraries: return "Sidebar Libraries"
         case .cache: return "Cache & Storage"
         case .userProfiles: return "User Profiles"
@@ -226,6 +233,7 @@ struct SettingsView: View {
     @State private var focusState = SettingsFocusState()
     @State private var focusTrigger = 0
     @State private var showChangelog = false
+    @State private var selectedLiveTVSource: LiveTVDataStore.LiveTVSourceInfo?
 
     // AppStorage
     @AppStorage("showHomeHero") private var showHomeHero = false
@@ -416,7 +424,39 @@ struct SettingsView: View {
         case .plex:
             PlexSettingsView(focusedSettingId: focusedSettingIdBinding)
         case .iptv:
-            IPTVSettingsView(focusedSettingId: focusedSettingIdBinding)
+            IPTVSettingsView(
+                focusedSettingId: focusedSettingIdBinding,
+                onNavigateToSource: { source in
+                    selectedLiveTVSource = source
+                    navigate(to: .liveTVSourceDetail)
+                },
+                onNavigateToAddSource: {
+                    navigate(to: .addLiveTVSource)
+                }
+            )
+        case .liveTVSourceDetail:
+            if let source = selectedLiveTVSource {
+                LiveTVSourceDetailView(source: source, focusedSettingId: focusedSettingIdBinding) {
+                    goBack()
+                }
+            }
+        case .addLiveTVSource:
+            AddLiveTVSourcePickerView(
+                focusedSettingId: focusedSettingIdBinding,
+                onNavigate: { navigate(to: $0) }
+            )
+        case .addPlexLiveTV:
+            AddPlexLiveTVSettingsView(focusedSettingId: focusedSettingIdBinding) {
+                navigateBackTo(.iptv)
+            }
+        case .addDispatcharrSource:
+            AddDispatcharrSettingsView(focusedSettingId: focusedSettingIdBinding) {
+                navigateBackTo(.iptv)
+            }
+        case .addM3USource:
+            AddM3USettingsView(focusedSettingId: focusedSettingIdBinding) {
+                navigateBackTo(.iptv)
+            }
         case .libraries:
             LibrarySettingsView(focusedSettingId: focusedSettingIdBinding)
         case .cache:
@@ -791,6 +831,17 @@ struct SettingsView: View {
         isForward = false
         withAnimation(.easeOut(duration: 0.45)) {
             navigationStack.removeLast()
+        }
+    }
+
+    private func navigateBackTo(_ page: SettingsPage) {
+        focusState.focusedSettingId = nil
+        focusState.focusedSubtext = nil
+        isForward = false
+        withAnimation(.easeOut(duration: 0.45)) {
+            if let index = navigationStack.lastIndex(of: page) {
+                navigationStack.removeSubrange((index + 1)...)
+            }
         }
     }
 

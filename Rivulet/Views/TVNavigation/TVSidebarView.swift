@@ -181,7 +181,7 @@ struct TVSidebarView: View {
                 Label {
                     Text(selectedTab == .account ? "Switch Profile" : profileName)
                 } icon: {
-                    SidebarProfileAvatar(user: profileManager.selectedUser, size: 20)
+                    SidebarProfileAvatar(user: profileManager.selectedUser, size: 20, trailingPad: 10)
                         .frame(width: 28, height: 28)
                 }
             }
@@ -509,20 +509,28 @@ struct TVSidebarView: View {
 struct SidebarProfileAvatar: View {
     let user: PlexHomeUser?
     let size: CGFloat
+    var trailingPad: CGFloat = 0
 
     @State private var circularImage: UIImage?
+
+    private var totalWidth: CGFloat { size + trailingPad }
 
     var body: some View {
         Group {
             if let circularImage {
                 Image(uiImage: circularImage)
-                    .resizable()
                     .renderingMode(.original)
             } else {
-                placeholder
+                HStack(spacing: 0) {
+                    placeholder
+                        .frame(width: size, height: size)
+                    if trailingPad > 0 {
+                        Color.clear.frame(width: trailingPad)
+                    }
+                }
             }
         }
-        .frame(width: size, height: size)
+        .frame(width: totalWidth, height: size)
         .task(id: user?.thumb) {
             await loadCircularAvatar()
         }
@@ -548,8 +556,9 @@ struct SidebarProfileAvatar: View {
 
         guard let source = image else { return }
 
-        // Render circular image with border
-        let renderer = UIGraphicsImageRenderer(size: CGSize(width: size, height: size))
+        // Render circular image with border (wider canvas for trailing pad)
+        let canvasWidth = size + trailingPad
+        let renderer = UIGraphicsImageRenderer(size: CGSize(width: canvasWidth, height: size))
         let circular = renderer.image { ctx in
             let rect = CGRect(origin: .zero, size: CGSize(width: size, height: size))
             let circlePath = UIBezierPath(ovalIn: rect)

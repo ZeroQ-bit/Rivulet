@@ -2,10 +2,111 @@
 //  LiveTVSourceDetailSheet.swift
 //  Rivulet
 //
-//  Full-screen detail view for managing an individual Live TV source
+//  Live TV source detail — inline settings page and full-screen sheet
 //
 
 import SwiftUI
+
+// MARK: - Inline Settings View (navigated to within settings)
+
+struct LiveTVSourceDetailView: View {
+    let source: LiveTVDataStore.LiveTVSourceInfo
+    @Binding var focusedSettingId: String?
+    var onRemoved: (() -> Void)?
+
+    @StateObject private var dataStore = LiveTVDataStore.shared
+    @State private var isRefreshing = false
+    @State private var showDeleteConfirmation = false
+
+    init(source: LiveTVDataStore.LiveTVSourceInfo, focusedSettingId: Binding<String?> = .constant(nil), onRemoved: (() -> Void)? = nil) {
+        self.source = source
+        self._focusedSettingId = focusedSettingId
+        self.onRemoved = onRemoved
+    }
+
+    var body: some View {
+        Group {
+            HStack {
+                Text("Status")
+                    .font(.system(size: 32))
+                Spacer()
+                Text(source.isConnected ? "Connected" : "Disconnected")
+                    .font(.system(size: 32))
+                    .foregroundStyle(source.isConnected ? .green : .red)
+            }
+            .listRowBackground(Color.clear)
+
+            HStack {
+                Text("Channels")
+                    .font(.system(size: 32))
+                Spacer()
+                Text("\(source.channelCount)")
+                    .font(.system(size: 32))
+                    .foregroundStyle(.secondary)
+            }
+            .listRowBackground(Color.clear)
+
+            if let lastSync = source.lastSync {
+                HStack {
+                    Text("Last Synced")
+                        .font(.system(size: 32))
+                    Spacer()
+                    Text(lastSync.formatted(date: .abbreviated, time: .shortened))
+                        .font(.system(size: 32))
+                        .foregroundStyle(.secondary)
+                }
+                .listRowBackground(Color.clear)
+            }
+
+            SettingsActionRow(
+                title: isRefreshing ? "Refreshing..." : "Refresh Channels",
+                action: { refreshSource() },
+                onFocusChange: { if $0 { focusedSettingId = "refreshChannels" } }
+            )
+            .disabled(isRefreshing)
+
+            SettingsActionRow(
+                title: "Remove Source",
+                isDestructive: true,
+                action: { showDeleteConfirmation = true },
+                onFocusChange: { if $0 { focusedSettingId = "removeSource" } }
+            )
+        }
+        .confirmationDialog(
+            "Remove Source?",
+            isPresented: $showDeleteConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Remove", role: .destructive) {
+                removeSource()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This will remove \"\(source.displayName)\" and all its channels from Live TV.")
+        }
+    }
+
+    private func refreshSource() {
+        isRefreshing = true
+        Task {
+            await dataStore.refreshChannels()
+            await MainActor.run {
+                isRefreshing = false
+            }
+        }
+    }
+
+    private func removeSource() {
+        Task {
+            await dataStore.removeSource(id: source.id)
+            await MainActor.run {
+                onRemoved?()
+            }
+        }
+    }
+}
+
+// MARK: - Full-Screen Sheet (for presentation from non-settings contexts)
 
 struct LiveTVSourceDetailSheet: View {
     let source: LiveTVDataStore.LiveTVSourceInfo
@@ -40,29 +141,26 @@ struct LiveTVSourceDetailSheet: View {
     }
 
     var body: some View {
-        ZStack {
-            Rectangle().fill(.background).ignoresSafeArea()
+        VStack(spacing: 0) {
+            // Header
+            Text("Source Details")
+                .font(.system(size: 52, weight: .bold))
+                .foregroundStyle(.white.opacity(0.65))
+                .frame(maxWidth: .infinity)
+                .padding(.top, 40)
+                .padding(.bottom, 24)
 
-            VStack(spacing: 0) {
-                // Header bar
-                headerBar
-
-                ScrollView(.vertical, showsIndicators: false) {
-                    VStack(spacing: 40) {
-                        // Source icon and name
-                        sourceHeader
-
-                        // Status card
-                        statusCard
-
-                        // Actions
-                        actionsSection
-                    }
-                    .padding(.horizontal, 80)
-                    .padding(.bottom, 60)
+            ScrollView(.vertical, showsIndicators: false) {
+                VStack(spacing: 40) {
+                    sourceHeader
+                    statusCard
+                    actionsSection
                 }
+                .padding(.horizontal, 80)
+                .padding(.bottom, 60)
             }
         }
+        .background(.clear)
         .confirmationDialog(
             "Remove Source?",
             isPresented: $showDeleteConfirmation,
@@ -75,22 +173,9 @@ struct LiveTVSourceDetailSheet: View {
         } message: {
             Text("This will remove \"\(source.displayName)\" and all its channels from Live TV.")
         }
-        // Use system appearance
         .onExitCommand {
             dismiss()
         }
-    }
-
-    // MARK: - Header Bar
-
-    private var headerBar: some View {
-        Text("Source Details")
-            .font(.system(size: 32, weight: .bold))
-            .foregroundStyle(.white)
-            .frame(maxWidth: .infinity)
-            .padding(.horizontal, 60)
-            .padding(.top, 50)
-        .padding(.bottom, 24)
     }
 
     // MARK: - Source Header
@@ -113,8 +198,8 @@ struct LiveTVSourceDetailSheet: View {
                     .foregroundStyle(.white)
 
                 Text(sourceTypeLabel)
-                    .font(.system(size: 22))
-                    .foregroundStyle(.white.opacity(0.6))
+                    .font(.system(size: 28))
+                    .foregroundStyle(.white.opacity(0.55))
             }
         }
         .padding(.top, 24)
@@ -144,16 +229,17 @@ struct LiveTVSourceDetailSheet: View {
             RoundedRectangle(cornerRadius: 20, style: .continuous)
                 .fill(.white.opacity(0.08))
         )
+        .frame(maxWidth: 600)
     }
 
     private func statusRow(title: String, value: String, valueColor: Color = .white) -> some View {
         HStack {
             Text(title)
-                .font(.system(size: 22))
-                .foregroundStyle(.white.opacity(0.6))
+                .font(.system(size: 28))
+                .foregroundStyle(.white.opacity(0.55))
             Spacer()
             Text(value)
-                .font(.system(size: 22, weight: .medium))
+                .font(.system(size: 28, weight: .medium))
                 .foregroundStyle(valueColor)
         }
         .padding(.horizontal, 24)
@@ -164,28 +250,68 @@ struct LiveTVSourceDetailSheet: View {
 
     private var actionsSection: some View {
         VStack(spacing: 16) {
-            // Refresh button
-            SourceActionButton(
-                icon: "arrow.clockwise",
-                iconColor: .blue,
-                title: "Refresh Channels",
-                subtitle: "Reload channel list from source",
-                isLoading: isRefreshing
-            ) {
+            Button {
                 refreshSource()
-            }
+            } label: {
+                HStack(spacing: 20) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .fill(Color.blue.gradient)
+                            .frame(width: 64, height: 64)
 
-            // Remove button
-            SourceActionButton(
-                icon: "trash",
-                iconColor: .red,
-                title: "Remove Source",
-                subtitle: "Disconnect this Live TV source",
-                isDestructive: true
-            ) {
+                        if isRefreshing {
+                            ProgressView()
+                                .tint(.white)
+                        } else {
+                            Image(systemName: "arrow.clockwise")
+                                .font(.system(size: 28, weight: .semibold))
+                                .foregroundStyle(.white)
+                        }
+                    }
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Refresh Channels")
+                            .font(.system(size: 32))
+
+                        Text("Reload channel list from source")
+                            .font(.system(size: 28))
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Spacer()
+                }
+            }
+            .disabled(isRefreshing)
+
+            Button {
                 showDeleteConfirmation = true
+            } label: {
+                HStack(spacing: 20) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .fill(Color.red.gradient)
+                            .frame(width: 64, height: 64)
+
+                        Image(systemName: "trash")
+                            .font(.system(size: 28, weight: .semibold))
+                            .foregroundStyle(.white)
+                    }
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Remove Source")
+                            .font(.system(size: 32))
+                            .foregroundStyle(.red)
+
+                        Text("Disconnect this Live TV source")
+                            .font(.system(size: 28))
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Spacer()
+                }
             }
         }
+        .frame(maxWidth: 600)
     }
 
     // MARK: - Actions
@@ -210,73 +336,6 @@ struct LiveTVSourceDetailSheet: View {
                 dismiss()
             }
         }
-    }
-}
-
-// MARK: - Source Action Button
-
-private struct SourceActionButton: View {
-    let icon: String
-    let iconColor: Color
-    let title: String
-    let subtitle: String
-    var isLoading: Bool = false
-    var isDestructive: Bool = false
-    let action: () -> Void
-
-    @FocusState private var isFocused: Bool
-
-    var body: some View {
-        HStack(spacing: 20) {
-            // Icon
-            ZStack {
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(iconColor.opacity(0.15))
-                    .frame(width: 64, height: 64)
-
-                if isLoading {
-                    ProgressView()
-                        .tint(iconColor)
-                } else {
-                    Image(systemName: icon)
-                        .font(.system(size: 26, weight: .semibold))
-                        .foregroundStyle(iconColor)
-                }
-            }
-
-            // Text
-            VStack(alignment: .leading, spacing: 5) {
-                Text(title)
-                    .font(.system(size: 26, weight: .medium))
-                    .foregroundStyle(isDestructive ? .red : .white)
-
-                Text(subtitle)
-                    .font(.system(size: 19))
-                    .foregroundStyle(.white.opacity(0.5))
-            }
-
-            Spacer()
-
-            // Chevron
-            Image(systemName: "chevron.right")
-                .font(.system(size: 22, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.4))
-        }
-        .padding(.horizontal, 24)
-        .padding(.vertical, 20)
-        .background(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(isFocused ? (isDestructive ? .red.opacity(0.15) : .white.opacity(0.15)) : .white.opacity(0.08))
-        )
-        .scaleEffect(isFocused ? 1.02 : 1.0)
-        .focusable()
-        .focused($isFocused)
-        .onTapGesture {
-            if !isLoading {
-                action()
-            }
-        }
-        .animation(.easeOut(duration: 0.15), value: isFocused)
     }
 }
 

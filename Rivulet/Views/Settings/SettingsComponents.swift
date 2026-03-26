@@ -576,25 +576,18 @@ struct SettingsTextEntryRow: View {
                     }
                 }
 
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(title)
-
-                    if value.isEmpty {
-                        Text(placeholder.isEmpty ? "Not set" : placeholder)
-                            .font(.footnote)
-                            .foregroundStyle(.tertiary)
-                    } else {
-                        Text(value)
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                    }
-                }
+                Text(title)
+                    .font(.system(size: 32))
 
                 Spacer()
 
+                Text(value.isEmpty ? (placeholder.isEmpty ? "Not set" : placeholder) : value)
+                    .font(.system(size: 32))
+                    .foregroundStyle(value.isEmpty ? .tertiary : .secondary)
+                    .lineLimit(1)
+
                 Image(systemName: "chevron.right")
-                    .font(.system(size: 22, weight: .semibold))
+                    .font(.system(size: 40, weight: .semibold))
                     .foregroundStyle(.secondary)
             }
         }
@@ -632,7 +625,7 @@ struct TextEntrySuggestion: Identifiable, Hashable {
 
 // MARK: - Text Entry Sheet
 
-/// A dedicated sheet for text entry with title, text field, hint, and action buttons
+/// Apple TV-style text entry — clean centered layout with system keyboard
 struct TextEntrySheet: View {
     let title: String
     @Binding var text: String
@@ -644,132 +637,78 @@ struct TextEntrySheet: View {
 
     @State private var editingText: String = ""
     @FocusState private var isTextFieldFocused: Bool
-    @FocusState private var focusedButton: ButtonType?
-    @FocusState private var focusedSuggestion: UUID?
-
-    enum ButtonType: Hashable {
-        case cancel, done
-    }
 
     var body: some View {
-        ZStack {
-            Rectangle().fill(.background)
-                .ignoresSafeArea()
+        VStack(spacing: 0) {
+            Spacer()
 
-            VStack(spacing: 24) {
-                if !suggestions.isEmpty {
-                    VStack(spacing: 12) {
-                        Text("Quick Select")
-                            .font(.system(size: 22, weight: .medium))
-                            .foregroundStyle(.white.opacity(0.5))
-
-                        ScrollView(.horizontal, showsIndicators: false) {
-                            HStack(spacing: 12) {
-                                ForEach(suggestions) { suggestion in
-                                    Button {
-                                        editingText = suggestion.value
-                                    } label: {
-                                        Text(suggestion.label)
-                                            .font(.system(size: 20, weight: .medium))
-                                    }
-                                    .focused($focusedSuggestion, equals: suggestion.id)
-                                }
-                            }
-                            .padding(.horizontal, 80)
-                        }
-                    }
-                    .padding(.top, 40)
-                    .onMoveCommand { direction in
-                        if direction == .down {
-                            focusedSuggestion = nil
-                            isTextFieldFocused = true
-                        }
-                    }
-                }
-
-                Spacer()
-
+            // Text field
+            VStack(spacing: 20) {
                 Text(title)
-                    .font(.system(size: 42, weight: .bold))
-                    .foregroundStyle(.white)
+                    .font(.system(size: 32, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.55))
 
-                VStack(spacing: 16) {
-                    ZStack(alignment: .leading) {
-                        if editingText.isEmpty {
-                            Text(placeholder)
-                                .font(.system(size: 32))
-                                .foregroundStyle(.white.opacity(0.4))
-                                .padding(.horizontal, 24)
-                        }
-
-                        TextField("", text: $editingText)
-                            .textFieldStyle(.plain)
-                            .font(.system(size: 32, weight: .medium))
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 24)
-                            .padding(.vertical, 20)
-                            .focused($isTextFieldFocused)
-                            .autocorrectionDisabled()
-                            .keyboardType(keyboardType)
-                    }
-                    .background(
-                        RoundedRectangle(cornerRadius: 16, style: .continuous)
-                            .fill(Color(white: isTextFieldFocused ? 0.18 : 0.12))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                                    .strokeBorder(
-                                        isTextFieldFocused ? .blue.opacity(0.7) : .white.opacity(0.2),
-                                        lineWidth: isTextFieldFocused ? 3 : 1
-                                    )
-                            )
-                    )
-                    .scaleEffect(isTextFieldFocused ? 1.01 : 1.0)
-                    .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isTextFieldFocused)
-
-                    if let hint = hint {
-                        Text(hint)
-                            .font(.system(size: 22))
-                            .foregroundStyle(.white.opacity(0.5))
-                            .multilineTextAlignment(.center)
-                    }
-                }
-                .frame(maxWidth: 700)
-
-                Spacer()
-
-                HStack(spacing: 24) {
-                    Button {
-                        isPresented = false
-                    } label: {
-                        Text("Cancel")
-                            .font(.system(size: 26, weight: .semibold))
-                            .frame(width: 180)
-                    }
-                    .focused($focusedButton, equals: .cancel)
-
-                    Button {
+                TextField(placeholder, text: $editingText)
+                    .font(.system(size: 36))
+                    .focused($isTextFieldFocused)
+                    .autocorrectionDisabled()
+                    .keyboardType(keyboardType)
+                    .frame(maxWidth: 700)
+                    .onSubmit {
                         text = editingText
                         isPresented = false
-                    } label: {
-                        Text("Done")
-                            .font(.system(size: 26, weight: .semibold))
-                            .frame(width: 180)
                     }
-                    .tint(.blue)
-                    .focused($focusedButton, equals: .done)
+
+                if let hint {
+                    Text(hint)
+                        .font(.system(size: 24))
+                        .foregroundStyle(.white.opacity(0.45))
                 }
-                .padding(.bottom, 60)
             }
-            .padding(.horizontal, 80)
+
+            Spacer()
+
+            // Suggestions
+            if !suggestions.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 12) {
+                        ForEach(suggestions) { suggestion in
+                            Button {
+                                editingText = suggestion.value
+                            } label: {
+                                Text(suggestion.label)
+                                    .font(.system(size: 24, weight: .medium))
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 80)
+                    .padding(.vertical, 8)
+                }
+                .scrollClipDisabled()
+                .focusSection()
+                .padding(.bottom, 24)
+            }
+
+            // Actions
+            HStack(spacing: 40) {
+                Button("Cancel") {
+                    isPresented = false
+                }
+
+                Button("Done") {
+                    text = editingText
+                    isPresented = false
+                }
+            }
+            .font(.system(size: 28, weight: .semibold))
+            .padding(.bottom, 80)
         }
+        .padding(.horizontal, 80)
+        .background(.ultraThinMaterial)
         .onAppear {
             editingText = text
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                if let first = suggestions.first {
-                    focusedSuggestion = first.id
-                } else {
-                    isTextFieldFocused = true
-                }
+                isTextFieldFocused = true
             }
         }
         .onExitCommand {
@@ -777,6 +716,7 @@ struct TextEntrySheet: View {
         }
     }
 }
+
 
 // MARK: - Settings Back Row
 
