@@ -797,6 +797,23 @@ final class UniversalPlayerViewModel: ObservableObject {
                     let time = String(format: "%.1f", item?.currentTime().seconds ?? 0)
                     print("[Remux] rate→0 (was playing) at \(time)s bufEmpty=\(bufEmpty) keepUp=\(keepUp) tcs=\(player.timeControlStatus.rawValue)")
                     self.updatePlaybackState(.paused)
+
+                    // With automaticallyWaitsToMinimizeStalling=false, AVPlayer pauses
+                    // on buffer underruns. Auto-resume after a short delay if buffer
+                    // has data. The keepUp KVO can't help here because keepUp stays
+                    // false while paused (chicken-and-egg).
+                    if self.remuxServer != nil {
+                        Task { @MainActor [weak self] in
+                            try? await Task.sleep(nanoseconds: 500_000_000)
+                            guard let self,
+                                  self.remuxServer != nil,
+                                  self.player?.rate == 0,
+                                  self.player?.currentItem?.isPlaybackBufferEmpty == false,
+                                  self.playbackState == .paused else { return }
+                            print("[Remux] Auto-resuming after buffer underrun (500ms delay)")
+                            self.player?.play()
+                        }
+                    }
                 }
             }
         }
