@@ -12,9 +12,8 @@ struct RivuletShortcuts: AppShortcutsProvider {
         AppShortcut(
             intent: PlayMediaIntent(),
             phrases: [
-                "Play \(\.$media) on \(.applicationName)",
-                "Watch \(\.$media) on \(.applicationName)",
-                "Play \(\.$media) in \(.applicationName)"
+                "Play something on \(.applicationName)",
+                "Watch something on \(.applicationName)"
             ],
             shortTitle: "Play Media",
             systemImageName: "play.fill"
