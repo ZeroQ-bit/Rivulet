@@ -811,6 +811,14 @@ final class UniversalPlayerViewModel: ObservableObject {
                         print("[Remux] AVPlayer: waitingToPlay (reason=\(reason), rate=\(player.rate))")
                     }
                     self.updatePlaybackState(.buffering)
+                    // For local remux, AVPlayer's "minimize stalls" evaluation is overly
+                    // conservative — it can hold 60+ seconds of buffer and still not play.
+                    // Force immediate playback when we know segments are flowing.
+                    if self.remuxServer != nil,
+                       reason == AVPlayer.WaitingReason.toMinimizeStalls.rawValue {
+                        print("[Remux] Forcing playImmediately (toMinimizeStalls with remux active)")
+                        player.playImmediately(atRate: 1.0)
+                    }
                 case .playing:
                     print("[Remux] AVPlayer: playing (rate=\(player.rate))")
                     if self.playbackState == .buffering {
