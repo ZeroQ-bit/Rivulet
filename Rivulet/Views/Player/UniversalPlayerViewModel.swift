@@ -326,7 +326,7 @@ final class UniversalPlayerViewModel: ObservableObject {
     @Published private(set) var currentAudioTrackId: Int?
     @Published private(set) var currentSubtitleTrackId: Int?
     private var compatibilityNoticeTimer: Timer?
-    private var userActivity: NSUserActivity?
+    private nonisolated(unsafe) var userActivity: NSUserActivity?
 
     // MARK: - Playback Settings Panel State (Column-based layout)
 
@@ -3425,6 +3425,10 @@ final class UniversalPlayerViewModel: ObservableObject {
         if let observer = appBecameActiveObserver {
             NotificationCenter.default.removeObserver(observer)
         }
+        // Clean up Siri user activity
+        userActivity?.resignCurrent()
+        userActivity?.invalidate()
+
         // Ensure screensaver is re-enabled when player is deallocated
         Task { @MainActor in
             UIApplication.shared.isIdleTimerDisabled = false

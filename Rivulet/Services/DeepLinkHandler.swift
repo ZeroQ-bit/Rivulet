@@ -75,7 +75,7 @@ final class DeepLinkHandler: ObservableObject {
 
     private func fetchAndSetPlayback(ratingKey: String) async {
         guard let serverURL = PlexAuthManager.shared.selectedServerURL,
-              let authToken = PlexAuthManager.shared.authToken else {
+              let authToken = PlexAuthManager.shared.selectedServerToken else {
             print("DeepLinkHandler: No Plex credentials available")
             return
         }
@@ -94,7 +94,7 @@ final class DeepLinkHandler: ObservableObject {
 
     private func fetchAndSetDetail(ratingKey: String) async {
         guard let serverURL = PlexAuthManager.shared.selectedServerURL,
-              let authToken = PlexAuthManager.shared.authToken else {
+              let authToken = PlexAuthManager.shared.selectedServerToken else {
             print("DeepLinkHandler: No Plex credentials available")
             return
         }
