@@ -29,6 +29,7 @@ struct TVSidebarView: View {
     @AppStorage("lastSeenBuild") private var lastSeenBuild = ""
     @State private var showWhatsNew = false
     @State private var whatsNewVersion = ""
+    @State private var deepLinkDetailItem: PlexMetadata?
 
     @Namespace private var contentNamespace
     @Environment(\.resetFocus) private var resetFocus
@@ -121,6 +122,16 @@ struct TVSidebarView: View {
             guard let metadata else { return }
             presentPlayerForDeepLink(metadata)
             deepLinkHandler.pendingPlayback = nil
+        }
+        // Handle detail deep links from Siri search results
+        .onChange(of: deepLinkHandler.pendingDetail) { _, metadata in
+            guard let metadata else { return }
+            deepLinkDetailItem = metadata
+            deepLinkHandler.pendingDetail = nil
+        }
+        .fullScreenCover(item: $deepLinkDetailItem) { metadata in
+            PlexDetailView(item: metadata)
+                .presentationBackground(.black)
         }
         // What's New overlay
         .fullScreenCover(isPresented: $showWhatsNew) {
