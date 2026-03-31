@@ -1033,7 +1033,6 @@ final class UniversalPlayerViewModel: ObservableObject {
             let activity = NSUserActivity(activityType: "com.rivulet.playMedia")
             activity.title = metadata.title
             activity.isEligibleForSearch = true
-            activity.isEligibleForPrediction = true
             activity.userInfo = ["ratingKey": metadata.ratingKey ?? ""]
             activity.targetContentIdentifier = "rivulet://play?ratingKey=\(metadata.ratingKey ?? "")"
             self.userActivity = activity

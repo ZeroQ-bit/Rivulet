@@ -701,7 +701,6 @@ struct PlexDetailView: View {
         .userActivity("com.rivulet.viewMedia") { activity in
             activity.title = currentItem.title
             activity.isEligibleForSearch = true
-            activity.isEligibleForPrediction = false
             activity.userInfo = ["ratingKey": currentItem.ratingKey ?? ""]
             activity.targetContentIdentifier = "rivulet://detail?ratingKey=\(currentItem.ratingKey ?? "")"
         }
