@@ -84,21 +84,27 @@ struct MediaItemEntity: AppEntity {
 
 struct MediaItemQuery: EntityStringQuery {
 
-    func entities(for identifiers: [String]) async throws -> [MediaItemEntity] {
-        guard let serverURL = await PlexAuthManager.shared.selectedServerURL,
-              let token = await PlexAuthManager.shared.selectedServerToken else {
-            return []
+    private func credentials() async -> (serverURL: String, token: String)? {
+        let (serverURL, token) = await MainActor.run {
+            (PlexAuthManager.shared.selectedServerURL,
+             PlexAuthManager.shared.selectedServerToken)
         }
+        guard let serverURL, let token else { return nil }
+        return (serverURL, token)
+    }
+
+    func entities(for identifiers: [String]) async throws -> [MediaItemEntity] {
+        guard let creds = await credentials() else { return [] }
 
         var results: [MediaItemEntity] = []
         for ratingKey in identifiers {
             do {
                 let metadata = try await PlexNetworkManager.shared.getMetadata(
-                    serverURL: serverURL,
-                    authToken: token,
+                    serverURL: creds.serverURL,
+                    authToken: creds.token,
                     ratingKey: ratingKey
                 )
-                results.append(MediaItemEntity(from: metadata, serverURL: serverURL, token: token))
+                results.append(MediaItemEntity(from: metadata, serverURL: creds.serverURL, token: creds.token))
             } catch {
                 continue
             }
@@ -107,34 +113,27 @@ struct MediaItemQuery: EntityStringQuery {
     }
 
     func entities(matching query: String) async throws -> [MediaItemEntity] {
-        guard !query.isEmpty,
-              let serverURL = await PlexAuthManager.shared.selectedServerURL,
-              let token = await PlexAuthManager.shared.selectedServerToken else {
-            return []
-        }
+        guard !query.isEmpty, let creds = await credentials() else { return [] }
 
         let results = try await PlexNetworkManager.shared.search(
-            serverURL: serverURL,
-            authToken: token,
+            serverURL: creds.serverURL,
+            authToken: creds.token,
             query: query,
             size: 10
         )
 
-        return results.map { MediaItemEntity(from: $0, serverURL: serverURL, token: token) }
+        return results.map { MediaItemEntity(from: $0, serverURL: creds.serverURL, token: creds.token) }
     }
 
     func suggestedEntities() async throws -> [MediaItemEntity] {
-        guard let serverURL = await PlexAuthManager.shared.selectedServerURL,
-              let token = await PlexAuthManager.shared.selectedServerToken else {
-            return []
-        }
+        guard let creds = await credentials() else { return [] }
 
         do {
             let onDeck = try await PlexNetworkManager.shared.getOnDeck(
-                serverURL: serverURL,
-                authToken: token
+                serverURL: creds.serverURL,
+                authToken: creds.token
             )
-            return onDeck.prefix(5).map { MediaItemEntity(from: $0, serverURL: serverURL, token: token) }
+            return onDeck.prefix(5).map { MediaItemEntity(from: $0, serverURL: creds.serverURL, token: creds.token) }
         } catch {
             return []
         }
