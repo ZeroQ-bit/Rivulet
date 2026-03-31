@@ -790,6 +790,11 @@ final class UniversalPlayerViewModel: ObservableObject {
                 if player.rate > 0 {
                     self.updatePlaybackState(.playing)
                 } else if self.playbackState == .playing {
+                    let item = player.currentItem
+                    let bufEmpty = item?.isPlaybackBufferEmpty ?? true
+                    let keepUp = item?.isPlaybackLikelyToKeepUp ?? false
+                    let time = String(format: "%.1f", item?.currentTime().seconds ?? 0)
+                    print("[Remux] rate→0 (was playing) at \(time)s bufEmpty=\(bufEmpty) keepUp=\(keepUp) tcs=\(player.timeControlStatus.rawValue)")
                     self.updatePlaybackState(.paused)
                 }
             }
@@ -1675,11 +1680,9 @@ final class UniversalPlayerViewModel: ObservableObject {
 
         try loadAVPlayer(url: localURL, headers: nil)
 
-        // Disable AVPlayer's buffering rate evaluation for local remux.
-        // Without this, AVPlayer deadlocks after seeks — it evaluates the first
-        // segment's delivery rate and refuses to play. playImmediately(atRate:)
-        // can't override toMinimizeStalls, so this property is the only option.
-        player?.automaticallyWaitsToMinimizeStalling = false
+        // Set a small forward buffer so AVPlayer starts quickly with just
+        // one segment cached, rather than its default (~30s for remote HLS).
+        player?.currentItem?.preferredForwardBufferDuration = 6.0
     }
 
     /// Stop remux server and session.
