@@ -84,6 +84,66 @@ final class ContentRouterPlaybackPlanTests: XCTestCase {
         }
     }
 
+    // MARK: - User-enabled local remux
+
+    func testMKVWithNativeAudioRoutesToLocalRemuxWhenEnabled() {
+        let metadata = makeMetadata(audioCodec: "eac3", container: "mkv", includePart: true)
+        let context = ContentRoutingContext(
+            metadata: metadata,
+            serverURL: URL(string: "http://127.0.0.1:32400")!,
+            authToken: "token",
+            playbackPolicy: .directPlayFirst,
+            useLocalRemux: true
+        )
+
+        let plan = ContentRouter.plan(for: context)
+
+        if FFmpegDemuxer.isAvailable {
+            if case .localRemux = plan.primary {
+                XCTAssertEqual(plan.fallbacks.count, 1)
+                if case .hls = plan.fallbacks[0] {
+                    // expected
+                } else {
+                    XCTFail("Expected HLS fallback for local remux")
+                }
+                XCTAssertTrue(plan.reasoning.contains("local_remux_user_enabled"))
+            } else {
+                XCTFail("Expected LocalRemux primary for MKV when local remux is enabled, got \(plan.primary)")
+            }
+        } else if case .hls = plan.primary {
+            XCTAssertTrue(plan.fallbacks.isEmpty)
+        } else {
+            XCTFail("Expected HLS primary when FFmpeg is unavailable, got \(plan.primary)")
+        }
+    }
+
+    func testMP4DirectPlayNotForcedToLocalRemuxWhenEnabled() {
+        let metadata = makeMetadata(audioCodec: "aac", container: "mp4", includePart: true)
+        let context = ContentRoutingContext(
+            metadata: metadata,
+            serverURL: URL(string: "http://127.0.0.1:32400")!,
+            authToken: "token",
+            playbackPolicy: .directPlayFirst,
+            useLocalRemux: true
+        )
+
+        let plan = ContentRouter.plan(for: context)
+
+        if FFmpegDemuxer.isAvailable {
+            if case .avPlayerDirect = plan.primary {
+                XCTAssertEqual(plan.fallbacks.count, 1)
+            } else {
+                XCTFail("Expected AVPlayerDirect primary for MP4 direct-play content, got \(plan.primary)")
+            }
+        } else if case .hls = plan.primary {
+            XCTAssertTrue(plan.fallbacks.isEmpty)
+        } else if case .avPlayerDirect = plan.primary {
+            // acceptable when native direct path is still available without FFmpeg
+        } else {
+            XCTFail("Unexpected route for MP4 direct-play content: \(plan.primary)")
+        }
+    }
+
     // MARK: - No part key → HLS fallback
 
     func testPlanUsesHLSWhenNoDirectPlaySourceExists() {

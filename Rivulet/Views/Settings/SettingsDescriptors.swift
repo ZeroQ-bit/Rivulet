@@ -129,6 +129,11 @@ enum SettingsDescriptorStore {
             iconColor: .purple,
             description: "How long to wait before automatically playing the next episode. Set to Off to disable autoplay."
         ),
+        "useLocalRemux": SettingDescriptor(
+            icon: "arrow.triangle.swap",
+            iconColor: .teal,
+            description: "Remuxes MKV files locally using FFmpeg instead of relying on Plex server. Enables true direct play for all containers with native AirPlay and HomePod support."
+        ),
         "avPlayerDV": SettingDescriptor(
             icon: "sparkles.tv",
             iconColor: .purple,

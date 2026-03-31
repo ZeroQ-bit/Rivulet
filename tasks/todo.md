@@ -1,5 +1,30 @@
 # Playback Reliability Worklog (2026-03-02)
 
+## Direct Play -> FFmpeg -> AVPlayer Robustness Pass (2026-03-27)
+
+## Plan
+- [x] Remove startup URL-preparation races in `UniversalPlayerViewModel`.
+  - Ensure a single in-flight stream preparation task is awaited by `startPlayback()`, retries, and episode handoff paths.
+- [x] Harden remux session packet/memory handling in `FFmpegRemuxSession`.
+  - Eliminate unsafe/duplicate packet ownership patterns and enforce bounded segment generation with explicit error surfaces.
+- [x] Strengthen local remux startup preflight before AVPlayer load.
+  - Validate init segment + first media segment shape and fail fast to HLS fallback if remux output is invalid.
+- [x] Tighten route/fallback behavior and coverage.
+  - Keep direct-play/local-remux/HLS plan behavior deterministic and add focused unit coverage for local-remux routing toggles.
+- [x] Verify with focused tests/build and record outcomes.
+
+## Review
+- Added a single-flight stream URL preparation path in `UniversalPlayerViewModel` (`ensureStreamURLPrepared`) so startup, retry, and episode handoff no longer race concurrent `prepareStreamURL()` calls.
+- Wired startup and runtime fallback behavior to actually execute: direct-play/local-remux startup load failures now route once to Plex HLS when a fallback exists, and `AVPlayerItem` failure can trigger the same one-shot fallback path.
+- Hardened local remux startup by preflighting both init and first media segment generation before creating the localhost `AVPlayerItem`.
+- Tightened `FFmpegRemuxSession` robustness: seek now flushes demux state, segment generation has bounded packet scanning, segment/init fragments are shape-validated (`ftyp+moov` for init, `moof+mdat` for media), and audio-stream switching now resets/rebuilds transcode state safely.
+- Added focused routing coverage for user-enabled local remux in `ContentRouterPlaybackPlanTests` (MKV remux-on and MP4 direct-play-unchanged paths).
+- Verification:
+  - `xcodebuild -project Rivulet.xcodeproj -scheme Rivulet -destination 'generic/platform=tvOS' build -quiet CODE_SIGNING_ALLOWED=NO`
+  - Result: build succeeded.
+  - `xcodebuild test ... -only-testing:RivuletTests/ContentRouterPlaybackPlanTests`
+  - Result: blocked by existing test target deployment mismatch in this environment (`RivuletTests` compiling for tvOS 26.2 while `Rivulet` module target is tvOS 26.4), so focused tests did not execute.
+
 ## AVPlayer Remux Rework Review (2026-03-19)
 
 ## Plan

@@ -77,6 +77,11 @@ struct ContentRoutingContext: Sendable {
 
     /// Preferred playback policy. Defaults to direct-play-first for VOD.
     var playbackPolicy: PlaybackPolicy = .default
+
+    /// Use local FFmpeg remux instead of Plex HLS for non-native containers.
+    /// When true, MKV/DTS/TrueHD content is remuxed locally to fMP4 HLS
+    /// and served to AVPlayer via LocalRemuxServer — zero server involvement.
+    var useLocalRemux: Bool = false
 }
 
 /// Analyzes media metadata to choose the optimal playback pipeline.
@@ -194,16 +199,25 @@ struct ContentRouter {
             )
         }
 
-        // Path 2: Local remux — ONLY for DV P7→P8.1 conversion (Plex can't do this)
-        if analysis.needsDVConversion, let remuxRoute = buildLocalRemuxRoute(context: context, analysis: analysis) {
-            reasoning.append(contentsOf: analysis.reasoning)
-            print("[ContentRouter] \(container) | audio=\(audioCodec) → LocalRemux (DV P7 conversion)")
-            return PlaybackPlan(
-                policy: context.playbackPolicy,
-                primary: remuxRoute,
-                fallbacks: [hlsFallback],
-                reasoning: reasoning
-            )
+        // Path 2: Local remux — FFmpeg demuxes locally, remuxes to fMP4 HLS for AVPlayer
+        // Used when: user enabled local remux AND content needs remux, OR DV P7 conversion needed
+        if analysis.needsRemux, context.useLocalRemux || analysis.needsDVConversion {
+            if let remuxRoute = buildLocalRemuxRoute(context: context, analysis: analysis) {
+                reasoning.append(contentsOf: analysis.reasoning)
+                if analysis.needsDVConversion {
+                    reasoning.append("local_remux_dv_conversion")
+                } else {
+                    reasoning.append("local_remux_user_enabled")
+                }
+                let reason = analysis.needsDVConversion ? "DV P7 conversion" : "local remux enabled"
+                print("[ContentRouter] \(container) | audio=\(audioCodec) → LocalRemux (\(reason))")
+                return PlaybackPlan(
+                    policy: context.playbackPolicy,
+                    primary: remuxRoute,
+                    fallbacks: [hlsFallback],
+                    reasoning: reasoning
+                )
+            }
         }
 
         // Path 3: Plex HLS — server remuxes MKV→fMP4, transcodes DTS/TrueHD, etc.

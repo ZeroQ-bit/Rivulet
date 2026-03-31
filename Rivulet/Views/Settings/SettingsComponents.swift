@@ -635,6 +635,7 @@ struct TextEntrySheet: View {
     var keyboardType: UIKeyboardType = .default
     @Binding var isPresented: Bool
 
+    @Environment(\.dismiss) private var dismiss
     @State private var editingText: String = ""
     @FocusState private var isTextFieldFocused: Bool
 
@@ -656,7 +657,7 @@ struct TextEntrySheet: View {
                     .frame(maxWidth: 700)
                     .onSubmit {
                         text = editingText
-                        isPresented = false
+                        dismiss()
                     }
 
                 if let hint {
@@ -692,12 +693,12 @@ struct TextEntrySheet: View {
             // Actions
             HStack(spacing: 40) {
                 Button("Cancel") {
-                    isPresented = false
+                    dismiss()
                 }
 
                 Button("Done") {
                     text = editingText
-                    isPresented = false
+                    dismiss()
                 }
             }
             .font(.system(size: 28, weight: .semibold))
@@ -710,9 +711,6 @@ struct TextEntrySheet: View {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
                 isTextFieldFocused = true
             }
-        }
-        .onExitCommand {
-            isPresented = false
         }
     }
 }

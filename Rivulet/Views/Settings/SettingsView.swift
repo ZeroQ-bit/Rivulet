@@ -250,6 +250,7 @@ struct SettingsView: View {
     @AppStorage("autoSkipIntro") private var autoSkipIntro = false
     @AppStorage("autoSkipCredits") private var autoSkipCredits = false
     @AppStorage("autoSkipAds") private var autoSkipAds = false
+    @AppStorage("useLocalRemux") private var useLocalRemux = false
     @AppStorage("autoplayCountdown") private var autoplayCountdownRaw = AutoplayCountdown.fiveSeconds.rawValue
     @AppStorage("displaySize") private var displaySizeRaw = DisplaySize.normal.rawValue
 
@@ -355,18 +356,23 @@ struct SettingsView: View {
                     )
                     .frame(width: geo.size.width * 0.55)
 
-                    // Right settings list
-                    ZStack {
-                        List {
-                            pageContent(for: currentPage)
+                    // Right settings list (focus-contained to block left escape to sidebar)
+                    FocusContainedView(
+                        blockLeftEscape: currentPage != .root,
+                        onLeftBlocked: { goBack() }
+                    ) {
+                        ZStack {
+                            List {
+                                pageContent(for: currentPage)
+                            }
+                            .listStyle(.grouped)
+                            .scrollClipDisabled()
+                            .id(currentPage)
+                            .transition(.asymmetric(
+                                insertion: .opacity.combined(with: .offset(x: isForward ? 120 : -120)),
+                                removal: .opacity.combined(with: .offset(x: isForward ? -60 : 60))
+                            ))
                         }
-                        .listStyle(.grouped)
-                        .scrollClipDisabled()
-                        .id(currentPage)
-                        .transition(.asymmetric(
-                            insertion: .opacity.combined(with: .offset(x: isForward ? 120 : -120)),
-                            removal: .opacity.combined(with: .offset(x: isForward ? -60 : 60))
-                        ))
                     }
                     .frame(width: geo.size.width * 0.45)
                 }
@@ -395,11 +401,7 @@ struct SettingsView: View {
                 nestedNavState.goBackAction = nil
             }
         }
-        .onExitCommand {
-            if currentPage != .root {
-                goBack()
-            }
-        }
+        .onExitCommand(perform: currentPage != .root ? { goBack() } : nil)
     }
 
     // MARK: - Left Panel (extracted to isolate re-renders from right panel)
@@ -631,6 +633,13 @@ struct SettingsView: View {
                 subtitle: autoplayCountdown.wrappedValue.description,
                 action: { navigate(to: .autoplayCountdownPicker) },
                 onFocusChange: { if $0 { focusState.focusedSettingId = "autoplayCountdown" } }
+            )
+
+            SettingsToggleRow(
+                title: "Direct Play",
+                subtitle: "",
+                isOn: $useLocalRemux,
+                onFocusChange: { if $0 { focusState.focusedSettingId = "useLocalRemux" } }
             )
 
         }
@@ -911,6 +920,55 @@ private struct SettingsLeftPanel: View {
         .animation(.easeInOut(duration: 0.25), value: focusedSettingId)
         .animation(.easeInOut(duration: 0.25), value: focusedSubtext)
         .animation(.easeInOut(duration: 0.3), value: currentPage)
+    }
+}
+
+// MARK: - Focus Containment (blocks leftward focus escape to sidebar)
+
+/// Wraps SwiftUI content in a UIHostingController that can block leftward focus escape.
+/// Used by SettingsView to prevent left-press from opening the sidebar when in sub-pages.
+private struct FocusContainedView<Content: View>: UIViewControllerRepresentable {
+    let blockLeftEscape: Bool
+    let onLeftBlocked: () -> Void
+    let content: Content
+
+    init(blockLeftEscape: Bool, onLeftBlocked: @escaping () -> Void, @ViewBuilder content: () -> Content) {
+        self.blockLeftEscape = blockLeftEscape
+        self.onLeftBlocked = onLeftBlocked
+        self.content = content()
+    }
+
+    func makeUIViewController(context: Context) -> FocusContainedHostingController<Content> {
+        let vc = FocusContainedHostingController(rootView: content)
+        vc.view.backgroundColor = .clear
+        vc.blockLeftEscape = blockLeftEscape
+        vc.onLeftBlocked = onLeftBlocked
+        return vc
+    }
+
+    func updateUIViewController(_ vc: FocusContainedHostingController<Content>, context: Context) {
+        vc.blockLeftEscape = blockLeftEscape
+        vc.onLeftBlocked = onLeftBlocked
+        vc.rootView = content
+    }
+}
+
+/// Hosting controller that overrides shouldUpdateFocus to block leftward focus escape.
+private final class FocusContainedHostingController<Content: View>: UIHostingController<Content> {
+    var blockLeftEscape = false
+    var onLeftBlocked: (() -> Void)?
+
+    override func shouldUpdateFocus(in context: UIFocusUpdateContext) -> Bool {
+        if blockLeftEscape,
+           context.focusHeading == .left,
+           let nextView = context.nextFocusedView,
+           !nextView.isDescendant(of: view) {
+            DispatchQueue.main.async { [weak self] in
+                self?.onLeftBlocked?()
+            }
+            return false
+        }
+        return super.shouldUpdateFocus(in: context)
     }
 }
 

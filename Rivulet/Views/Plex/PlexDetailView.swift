@@ -27,6 +27,7 @@ struct PlexDetailView: View {
     var backdropWindowFrame: CGRect? = nil
     var onPreviewExitRequested: (() -> Void)? = nil
     var onDetailsBecameVisible: (() -> Void)? = nil
+    var enableDetailDataLoading: Bool = true
 
     /// Tracks the currently displayed item - allows swapping content in place
     /// When set, this overrides `item` so collection/recommended navigation
@@ -94,6 +95,8 @@ struct PlexDetailView: View {
     @State private var belowFoldTitleOpacity: CGFloat = 0
     @State private var scrollResetID = UUID()
     @State private var kenBurnsOffset: CGFloat = 0
+    @State private var retainedLogoURL: URL?
+    @State private var hasDisplayedHeroLogoImage = false
 
     // Navigation state for episode parent navigation
     @State private var navigateToSeason: PlexMetadata?
@@ -110,6 +113,16 @@ struct PlexDetailView: View {
     private let recommendationService = PersonalizedRecommendationService.shared
     private var isPreviewCarousel: Bool { presentationMode == .previewCarousel }
     private var isExpandedPreviewFlow: Bool { onPreviewExitRequested != nil && presentationMode == .expandedDetail }
+    private var shouldLoadDetailData: Bool {
+        if !isPreviewCarousel { return true }
+        return enableDetailDataLoading
+    }
+    private var detailLoadTaskID: String {
+        "\(currentItem.ratingKey ?? "unknown")-\(shouldLoadDetailData ? "active" : "passive")"
+    }
+    private var effectiveHeroLogoURL: URL? {
+        heroBackdrop.session.logoURL ?? retainedLogoURL
+    }
     private var heroBackdropScale: CGFloat {
         (isPreviewCarousel || isExpandedPreviewFlow) ? 1.14 : 1.08
     }
@@ -284,7 +297,6 @@ struct PlexDetailView: View {
                 )
                 .opacity(effectiveVignetteVisible ? 1 : 0)
                 .animation(.easeOut(duration: 0.6), value: effectiveVignetteVisible)
-                .drawingGroup()
                 .ignoresSafeArea()
                 .allowsHitTesting(false)
 
@@ -304,7 +316,6 @@ struct PlexDetailView: View {
                 .frame(maxHeight: .infinity, alignment: .bottom)
                 .opacity(effectiveVignetteVisible ? 1 : 0)
                 .animation(.easeOut(duration: 0.6), value: effectiveVignetteVisible)
-                .drawingGroup()
                 .ignoresSafeArea()
                 .allowsHitTesting(false)
 
@@ -438,7 +449,14 @@ struct PlexDetailView: View {
             }
         }
         .ignoresSafeArea()
-        .task(id: currentItem.ratingKey) {
+        .task(id: detailLoadTaskID) {
+            // Passive carousel cards should keep any already-resolved metadata/logo
+            // so transitions never swap logo -> title mid-motion.
+            guard shouldLoadDetailData else {
+                syncHeroBackdrop()
+                return
+            }
+
             // Reset state for new item
             seasons = []
             episodes = []
@@ -537,6 +555,15 @@ struct PlexDetailView: View {
         }
         .onChange(of: heroBackdropMotionLocked) { _, locked in
             heroBackdrop.setMotionLocked(locked)
+        }
+        .onChange(of: heroBackdrop.session.logoURL) { _, newLogoURL in
+            if let newLogoURL {
+                retainedLogoURL = newLogoURL
+            }
+        }
+        .onChange(of: currentItem.ratingKey) { _, _ in
+            retainedLogoURL = nil
+            hasDisplayedHeroLogoImage = false
         }
         .onChange(of: showExpandedChrome) { _, isVisible in
             guard isVisible, isExpandedPreviewFlow else { return }
@@ -768,7 +795,7 @@ struct PlexDetailView: View {
                     // TMDB logo or title — fixed height so content below is always
                     // at the same position regardless of logo aspect ratio
                     Group {
-                        if let logoURL = heroBackdrop.session.logoURL {
+                        if let logoURL = effectiveHeroLogoURL {
                             CachedAsyncImage(url: logoURL) { phase in
                                 switch phase {
                                 case .success(let image):
@@ -776,6 +803,17 @@ struct PlexDetailView: View {
                                         .resizable()
                                         .aspectRatio(contentMode: .fit)
                                         .shadow(color: .black.opacity(0.8), radius: 20, x: 0, y: 4)
+                                        .onAppear {
+                                            if !hasDisplayedHeroLogoImage {
+                                                hasDisplayedHeroLogoImage = true
+                                            }
+                                        }
+                                case .empty:
+                                    if hasDisplayedHeroLogoImage {
+                                        Color.clear
+                                    } else {
+                                        heroTitleText
+                                    }
                                 default:
                                     heroTitleText
                                 }
@@ -879,7 +917,7 @@ struct PlexDetailView: View {
                 .allowsHitTesting(allowActionRowInteraction)
             }
             .padding(.horizontal, heroOverlayHorizontalInset)
-            .animation(.easeInOut(duration: 0.3), value: currentItem.ratingKey)
+            .animation(isPreviewCarousel ? nil : .easeInOut(duration: 0.3), value: currentItem.ratingKey)
         }
     }
 
@@ -887,13 +925,26 @@ struct PlexDetailView: View {
 
     private var belowFoldTitleLogo: some View {
         Group {
-            if let logoURL = heroBackdrop.session.logoURL {
+            if let logoURL = effectiveHeroLogoURL {
                 CachedAsyncImage(url: logoURL) { phase in
                     switch phase {
                     case .success(let image):
                         image
                             .resizable()
                             .aspectRatio(contentMode: .fit)
+                            .onAppear {
+                                if !hasDisplayedHeroLogoImage {
+                                    hasDisplayedHeroLogoImage = true
+                                }
+                            }
+                    case .empty:
+                        if hasDisplayedHeroLogoImage {
+                            Color.clear
+                        } else {
+                            Text(heroBrandTitle)
+                                .font(.system(size: 42, weight: .bold))
+                                .foregroundStyle(.primary)
+                        }
                     default:
                         Text(heroBrandTitle)
                             .font(.system(size: 42, weight: .bold))

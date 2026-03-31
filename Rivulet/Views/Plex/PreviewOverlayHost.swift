@@ -393,13 +393,43 @@ struct PreviewOverlayHost: View {
 
     @MainActor
     private func prefetchAssets(around index: Int) {
-        let requests = [index - 1, index, index + 1]
+        let serverURLValue = serverURL
+        let authTokenValue = authToken
+        let networkManager = PlexNetworkManager.shared
+        let itemsToPrefetch = [index - 1, index, index + 1]
             .filter { request.items.indices.contains($0) }
-            .map { request.items[$0].heroBackdropRequest(serverURL: serverURL, authToken: authToken) }
+            .map { request.items[$0] }
+        let requests = itemsToPrefetch.map {
+            $0.heroBackdropRequest(serverURL: serverURLValue, authToken: authTokenValue)
+        }
+        let ratingKeys = itemsToPrefetch.compactMap(\.ratingKey)
 
-        Task.detached(priority: .utility) { [requests] in
+        Task.detached(priority: .utility) {
+            [requests, ratingKeys, serverURLValue, authTokenValue, networkManager] in
             for request in requests {
                 _ = await HeroBackdropResolver.shared.resolveAssets(for: request)
+            }
+
+            guard !ratingKeys.isEmpty else { return }
+            for ratingKey in ratingKeys {
+                let isFresh = await MainActor.run {
+                    PlexDataStore.shared.isFullMetadataFresh(for: ratingKey)
+                }
+                if isFresh {
+                    continue
+                }
+
+                guard let metadata = try? await networkManager.getFullMetadata(
+                    serverURL: serverURLValue,
+                    authToken: authTokenValue,
+                    ratingKey: ratingKey
+                ) else {
+                    continue
+                }
+
+                await MainActor.run {
+                    PlexDataStore.shared.cacheFullMetadata(metadata, for: ratingKey)
+                }
             }
         }
     }
@@ -570,7 +600,8 @@ private struct PreviewCarouselCard: View {
                     backdropStageSize: stageSize,
                     backdropWindowFrame: stageWindowFrame,
                     onPreviewExitRequested: onPreviewExitRequested,
-                    onDetailsBecameVisible: onDetailsBecameVisible
+                    onDetailsBecameVisible: onDetailsBecameVisible,
+                    enableDetailDataLoading: isCurrent
                 )
                 .allowsHitTesting(usesExpandedSurface && isCardExpanded)
 
@@ -635,6 +666,7 @@ private struct PreviewHeroSurface: View {
     let backdropWindowFrame: CGRect
     let onPreviewExitRequested: () -> Void
     let onDetailsBecameVisible: () -> Void
+    let enableDetailDataLoading: Bool
 
     var body: some View {
         PlexDetailView(
@@ -651,7 +683,8 @@ private struct PreviewHeroSurface: View {
             backdropStageSize: backdropStageSize,
             backdropWindowFrame: backdropWindowFrame,
             onPreviewExitRequested: onPreviewExitRequested,
-            onDetailsBecameVisible: onDetailsBecameVisible
+            onDetailsBecameVisible: onDetailsBecameVisible,
+            enableDetailDataLoading: enableDetailDataLoading
         )
     }
 }
