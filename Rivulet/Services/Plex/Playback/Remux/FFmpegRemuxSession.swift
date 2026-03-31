@@ -111,17 +111,14 @@ actor FFmpegRemuxSession {
     // Cancellation
     private var isCancelled = false
 
+    // Sequential generation: skip expensive HTTP seeks for sequential segments.
+    // After segment N, the format context is positioned near segment N+1's start.
+    private var lastGeneratedSegmentIndex: Int = -1
+
     // Target segment duration in seconds
-    private let targetSegmentDuration: TimeInterval = 2.0
-    private let estimatedSegmentDurationMin: TimeInterval = 2.0
-    private let estimatedSegmentDurationMax: TimeInterval = 12.0
-    private var estimatedSegmentDuration: TimeInterval = 2.0
+    private let targetSegmentDuration: TimeInterval = 6.0
     // Hard ceiling to avoid pathological scans on damaged/odd streams.
     private let maxPacketsPerSegmentRead = 60_000
-    // Estimated segments can drift from real keyframe boundaries. As we generate
-    // sequentially, capture actual keyframe starts per index to keep continuity.
-    private var usesEstimatedSegments = false
-    private var actualSegmentStartPTS: [Int: Int64] = [:]
 
     // Cached init segment (moov)
     private var cachedInitSegment: Data?
@@ -138,11 +135,23 @@ actor FFmpegRemuxSession {
     private var audioDecoder: FFmpegAudioDecoder?
     private var audioEncoder: FFmpegAudioEncoder?
 
+    /// Shared interrupt flag for aborting in-progress FFmpeg I/O.
+    /// Accessible outside the actor (nonisolated) so the server can signal
+    /// cancellation immediately without waiting for actor serialization.
+    /// Set to 1 to interrupt; cleared to 0 at the start of each generateSegment().
+    nonisolated(unsafe) let interruptFlag: UnsafeMutablePointer<Int32> = {
+        let ptr = UnsafeMutablePointer<Int32>.allocate(capacity: 1)
+        ptr.initialize(to: 0)
+        return ptr
+    }()
+
     deinit {
         if let ctx = formatContext {
             var mutableCtx: UnsafeMutablePointer<AVFormatContext>? = ctx
             avformat_close_input(&mutableCtx)
         }
+        interruptFlag.deinitialize(count: 1)
+        interruptFlag.deallocate()
     }
 
     // MARK: - Open
@@ -150,6 +159,7 @@ actor FFmpegRemuxSession {
     /// Open a source URL, discover streams, and scan keyframes to build the segment list.
     func open(url: URL, headers: [String: String]? = nil) throws -> RemuxSessionInfo {
         guard !isOpen else { throw RemuxError.alreadyOpen }
+        let openStart = Date()
 
         self.sourceURL = url
         self.sourceHeaders = headers
@@ -158,6 +168,15 @@ actor FFmpegRemuxSession {
         guard let ctx = avformat_alloc_context() else {
             throw RemuxError.openFailed("Failed to allocate format context")
         }
+
+        // Wire up interrupt callback so stale I/O can be aborted from outside
+        // the actor (e.g., when the server detects a seek and needs the actor
+        // to stop generating a stale read-ahead segment immediately).
+        ctx.pointee.interrupt_callback.callback = { opaquePtr -> Int32 in
+            guard let ptr = opaquePtr?.assumingMemoryBound(to: Int32.self) else { return 0 }
+            return ptr.pointee
+        }
+        ctx.pointee.interrupt_callback.opaque = UnsafeMutableRawPointer(interruptFlag)
 
         // Set up HTTP headers
         var options: OpaquePointer? = nil
@@ -168,6 +187,7 @@ actor FFmpegRemuxSession {
             av_dict_set(&options, "reconnect", "1", 0)
             av_dict_set(&options, "reconnect_streamed", "1", 0)
             av_dict_set(&options, "reconnect_delay_max", "5", 0)
+            av_dict_set(&options, "reconnect_on_network_error", "1", 0)
         }
 
         var mutableCtx: UnsafeMutablePointer<AVFormatContext>? = ctx
@@ -227,7 +247,7 @@ actor FFmpegRemuxSession {
         // Initialize DV converter if needed
         if needsDVConversion {
             doviConverter = DoviProfileConverter()
-            print("[RemuxSession] DV P7→P8.1 conversion enabled")
+            print("[Remux] DV P7→P8.1 conversion enabled")
         }
 
         // Get duration
@@ -235,20 +255,9 @@ actor FFmpegRemuxSession {
             duration = Double(openCtx.pointee.duration) / Double(AV_TIME_BASE)
         }
 
-        // Build segment list from actual keyframes (reads the file's index/keyframes).
-        // Falls back to estimated segments if keyframe scan finds nothing.
-        estimatedSegmentDuration = targetSegmentDuration
-        buildKeyframeSegmentList(ctx: openCtx)
-        if segments.isEmpty {
-            usesEstimatedSegments = true
-            if let probed = probeKeyframeInterval(ctx: openCtx) {
-                estimatedSegmentDuration = probed
-            }
-            buildEstimatedSegmentList()
-        } else {
-            usesEstimatedSegments = false
-        }
-        actualSegmentStartPTS.removeAll()
+        // Build segment list from duration (no keyframe scanning — segments are
+        // estimated and generateSegment() snaps to actual keyframes at read time).
+        buildEstimatedSegmentList()
 
         isOpen = true
         isCancelled = false
@@ -266,7 +275,8 @@ actor FFmpegRemuxSession {
             needsDVConversion: needsDVConversion
         )
 
-        print("[RemuxSession] Opened: \(videoCodecName) \(videoWidth)x\(videoHeight), audio=\(audioCodecName), " +
+        let openMs = Int(Date().timeIntervalSince(openStart) * 1000)
+        print("[Remux] open: \(openMs)ms — \(videoCodecName) \(videoWidth)x\(videoHeight), audio=\(audioCodecName), " +
               "duration=\(String(format: "%.1f", duration))s, segments=\(segments.count), " +
               "DV=\(hasDolbyVision ? "P\(dvProfile ?? 0)" : "no"), " +
               "audioTranscode=\(needsAudioTranscode), dvConversion=\(needsDVConversion)")
@@ -294,60 +304,98 @@ actor FFmpegRemuxSession {
             throw RemuxError.writeFailed("Invalid init segment structure")
         }
         cachedInitSegment = initData
-        print("[RemuxSession] Init segment: \(initData.count) bytes (raw \(rawData.count) bytes)")
+
+        // Log box structure for diagnostics
+        let rawBoxes = topLevelBoxes(in: rawData).joined(separator: ", ")
+        let initBoxes = topLevelBoxes(in: initData).joined(separator: ", ")
+        let moovChildren = moovSubBoxes(in: initData)
+        let codecTag = videoCodecTag()
+        let tagStr = String(format: "%c%c%c%c",
+                            codecTag & 0xFF, (codecTag >> 8) & 0xFF,
+                            (codecTag >> 16) & 0xFF, (codecTag >> 24) & 0xFF)
+        print("[Remux] Init segment: \(initData.count) bytes (raw \(rawData.count) bytes)")
+        print("[Remux] Init boxes: [\(initBoxes)] moov=[\(moovChildren)] codecTag=\(tagStr)")
         return initData
     }
 
     // MARK: - Media Segment Generation
 
     /// Generate an fMP4 media segment (moof + mdat) for the given segment index.
+    /// On network failure (stale connection after pause), automatically reconnects
+    /// to the Plex server and retries once.
     func generateSegment(index: Int) throws -> Data {
-        guard let ctx = formatContext, isOpen else { throw RemuxError.notOpen }
+        guard isOpen else { throw RemuxError.notOpen }
         guard index >= 0 && index < segments.count else {
             throw RemuxError.segmentOutOfRange(index)
         }
-        guard !isCancelled else { throw RemuxError.cancelled }
+        guard !isCancelled && !Task.isCancelled else { throw RemuxError.cancelled }
+
+        interruptFlag.pointee = 0
+
+        do {
+            return try performSegmentGeneration(index: index)
+        } catch RemuxError.cancelled {
+            throw RemuxError.cancelled
+        } catch RemuxError.segmentOutOfRange {
+            throw RemuxError.segmentOutOfRange(index)
+        } catch {
+            // Network errors after long pauses leave the format context dead.
+            // Reopen the connection and retry once.
+            guard !isCancelled && !Task.isCancelled else { throw RemuxError.cancelled }
+
+            print("[Remux] Segment \(index) failed (\(error)), reconnecting...")
+            try reopenFormatContext()
+            interruptFlag.pointee = 0
+            return try performSegmentGeneration(index: index)
+        }
+    }
+
+    /// Core segment generation logic — seek to position and mux packets into fMP4.
+    private func performSegmentGeneration(index: Int) throws -> Data {
+        guard let ctx = formatContext else { throw RemuxError.notOpen }
+
         let generationStart = Date()
-
         let segment = segments[index]
-        var startPTS = segment.startPTS
-        if usesEstimatedSegments, let refinedStart = actualSegmentStartPTS[index] {
-            startPTS = refinedStart
-        }
-        var nextSegmentPTS: Int64?
-        if index + 1 < segments.count {
-            if usesEstimatedSegments, let refinedNextStart = actualSegmentStartPTS[index + 1] {
-                nextSegmentPTS = refinedNextStart
-            } else {
-                nextSegmentPTS = segments[index + 1].startPTS
-            }
-        }
+        let startPTS = segment.startPTS
+        let nextSegmentPTS: Int64? = (index + 1 < segments.count) ? segments[index + 1].startPTS : nil
 
-        // Seek to segment start position (time-based, backward to nearest keyframe)
-        let streamSeekRet = avformat_seek_file(
-            ctx,
-            videoStreamIndex,
-            Int64.min,
-            startPTS,
-            startPTS,
-            AVSEEK_FLAG_BACKWARD
-        )
-        if streamSeekRet < 0 {
-            let seekTarget = av_rescale_q(startPTS, videoTimebase,
-                                          AVRational(num: 1, den: Int32(AV_TIME_BASE)))
-            let globalSeekRet = avformat_seek_file(
+        // For sequential segments, skip the expensive HTTP seek — the format context
+        // is already positioned near this segment's start after the previous generation.
+        // The foundFirstKeyframe logic will skip packets until the right keyframe.
+        // Also skip for segment 0 on first generation — the format context is already
+        // at position 0 after open() + init segment generation. Seeking + flushing
+        // would just clear HTTP buffers and force an expensive re-fetch (~3-4s).
+        let isSequential = (index == lastGeneratedSegmentIndex + 1) && lastGeneratedSegmentIndex >= 0
+        let isFirstSegmentFromStart = index == 0 && lastGeneratedSegmentIndex == -1
+        if !isSequential && !isFirstSegmentFromStart {
+            let seekStart = Date()
+            let streamSeekRet = avformat_seek_file(
                 ctx,
-                -1,
+                videoStreamIndex,
                 Int64.min,
-                seekTarget,
-                seekTarget,
+                startPTS,
+                startPTS,
                 AVSEEK_FLAG_BACKWARD
             )
-            if globalSeekRet < 0, index > 0 {
-                print("[RemuxSession] Seek failed for segment \(index): stream=\(streamSeekRet), global=\(globalSeekRet)")
+            if streamSeekRet < 0 {
+                let seekTarget = av_rescale_q(startPTS, videoTimebase,
+                                              AVRational(num: 1, den: Int32(AV_TIME_BASE)))
+                let globalSeekRet = avformat_seek_file(
+                    ctx,
+                    -1,
+                    Int64.min,
+                    seekTarget,
+                    seekTarget,
+                    AVSEEK_FLAG_BACKWARD
+                )
+                if globalSeekRet < 0, index > 0 {
+                    print("[Remux] Seek failed for segment \(index): stream=\(streamSeekRet), global=\(globalSeekRet)")
+                }
             }
+            avformat_flush(ctx)
+            let seekMs = Int(Date().timeIntervalSince(seekStart) * 1000)
+            print("[Remux] Segment \(index) seek: \(seekMs)ms")
         }
-        avformat_flush(ctx)
 
         // Read packets for this segment and write to fMP4 fragment
         let result = try writeMediaSegment(
@@ -358,18 +406,12 @@ actor FFmpegRemuxSession {
         )
         let segmentData = result.data
 
-        if usesEstimatedSegments {
-            actualSegmentStartPTS[index] = result.actualStartPTS
-            let nextIndex = index + 1
-            if nextIndex < segments.count,
-               let observedNextStart = result.nextSegmentStartPTS,
-               actualSegmentStartPTS[nextIndex] == nil {
-                actualSegmentStartPTS[nextIndex] = max(observedNextStart, result.actualStartPTS + 1)
-            }
-        }
+        lastGeneratedSegmentIndex = index
 
         let elapsedMs = Int(Date().timeIntervalSince(generationStart) * 1000)
-        print("[RemuxSession] Segment \(index): \(segmentData.count) bytes, " +
+        let seqLabel = isSequential ? " (seq)" : (isFirstSegmentFromStart ? " (first)" : "")
+        let boxes = topLevelBoxes(in: segmentData).joined(separator: "+")
+        print("[Remux] Segment \(index)\(seqLabel): \(segmentData.count) bytes [\(boxes)], " +
               "duration=\(String(format: "%.2f", segment.duration))s, elapsed=\(elapsedMs)ms")
 
         return segmentData
@@ -391,14 +433,72 @@ actor FFmpegRemuxSession {
         formatContext = nil
         isOpen = false
         segments = []
-        actualSegmentStartPTS.removeAll()
-        usesEstimatedSegments = false
+        lastGeneratedSegmentIndex = -1
         cachedInitSegment = nil
         cachedAudioPrimer = nil
         doviConverter = nil
         audioDecoder = nil
         audioEncoder = nil
         isCancelled = false
+    }
+
+    // MARK: - Reconnect
+
+    /// Reopen the format context after a stale/dead connection.
+    /// Preserves stream indices, codec state, and segment list — only the I/O
+    /// connection is refreshed. Called automatically by generateSegment() on failure.
+    private func reopenFormatContext() throws {
+        guard let url = sourceURL else { throw RemuxError.notOpen }
+
+        // Close old context
+        if let ctx = formatContext {
+            var mutableCtx: UnsafeMutablePointer<AVFormatContext>? = ctx
+            avformat_close_input(&mutableCtx)
+        }
+        formatContext = nil
+        lastGeneratedSegmentIndex = -1
+
+        // Allocate new context
+        guard let ctx = avformat_alloc_context() else {
+            throw RemuxError.openFailed("Failed to allocate format context for reconnect")
+        }
+
+        // Wire up interrupt callback
+        ctx.pointee.interrupt_callback.callback = { opaquePtr -> Int32 in
+            guard let ptr = opaquePtr?.assumingMemoryBound(to: Int32.self) else { return 0 }
+            return ptr.pointee
+        }
+        ctx.pointee.interrupt_callback.opaque = UnsafeMutableRawPointer(interruptFlag)
+
+        // Set up HTTP options (same as open())
+        var options: OpaquePointer? = nil
+        if let headers = sourceHeaders, !headers.isEmpty {
+            let headerString = headers.map { "\($0.key): \($0.value)" }
+                .joined(separator: "\r\n") + "\r\n"
+            av_dict_set(&options, "headers", headerString, 0)
+        }
+        av_dict_set(&options, "reconnect", "1", 0)
+        av_dict_set(&options, "reconnect_streamed", "1", 0)
+        av_dict_set(&options, "reconnect_delay_max", "5", 0)
+        av_dict_set(&options, "reconnect_on_network_error", "1", 0)
+
+        var mutableCtx: UnsafeMutablePointer<AVFormatContext>? = ctx
+        let ret = avformat_open_input(&mutableCtx, url.absoluteString, nil, &options)
+        av_dict_free(&options)
+
+        guard ret >= 0, let openCtx = mutableCtx else {
+            throw RemuxError.openFailed("Reconnect failed: avformat_open_input returned \(ret)")
+        }
+
+        let findRet = avformat_find_stream_info(openCtx, nil)
+        guard findRet >= 0 else {
+            var closable: UnsafeMutablePointer<AVFormatContext>? = openCtx
+            avformat_close_input(&closable)
+            throw RemuxError.openFailed("Reconnect failed: avformat_find_stream_info returned \(findRet)")
+        }
+
+        self.formatContext = openCtx
+        print("[Remux] Reconnected to source after stale connection")
     }
 
     // MARK: - Audio Stream Selection
@@ -432,7 +532,7 @@ actor FFmpegRemuxSession {
         // Invalidate cached init segment since codec may have changed
         cachedInitSegment = nil
 
-        print("[RemuxSession] Selected audio stream \(index): \(audioCodecName)")
+        print("[Remux] Selected audio stream \(index): \(audioCodecName)")
     }
 
     // MARK: - Private: DV Detection
@@ -459,7 +559,7 @@ actor FFmpegRemuxSession {
 
             hasDolbyVision = true
             dvProfile = profile
-            print("[RemuxSession] Dolby Vision detected: profile=\(profile), bl_compat_id=\(blCompatId)")
+            print("[Remux] Dolby Vision detected: profile=\(profile), bl_compat_id=\(blCompatId)")
         }
     }
 
@@ -504,7 +604,7 @@ actor FFmpegRemuxSession {
         )
         self.audioEncoder = encoder
 
-        print("[RemuxSession] Audio transcoder: \(audioCodecName) → EAC3 (\(srcChannels)ch → \(outChannels)ch)")
+        print("[Remux] Audio transcoder: \(audioCodecName) → EAC3 (\(srcChannels)ch → \(outChannels)ch)")
     }
 
     /// Transcode an audio packet: decode to PCM, re-encode to EAC3.
@@ -550,73 +650,8 @@ actor FFmpegRemuxSession {
 
     // MARK: - Private: Segment List
 
-    /// Build segment list from the container's index entries (MKV Cues, MP4 stss).
-    /// These are already in memory after avformat_find_stream_info — no I/O needed.
-    /// Groups keyframes into segments of approximately targetSegmentDuration.
-    private func buildKeyframeSegmentList(ctx: UnsafeMutablePointer<AVFormatContext>) {
-        let timebaseFactor = Double(videoTimebase.num) / Double(videoTimebase.den)
-        guard timebaseFactor > 0, duration > 0 else { return }
-
-        let stream = ctx.pointee.streams[Int(videoStreamIndex)]!
-        let numEntries = Int(avformat_index_get_entries_count(stream))
-        guard numEntries >= 2 else { return }
-
-        // Collect keyframe timestamps from the container index (MKV Cues, etc.)
-        var keyframePTS: [Int64] = []
-        keyframePTS.reserveCapacity(numEntries)
-        for i in 0..<numEntries {
-            guard let entry = avformat_index_get_entry(stream, Int32(i)) else { continue }
-            if entry.pointee.flags & Int32(AVINDEX_KEYFRAME) != 0 {
-                keyframePTS.append(entry.pointee.timestamp)
-            }
-        }
-
-        guard keyframePTS.count >= 2 else { return }
-
-        // Group keyframes into segments of approximately targetSegmentDuration
-        let targetDurationPTS = Int64(targetSegmentDuration / timebaseFactor)
-        var result: [RemuxSegmentInfo] = []
-        var segIdx = 0
-        var segStartIdx = 0
-
-        while segStartIdx < keyframePTS.count {
-            let startPTS = keyframePTS[segStartIdx]
-
-            // Find the next keyframe that's at least targetDuration past our start
-            var nextSegStartIdx = segStartIdx + 1
-            while nextSegStartIdx < keyframePTS.count {
-                if keyframePTS[nextSegStartIdx] - startPTS >= targetDurationPTS {
-                    break
-                }
-                nextSegStartIdx += 1
-            }
-
-            let endPTS: Int64
-            if nextSegStartIdx < keyframePTS.count {
-                endPTS = keyframePTS[nextSegStartIdx]
-            } else {
-                endPTS = Int64(duration / timebaseFactor)
-            }
-            let segDuration = Double(endPTS - startPTS) * timebaseFactor
-
-            result.append(RemuxSegmentInfo(
-                index: segIdx,
-                startPTS: startPTS,
-                duration: max(segDuration, 0.001),
-                bytePosition: -1
-            ))
-
-            segIdx += 1
-            segStartIdx = nextSegStartIdx
-        }
-
-        segments = result
-        print("[RemuxSession] Built \(segments.count) keyframe-aligned segments from \(keyframePTS.count) keyframes " +
-              "(avg \(String(format: "%.1f", duration / Double(max(segments.count, 1))))s each)")
-    }
-
-    /// Build segment list using estimated time intervals.
-    /// Fallback when keyframe scan produces no results.
+    /// Build segment list from duration using estimated time intervals.
+    /// Segments are approximate — generateSegment() snaps to actual keyframes.
     private func buildEstimatedSegmentList() {
         guard duration > 0 else {
             segments = [RemuxSegmentInfo(index: 0, startPTS: 0, duration: max(duration, 1), bytePosition: -1)]
@@ -633,13 +668,20 @@ actor FFmpegRemuxSession {
         var segIdx = 0
         var currentTime: TimeInterval = 0
 
-        let segmentDuration = max(
-            estimatedSegmentDurationMin,
-            min(estimatedSegmentDuration, estimatedSegmentDurationMax)
-        )
-
         while currentTime < duration {
-            let segDuration = min(segmentDuration, duration - currentTime)
+            let segDuration = min(targetSegmentDuration, duration - currentTime)
+            // Skip tiny trailing segments — no keyframes exist in the last fraction
+            // of a second, and they cause "No keyframe found" infinite retry loops.
+            if segDuration < 1.0 && !result.isEmpty {
+                // Extend the previous segment's duration instead
+                result[result.count - 1] = RemuxSegmentInfo(
+                    index: result[result.count - 1].index,
+                    startPTS: result[result.count - 1].startPTS,
+                    duration: result[result.count - 1].duration + segDuration,
+                    bytePosition: -1
+                )
+                break
+            }
             let startPTS = Int64(currentTime / timebaseFactor)
 
             result.append(RemuxSegmentInfo(
@@ -649,65 +691,11 @@ actor FFmpegRemuxSession {
                 bytePosition: -1
             ))
             segIdx += 1
-            currentTime += segmentDuration
+            currentTime += targetSegmentDuration
         }
 
         segments = result
-        print("[RemuxSession] Built \(segments.count) estimated segments (\(String(format: "%.1f", segmentDuration))s each)")
-    }
-
-    /// Probe the first few keyframes directly from packets when container index
-    /// metadata is unavailable. This keeps fallback segmenting aligned to real GOP.
-    private func probeKeyframeInterval(ctx: UnsafeMutablePointer<AVFormatContext>) -> TimeInterval? {
-        guard videoStreamIndex >= 0 else { return nil }
-        let timebaseFactor = Double(videoTimebase.num) / Double(videoTimebase.den)
-        guard timebaseFactor > 0 else { return nil }
-
-        let seekRet = avformat_seek_file(ctx, videoStreamIndex, Int64.min, 0, 0, AVSEEK_FLAG_BACKWARD)
-        if seekRet >= 0 {
-            avformat_flush(ctx)
-        }
-
-        var pkt = av_packet_alloc()
-        guard let packet = pkt else { return nil }
-        defer { av_packet_free(&pkt) }
-        defer {
-            let resetRet = avformat_seek_file(ctx, videoStreamIndex, Int64.min, 0, 0, AVSEEK_FLAG_BACKWARD)
-            if resetRet >= 0 {
-                avformat_flush(ctx)
-            }
-        }
-
-        var keyframePTS: [Int64] = []
-        keyframePTS.reserveCapacity(4)
-        var packetsRead = 0
-        let maxPackets = 20_000
-
-        while packetsRead < maxPackets && keyframePTS.count < 4 {
-            packetsRead += 1
-            let readRet = av_read_frame(ctx, packet)
-            if readRet < 0 { break }
-            defer { av_packet_unref(packet) }
-
-            guard packet.pointee.stream_index == videoStreamIndex else { continue }
-            guard (packet.pointee.flags & AV_PKT_FLAG_KEY) != 0 else { continue }
-            let pts = packet.pointee.pts
-            if keyframePTS.last != pts {
-                keyframePTS.append(pts)
-            }
-        }
-
-        guard keyframePTS.count >= 2 else { return nil }
-        let diffs = zip(keyframePTS, keyframePTS.dropFirst()).map { $1 - $0 }.filter { $0 > 0 }
-        guard !diffs.isEmpty else { return nil }
-
-        let sortedDiffs = diffs.sorted()
-        let medianPTS = sortedDiffs[sortedDiffs.count / 2]
-        let rawSeconds = Double(medianPTS) * timebaseFactor
-        let clamped = max(estimatedSegmentDurationMin, min(rawSeconds, estimatedSegmentDurationMax))
-
-        print("[RemuxSession] Probed fallback keyframe interval: raw=\(String(format: "%.2f", rawSeconds))s, using=\(String(format: "%.2f", clamped))s")
-        return clamped
+        print("[Remux] Built \(segments.count) estimated segments (\(String(format: "%.1f", targetSegmentDuration))s each)")
     }
 
     // MARK: - Private: Init Segment Writing
@@ -732,10 +720,12 @@ actor FFmpegRemuxSession {
             throw RemuxError.muxerFailed("Failed to copy video codec params: \(copyRet)")
         }
         outVideoStream.pointee.time_base = srcVideoStream.pointee.time_base
-        outVideoStream.pointee.codecpar.pointee.codec_tag = 0  // Let muxer choose
 
-        // Let FFmpeg choose the codec tag (hev1/hvc1).
-        // DV signaling (dvh1) will be patched in the init segment after muxing if needed.
+        // Apple HLS requires hvc1 (not hev1) for HEVC. FFmpeg defaults to hev1
+        // when codec_tag=0, which causes AVPlayer to reject every video sample
+        // with -12860 (kCMSampleBufferError_DataFailed). For DV, use dvh1 which
+        // triggers AVPlayer's Dolby Vision decode pipeline.
+        outVideoStream.pointee.codecpar.pointee.codec_tag = videoCodecTag()
 
         // Add audio stream (if present)
         if audioStreamIndex >= 0 {
@@ -764,6 +754,11 @@ actor FFmpegRemuxSession {
             // AC3 also needs frame_size
             if outAudioStream.pointee.codecpar.pointee.codec_id == AV_CODEC_ID_AC3 {
                 outAudioStream.pointee.codecpar.pointee.frame_size = 1536
+            }
+            // AAC often arrives with unset frame_size when copied from source metadata.
+            if outAudioStream.pointee.codecpar.pointee.codec_id == AV_CODEC_ID_AAC,
+               outAudioStream.pointee.codecpar.pointee.frame_size <= 0 {
+                outAudioStream.pointee.codecpar.pointee.frame_size = 1024
             }
         }
 
@@ -837,6 +832,15 @@ actor FFmpegRemuxSession {
                 defer { av_packet_unref(pkt) }
 
                 if pkt.pointee.stream_index == videoStreamIndex && !wroteVideo {
+                    if pkt.pointee.pts == avNoPTSValue {
+                        pkt.pointee.pts = (pkt.pointee.dts != avNoPTSValue) ? pkt.pointee.dts : 0
+                    }
+                    if pkt.pointee.dts == avNoPTSValue {
+                        pkt.pointee.dts = pkt.pointee.pts
+                    }
+                    if pkt.pointee.duration <= 0 {
+                        pkt.pointee.duration = 1
+                    }
                     pkt.pointee.stream_index = 0
                     av_packet_rescale_ts(pkt, srcVideoStream.pointee.time_base, outVideoStream.pointee.time_base)
                     let writeRet = av_write_frame(outCtx, pkt)
@@ -884,6 +888,12 @@ actor FFmpegRemuxSession {
                         // Passthrough: cache raw frame and write directly
                         if let rawData = pkt.pointee.data, pkt.pointee.size > 0 {
                             cachedAudioPrimer = Data(bytes: rawData, count: Int(pkt.pointee.size))
+                        }
+                        if pkt.pointee.pts == avNoPTSValue {
+                            pkt.pointee.pts = (pkt.pointee.dts != avNoPTSValue) ? pkt.pointee.dts : 0
+                        }
+                        if pkt.pointee.dts == avNoPTSValue {
+                            pkt.pointee.dts = pkt.pointee.pts
                         }
                         pkt.pointee.stream_index = 1
                         av_packet_rescale_ts(pkt, srcAudioStream.pointee.time_base,
@@ -956,7 +966,7 @@ actor FFmpegRemuxSession {
             throw RemuxError.muxerFailed("Failed to copy segment video codec params: \(copyVideoRet)")
         }
         outVideoStream.pointee.time_base = srcVideoStream.pointee.time_base
-        outVideoStream.pointee.codecpar.pointee.codec_tag = 0
+        outVideoStream.pointee.codecpar.pointee.codec_tag = videoCodecTag()
 
         var outAudioStreamIndex: Int32 = -1
         if audioStreamIndex >= 0 {
@@ -983,6 +993,9 @@ actor FFmpegRemuxSession {
             let audioCodecId = outAudioStream.pointee.codecpar.pointee.codec_id
             if audioCodecId == AV_CODEC_ID_EAC3 || audioCodecId == AV_CODEC_ID_AC3 {
                 outAudioStream.pointee.codecpar.pointee.frame_size = 1536
+            }
+            if audioCodecId == AV_CODEC_ID_AAC, outAudioStream.pointee.codecpar.pointee.frame_size <= 0 {
+                outAudioStream.pointee.codecpar.pointee.frame_size = 1024
             }
         }
 
@@ -1050,13 +1063,18 @@ actor FFmpegRemuxSession {
         var videoPTSShift: Int64 = 0  // Shift applied when PTS too small for depth offset
         var packetsScanned = 0
 
-        while !isCancelled {
+        while !isCancelled && !Task.isCancelled {
             packetsScanned += 1
             if packetsScanned > maxPacketsPerSegmentRead {
                 break
             }
             let readRet = av_read_frame(sourceCtx, packet)
-            if readRet < 0 { break }  // EOF or error
+            if readRet < 0 { break }  // EOF, error, or interrupt
+
+            // Re-check cancellation after potentially long-blocking network read.
+            // The interrupt callback aborts av_read_frame quickly, but we also
+            // check here for Task-level cancellation.
+            if Task.isCancelled || interruptFlag.pointee != 0 { break }
 
             do {
                 defer { av_packet_unref(packet) }
@@ -1069,26 +1087,39 @@ actor FFmpegRemuxSession {
                 }
 
                 if streamIndex == videoStreamIndex {
+                    let packetVideoPTS = packet.pointee.pts != avNoPTSValue
+                        ? packet.pointee.pts
+                        : packet.pointee.dts
+                    guard packetVideoPTS != avNoPTSValue else { continue }
+
                     // Check if we've reached the next segment.
                     // Only break on a KEYFRAME past endPTS — non-keyframes (B/P-frames)
                     // with PTS >= endPTS may still belong to the current GOP. Breaking
                     // on a non-keyframe would lose trailing B-frames in decode order.
-                    if let endPTS = endPTS, packet.pointee.pts >= endPTS,
+                    if let endPTS = endPTS, packetVideoPTS >= endPTS,
                        (packet.pointee.flags & AV_PKT_FLAG_KEY) != 0 {
                         if foundFirstKeyframe {
-                            nextSegmentStartPTS = packet.pointee.pts
+                            nextSegmentStartPTS = packetVideoPTS
                             break
                         }
                     }
 
                     // Wait for the first keyframe at or after our start PTS.
                     if !foundFirstKeyframe {
-                        if (packet.pointee.flags & AV_PKT_FLAG_KEY) != 0 && packet.pointee.pts >= startPTS {
+                        if (packet.pointee.flags & AV_PKT_FLAG_KEY) != 0 && packetVideoPTS >= startPTS {
                             foundFirstKeyframe = true
-                            actualStartPTS = packet.pointee.pts
+                            actualStartPTS = packetVideoPTS
                         } else {
                             continue
                         }
+                    }
+
+                    packet.pointee.pts = packetVideoPTS
+                    if packet.pointee.dts == avNoPTSValue {
+                        packet.pointee.dts = packet.pointee.pts
+                    }
+                    if packet.pointee.duration <= 0 {
+                        packet.pointee.duration = 1
                     }
 
                     // Remap stream index for output (video is always stream 0)
@@ -1151,14 +1182,22 @@ actor FFmpegRemuxSession {
 
                     let writeRet = av_write_frame(outCtx, packet)
                     if writeRet < 0 {
-                        print("[RemuxSession] Warning: video write failed for segment \(segmentIndex): \(writeRet)")
+                        print("[Remux] Warning: video write failed for segment \(segmentIndex): \(writeRet)")
                     }
                     videoPacketCount += 1
 
                 } else if streamIndex == audioStreamIndex {
                     guard foundFirstKeyframe else { continue }
 
-                    let audioPTS = av_rescale_q(packet.pointee.pts, audioTimebase, videoTimebase)
+                    let rawAudioPTS: Int64
+                    if packet.pointee.pts != avNoPTSValue {
+                        rawAudioPTS = packet.pointee.pts
+                    } else if packet.pointee.dts != avNoPTSValue {
+                        rawAudioPTS = packet.pointee.dts
+                    } else {
+                        continue
+                    }
+                    let audioPTS = av_rescale_q(rawAudioPTS, audioTimebase, videoTimebase)
                     if let endPTS = endPTS, audioPTS >= endPTS {
                         continue
                     }
@@ -1203,12 +1242,18 @@ actor FFmpegRemuxSession {
 
                             let writeRet = av_write_frame(outCtx, fp)
                             if writeRet < 0 {
-                                print("[RemuxSession] Warning: transcoded audio write failed for segment \(segmentIndex): \(writeRet)")
+                                print("[Remux] Warning: transcoded audio write failed for segment \(segmentIndex): \(writeRet)")
                             }
                             av_packet_free(&outPkt)
                             audioPacketCount += 1
                         }
                     } else {
+                        if packet.pointee.pts == avNoPTSValue {
+                            packet.pointee.pts = rawAudioPTS
+                        }
+                        if packet.pointee.dts == avNoPTSValue {
+                            packet.pointee.dts = packet.pointee.pts
+                        }
                         packet.pointee.stream_index = outStreamIdx
 
                         let srcAudioStream = sourceCtx.pointee.streams[Int(audioStreamIndex)]!
@@ -1219,7 +1264,7 @@ actor FFmpegRemuxSession {
 
                         let writeRet = av_write_frame(outCtx, packet)
                         if writeRet < 0 {
-                            print("[RemuxSession] Warning: audio write failed for segment \(segmentIndex): \(writeRet)")
+                            print("[Remux] Warning: audio write failed for segment \(segmentIndex): \(writeRet)")
                         }
                         audioPacketCount += 1
                     }
@@ -1227,7 +1272,7 @@ actor FFmpegRemuxSession {
             }
         }
 
-        guard !isCancelled else {
+        guard !isCancelled && !Task.isCancelled else {
             avio_context_free(&outCtx.pointee.pb)
             Unmanaged<OutputWriter>.fromOpaque(opaquePtr).release()
             throw RemuxError.cancelled
@@ -1266,7 +1311,7 @@ actor FFmpegRemuxSession {
                         pp.pointee.duration = 1536  // Standard EAC3 frame size
                         let primerWriteRet = av_write_frame(outCtx, pp)
                         if primerWriteRet < 0 {
-                            print("[RemuxSession] Warning: audio primer write failed for segment \(segmentIndex): \(primerWriteRet)")
+                            print("[Remux] Warning: audio primer write failed for segment \(segmentIndex): \(primerWriteRet)")
                         }
                     } else {
                         av_free(packetBuf)
@@ -1302,7 +1347,54 @@ actor FFmpegRemuxSession {
         )
     }
 
+    // MARK: - Private: Codec Tag
+
+    /// Returns the correct mp4 codec tag for the video stream.
+    /// Apple HLS requires `hvc1` for HEVC (not FFmpeg's default `hev1`).
+    /// Dolby Vision content uses `dvh1` to trigger AVPlayer's DV pipeline.
+    private func videoCodecTag() -> UInt32 {
+        // MKTAG('a','v','c','1') = 0x31637661
+        // MKTAG('h','v','c','1') = 0x31637668
+        // MKTAG('d','v','h','1') = 0x31687664
+        if hasDolbyVision {
+            return 0x31687664  // dvh1
+        } else if videoCodecId == AV_CODEC_ID_HEVC {
+            return 0x31637668  // hvc1
+        } else if videoCodecId == AV_CODEC_ID_H264 {
+            return 0x31637661  // avc1
+        } else {
+            return 0  // Let muxer choose
+        }
+    }
+
     // MARK: - Private: fMP4 Box Parsing
+
+    /// List direct children of the moov box (mvhd, trak, mvex, etc.)
+    private func moovSubBoxes(in data: Data) -> String {
+        var offset = 0
+        // Find moov box
+        while offset + 8 <= data.count {
+            let boxSize = Int(data.loadBigEndianUInt32(at: offset))
+            let boxType = String(data: data[offset+4..<offset+8], encoding: .ascii) ?? ""
+            guard boxSize >= 8 && offset + boxSize <= data.count else { break }
+            if boxType == "moov" {
+                // Parse children of moov
+                var children: [String] = []
+                var childOffset = offset + 8
+                let moovEnd = offset + boxSize
+                while childOffset + 8 <= moovEnd {
+                    let childSize = Int(data.loadBigEndianUInt32(at: childOffset))
+                    let childType = String(data: data[childOffset+4..<childOffset+8], encoding: .ascii) ?? ""
+                    guard childSize >= 8 && childOffset + childSize <= moovEnd else { break }
+                    children.append(childType)
+                    childOffset += childSize
+                }
+                return children.joined(separator: ", ")
+            }
+            offset += boxSize
+        }
+        return "moov not found"
+    }
 
     /// Extract only moof+mdat (and styp if present) from fMP4 output.
     /// Allowlist approach: only keep boxes that belong in an HLS media segment.
@@ -1457,7 +1549,7 @@ actor FFmpegRemuxSession {
             offset += boxSize
         }
 
-        print("[RemuxSession] [\(label)] boxes: \(boxes.joined(separator: " | "))")
+        print("[Remux] [\(label)] boxes: \(boxes.joined(separator: " | "))")
     }
 
     // MARK: - Private: Helpers
@@ -1502,6 +1594,7 @@ private extension Data {
 
 private let AVSEEK_FLAG_BACKWARD: Int32 = 1
 private let AVSEEK_FLAG_BYTE: Int32 = 2
+private let avNoPTSValue: Int64 = Int64.min
 
 #else
 

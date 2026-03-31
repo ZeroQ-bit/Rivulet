@@ -492,10 +492,6 @@ final class UniversalPlayerViewModel: ObservableObject {
     /// One-shot direct-play -> HLS fallback guards (prevents loops).
     private var hasAttemptedRivuletHLSFallback = false
     private var isAttemptingRivuletHLSFallback = false
-    /// Deferred initial seek for local remux startup (applied after first play).
-    private var pendingLocalRemuxInitialSeek: TimeInterval?
-    /// Large startup seeks on local remux can destabilize playback; clamp for now.
-    private let localRemuxStartupSeekMaxSeconds: TimeInterval = 20
 
     // MARK: - Shuffled Queue
 
@@ -803,14 +799,18 @@ final class UniversalPlayerViewModel: ObservableObject {
         timeControlObservation = player.observe(\.timeControlStatus, options: [.new]) { [weak self] player, _ in
             Task { @MainActor [weak self] in
                 guard let self else { return }
+                let reason = player.reasonForWaitingToPlay?.rawValue ?? "none"
                 switch player.timeControlStatus {
                 case .waitingToPlayAtSpecifiedRate:
+                    print("[Remux] AVPlayer: waitingToPlay (reason=\(reason), rate=\(player.rate))")
                     self.updatePlaybackState(.buffering)
                 case .playing:
+                    print("[Remux] AVPlayer: playing (rate=\(player.rate))")
                     if self.playbackState == .buffering {
                         self.updatePlaybackState(.playing)
                     }
                 case .paused:
+                    print("[Remux] AVPlayer: paused (rate=\(player.rate))")
                     break  // Handled by rate observer
                 @unknown default:
                     break
@@ -1026,7 +1026,11 @@ final class UniversalPlayerViewModel: ObservableObject {
             ))
             try await startWithFallback(plan: plan, startTime: startOffset)
 
-            print("[Player] startPlayback: player=\(player != nil), item=\(player?.currentItem != nil), status=\(player?.currentItem?.status.rawValue ?? -1)")
+            let itemStatus = player?.currentItem?.status.rawValue ?? -1
+            let bufferEmpty = player?.currentItem?.isPlaybackBufferEmpty ?? true
+            let bufferFull = player?.currentItem?.isPlaybackBufferFull ?? false
+            let likelyKeepUp = player?.currentItem?.isPlaybackLikelyToKeepUp ?? false
+            print("[Remux] play() — status=\(itemStatus) bufferEmpty=\(bufferEmpty) bufferFull=\(bufferFull) likelyKeepUp=\(likelyKeepUp)")
             player?.play()
 
             // Index for Siri Suggestions — watched content gets higher priority
@@ -1037,15 +1041,6 @@ final class UniversalPlayerViewModel: ObservableObject {
             activity.targetContentIdentifier = "rivulet://play?ratingKey=\(metadata.ratingKey ?? "")"
             self.userActivity = activity
             activity.becomeCurrent()
-            if let deferredSeek = pendingLocalRemuxInitialSeek, deferredSeek > 0 {
-                pendingLocalRemuxInitialSeek = nil
-                Task { @MainActor [weak self] in
-                    guard let self else { return }
-                    // Give AVPlayer a short bootstrap window before high-offset seek on remux HLS.
-                    try? await Task.sleep(nanoseconds: 400_000_000)
-                    await self.player?.seek(to: CMTime(seconds: deferredSeek, preferredTimescale: 600))
-                }
-            }
             if let dur = player?.currentItem?.duration.seconds, dur.isFinite {
                 self.duration = dur
             }
@@ -1165,22 +1160,53 @@ final class UniversalPlayerViewModel: ObservableObject {
     /// Wait for AVPlayerItem status to leave `.unknown` during startup.
     /// Returns true when ready, false on timeout/failed/missing item.
     private func waitForCurrentItemReady(timeout: TimeInterval) async -> Bool {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            guard let item = player?.currentItem else { return false }
-            switch item.status {
-            case .readyToPlay:
-                return true
-            case .failed:
-                return false
-            case .unknown:
-                break
-            @unknown default:
-                break
-            }
-            try? await Task.sleep(nanoseconds: 200_000_000)
+        guard let item = player?.currentItem else {
+            print("[Remux] waitReady: no currentItem")
+            return false
         }
-        return false
+
+        // Already ready
+        if item.status == .readyToPlay { return true }
+        if item.status == .failed { return false }
+
+        // Use KVO continuation — wakes immediately when status changes, no polling
+        return await withCheckedContinuation { continuation in
+            var observation: NSKeyValueObservation?
+            var timeoutTask: Task<Void, Never>?
+            var resumed = false
+            let lock = NSLock()
+
+            func resume(with value: Bool) {
+                lock.lock()
+                guard !resumed else { lock.unlock(); return }
+                resumed = true
+                lock.unlock()
+                observation?.invalidate()
+                timeoutTask?.cancel()
+                continuation.resume(returning: value)
+            }
+
+            observation = item.observe(\.status, options: [.new]) { item, _ in
+                switch item.status {
+                case .readyToPlay:
+                    print("[Remux] waitReady: readyToPlay")
+                    resume(with: true)
+                case .failed:
+                    print("[Remux] waitReady: FAILED — \(item.error?.localizedDescription ?? "unknown")")
+                    resume(with: false)
+                default:
+                    break
+                }
+            }
+
+            timeoutTask = Task {
+                try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+                guard !Task.isCancelled else { return }
+                let s = item.status.rawValue
+                print("[Remux] waitReady: TIMEOUT after \(Int(timeout))s — status=\(s) bufEmpty=\(item.isPlaybackBufferEmpty) keepUp=\(item.isPlaybackLikelyToKeepUp)")
+                resume(with: false)
+            }
+        }
     }
 
     /// Load content using the appropriate path from the playback plan.
@@ -1190,7 +1216,6 @@ final class UniversalPlayerViewModel: ObservableObject {
     /// 2. **Local remux** — FFmpegRemuxSession → LocalRemuxServer → AVPlayer (MKV, DTS, DV P7)
     /// 3. **Plex HLS** — AVPlayer opens Plex HLS URL
     private func startWithFallback(plan: PlaybackPlan, startTime: TimeInterval?) async throws {
-        pendingLocalRemuxInitialSeek = nil
         switch plan.primary {
         case .avPlayerDirect(let url, let headers):
             let directURL = streamURL ?? url
@@ -1216,24 +1241,17 @@ final class UniversalPlayerViewModel: ObservableObject {
             let remuxURL = streamURL ?? url
             let remuxHeaders = streamHeaders.isEmpty ? (headers ?? rivuletDirectPlayHeaders()) : streamHeaders
             do {
-                try await loadWithRemuxServer(sourceURL: remuxURL, headers: remuxHeaders)
+                let remuxStart = Date()
+                // Prefetch init + target segment, then use EXT-X-START so AVPlayer
+                // goes directly to the resume position. All data is instant cache hits.
+                try await loadWithRemuxServer(sourceURL: remuxURL, headers: remuxHeaders, startTime: startTime)
                 let becameReady = await waitForCurrentItemReady(timeout: 8.0)
+                let readyMs = Int(Date().timeIntervalSince(remuxStart) * 1000)
                 if !becameReady {
+                    print("[Remux] TIMEOUT: not ready after \(readyMs)ms")
                     throw PlayerError.loadFailed("Local remux did not become ready in time")
                 }
-                // For local remux, defer non-zero startup seeks until after first play.
-                // Seeking into high segment indexes before initial readiness can stall AVPlayer.
-                if let startTime, startTime > 0 {
-                    if startTime <= localRemuxStartupSeekMaxSeconds {
-                        pendingLocalRemuxInitialSeek = startTime
-                    } else {
-                        pendingLocalRemuxInitialSeek = nil
-                        print(
-                            "[Player] Local remux startup seek skipped: \(String(format: "%.1f", startTime))s " +
-                            "exceeds max \(Int(localRemuxStartupSeekMaxSeconds))s"
-                        )
-                    }
-                }
+                print("[Remux] Ready in \(readyMs)ms")
             } catch {
                 guard planHasHLSFallback(plan) else { throw error }
                 let kind = classifyDirectPlayFailure(error)
@@ -1606,50 +1624,62 @@ final class UniversalPlayerViewModel: ObservableObject {
     }
 
     /// Create remux session + local server, then point AVPlayer at localhost HLS.
-    private func loadWithRemuxServer(sourceURL: URL, headers: [String: String]?) async throws {
+    private func loadWithRemuxServer(sourceURL: URL, headers: [String: String]?, startTime: TimeInterval? = nil) async throws {
         // Stop previous remux infrastructure
-        stopRemuxServer()
+        await stopRemuxServer()
 
         let session = FFmpegRemuxSession()
         self.remuxSession = session
 
         let sessionInfo = try await session.open(url: sourceURL, headers: headers)
-
-        // Preflight: validate FFmpeg can produce valid fMP4 before starting server
-        let initData = try await session.generateInitSegment()
-        guard initData.count > 8 else {
-            throw PlayerError.loadFailed("Init segment invalid (\(initData.count) bytes)")
-        }
         guard !sessionInfo.segments.isEmpty else {
             throw PlayerError.loadFailed("No remux segments available")
         }
-        let firstSegmentData = try await session.generateSegment(index: 0)
-        guard firstSegmentData.count > 8 else {
-            throw PlayerError.loadFailed("First media segment invalid (\(firstSegmentData.count) bytes)")
-        }
 
-        // Reuse preflight output so AVPlayer's first init/segment requests hit cache
-        // instead of regenerating expensive startup fragments a second time.
+        // Pre-generate init + the first segment AVPlayer will request so it gets
+        // instant cache hits (Content-Length). With a start time, prefetch the target
+        // segment and use EXT-X-START so AVPlayer goes directly there.
+        let prefetchStart = Date()
+        let initData = try await session.generateInitSegment()
+        let targetSegIdx = startTime.map { max(0, Int($0 / sessionInfo.segments.first!.duration)) } ?? 0
+        let clampedIdx = min(targetSegIdx, sessionInfo.segments.count - 1)
+        let segData = try await session.generateSegment(index: clampedIdx)
+        let prefetchMs = Int(Date().timeIntervalSince(prefetchStart) * 1000)
+        print("[Remux] Prefetch: init + segment \(clampedIdx) in \(prefetchMs)ms")
+
         let server = LocalRemuxServer(
             session: session,
             sessionInfo: sessionInfo,
             prebuiltInitSegment: initData,
-            prebuiltSegments: [0: firstSegmentData]
+            prebuiltSegments: [clampedIdx: segData]
         )
+        if let startTime, startTime > 0 {
+            server.startOffset = startTime
+        }
         self.remuxServer = server
 
         let localURL = try server.start()
-        print("[Player] Remux server started: \(localURL), init segment: \(initData.count) bytes")
+        print("[Remux] Server started: \(localURL), segments=\(sessionInfo.segments.count), target=seg\(clampedIdx)")
 
         try loadAVPlayer(url: localURL, headers: nil)
+
+        // For local remux, skip AVPlayer's buffering rate evaluation.
+        // Our segments generate faster than real-time (~500-1400ms per 6s segment),
+        // so sustained playback is fine. Without this, AVPlayer spends 10-15 seconds
+        // measuring throughput before starting, which is worse than the HLS fallback.
+        player?.automaticallyWaitsToMinimizeStalling = false
     }
 
     /// Stop remux server and session.
-    private func stopRemuxServer() {
+    private func stopRemuxServer() async {
         remuxServer?.stop()
         remuxServer = nil
         if let session = remuxSession {
-            Task { await session.close() }
+            // Abort in-progress FFmpeg I/O immediately so the actor becomes
+            // available for cancel/close without waiting for generation to finish.
+            session.interruptFlag.pointee = 1
+            await session.cancel()
+            await session.close()
         }
         remuxSession = nil
     }
@@ -1689,7 +1719,7 @@ final class UniversalPlayerViewModel: ObservableObject {
         // Stop current player
         teardownAVPlayerObservers()
         player?.pause()
-        stopRemuxServer()
+        await stopRemuxServer()
 
         streamURL = fallback.url
         streamHeaders = fallback.headers
@@ -1840,7 +1870,15 @@ final class UniversalPlayerViewModel: ObservableObject {
         player?.replaceCurrentItem(with: nil)
         player = nil
         _playerForCleanup = nil
-        stopRemuxServer()
+        // Abort any in-progress FFmpeg I/O immediately (bypasses actor queue),
+        // then cancel/close the session asynchronously.
+        if let session = remuxSession {
+            session.interruptFlag.pointee = 1
+            Task { await session.cancel(); await session.close() }
+        }
+        remuxServer?.stop()
+        remuxServer = nil
+        remuxSession = nil
         dvProxyServer?.stop()
         dvProxyServer = nil
         hlsManifestEnricher = nil

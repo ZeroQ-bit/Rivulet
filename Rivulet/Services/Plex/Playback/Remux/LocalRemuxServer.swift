@@ -37,22 +37,27 @@ final class LocalRemuxServer {
     private(set) var isRunning = false
 
     /// Segment cache — ring buffer to avoid regenerating recent segments.
-    /// 60 segments at 2s each = 120s lookahead buffer.
+    /// 60 segments at 6s each = 360s lookahead buffer.
     private var segmentCache: [Int: Data] = [:]
     private var cacheOrder: [Int] = []
     private let maxCachedSegments = 60
     private let cacheLock = NSLock()
 
-    /// Sequential producer state.
-    /// Produces segments in index order with bounded lookahead from latest demand.
-    private let producerLock = NSLock()
-    private var producerTask: Task<Void, Never>?
-    private var producerCursor: Int?
-    private var producerMaxRequested = -1
-    private let producerLookahead = 12
+    /// Read-ahead tasks for background pre-generation.
+    private var readAheadTasks: [Task<Void, Never>] = []
+
+    /// Last segment index requested — used to detect seeks vs sequential access.
+    private var lastRequestedIndex: Int = -1
+
+    /// Segments currently being generated (prevents duplicate actor calls).
+    private var inFlightSegments: Set<Int> = []
 
     /// Cached init segment
     private var initSegment: Data?
+
+    /// Start offset for EXT-X-START — tells AVPlayer to begin at this time
+    /// instead of segment 0, avoiding wrong-position playback + deferred seek.
+    var startOffset: TimeInterval = 0
 
     init(
         session: FFmpegRemuxSession,
@@ -87,7 +92,7 @@ final class LocalRemuxServer {
                     self?.isRunning = true
                 }
             case .failed(let error):
-                print("[RemuxServer] Listener failed: \(error)")
+                print("[Remux] Listener failed: \(error)")
                 self?.isRunning = false
             case .cancelled:
                 self?.isRunning = false
@@ -115,7 +120,7 @@ final class LocalRemuxServer {
         }
 
         let url = URL(string: "http://127.0.0.1:\(port)/master.m3u8")!
-        print("[RemuxServer] Started on port \(port)")
+        print("[Remux] Started on port \(port)")
         return url
     }
 
@@ -135,16 +140,15 @@ final class LocalRemuxServer {
         segmentCache.removeAll()
         cacheOrder.removeAll()
         cacheLock.unlock()
-        producerLock.lock()
-        producerTask?.cancel()
-        producerTask = nil
-        producerCursor = nil
-        producerMaxRequested = -1
-        producerLock.unlock()
+
+        for task in readAheadTasks { task.cancel() }
+        readAheadTasks.removeAll()
+        lastRequestedIndex = -1
+        inFlightSegments.removeAll()
 
         initSegment = nil
         isRunning = false
-        print("[RemuxServer] Stopped")
+        print("[Remux] Stopped")
     }
 
     // MARK: - Connection Handling
@@ -205,7 +209,7 @@ final class LocalRemuxServer {
 
     private func routeRequest(path: String, on connection: NWConnection) {
         let pathOnly = path.components(separatedBy: "?").first ?? path
-        print("[RemuxServer] Request: \(pathOnly)")
+        print("[Remux] Request: \(pathOnly)")
 
         if pathOnly == "/master.m3u8" {
             serveMasterPlaylist(on: connection)
@@ -231,12 +235,19 @@ final class LocalRemuxServer {
     // MARK: - Master Playlist
 
     private func serveMasterPlaylist(on connection: NWConnection) {
-        // Build codec string
-        var codecs = "hvc1.2.4.L153.B0"  // Default HEVC
-        if sessionInfo.hasDolbyVision {
-            // Use hvc1 in master playlist — AVPlayer rejects dvh1 in CODECS
-            // The init segment's codec tag (dvh1) triggers DV pipeline
+        // Build codec string matching the actual video codec.
+        // Mismatch between playlist CODECS and init segment stsd causes AVPlayer
+        // to reject every video sample with -12860 (kCMSampleBufferError_DataFailed).
+        let codecs: String
+        switch sessionInfo.videoCodecName {
+        case "hevc":
+            // Apple HLS requires hvc1 in CODECS (even for DV — dvh1 is rejected here,
+            // but the init segment's stsd uses dvh1 to trigger the DV pipeline).
             codecs = "hvc1.2.4.L153.B0"
+        case "h264":
+            codecs = "avc1.640028"  // High Profile Level 4.0
+        default:
+            codecs = "avc1.640028"  // Safe fallback
         }
 
         // Audio codec string
@@ -260,6 +271,7 @@ final class LocalRemuxServer {
 
         var playlist = "#EXTM3U\n"
         playlist += "#EXT-X-VERSION:7\n"
+        playlist += "#EXT-X-INDEPENDENT-SEGMENTS\n"
         playlist += "#EXT-X-STREAM-INF:BANDWIDTH=\(bandwidth),RESOLUTION=\(resolution),"
         playlist += "CODECS=\"\(codecs),\(audioCodec)\"\n"
         playlist += "stream.m3u8\n"
@@ -279,6 +291,10 @@ final class LocalRemuxServer {
         playlist += "#EXT-X-TARGETDURATION:\(Int(ceil(segments.map(\.duration).max() ?? 6.0)))\n"
         playlist += "#EXT-X-PLAYLIST-TYPE:VOD\n"
         playlist += "#EXT-X-MEDIA-SEQUENCE:0\n"
+        playlist += "#EXT-X-INDEPENDENT-SEGMENTS\n"
+        if startOffset > 0 {
+            playlist += "#EXT-X-START:TIME-OFFSET=\(String(format: "%.3f", startOffset))\n"
+        }
         playlist += "#EXT-X-MAP:URI=\"init.mp4\"\n"
 
         for segment in segments {
@@ -309,7 +325,7 @@ final class LocalRemuxServer {
                 self.initSegment = data
                 self.sendResponse(on: connection, contentType: "video/mp4", body: data)
             } catch {
-                print("[RemuxServer] Init segment generation failed: \(error)")
+                print("[Remux] Init segment generation failed: \(error)")
                 self.sendError(on: connection, status: 500, message: "Init segment generation failed")
             }
         }
@@ -323,123 +339,175 @@ final class LocalRemuxServer {
             return
         }
 
-        // Cache hit — serve immediately with Content-Length
+        let isSeek = index != lastRequestedIndex + 1 && lastRequestedIndex >= 0
+        lastRequestedIndex = index
+
+        // Cache hit — serve immediately
         cacheLock.lock()
         if let cached = segmentCache[index] {
             cacheLock.unlock()
-            print("[RemuxServer] Segment \(index) cache hit (\(cached.count) bytes)")
+            print("[Remux] Segment \(index) cache hit (\(cached.count) bytes)")
             sendResponse(on: connection, contentType: "video/mp4", body: cached)
-            requestSequentialProduction(startingAt: index + 1)
+            startReadAhead(from: index + 1)
             return
         }
         cacheLock.unlock()
 
-        // Start/advance sequential producer and wait for cache fill.
-        requestSequentialProduction(startingAt: index)
+        // On seek, cancel read-ahead so we don't wait behind stale pre-generation.
+        // For sequential access, let read-ahead continue — it may be nearly done.
+        if isSeek {
+            print("[Remux] Seek detected: segment \(index), cancelling read-ahead")
+            // Signal FFmpeg's interrupt callback to abort any in-progress av_read_frame()
+            // immediately. This bypasses actor serialization — the stale generation exits
+            // within one I/O poll cycle (~10-50ms) instead of running to completion (~4s).
+            session.interruptFlag.pointee = 1
+            for task in readAheadTasks { task.cancel() }
+            readAheadTasks.removeAll()
+            inFlightSegments.removeAll()
+        }
+
+        // If read-ahead is already generating this segment, wait for it
+        if inFlightSegments.contains(index) {
+            Task {
+                await self.waitForCachedSegment(index: index, on: connection)
+            }
+            return
+        }
+
+        // Cache miss — send 200 OK headers immediately so AVPlayer doesn't
+        // time out waiting for the response while we seek + generate (~3-8s).
+        // The body follows via chunked transfer encoding once generation completes.
+        sendChunkedResponseHeaders(on: connection, contentType: "video/mp4")
+
+        inFlightSegments.insert(index)
         Task {
-            await self.waitForCachedSegment(index: index, on: connection)
+            do {
+                let generationStart = Date()
+                let data = try await self.session.generateSegment(index: index)
+                self.inFlightSegments.remove(index)
+                self.cacheSegment(index: index, data: data)
+                let elapsedMs = Int(Date().timeIntervalSince(generationStart) * 1000)
+                print("[Remux] Segment \(index) generated (\(data.count) bytes, elapsed=\(elapsedMs)ms)")
+                self.sendChunkedResponseBody(on: connection, body: data)
+                self.startReadAhead(from: index + 1)
+            } catch {
+                self.inFlightSegments.remove(index)
+                print("[Remux] Segment \(index) generation failed: \(error)")
+                // Headers already sent — can't send HTTP error, just close
+                connection.cancel()
+                self.removeConnection(connection)
+            }
         }
     }
 
-    /// Wait for a segment to appear in cache (another request is generating it).
+    /// Wait for an in-flight read-ahead to populate the cache, then serve.
     private func waitForCachedSegment(index: Int, on connection: NWConnection) async {
-        // Poll cache every 100ms for up to 5 seconds.
-        // If sequential production falls behind, fail over faster to direct generation.
         let waitStart = Date()
-        for _ in 0..<50 {
-            try? await Task.sleep(nanoseconds: 100_000_000)
+        // Poll cache every 50ms for up to 10 seconds
+        for _ in 0..<200 {
+            try? await Task.sleep(nanoseconds: 50_000_000)
 
             cacheLock.lock()
             if let cached = segmentCache[index] {
                 cacheLock.unlock()
                 let waitedMs = Int(Date().timeIntervalSince(waitStart) * 1000)
-                print("[RemuxServer] Segment \(index) served from cache after wait (\(cached.count) bytes, wait=\(waitedMs)ms)")
+                print("[Remux] Segment \(index) served from read-ahead cache (wait=\(waitedMs)ms)")
                 sendResponse(on: connection, contentType: "video/mp4", body: cached)
+                startReadAhead(from: index + 1)
                 return
             }
             cacheLock.unlock()
+
+            // If read-ahead finished without caching (error/cancel), generate directly
+            if !inFlightSegments.contains(index) {
+                break
+            }
+
+            // If AVPlayer seeked away, stop waiting — this segment is stale
+            if lastRequestedIndex > index {
+                print("[Remux] Segment \(index) wait abandoned — AVPlayer moved to \(lastRequestedIndex)")
+                connection.cancel()
+                removeConnection(connection)
+                return
+            }
         }
 
-        // Producer timed out. Kick producer again, then do one direct fallback attempt.
-        requestSequentialProduction(startingAt: index)
-        print("[RemuxServer] Segment \(index) wait timed out, generating directly")
+        // If AVPlayer seeked away, don't bother generating
+        if lastRequestedIndex > index {
+            print("[Remux] Segment \(index) fallback skipped — AVPlayer moved to \(lastRequestedIndex)")
+            connection.cancel()
+            removeConnection(connection)
+            return
+        }
+
+        // Fallback: generate directly — use chunked encoding since this can be slow
+        sendChunkedResponseHeaders(on: connection, contentType: "video/mp4")
+        inFlightSegments.insert(index)
         do {
             let generationStart = Date()
             let data = try await session.generateSegment(index: index)
+            inFlightSegments.remove(index)
             cacheSegment(index: index, data: data)
             let elapsedMs = Int(Date().timeIntervalSince(generationStart) * 1000)
-            print("[RemuxServer] Direct segment \(index) generated in \(elapsedMs)ms (\(data.count) bytes)")
-            sendResponse(on: connection, contentType: "video/mp4", body: data)
+            print("[Remux] Segment \(index) generated after wait fallback (\(data.count) bytes, elapsed=\(elapsedMs)ms)")
+            sendChunkedResponseBody(on: connection, body: data)
+            startReadAhead(from: index + 1)
         } catch {
-            print("[RemuxServer] Segment \(index) generation failed: \(error)")
-            sendError(on: connection, status: 500, message: "Segment generation failed")
+            inFlightSegments.remove(index)
+            print("[Remux] Segment \(index) generation failed: \(error)")
+            connection.cancel()
+            removeConnection(connection)
         }
     }
 
-    // MARK: - Sequential Producer
+    // MARK: - Read-Ahead
 
-    private func requestSequentialProduction(startingAt index: Int) {
-        guard index >= 0 else { return }
-        producerLock.lock()
-        let cappedIndex = min(index, max(sessionInfo.segments.count - 1, 0))
-        producerMaxRequested = max(producerMaxRequested, cappedIndex)
-        if producerCursor == nil {
-            producerCursor = cappedIndex
+    /// Fire-and-forget background generation of the next few segments.
+    /// If AVPlayer requests them before they finish, direct generation handles it.
+    /// Only reads ahead near the current playback position to avoid stale generation.
+    private func startReadAhead(from startIndex: Int) {
+        // Don't read ahead from a stale position — AVPlayer may have seeked away.
+        // Allow read-ahead only if it's near what AVPlayer last requested.
+        if lastRequestedIndex >= 0 && startIndex < lastRequestedIndex {
+            return
         }
-        if producerTask == nil {
-            producerTask = Task { [weak self] in
-                await self?.runSequentialProducer()
-            }
-        }
-        producerLock.unlock()
-    }
 
-    private func runSequentialProducer() async {
-        while !Task.isCancelled {
-            let nextIndex: Int?
-            producerLock.lock()
-            let segmentCount = sessionInfo.segments.count
-            let maxIndex = max(segmentCount - 1, 0)
-            guard let cursor = producerCursor else {
-                producerTask = nil
-                producerLock.unlock()
-                return
-            }
-            if segmentCount == 0 || cursor > maxIndex {
-                producerTask = nil
-                producerLock.unlock()
-                return
-            }
-            let target = min(maxIndex, producerMaxRequested + producerLookahead)
-            if cursor > target {
-                producerTask = nil
-                producerLock.unlock()
-                return
-            }
-            nextIndex = cursor
-            producerCursor = cursor + 1
-            producerLock.unlock()
+        let segmentCount = sessionInfo.segments.count
+        let readAheadCount = 3
+        let endIndex = min(startIndex + readAheadCount, segmentCount)
+        guard startIndex < endIndex else { return }
 
-            guard let segmentIndex = nextIndex else { continue }
-
+        for i in startIndex..<endIndex {
             cacheLock.lock()
-            let alreadyCached = segmentCache[segmentIndex] != nil
+            let alreadyCached = segmentCache[i] != nil
             cacheLock.unlock()
-            if alreadyCached { continue }
+            if alreadyCached || inFlightSegments.contains(i) { continue }
 
-            do {
-                let generationStart = Date()
-                let data = try await session.generateSegment(index: segmentIndex)
-                cacheSegment(index: segmentIndex, data: data)
-                let elapsedMs = Int(Date().timeIntervalSince(generationStart) * 1000)
-                print("[RemuxServer] Sequential segment \(segmentIndex) (\(data.count) bytes, elapsed=\(elapsedMs)ms)")
-            } catch {
-                print("[RemuxServer] Sequential segment \(segmentIndex) failed: \(error)")
+            inFlightSegments.insert(i)
+            let task = Task { [weak self] in
+                guard let self = self else { return }
+                guard !Task.isCancelled else {
+                    self.inFlightSegments.remove(i)
+                    return
+                }
+
+                do {
+                    let data = try await self.session.generateSegment(index: i)
+                    self.inFlightSegments.remove(i)
+                    self.cacheSegment(index: i, data: data)
+                    print("[Remux] Read-ahead segment \(i) cached (\(data.count) bytes)")
+                } catch {
+                    self.inFlightSegments.remove(i)
+                    if !Task.isCancelled {
+                        print("[Remux] Read-ahead segment \(i) failed: \(error)")
+                    }
+                }
             }
+            readAheadTasks.append(task)
         }
-        producerLock.lock()
-        producerTask = nil
-        producerLock.unlock()
+
+        // Clean up completed tasks
+        readAheadTasks.removeAll { $0.isCancelled }
     }
 
     // MARK: - Cache Management
@@ -478,7 +546,53 @@ final class LocalRemuxServer {
                     // AVPlayer frequently cancels duplicate/in-flight segment requests.
                     // Treat broken pipe/reset as expected client aborts.
                 } else {
-                    print("[RemuxServer] Send error: \(error)")
+                    print("[Remux] Send error: \(error)")
+                }
+            }
+            connection.cancel()
+            self?.removeConnection(connection)
+        })
+    }
+
+    /// Send HTTP 200 headers immediately with chunked transfer encoding.
+    /// The body is sent separately via `sendChunkedResponseBody()`.
+    /// This prevents AVPlayer from timing out during slow segment generation.
+    private func sendChunkedResponseHeaders(on connection: NWConnection, contentType: String) {
+        var response = "HTTP/1.1 200 OK\r\n"
+        response += "Content-Type: \(contentType)\r\n"
+        response += "Transfer-Encoding: chunked\r\n"
+        response += "Access-Control-Allow-Origin: *\r\n"
+        response += "Connection: close\r\n"
+        response += "\r\n"
+
+        connection.send(content: response.data(using: .utf8)!, contentContext: .defaultMessage,
+                        isComplete: false, completion: .contentProcessed { error in
+            if let error = error {
+                print("[Remux] Chunked header send error: \(error)")
+            }
+        })
+    }
+
+    /// Send the body for a chunked response and close the connection.
+    private func sendChunkedResponseBody(on connection: NWConnection, body: Data) {
+        // Chunked encoding: hex-size CRLF data CRLF, then terminal 0-chunk
+        let chunkHeader = String(format: "%x\r\n", body.count).data(using: .utf8)!
+        let chunkTrailer = "\r\n0\r\n\r\n".data(using: .utf8)!
+
+        var payload = Data()
+        payload.reserveCapacity(chunkHeader.count + body.count + chunkTrailer.count)
+        payload.append(chunkHeader)
+        payload.append(body)
+        payload.append(chunkTrailer)
+
+        connection.send(content: payload, contentContext: .finalMessage,
+                        isComplete: true, completion: .contentProcessed { [weak self] error in
+            if let error = error {
+                if case let .posix(code) = error,
+                   code == .EPIPE || code == .ECONNRESET {
+                    // Expected — AVPlayer may have moved on
+                } else {
+                    print("[Remux] Chunked body send error: \(error)")
                 }
             }
             connection.cancel()
