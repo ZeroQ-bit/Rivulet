@@ -609,6 +609,7 @@ final class UniversalPlayerViewModel: ObservableObject {
             guard let self else { return }
             if self.playbackState == .playing {
                 self.pausedDueToAppInactive = true
+                print("[Remux] App entering background — pausing")
                 Task { @MainActor in
                     self.pause()
                 }
@@ -795,7 +796,9 @@ final class UniversalPlayerViewModel: ObservableObject {
                     let bufEmpty = item?.isPlaybackBufferEmpty ?? true
                     let keepUp = item?.isPlaybackLikelyToKeepUp ?? false
                     let time = String(format: "%.1f", item?.currentTime().seconds ?? 0)
-                    print("[Remux] rate→0 (was playing) at \(time)s bufEmpty=\(bufEmpty) keepUp=\(keepUp) tcs=\(player.timeControlStatus.rawValue)")
+                    let loaded = item?.loadedTimeRanges.first?.timeRangeValue
+                    let loadedEnd = loaded.map { String(format: "%.1f", CMTimeGetSeconds($0.start) + CMTimeGetSeconds($0.duration)) } ?? "?"
+                    print("[Remux] rate→0 (was playing) at \(time)s bufEmpty=\(bufEmpty) keepUp=\(keepUp) tcs=\(player.timeControlStatus.rawValue) loadedTo=\(loadedEnd)s")
                     self.updatePlaybackState(.paused)
 
                     // With automaticallyWaitsToMinimizeStalling=false, AVPlayer pauses
@@ -1996,6 +1999,9 @@ final class UniversalPlayerViewModel: ObservableObject {
     }
 
     private func activePlayer_pause() {
+        if remuxServer != nil {
+            print("[Remux] activePlayer_pause() called")
+        }
         player?.pause()
     }
 
