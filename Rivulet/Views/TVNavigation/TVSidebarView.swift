@@ -117,7 +117,30 @@ struct TVSidebarView: View {
             // Start background preloading of Live TV data (low priority)
             liveTVDataStore.startBackgroundPreload()
         }
-        // Handle deep links from Top Shelf
+        // Handle deep links from Top Shelf and Siri
+        .onOpenURL { url in
+            Task {
+                await DeepLinkHandler.shared.handle(url: url)
+            }
+        }
+        .onContinueUserActivity("com.rivulet.viewMedia") { activity in
+            guard let ratingKey = activity.userInfo?["ratingKey"] as? String,
+                  !ratingKey.isEmpty else { return }
+            Task {
+                await DeepLinkHandler.shared.handle(
+                    url: URL(string: "rivulet://detail?ratingKey=\(ratingKey)")!
+                )
+            }
+        }
+        .onContinueUserActivity("com.rivulet.playMedia") { activity in
+            guard let ratingKey = activity.userInfo?["ratingKey"] as? String,
+                  !ratingKey.isEmpty else { return }
+            Task {
+                await DeepLinkHandler.shared.handle(
+                    url: URL(string: "rivulet://play?ratingKey=\(ratingKey)")!
+                )
+            }
+        }
         .onChange(of: deepLinkHandler.pendingPlayback) { _, metadata in
             guard let metadata else { return }
             presentPlayerForDeepLink(metadata)

@@ -70,30 +70,6 @@ struct RivuletApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()
-                .onOpenURL { url in
-                    // Handle deep links from Top Shelf
-                    Task {
-                        await DeepLinkHandler.shared.handle(url: url)
-                    }
-                }
-                .onContinueUserActivity("com.rivulet.viewMedia") { activity in
-                    guard let ratingKey = activity.userInfo?["ratingKey"] as? String,
-                          !ratingKey.isEmpty else { return }
-                    Task {
-                        await DeepLinkHandler.shared.handle(
-                            url: URL(string: "rivulet://detail?ratingKey=\(ratingKey)")!
-                        )
-                    }
-                }
-                .onContinueUserActivity("com.rivulet.playMedia") { activity in
-                    guard let ratingKey = activity.userInfo?["ratingKey"] as? String,
-                          !ratingKey.isEmpty else { return }
-                    Task {
-                        await DeepLinkHandler.shared.handle(
-                            url: URL(string: "rivulet://play?ratingKey=\(ratingKey)")!
-                        )
-                    }
-                }
         }
         .modelContainer(sharedModelContainer)
     }
