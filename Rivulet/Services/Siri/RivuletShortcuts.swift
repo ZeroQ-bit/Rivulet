@@ -19,15 +19,5 @@ struct RivuletShortcuts: AppShortcutsProvider {
             shortTitle: "Play Media",
             systemImageName: "play.fill"
         )
-        AppShortcut(
-            intent: SearchMediaIntent(),
-            phrases: [
-                "Search \(.applicationName) for \(\.$query)",
-                "Find \(\.$query) on \(.applicationName)",
-                "Look up \(\.$query) on \(.applicationName)"
-            ],
-            shortTitle: "Search Media",
-            systemImageName: "magnifyingglass"
-        )
     }
 }
