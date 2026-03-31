@@ -420,6 +420,7 @@ final class UniversalPlayerViewModel: ObservableObject {
     private var rateObservation: NSKeyValueObservation?
     private var timeControlObservation: NSKeyValueObservation?
     private var itemStatusObservation: NSKeyValueObservation?
+    private var keepUpObservation: NSKeyValueObservation?
     private var timeObserver: Any?
     // Non-isolated reference for cleanup in deinit
     private nonisolated(unsafe) var _playerForCleanup: AVPlayer?
@@ -811,14 +812,6 @@ final class UniversalPlayerViewModel: ObservableObject {
                         print("[Remux] AVPlayer: waitingToPlay (reason=\(reason), rate=\(player.rate))")
                     }
                     self.updatePlaybackState(.buffering)
-                    // For local remux, AVPlayer's "minimize stalls" evaluation is overly
-                    // conservative — it can hold 60+ seconds of buffer and still not play.
-                    // Force immediate playback when we know segments are flowing.
-                    if self.remuxServer != nil,
-                       reason == AVPlayer.WaitingReason.toMinimizeStalls.rawValue {
-                        print("[Remux] Forcing playImmediately (toMinimizeStalls with remux active)")
-                        player.playImmediately(atRate: 1.0)
-                    }
                 case .playing:
                     print("[Remux] AVPlayer: playing (rate=\(player.rate))")
                     if self.playbackState == .buffering {
@@ -903,6 +896,24 @@ final class UniversalPlayerViewModel: ObservableObject {
             }
         }
 
+        // Buffer recovery for local remux. With automaticallyWaitsToMinimizeStalling=false,
+        // AVPlayer pauses (rate=0) on buffer underruns instead of waiting. We detect when
+        // the buffer refills and resume playback ourselves.
+        if let item = player.currentItem {
+            keepUpObservation = item.observe(\.isPlaybackLikelyToKeepUp, options: [.new]) { [weak self] item, _ in
+                Task { @MainActor [weak self] in
+                    guard let self, self.remuxServer != nil else { return }
+                    if item.isPlaybackLikelyToKeepUp,
+                       self.player?.rate == 0,
+                       self.player?.currentItem?.status == .readyToPlay,
+                       self.playbackState == .paused || self.playbackState == .buffering {
+                        print("[Remux] Buffer recovered (keepUp=true), resuming playback")
+                        self.player?.play()
+                    }
+                }
+            }
+        }
+
         // Time updates (every 0.5s)
         let interval = CMTime(seconds: 0.5, preferredTimescale: 600)
         let observer = player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] time in
@@ -922,6 +933,8 @@ final class UniversalPlayerViewModel: ObservableObject {
         rateObservation = nil
         timeControlObservation?.invalidate()
         timeControlObservation = nil
+        keepUpObservation?.invalidate()
+        keepUpObservation = nil
         itemStatusObservation?.invalidate()
         itemStatusObservation = nil
         if let timeObserver, let player {
@@ -1688,8 +1701,10 @@ final class UniversalPlayerViewModel: ObservableObject {
 
         try loadAVPlayer(url: localURL, headers: nil)
 
-        // Set a small forward buffer so AVPlayer starts quickly with just
-        // one segment cached, rather than its default (~30s for remote HLS).
+        // Disable AVPlayer's stall minimization — it deadlocks on locally-generated
+        // HLS because it can't evaluate the "network" throughput correctly.
+        // We handle buffer recovery ourselves via isPlaybackLikelyToKeepUp KVO.
+        player?.automaticallyWaitsToMinimizeStalling = false
         player?.currentItem?.preferredForwardBufferDuration = 6.0
     }
 
