@@ -108,6 +108,7 @@ struct PlexDetailView: View {
     @State private var unifiedEpisodes: [PlexMetadata] = []
     @State private var episodeScrollTarget: String? = nil
     @State private var scrollToTopTrigger = false
+    @State private var browseActivity: NSUserActivity?
 
     private let networkManager = PlexNetworkManager.shared
     private let recommendationService = PersonalizedRecommendationService.shared
@@ -473,6 +474,16 @@ struct PlexDetailView: View {
             belowFoldTitleOpacity = 0
             syncHeroBackdrop()
 
+            // Index for Siri search
+            browseActivity?.resignCurrent()
+            let activity = NSUserActivity(activityType: "com.rivulet.viewMedia")
+            activity.title = currentItem.title
+            activity.isEligibleForSearch = true
+            activity.userInfo = ["ratingKey": currentItem.ratingKey ?? ""]
+            activity.targetContentIdentifier = "rivulet://detail?ratingKey=\(currentItem.ratingKey ?? "")"
+            activity.becomeCurrent()
+            browseActivity = activity
+
             // Initialize watched state
             isWatched = currentItem.isWatched
 
@@ -723,13 +734,6 @@ struct PlexDetailView: View {
                     focusedTrackId = savedFocus
                 }
             }
-        }
-        // Index browsed content for Siri search (not suggestions)
-        .userActivity("com.rivulet.viewMedia") { activity in
-            activity.title = currentItem.title
-            activity.isEligibleForSearch = true
-            activity.userInfo = ["ratingKey": currentItem.ratingKey ?? ""]
-            activity.targetContentIdentifier = "rivulet://detail?ratingKey=\(currentItem.ratingKey ?? "")"
         }
     }
 

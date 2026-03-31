@@ -9,8 +9,47 @@ import SwiftUI
 import SwiftData
 import Sentry
 
+// MARK: - App Delegate
+
+class RivuletAppDelegate: NSObject, UIApplicationDelegate {
+
+    func application(_ app: UIApplication, open url: URL, options: [UIApplication.OpenURLOptionsKey: Any] = [:]) -> Bool {
+        Task {
+            await DeepLinkHandler.shared.handle(url: url)
+        }
+        return true
+    }
+
+    func application(_ application: UIApplication, continue userActivity: NSUserActivity, restorationHandler: @escaping ([any UIUserActivityRestoring]?) -> Void) -> Bool {
+        guard let ratingKey = userActivity.userInfo?["ratingKey"] as? String,
+              !ratingKey.isEmpty else { return false }
+
+        switch userActivity.activityType {
+        case "com.rivulet.viewMedia":
+            Task {
+                await DeepLinkHandler.shared.handle(
+                    url: URL(string: "rivulet://detail?ratingKey=\(ratingKey)")!
+                )
+            }
+            return true
+        case "com.rivulet.playMedia":
+            Task {
+                await DeepLinkHandler.shared.handle(
+                    url: URL(string: "rivulet://play?ratingKey=\(ratingKey)")!
+                )
+            }
+            return true
+        default:
+            return false
+        }
+    }
+}
+
+// MARK: - App
+
 @main
 struct RivuletApp: App {
+    @UIApplicationDelegateAdaptor(RivuletAppDelegate.self) var appDelegate
 
     init() {
         #if !DEBUG
