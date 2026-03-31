@@ -284,6 +284,7 @@ struct PlexDetailView: View {
                 )
                 .opacity(effectiveVignetteVisible ? 1 : 0)
                 .animation(.easeOut(duration: 0.6), value: effectiveVignetteVisible)
+                .drawingGroup()
                 .ignoresSafeArea()
                 .allowsHitTesting(false)
 
@@ -303,6 +304,7 @@ struct PlexDetailView: View {
                 .frame(maxHeight: .infinity, alignment: .bottom)
                 .opacity(effectiveVignetteVisible ? 1 : 0)
                 .animation(.easeOut(duration: 0.6), value: effectiveVignetteVisible)
+                .drawingGroup()
                 .ignoresSafeArea()
                 .allowsHitTesting(false)
 
@@ -695,6 +697,14 @@ struct PlexDetailView: View {
                 }
             }
         }
+        // Index browsed content for Siri search (not suggestions)
+        .userActivity("com.rivulet.viewMedia") { activity in
+            activity.title = currentItem.title
+            activity.isEligibleForSearch = true
+            activity.isEligibleForPrediction = false
+            activity.userInfo = ["ratingKey": currentItem.ratingKey ?? ""]
+            activity.targetContentIdentifier = "rivulet://detail?ratingKey=\(currentItem.ratingKey ?? "")"
+        }
     }
 
     private func heroContentHeight(for fullHeight: CGFloat) -> CGFloat {
@@ -870,8 +880,8 @@ struct PlexDetailView: View {
                 .allowsHitTesting(allowActionRowInteraction)
             }
             .padding(.horizontal, heroOverlayHorizontalInset)
+            .animation(.easeInOut(duration: 0.3), value: currentItem.ratingKey)
         }
-        .animation(.easeInOut(duration: 0.3), value: currentItem.ratingKey)
     }
 
     // MARK: - Below-fold Title Logo (centered, Apple TV+ style)
@@ -3051,19 +3061,13 @@ struct EpisodeRow: View {
                 .overlay(alignment: .bottom) {
                     // Progress bar
                     if let progress = episode.watchProgress, progress > 0 && progress < 1 {
-                        GeometryReader { geo in
-                            VStack {
-                                Spacer()
-                                ZStack(alignment: .leading) {
-                                    Rectangle()
-                                        .fill(Color.black.opacity(0.5))
-                                        .frame(height: 3)
-                                    Rectangle()
-                                        .fill(Color.blue)
-                                        .frame(width: geo.size.width * progress, height: 3)
-                                }
-                            }
+                        ZStack(alignment: .leading) {
+                            Rectangle()
+                                .fill(Color.black.opacity(0.5))
+                            Color.blue
+                                .scaleEffect(x: progress, anchor: .leading)
                         }
+                        .frame(height: 3)
                     }
                 }
 
