@@ -19,8 +19,7 @@ struct PlayMediaIntent: AppIntent {
 
     @MainActor
     func perform() async throws -> some IntentResult & ProvidesDialog {
-        let url = URL(string: "rivulet://play?ratingKey=\(media.id)")!
-        await DeepLinkHandler.shared.handle(url: url)
+        DeepLinkHandler.shared.handlePlay(ratingKey: media.id)
         return .result(dialog: "Playing \(media.title)")
     }
 }
