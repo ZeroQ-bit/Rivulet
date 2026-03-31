@@ -115,6 +115,12 @@ actor FFmpegRemuxSession {
     // After segment N, the format context is positioned near segment N+1's start.
     private var lastGeneratedSegmentIndex: Int = -1
 
+    // DTS continuity across segments. Each segment's DTS must continue where
+    // the previous segment ended, otherwise AVPlayer sees gaps/overlaps and stalls.
+    // Reset to nil after seeks (non-sequential segments start fresh).
+    private var continuationVideoDTS: Int64?
+    private var continuationVideoPTSShift: Int64 = 0
+
     // Target segment duration in seconds
     private let targetSegmentDuration: TimeInterval = 6.0
     // Hard ceiling to avoid pathological scans on damaged/odd streams.
@@ -397,16 +403,22 @@ actor FFmpegRemuxSession {
             print("[Remux] Segment \(index) seek: \(seekMs)ms")
         }
 
-        // Read packets for this segment and write to fMP4 fragment
+        // Read packets for this segment and write to fMP4 fragment.
+        // For sequential segments, carry over DTS from the previous segment
+        // to ensure timeline continuity (prevents AVPlayer stalls at boundaries).
         let result = try writeMediaSegment(
             sourceCtx: ctx,
             segmentIndex: index,
             startPTS: startPTS,
-            endPTS: nextSegmentPTS
+            endPTS: nextSegmentPTS,
+            continuationDTS: isSequential ? continuationVideoDTS : nil,
+            continuationPTSShift: isSequential ? continuationVideoPTSShift : 0
         )
         let segmentData = result.data
 
         lastGeneratedSegmentIndex = index
+        continuationVideoDTS = result.endVideoDTS
+        continuationVideoPTSShift = result.videoPTSShift
 
         let elapsedMs = Int(Date().timeIntervalSince(generationStart) * 1000)
         let seqLabel = isSequential ? " (seq)" : (isFirstSegmentFromStart ? " (first)" : "")
@@ -434,6 +446,8 @@ actor FFmpegRemuxSession {
         isOpen = false
         segments = []
         lastGeneratedSegmentIndex = -1
+        continuationVideoDTS = nil
+        continuationVideoPTSShift = 0
         cachedInitSegment = nil
         cachedAudioPrimer = nil
         doviConverter = nil
@@ -457,6 +471,8 @@ actor FFmpegRemuxSession {
         }
         formatContext = nil
         lastGeneratedSegmentIndex = -1
+        continuationVideoDTS = nil
+        continuationVideoPTSShift = 0
 
         // Allocate new context
         guard let ctx = avformat_alloc_context() else {
@@ -939,14 +955,22 @@ actor FFmpegRemuxSession {
         let data: Data
         let actualStartPTS: Int64
         let nextSegmentStartPTS: Int64?
+        /// The DTS value the next segment should start at for continuity.
+        let endVideoDTS: Int64
+        /// The PTS shift applied in this segment (carry over for continuity).
+        let videoPTSShift: Int64
     }
 
     /// Write an fMP4 media segment (moof+mdat) containing packets for the given segment.
+    /// - Parameter continuationDTS: If non-nil, start DTS here for timeline continuity with the previous segment.
+    /// - Parameter continuationPTSShift: PTS shift from the previous segment (carry over for continuity).
     private func writeMediaSegment(
         sourceCtx: UnsafeMutablePointer<AVFormatContext>,
         segmentIndex: Int,
         startPTS: Int64,
-        endPTS: Int64?
+        endPTS: Int64?,
+        continuationDTS: Int64? = nil,
+        continuationPTSShift: Int64 = 0
     ) throws -> MediaSegmentResult {
         // Create output format context with in-memory I/O
         var outputCtx: UnsafeMutablePointer<AVFormatContext>? = nil
@@ -1059,8 +1083,11 @@ actor FFmpegRemuxSession {
         var foundFirstKeyframe = false
         var actualStartPTS: Int64?
         var nextSegmentStartPTS: Int64?
-        var nextVideoDTS: Int64 = Int64.min
-        var videoPTSShift: Int64 = 0  // Shift applied when PTS too small for depth offset
+        // For sequential segments, carry over DTS from the previous segment to ensure
+        // timeline continuity. AVPlayer expects baseMediaDecodeTime to be continuous
+        // across segments — gaps cause stalls, overlaps cause drops.
+        var nextVideoDTS: Int64 = continuationDTS ?? Int64.min
+        var videoPTSShift: Int64 = continuationPTSShift
         var packetsScanned = 0
 
         while !isCancelled && !Task.isCancelled {
@@ -1343,7 +1370,9 @@ actor FFmpegRemuxSession {
         return MediaSegmentResult(
             data: segmentData,
             actualStartPTS: actualStartPTS ?? startPTS,
-            nextSegmentStartPTS: nextSegmentStartPTS
+            nextSegmentStartPTS: nextSegmentStartPTS,
+            endVideoDTS: nextVideoDTS,
+            videoPTSShift: videoPTSShift
         )
     }
 
