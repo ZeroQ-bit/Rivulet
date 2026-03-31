@@ -374,11 +374,10 @@ final class LocalRemuxServer {
             return
         }
 
-        // Cache miss — send 200 OK headers immediately so AVPlayer doesn't
-        // time out waiting for the response while we seek + generate (~3-8s).
-        // The body follows via chunked transfer encoding once generation completes.
-        sendChunkedResponseHeaders(on: connection, contentType: "video/mp4")
-
+        // Cache miss — generate and serve with Content-Length.
+        // With interrupt callback + fast seeks, generation is ~2-3s which is
+        // within AVPlayer's HTTP timeout. Chunked encoding caused AVPlayer to
+        // miscount the segment delivery rate and get stuck evaluating buffering.
         inFlightSegments.insert(index)
         Task {
             do {
@@ -388,14 +387,12 @@ final class LocalRemuxServer {
                 self.cacheSegment(index: index, data: data)
                 let elapsedMs = Int(Date().timeIntervalSince(generationStart) * 1000)
                 print("[Remux] Segment \(index) generated (\(data.count) bytes, elapsed=\(elapsedMs)ms)")
-                self.sendChunkedResponseBody(on: connection, body: data)
+                self.sendResponse(on: connection, contentType: "video/mp4", body: data)
                 self.startReadAhead(from: index + 1)
             } catch {
                 self.inFlightSegments.remove(index)
                 print("[Remux] Segment \(index) generation failed: \(error)")
-                // Headers already sent — can't send HTTP error, just close
-                connection.cancel()
-                self.removeConnection(connection)
+                self.sendError(on: connection, status: 500, message: "Segment generation failed")
             }
         }
     }
@@ -440,8 +437,7 @@ final class LocalRemuxServer {
             return
         }
 
-        // Fallback: generate directly — use chunked encoding since this can be slow
-        sendChunkedResponseHeaders(on: connection, contentType: "video/mp4")
+        // Fallback: generate directly
         inFlightSegments.insert(index)
         do {
             let generationStart = Date()
@@ -450,13 +446,12 @@ final class LocalRemuxServer {
             cacheSegment(index: index, data: data)
             let elapsedMs = Int(Date().timeIntervalSince(generationStart) * 1000)
             print("[Remux] Segment \(index) generated after wait fallback (\(data.count) bytes, elapsed=\(elapsedMs)ms)")
-            sendChunkedResponseBody(on: connection, body: data)
+            sendResponse(on: connection, contentType: "video/mp4", body: data)
             startReadAhead(from: index + 1)
         } catch {
             inFlightSegments.remove(index)
             print("[Remux] Segment \(index) generation failed: \(error)")
-            connection.cancel()
-            removeConnection(connection)
+            sendError(on: connection, status: 500, message: "Segment generation failed")
         }
     }
 

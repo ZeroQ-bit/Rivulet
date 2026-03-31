@@ -802,7 +802,9 @@ final class UniversalPlayerViewModel: ObservableObject {
                 let reason = player.reasonForWaitingToPlay?.rawValue ?? "none"
                 switch player.timeControlStatus {
                 case .waitingToPlayAtSpecifiedRate:
-                    print("[Remux] AVPlayer: waitingToPlay (reason=\(reason), rate=\(player.rate))")
+                    if self.playbackState != .buffering {
+                        print("[Remux] AVPlayer: waitingToPlay (reason=\(reason), rate=\(player.rate))")
+                    }
                     self.updatePlaybackState(.buffering)
                 case .playing:
                     print("[Remux] AVPlayer: playing (rate=\(player.rate))")
@@ -1031,7 +1033,17 @@ final class UniversalPlayerViewModel: ObservableObject {
             let bufferFull = player?.currentItem?.isPlaybackBufferFull ?? false
             let likelyKeepUp = player?.currentItem?.isPlaybackLikelyToKeepUp ?? false
             print("[Remux] play() — status=\(itemStatus) bufferEmpty=\(bufferEmpty) bufferFull=\(bufferFull) likelyKeepUp=\(likelyKeepUp)")
-            player?.play()
+            // Use playImmediately to skip the buffering rate evaluation on startup.
+            // After seeks, AVPlayer evaluates the first segment's delivery rate and
+            // deadlocks if it's slow (HTTP seek overhead). playImmediately bypasses
+            // this for the initial play only — AVPlayerViewController's scrub resume
+            // calls regular play() which works normally with cached read-ahead data.
+            if remuxServer != nil {
+                player?.playImmediately(atRate: 1.0)
+            } else {
+                player?.play()
+            }
+
 
             // Index for Siri Suggestions — watched content gets higher priority
             let activity = NSUserActivity(activityType: "com.rivulet.playMedia")
@@ -1663,10 +1675,10 @@ final class UniversalPlayerViewModel: ObservableObject {
 
         try loadAVPlayer(url: localURL, headers: nil)
 
-        // For local remux, skip AVPlayer's buffering rate evaluation.
-        // Our segments generate faster than real-time (~500-1400ms per 6s segment),
-        // so sustained playback is fine. Without this, AVPlayer spends 10-15 seconds
-        // measuring throughput before starting, which is worse than the HLS fallback.
+        // Disable AVPlayer's buffering rate evaluation for local remux.
+        // Without this, AVPlayer deadlocks after seeks — it evaluates the first
+        // segment's delivery rate and refuses to play. playImmediately(atRate:)
+        // can't override toMinimizeStalls, so this property is the only option.
         player?.automaticallyWaitsToMinimizeStalling = false
     }
 
