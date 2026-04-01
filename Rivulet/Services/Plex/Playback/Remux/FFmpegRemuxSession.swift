@@ -1345,10 +1345,10 @@ actor FFmpegRemuxSession {
                     } else {
                         continue
                     }
-                    let audioPTS = av_rescale_q(rawAudioPTS, audioTimebase, videoTimebase)
-                    if let endPTS = endPTS, audioPTS >= endPTS {
-                        continue
-                    }
+                    // Don't filter audio by endPTS — video reads to the actual keyframe
+                    // (which can be far past the estimated endPTS). Audio must cover the
+                    // same range as video. Audio naturally stops when the video loop
+                    // breaks at the keyframe boundary.
 
                     let outStreamIdx = (outAudioStreamIndex >= 0) ? outAudioStreamIndex : 1
 
@@ -1468,6 +1468,10 @@ actor FFmpegRemuxSession {
                         let primerWriteRet = av_write_frame(outCtx, pp)
                         if primerWriteRet < 0 {
                             print("[Remux] Warning: audio primer write failed for segment \(segmentIndex): \(primerWriteRet)")
+                        }
+                        if !audioPacketWritten {
+                            firstWrittenAudioDTS = pp.pointee.dts
+                            audioPacketWritten = true
                         }
                     } else {
                         av_free(packetBuf)
