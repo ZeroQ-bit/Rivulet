@@ -101,7 +101,7 @@ struct MusicHomeView: View {
 
     private var sidebar: some View {
         ScrollView(.vertical, showsIndicators: false) {
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 8) {
                 // Categories
                 ForEach(MusicLibraryCategory.allCases, id: \.self) { category in
                     Button {
@@ -135,7 +135,7 @@ struct MusicHomeView: View {
             }
             .padding(40)
         }
-        .frame(width: 340)
+        .frame(width: 400)
         .focusSection()
     }
 
@@ -217,11 +217,23 @@ struct MusicHomeView: View {
                         Button {
                             selectedItem = item
                         } label: {
-                            EquatableView(content: MediaPosterCard(
-                                item: item,
-                                serverURL: authManager.selectedServerURL ?? "",
-                                authToken: authManager.selectedServerToken ?? ""
-                            ))
+                            VStack(alignment: .leading, spacing: 8) {
+                                EquatableView(content: MediaPosterCard(
+                                    item: item,
+                                    serverURL: authManager.selectedServerURL ?? "",
+                                    authToken: authManager.selectedServerToken ?? ""
+                                ))
+
+                                Text(item.title ?? "Unknown")
+                                    .font(.system(size: ScaledDimensions.posterTitleSize))
+                                    .foregroundStyle(.white)
+                                    .lineLimit(1)
+
+                                Text(item.parentTitle ?? item.grandparentTitle ?? "")
+                                    .font(.system(size: ScaledDimensions.posterSubtitleSize))
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                            }
                         }
                         .buttonStyle(CardButtonStyle())
                         .contextMenu {
