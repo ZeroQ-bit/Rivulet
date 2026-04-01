@@ -727,59 +727,69 @@ actor FFmpegRemuxSession {
         print("[Remux] Built \(segments.count) estimated segments (\(String(format: "%.1f", targetSegmentDuration))s each)")
     }
 
-    /// Build segment list from actual keyframe positions in the stream index.
-    /// Each segment starts at a keyframe and runs to the next keyframe that's
-    /// at least targetSegmentDuration later. Returns true if index was available.
+    /// Scan the first ~60 seconds of packets to find the keyframe interval,
+    /// then build the segment list using that interval for accurate EXTINF.
+    /// Returns true if keyframes were found.
     private func buildKeyframeSegmentList() -> Bool {
         guard let ctx = formatContext else { return false }
-        let stream = ctx.pointee.streams[Int(videoStreamIndex)]!
 
-        // Check if FFmpeg has an index loaded (from MKV Cues, MP4 stss, etc.)
-        let entryCount = Int(stream.pointee.nb_index_entries)
-        guard entryCount > 1 else { return false }
-
-        let tb = videoTimebase
-        let tbFactor = Double(tb.num) / Double(tb.den)
+        let tbFactor = Double(videoTimebase.num) / Double(videoTimebase.den)
         guard tbFactor > 0 else { return false }
 
-        // Collect keyframe timestamps
+        // Scan first ~60s for keyframe positions
+        let scanStart = Date()
         var keyframePTS: [Int64] = []
-        for i in 0..<entryCount {
-            let entry = stream.pointee.index_entries[i]
-            if entry.flags & Int32(AVINDEX_KEYFRAME) != 0 {
-                keyframePTS.append(entry.timestamp)
-            }
-        }
-        guard keyframePTS.count > 1 else { return false }
+        var pkt = av_packet_alloc()
+        guard let packet = pkt else { return false }
+        defer { av_packet_free(&pkt) }
 
-        // Build segments: each starts at a keyframe, target ~6s duration.
-        // Group keyframes so each segment is at least targetSegmentDuration.
+        let scanLimitPTS = Int64(60.0 / tbFactor)  // 60 seconds in timebase
+        while av_read_frame(ctx, packet) >= 0 {
+            defer { av_packet_unref(packet) }
+            guard packet.pointee.stream_index == videoStreamIndex else { continue }
+            let pts = packet.pointee.pts != avNoPTSValue ? packet.pointee.pts : packet.pointee.dts
+            guard pts != avNoPTSValue else { continue }
+
+            if (packet.pointee.flags & AV_PKT_FLAG_KEY) != 0 {
+                keyframePTS.append(pts)
+            }
+            if pts > scanLimitPTS && keyframePTS.count >= 4 { break }
+        }
+
+        // Seek back to start
+        avformat_seek_file(ctx, videoStreamIndex, Int64.min, 0, 0, AVSEEK_FLAG_BACKWARD)
+        avformat_flush(ctx)
+
+        guard keyframePTS.count >= 2 else { return false }
+
+        // Compute average keyframe interval
+        var intervals: [Double] = []
+        for i in 1..<keyframePTS.count {
+            intervals.append(Double(keyframePTS[i] - keyframePTS[i-1]) * tbFactor)
+        }
+        let avgInterval = intervals.reduce(0, +) / Double(intervals.count)
+        guard avgInterval > 0.1 else { return false }
+
+        // Build segments using the detected keyframe interval, grouped to ~targetSegmentDuration
+        let keyframesPerSegment = max(1, Int(round(targetSegmentDuration / avgInterval)))
+        let segmentInterval = avgInterval * Double(keyframesPerSegment)
+
         var result: [RemuxSegmentInfo] = []
         var segIdx = 0
-        var segStartIdx = 0
+        var currentTime: TimeInterval = 0
 
-        while segStartIdx < keyframePTS.count {
-            let startPTS = keyframePTS[segStartIdx]
-            let startTime = Double(startPTS) * tbFactor
-
-            // Find the next keyframe that's at least targetSegmentDuration later
-            var endIdx = segStartIdx + 1
-            while endIdx < keyframePTS.count {
-                let endTime = Double(keyframePTS[endIdx]) * tbFactor
-                if endTime - startTime >= targetSegmentDuration {
-                    break
-                }
-                endIdx += 1
+        while currentTime < duration {
+            let segDuration = min(segmentInterval, duration - currentTime)
+            if segDuration < 0.5 && !result.isEmpty {
+                result[result.count - 1] = RemuxSegmentInfo(
+                    index: result[result.count - 1].index,
+                    startPTS: result[result.count - 1].startPTS,
+                    duration: result[result.count - 1].duration + segDuration,
+                    bytePosition: -1
+                )
+                break
             }
-
-            // Duration: to next segment start, or to end of file
-            let segDuration: TimeInterval
-            if endIdx < keyframePTS.count {
-                segDuration = Double(keyframePTS[endIdx] - startPTS) * tbFactor
-            } else {
-                segDuration = max(duration - startTime, 0.1)
-            }
-
+            let startPTS = Int64(currentTime / tbFactor)
             result.append(RemuxSegmentInfo(
                 index: segIdx,
                 startPTS: startPTS,
@@ -787,51 +797,22 @@ actor FFmpegRemuxSession {
                 bytePosition: -1
             ))
             segIdx += 1
-            segStartIdx = endIdx
+            currentTime += segmentInterval
         }
 
         guard !result.isEmpty else { return false }
         segments = result
-        print("[Remux] Built \(segments.count) keyframe segments from index (\(entryCount) index entries, \(keyframePTS.count) keyframes)")
+
+        let scanMs = Int(Date().timeIntervalSince(scanStart) * 1000)
+        print("[Remux] Built \(segments.count) segments from keyframe scan: " +
+              "avgGOP=\(String(format: "%.2f", avgInterval))s, " +
+              "segDur=\(String(format: "%.2f", segmentInterval))s, " +
+              "scan=\(scanMs)ms (\(keyframePTS.count) keyframes found)")
         return true
     }
 
-    /// Load the MKV Cue index by seeking near the end of the file.
-    /// Call this in the background, then rebuild the segment list.
+    /// Load keyframe index (no-op placeholder — scanning is done at open time now).
     func loadKeyframeIndex() -> Bool {
-        guard let ctx = formatContext, isOpen else { return false }
-
-        // Check if index is already loaded
-        let stream = ctx.pointee.streams[Int(videoStreamIndex)]!
-        if stream.pointee.nb_index_entries > 1 {
-            return buildKeyframeSegmentList()
-        }
-
-        // Force Cue loading by seeking near the end then back
-        let farPTS: Int64
-        let tbFactor = Double(videoTimebase.num) / Double(videoTimebase.den)
-        if tbFactor > 0 && duration > 10 {
-            farPTS = Int64((duration - 1) / tbFactor)
-        } else {
-            return false
-        }
-
-        let loadStart = Date()
-        avformat_seek_file(ctx, videoStreamIndex, Int64.min, farPTS, farPTS, AVSEEK_FLAG_BACKWARD)
-        avformat_seek_file(ctx, videoStreamIndex, Int64.min, 0, 0, AVSEEK_FLAG_BACKWARD)
-        avformat_flush(ctx)
-        let loadMs = Int(Date().timeIntervalSince(loadStart) * 1000)
-
-        let newCount = Int(stream.pointee.nb_index_entries)
-        print("[Remux] Cue index loaded in \(loadMs)ms (\(newCount) entries)")
-
-        if newCount > 1 {
-            // Reset DTS continuity since segment boundaries changed
-            lastGeneratedSegmentIndex = -1
-            continuationVideoDTS = nil
-            continuationVideoPTSShift = 0
-            return buildKeyframeSegmentList()
-        }
         return false
     }
 

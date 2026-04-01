@@ -1736,31 +1736,6 @@ final class UniversalPlayerViewModel: ObservableObject {
         // to read the Cue index, then rebuilds the segment list with accurate
         // durations. The server's playlist will reflect actual durations on
         // AVPlayer's next re-fetch.
-        if !sessionInfo.hasKeyframeIndex {
-            let serverRef = server
-            Task {
-                let loaded = await session.loadKeyframeIndex()
-                if loaded {
-                    let newSegments = await session.segments
-                    let newDuration = await session.duration
-                    let newInfo = RemuxSessionInfo(
-                        duration: newDuration,
-                        videoCodecName: sessionInfo.videoCodecName,
-                        audioCodecName: sessionInfo.audioCodecName,
-                        width: sessionInfo.width,
-                        height: sessionInfo.height,
-                        segments: newSegments,
-                        hasDolbyVision: sessionInfo.hasDolbyVision,
-                        dvProfile: sessionInfo.dvProfile,
-                        needsAudioTranscode: sessionInfo.needsAudioTranscode,
-                        needsDVConversion: sessionInfo.needsDVConversion,
-                        hasKeyframeIndex: true
-                    )
-                    serverRef.updateSessionInfo(newInfo)
-                    print("[Remux] Background keyframe index loaded — \(newSegments.count) segments")
-                }
-            }
-        }
         player?.currentItem?.preferredForwardBufferDuration = 6.0
     }
 
