@@ -425,11 +425,7 @@ actor FFmpegRemuxSession {
         continuationVideoDTS = result.endVideoDTS
         continuationVideoPTSShift = result.videoPTSShift
 
-        // Compute actual segment duration from the DTS range for EXTINF accuracy.
-        let dtsDuration = result.endVideoDTS - result.startVideoDTS
-        let timebaseFactor = Double(videoTimebase.num) / Double(videoTimebase.den)
-        let actualDuration = Double(dtsDuration) * timebaseFactor
-        lastSegmentActualDuration = actualDuration > 0 ? actualDuration : segment.duration
+        lastSegmentActualDuration = result.actualDuration
         lastSegmentIndex = index
 
         let elapsedMs = Int(Date().timeIntervalSince(generationStart) * 1000)
@@ -967,12 +963,12 @@ actor FFmpegRemuxSession {
         let data: Data
         let actualStartPTS: Int64
         let nextSegmentStartPTS: Int64?
-        /// The first DTS written (used to compute actual segment duration).
-        let startVideoDTS: Int64
         /// The DTS value the next segment should start at for continuity.
         let endVideoDTS: Int64
         /// The PTS shift applied in this segment (carry over for continuity).
         let videoPTSShift: Int64
+        /// Actual segment duration in seconds (computed from output timebase).
+        let actualDuration: TimeInterval
     }
 
     /// Write an fMP4 media segment (moof+mdat) containing packets for the given segment.
@@ -1095,7 +1091,7 @@ actor FFmpegRemuxSession {
         var videoPacketCount = 0
         var audioPacketCount = 0
         var foundFirstKeyframe = false
-        var firstWrittenVideoDTS: Int64 = 0
+        var firstWrittenVideoDTS: Int64 = 0  // Track for actual duration computation
         var actualStartPTS: Int64?
         var nextSegmentStartPTS: Int64?
         // For sequential segments, carry over DTS from the previous segment to ensure
@@ -1385,13 +1381,19 @@ actor FFmpegRemuxSession {
             throw RemuxError.writeFailed("Invalid media fragment structure for segment \(segmentIndex)")
         }
 
+        // Compute actual duration using the OUTPUT timebase (which the muxer may
+        // have changed from the source timebase during avformat_write_header).
+        let outTB = outVideoStream.pointee.time_base
+        let dtsTicks = nextVideoDTS - firstWrittenVideoDTS
+        let segActualDuration = Double(dtsTicks) * Double(outTB.num) / Double(outTB.den)
+
         return MediaSegmentResult(
             data: segmentData,
             actualStartPTS: actualStartPTS ?? startPTS,
             nextSegmentStartPTS: nextSegmentStartPTS,
-            startVideoDTS: firstWrittenVideoDTS,
             endVideoDTS: nextVideoDTS,
-            videoPTSShift: videoPTSShift
+            videoPTSShift: videoPTSShift,
+            actualDuration: segActualDuration > 0 ? segActualDuration : 6.0
         )
     }
 
