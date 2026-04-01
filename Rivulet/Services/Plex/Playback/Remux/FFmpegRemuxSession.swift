@@ -45,6 +45,7 @@ struct RemuxSessionInfo: Sendable {
     let dvProfile: UInt8?
     let needsAudioTranscode: Bool
     let needsDVConversion: Bool
+    let hasKeyframeIndex: Bool
 }
 
 // MARK: - Errors
@@ -266,9 +267,12 @@ actor FFmpegRemuxSession {
             duration = Double(openCtx.pointee.duration) / Double(AV_TIME_BASE)
         }
 
-        // Build segment list from duration (no keyframe scanning — segments are
-        // estimated and generateSegment() snaps to actual keyframes at read time).
-        buildEstimatedSegmentList()
+        // Try to build segment list from actual keyframe positions (MKV Cues, MP4 stss).
+        // Falls back to estimated 6s segments if index isn't available yet.
+        let gotKeyframeIndex = buildKeyframeSegmentList()
+        if !gotKeyframeIndex {
+            buildEstimatedSegmentList()
+        }
 
         isOpen = true
         isCancelled = false
@@ -283,7 +287,8 @@ actor FFmpegRemuxSession {
             hasDolbyVision: hasDolbyVision,
             dvProfile: dvProfile,
             needsAudioTranscode: needsAudioTranscode,
-            needsDVConversion: needsDVConversion
+            needsDVConversion: needsDVConversion,
+            hasKeyframeIndex: gotKeyframeIndex
         )
 
         let openMs = Int(Date().timeIntervalSince(openStart) * 1000)
@@ -720,6 +725,114 @@ actor FFmpegRemuxSession {
 
         segments = result
         print("[Remux] Built \(segments.count) estimated segments (\(String(format: "%.1f", targetSegmentDuration))s each)")
+    }
+
+    /// Build segment list from actual keyframe positions in the stream index.
+    /// Each segment starts at a keyframe and runs to the next keyframe that's
+    /// at least targetSegmentDuration later. Returns true if index was available.
+    private func buildKeyframeSegmentList() -> Bool {
+        guard let ctx = formatContext else { return false }
+        let stream = ctx.pointee.streams[Int(videoStreamIndex)]!
+
+        // Check if FFmpeg has an index loaded (from MKV Cues, MP4 stss, etc.)
+        let entryCount = Int(stream.pointee.nb_index_entries)
+        guard entryCount > 1 else { return false }
+
+        let tb = videoTimebase
+        let tbFactor = Double(tb.num) / Double(tb.den)
+        guard tbFactor > 0 else { return false }
+
+        // Collect keyframe timestamps
+        var keyframePTS: [Int64] = []
+        for i in 0..<entryCount {
+            let entry = stream.pointee.index_entries[i]
+            if entry.flags & Int32(AVINDEX_KEYFRAME) != 0 {
+                keyframePTS.append(entry.timestamp)
+            }
+        }
+        guard keyframePTS.count > 1 else { return false }
+
+        // Build segments: each starts at a keyframe, target ~6s duration.
+        // Group keyframes so each segment is at least targetSegmentDuration.
+        var result: [RemuxSegmentInfo] = []
+        var segIdx = 0
+        var segStartIdx = 0
+
+        while segStartIdx < keyframePTS.count {
+            let startPTS = keyframePTS[segStartIdx]
+            let startTime = Double(startPTS) * tbFactor
+
+            // Find the next keyframe that's at least targetSegmentDuration later
+            var endIdx = segStartIdx + 1
+            while endIdx < keyframePTS.count {
+                let endTime = Double(keyframePTS[endIdx]) * tbFactor
+                if endTime - startTime >= targetSegmentDuration {
+                    break
+                }
+                endIdx += 1
+            }
+
+            // Duration: to next segment start, or to end of file
+            let segDuration: TimeInterval
+            if endIdx < keyframePTS.count {
+                segDuration = Double(keyframePTS[endIdx] - startPTS) * tbFactor
+            } else {
+                segDuration = max(duration - startTime, 0.1)
+            }
+
+            result.append(RemuxSegmentInfo(
+                index: segIdx,
+                startPTS: startPTS,
+                duration: segDuration,
+                bytePosition: -1
+            ))
+            segIdx += 1
+            segStartIdx = endIdx
+        }
+
+        guard !result.isEmpty else { return false }
+        segments = result
+        print("[Remux] Built \(segments.count) keyframe segments from index (\(entryCount) index entries, \(keyframePTS.count) keyframes)")
+        return true
+    }
+
+    /// Load the MKV Cue index by seeking near the end of the file.
+    /// Call this in the background, then rebuild the segment list.
+    func loadKeyframeIndex() -> Bool {
+        guard let ctx = formatContext, isOpen else { return false }
+
+        // Check if index is already loaded
+        let stream = ctx.pointee.streams[Int(videoStreamIndex)]!
+        if stream.pointee.nb_index_entries > 1 {
+            return buildKeyframeSegmentList()
+        }
+
+        // Force Cue loading by seeking near the end then back
+        let farPTS: Int64
+        let tbFactor = Double(videoTimebase.num) / Double(videoTimebase.den)
+        if tbFactor > 0 && duration > 10 {
+            farPTS = Int64((duration - 1) / tbFactor)
+        } else {
+            return false
+        }
+
+        let loadStart = Date()
+        avformat_seek_file(ctx, videoStreamIndex, Int64.min, farPTS, farPTS, AVSEEK_FLAG_BACKWARD)
+        avformat_seek_file(ctx, videoStreamIndex, Int64.min, 0, 0, AVSEEK_FLAG_BACKWARD)
+        avformat_flush(ctx)
+        let loadMs = Int(Date().timeIntervalSince(loadStart) * 1000)
+
+        let newCount = Int(stream.pointee.nb_index_entries)
+        print("[Remux] Cue index loaded in \(loadMs)ms (\(newCount) entries)")
+
+        if newCount > 1 {
+            // Reset DTS continuity since segment boundaries changed
+            lastGeneratedSegmentIndex = -1
+            continuationVideoDTS = nil
+            continuationVideoPTSShift = 0
+            return buildKeyframeSegmentList()
+        }
+        return false
     }
 
     // MARK: - Private: Init Segment Writing
@@ -1670,6 +1783,7 @@ struct RemuxSessionInfo: Sendable {
     let dvProfile: UInt8?
     let needsAudioTranscode: Bool
     let needsDVConversion: Bool
+    let hasKeyframeIndex: Bool
 }
 
 enum RemuxError: Error, Sendable {
@@ -1689,6 +1803,16 @@ actor FFmpegRemuxSession {
     private(set) var segments: [RemuxSegmentInfo] = []
     private(set) var duration: TimeInterval = 0
     private(set) var isOpen = false
+    private(set) var lastSegmentActualDuration: TimeInterval?
+    private(set) var lastSegmentIndex: Int?
+
+    nonisolated(unsafe) let interruptFlag: UnsafeMutablePointer<Int32> = {
+        let ptr = UnsafeMutablePointer<Int32>.allocate(capacity: 1)
+        ptr.initialize(to: 0)
+        return ptr
+    }()
+
+    deinit { interruptFlag.deinitialize(count: 1); interruptFlag.deallocate() }
 
     func open(url: URL, headers: [String: String]? = nil) throws -> RemuxSessionInfo {
         throw RemuxError.openFailed("FFmpeg not available")
@@ -1702,6 +1826,7 @@ actor FFmpegRemuxSession {
         throw RemuxError.notOpen
     }
 
+    func loadKeyframeIndex() -> Bool { return false }
     func cancel() {}
     func close() {}
     func selectAudioStream(index: Int32) throws {

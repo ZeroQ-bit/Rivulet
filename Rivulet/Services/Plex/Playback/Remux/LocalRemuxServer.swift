@@ -28,7 +28,7 @@ final class LocalRemuxServer {
     private let session: FFmpegRemuxSession
 
     /// Session info from open()
-    private let sessionInfo: RemuxSessionInfo
+    private var sessionInfo: RemuxSessionInfo
 
     /// Port the server is listening on
     private(set) var port: UInt16 = 0
@@ -535,6 +535,11 @@ final class LocalRemuxServer {
 
         // Clean up completed tasks
         readAheadTasks.removeAll { $0.isCancelled }
+    }
+
+    /// Update the session info with new segment data (e.g., after background Cue load).
+    func updateSessionInfo(_ newInfo: RemuxSessionInfo) {
+        self.sessionInfo = newInfo
     }
 
     /// Record the actual duration of a generated segment.
