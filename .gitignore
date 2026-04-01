@@ -53,5 +53,8 @@ playground.xcworkspace
 *.mobileprovision
 *.provisionprofile
 
+# Git worktrees
+worktrees/
+
 # Secrets (do not commit)
 Rivulet/Config/Secrets.swift
