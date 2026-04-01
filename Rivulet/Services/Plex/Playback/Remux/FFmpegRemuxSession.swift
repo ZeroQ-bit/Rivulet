@@ -1192,7 +1192,9 @@ actor FFmpegRemuxSession {
         var videoPacketCount = 0
         var audioPacketCount = 0
         var foundFirstKeyframe = false
-        var firstWrittenVideoDTS: Int64 = 0  // Track for actual duration computation
+        var firstWrittenVideoDTS: Int64 = 0
+        var firstWrittenAudioDTS: Int64 = 0
+        var audioPacketWritten = false
         var actualStartPTS: Int64?
         var nextSegmentStartPTS: Int64?
         // For sequential segments, carry over DTS from the previous segment to ensure
@@ -1390,6 +1392,10 @@ actor FFmpegRemuxSession {
                             if writeRet < 0 {
                                 print("[Remux] Warning: transcoded audio write failed for segment \(segmentIndex): \(writeRet)")
                             }
+                            if !audioPacketWritten {
+                                firstWrittenAudioDTS = fp.pointee.dts
+                                audioPacketWritten = true
+                            }
                             av_packet_free(&outPkt)
                             audioPacketCount += 1
                         }
@@ -1411,6 +1417,10 @@ actor FFmpegRemuxSession {
                         let writeRet = av_write_frame(outCtx, packet)
                         if writeRet < 0 {
                             print("[Remux] Warning: audio write failed for segment \(segmentIndex): \(writeRet)")
+                        }
+                        if !audioPacketWritten {
+                            firstWrittenAudioDTS = packet.pointee.dts
+                            audioPacketWritten = true
                         }
                         audioPacketCount += 1
                     }
@@ -1486,11 +1496,13 @@ actor FFmpegRemuxSession {
             throw RemuxError.writeFailed("Invalid media fragment structure for segment \(segmentIndex)")
         }
 
-        // Patch the video track's tfdt with the actual baseMediaDecodeTime.
+        // Patch both tracks' tfdt with actual baseMediaDecodeTime values.
         // delay_moov normalizes all timestamps to start at 0 for each muxer context,
-        // so the tfdt is always 0. We overwrite it with the correct DTS value
-        // to ensure timeline continuity across segments.
-        patchVideoTfdt(in: &segmentData, baseDecodeTime: firstWrittenVideoDTS)
+        // so the tfdt is always 0. We overwrite with correct DTS values
+        // to ensure timeline continuity across segments for both A/V tracks.
+        patchTfdt(in: &segmentData,
+                  videoBaseDecodeTime: firstWrittenVideoDTS,
+                  audioBaseDecodeTime: firstWrittenAudioDTS)
 
         // Compute actual duration using the OUTPUT timebase (which the muxer may
         // have changed from the source timebase during avformat_write_header).
@@ -1643,10 +1655,10 @@ actor FFmpegRemuxSession {
 
     // MARK: - Private: tfdt Patching
 
-    /// Patch the video track's baseMediaDecodeTime (tfdt) in a moof+mdat fragment.
+    /// Patch all tracks' baseMediaDecodeTime (tfdt) in a moof+mdat fragment.
     /// delay_moov normalizes timestamps to start at 0 for each muxer context,
     /// so we overwrite the tfdt with the actual DTS for timeline continuity.
-    private func patchVideoTfdt(in data: inout Data, baseDecodeTime: Int64) {
+    private func patchTfdt(in data: inout Data, videoBaseDecodeTime: Int64, audioBaseDecodeTime: Int64) {
         var offset = 0
         while offset + 8 <= data.count {
             let boxSize = Int(data.loadBigEndianUInt32(at: offset))
@@ -1654,54 +1666,50 @@ actor FFmpegRemuxSession {
             guard boxSize >= 8 && offset + boxSize <= data.count else { break }
 
             if boxType == "moof" {
-                // Find the first traf (video track) → tfdt
                 var trafOffset = offset + 8
                 let moofEnd = offset + boxSize
+                var trackIdx = 0
                 while trafOffset + 8 <= moofEnd {
                     let trafSize = Int(data.loadBigEndianUInt32(at: trafOffset))
                     let trafType = String(data: data[trafOffset+4..<trafOffset+8], encoding: .ascii) ?? ""
                     guard trafSize >= 8 && trafOffset + trafSize <= moofEnd else { break }
 
                     if trafType == "traf" {
-                        // Find tfdt inside this traf
-                        var childOffset = trafOffset + 8
-                        let trafEnd = trafOffset + trafSize
-                        while childOffset + 8 <= trafEnd {
-                            let childSize = Int(data.loadBigEndianUInt32(at: childOffset))
-                            let childType = String(data: data[childOffset+4..<childOffset+8], encoding: .ascii) ?? ""
-                            guard childSize >= 8 && childOffset + childSize <= trafEnd else { break }
-
-                            if childType == "tfdt" {
-                                let version = data[childOffset + 8]
-                                if version == 1 && childSize >= 20 {
-                                    // 64-bit baseMediaDecodeTime
-                                    let val = UInt64(bitPattern: baseDecodeTime)
-                                    data[childOffset + 12] = UInt8((val >> 56) & 0xFF)
-                                    data[childOffset + 13] = UInt8((val >> 48) & 0xFF)
-                                    data[childOffset + 14] = UInt8((val >> 40) & 0xFF)
-                                    data[childOffset + 15] = UInt8((val >> 32) & 0xFF)
-                                    data[childOffset + 16] = UInt8((val >> 24) & 0xFF)
-                                    data[childOffset + 17] = UInt8((val >> 16) & 0xFF)
-                                    data[childOffset + 18] = UInt8((val >> 8) & 0xFF)
-                                    data[childOffset + 19] = UInt8(val & 0xFF)
-                                } else if childSize >= 16 {
-                                    // 32-bit baseMediaDecodeTime
-                                    let val = UInt32(truncatingIfNeeded: baseDecodeTime)
-                                    data[childOffset + 12] = UInt8((val >> 24) & 0xFF)
-                                    data[childOffset + 13] = UInt8((val >> 16) & 0xFF)
-                                    data[childOffset + 14] = UInt8((val >> 8) & 0xFF)
-                                    data[childOffset + 15] = UInt8(val & 0xFF)
-                                }
-                                return  // Patched video track's tfdt — done
-                            }
-                            childOffset += childSize
-                        }
-                        return  // Found first traf (video) but no tfdt — shouldn't happen
+                        let baseTime = trackIdx == 0 ? videoBaseDecodeTime : audioBaseDecodeTime
+                        patchTfdtInTraf(in: &data, trafOffset: trafOffset, trafSize: trafSize, baseDecodeTime: baseTime)
+                        trackIdx += 1
                     }
                     trafOffset += trafSize
                 }
             }
             offset += boxSize
+        }
+    }
+
+    private func patchTfdtInTraf(in data: inout Data, trafOffset: Int, trafSize: Int, baseDecodeTime: Int64) {
+        var childOffset = trafOffset + 8
+        let trafEnd = trafOffset + trafSize
+        while childOffset + 8 <= trafEnd {
+            let childSize = Int(data.loadBigEndianUInt32(at: childOffset))
+            let childType = String(data: data[childOffset+4..<childOffset+8], encoding: .ascii) ?? ""
+            guard childSize >= 8 && childOffset + childSize <= trafEnd else { break }
+
+            if childType == "tfdt" {
+                let version = data[childOffset + 8]
+                if version == 1 && childSize >= 20 {
+                    let val = UInt64(bitPattern: baseDecodeTime)
+                    for i in 0..<8 {
+                        data[childOffset + 12 + i] = UInt8((val >> ((7 - i) * 8)) & 0xFF)
+                    }
+                } else if childSize >= 16 {
+                    let val = UInt32(truncatingIfNeeded: baseDecodeTime)
+                    for i in 0..<4 {
+                        data[childOffset + 12 + i] = UInt8((val >> ((3 - i) * 8)) & 0xFF)
+                    }
+                }
+                return
+            }
+            childOffset += childSize
         }
     }
 
