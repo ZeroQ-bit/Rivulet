@@ -2,14 +2,15 @@
 //  MusicHomeView.swift
 //  Rivulet
 //
-//  Split-view music library matching Apple Music tvOS Library tab.
-//  Left sidebar for categories, right content area with grids/lists.
+//  Music library home matching Apple Music tvOS Library tab.
+//  Left sidebar for categories, right content area with album/artist grids.
+//  Uses the same MediaPosterCard and grid patterns as PlexLibraryView.
 //
 
 import SwiftUI
 
 /// Category shown in the left sidebar of the music library
-enum MusicLibraryCategory: Hashable, CaseIterable {
+enum MusicLibraryCategory: String, Hashable, CaseIterable {
     case recentlyAdded
     case playlists
     case artists
@@ -25,77 +26,67 @@ enum MusicLibraryCategory: Hashable, CaseIterable {
         case .songs: return "Songs"
         }
     }
-
-    var icon: String {
-        switch self {
-        case .recentlyAdded: return "clock"
-        case .playlists: return "music.note.list"
-        case .artists: return "music.mic"
-        case .albums: return "square.stack"
-        case .songs: return "music.note"
-        }
-    }
 }
 
-/// Music library home with Apple Music-style split layout.
-/// Left sidebar for category selection, right side shows content grid.
 struct MusicHomeView: View {
     let libraryKey: String
     let libraryTitle: String
 
     @Environment(\.nestedNavigationState) private var nestedNavState
+    @Environment(\.uiScale) private var scale
 
     @ObservedObject private var authManager = PlexAuthManager.shared
     @ObservedObject private var dataStore = PlexDataStore.shared
     @ObservedObject private var musicQueue = MusicQueue.shared
 
     // Data
-    @State private var hubs: [PlexHub] = []
+    @State private var recentlyAddedItems: [PlexMetadata] = []
     @State private var allArtists: [PlexMetadata] = []
     @State private var allAlbums: [PlexMetadata] = []
     @State private var allTracks: [PlexMetadata] = []
     @State private var playlists: [PlexMetadata] = []
     @State private var genres: [String] = []
     @State private var isLoading = false
-    @State private var error: String?
     @State private var loadedCategories: Set<MusicLibraryCategory> = []
 
     // Navigation
     @State private var selectedCategory: MusicLibraryCategory = .recentlyAdded
-    @State private var selectedAlbum: PlexMetadata?
-    @State private var selectedArtist: PlexMetadata?
-    @State private var selectedPlaylist: PlexMetadata?
+    @State private var selectedItem: PlexMetadata?
 
     // Focus
-    @FocusState private var focusedCategory: MusicLibraryCategory?
-    @FocusState private var focusedGenre: String?
-    @FocusState private var focusedContentId: String?
+    @FocusState private var sidebarFocus: String?
 
     private let networkManager = PlexNetworkManager.shared
+
+    // Grid columns — same as PlexLibraryView
+    private var columns: [GridItem] {
+        let minWidth = ScaledDimensions.gridMinWidth * scale
+        let maxWidth = ScaledDimensions.gridMaxWidth * scale
+        return [GridItem(.adaptive(minimum: minWidth, maximum: maxWidth), spacing: ScaledDimensions.gridSpacing)]
+    }
 
     var body: some View {
         NavigationStack {
             HStack(spacing: 0) {
-                // Left sidebar
                 sidebar
-                    .frame(width: 340)
-
-                // Right content
                 contentArea
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            .navigationDestination(item: $selectedAlbum) { album in
-                MusicAlbumDetailView(album: album)
-            }
-            .navigationDestination(item: $selectedArtist) { artist in
-                MusicArtistDetailView(artist: artist, libraryKey: libraryKey)
-            }
-            .navigationDestination(item: $selectedPlaylist) { playlist in
-                MusicPlaylistView(playlist: playlist)
+            .navigationDestination(item: $selectedItem) { item in
+                if item.type == "artist" {
+                    MusicArtistDetailView(artist: item, libraryKey: libraryKey)
+                } else if item.type == "playlist" {
+                    MusicPlaylistView(playlist: item)
+                } else {
+                    MusicAlbumDetailView(album: item)
+                }
             }
         }
+        .onChange(of: selectedItem) { _, newValue in
+            nestedNavState.isNested = newValue != nil
+        }
         .task {
-            await loadInitialData()
+            await loadRecentlyAdded()
+            await loadGenres()
         }
     }
 
@@ -103,261 +94,253 @@ struct MusicHomeView: View {
 
     private var sidebar: some View {
         ScrollView(.vertical, showsIndicators: false) {
-            VStack(alignment: .leading, spacing: 4) {
-                // Library title
-                Text(libraryTitle)
-                    .font(.system(size: 32, weight: .bold))
-                    .foregroundStyle(.white)
-                    .padding(.bottom, 24)
-
-                // Category list
+            VStack(alignment: .leading, spacing: 0) {
+                // Categories
                 ForEach(MusicLibraryCategory.allCases, id: \.self) { category in
-                    sidebarButton(category: category)
+                    Button {
+                        selectedCategory = category
+                        Task { await loadCategoryData(category) }
+                    } label: {
+                        HStack(spacing: 10) {
+                            Text(category.title)
+                                .font(.system(size: 20))
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.vertical, 10)
+                        .padding(.horizontal, 20)
+                    }
+                    .buttonStyle(.plain)
+                    .focused($sidebarFocus, equals: category.rawValue)
+                    .background(
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .fill(selectedCategory == category && sidebarFocus != category.rawValue
+                                  ? .white.opacity(0.1) : .clear)
+                    )
                 }
 
                 // Genres section
                 if !genres.isEmpty {
-                    Divider()
-                        .background(.white.opacity(0.1))
-                        .padding(.vertical, 16)
-
                     Text("Genres")
-                        .font(.system(size: 18, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.5))
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.4))
+                        .padding(.top, 24)
                         .padding(.bottom, 8)
+                        .padding(.horizontal, 20)
 
                     ForEach(genres, id: \.self) { genre in
                         Button {
-                            // Genre filtering could be added as a future feature
+                            // Genre filtering — future feature
                         } label: {
                             Text(genre)
-                                .font(.system(size: 22))
-                                .foregroundStyle(focusedGenre == genre ? .black : .white.opacity(0.8))
+                                .font(.system(size: 20))
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .padding(.vertical, 10)
-                                .padding(.horizontal, 16)
-                                .background(
-                                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                        .fill(focusedGenre == genre ? .white : .clear)
-                                )
+                                .padding(.horizontal, 20)
                         }
                         .buttonStyle(.plain)
-                        .focused($focusedGenre, equals: genre)
+                        .focused($sidebarFocus, equals: "genre_\(genre)")
                     }
                 }
             }
-            .padding(.horizontal, 40)
             .padding(.vertical, 40)
         }
+        .frame(width: 260)
         .focusSection()
-    }
-
-    private func sidebarButton(category: MusicLibraryCategory) -> some View {
-        Button {
-            selectedCategory = category
-            Task { await loadCategoryData(category) }
-        } label: {
-            HStack(spacing: 14) {
-                Image(systemName: category.icon)
-                    .font(.system(size: 20))
-                    .frame(width: 24)
-
-                Text(category.title)
-                    .font(.system(size: 24, weight: selectedCategory == category ? .semibold : .regular))
-
-                Spacer()
-            }
-            .foregroundStyle(
-                focusedCategory == category
-                    ? .black
-                    : (selectedCategory == category ? .white : .white.opacity(0.7))
-            )
-            .padding(.vertical, 12)
-            .padding(.horizontal, 16)
-            .background(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(
-                        focusedCategory == category
-                            ? .white
-                            : (selectedCategory == category ? .white.opacity(0.12) : .clear)
-                    )
-            )
-        }
-        .buttonStyle(.plain)
-        .focused($focusedCategory, equals: category)
     }
 
     // MARK: - Content Area
 
-    @ViewBuilder
     private var contentArea: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // Content header
-            contentHeader
-                .padding(.horizontal, 40)
-                .padding(.top, 40)
-                .padding(.bottom, 20)
+            // Header — only for categories with counts
+            if selectedCategory != .recentlyAdded {
+                contentHeader
+                    .padding(.horizontal, ScaledDimensions.rowHorizontalPadding)
+                    .padding(.top, 40)
+                    .padding(.bottom, 20)
+            }
 
-            // Content body
+            // Grid content
             switch selectedCategory {
-            case .recentlyAdded:
-                recentlyAddedGrid
-            case .playlists:
-                playlistsGrid
-            case .artists:
-                artistsGrid
-            case .albums:
-                albumsGrid
-            case .songs:
-                songsList
+            case .recentlyAdded: albumGrid(items: recentlyAddedItems)
+            case .playlists:     albumGrid(items: playlists)
+            case .artists:       artistGrid
+            case .albums:        albumGrid(items: allAlbums)
+            case .songs:         songsList
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .focusSection()
     }
 
     private var contentHeader: some View {
-        HStack(alignment: .bottom) {
-            VStack(alignment: .leading, spacing: 4) {
+        HStack(alignment: .center) {
+            VStack(alignment: .leading, spacing: 2) {
                 Text(selectedCategory.title)
-                    .font(.system(size: 34, weight: .bold))
+                    .font(.system(size: 28, weight: .bold))
                     .foregroundStyle(.white)
 
                 Text(contentCountText)
-                    .font(.system(size: 18))
+                    .font(.system(size: 16))
                     .foregroundStyle(.white.opacity(0.5))
             }
 
             Spacer()
 
-            // Play All / Shuffle for applicable categories
-            if selectedCategory == .albums || selectedCategory == .songs {
+            if selectedCategory == .albums || selectedCategory == .artists || selectedCategory == .songs {
                 HStack(spacing: 12) {
                     Button {
-                        Task { await playAllContent(shuffled: false) }
+                        Task { await playAll(shuffled: false) }
                     } label: {
-                        HStack(spacing: 6) {
-                            Image(systemName: "play.fill")
-                            Text("Play")
-                        }
-                        .font(.system(size: 18, weight: .semibold))
-                        .frame(width: 110, height: 44)
+                        Label("Play", systemImage: "play.fill")
+                            .font(.system(size: 17, weight: .semibold))
                     }
-                    .buttonStyle(AppStoreActionButtonStyle(
-                        isFocused: focusedContentId == "_play",
-                        isPrimary: true
-                    ))
-                    .focused($focusedContentId, equals: "_play")
+                    .buttonStyle(.borderedProminent)
+                    .tint(.white.opacity(0.15))
 
                     Button {
-                        Task { await playAllContent(shuffled: true) }
+                        Task { await playAll(shuffled: true) }
                     } label: {
-                        HStack(spacing: 6) {
-                            Image(systemName: "shuffle")
-                            Text("Shuffle")
-                        }
-                        .font(.system(size: 18, weight: .semibold))
-                        .frame(width: 120, height: 44)
+                        Label("Shuffle", systemImage: "shuffle")
+                            .font(.system(size: 17, weight: .semibold))
                     }
-                    .buttonStyle(AppStoreActionButtonStyle(
-                        isFocused: focusedContentId == "_shuffle",
-                        isPrimary: false
-                    ))
-                    .focused($focusedContentId, equals: "_shuffle")
+                    .buttonStyle(.borderedProminent)
+                    .tint(.white.opacity(0.15))
                 }
             }
         }
     }
 
-    private var contentCountText: String {
-        switch selectedCategory {
-        case .recentlyAdded:
-            let count = recentlyAddedItems.count
-            return count > 0 ? "\(count) albums" : ""
-        case .playlists:
-            return playlists.isEmpty ? "" : "\(playlists.count) playlists"
-        case .artists:
-            return allArtists.isEmpty ? "" : "\(allArtists.count) artists"
-        case .albums:
-            return allAlbums.isEmpty ? "" : "\(allAlbums.count) albums"
-        case .songs:
-            return allTracks.isEmpty ? "" : "\(allTracks.count) songs"
-        }
-    }
+    // MARK: - Album / Recently Added Grid
 
-    // MARK: - Recently Added
-
-    private var recentlyAddedItems: [PlexMetadata] {
-        let hubItems = hubs.flatMap { $0.Metadata ?? [] }
-        // Filter to albums only for recently added
-        let albums = hubItems.filter { $0.type == "album" }
-        return albums.isEmpty ? hubItems : albums
-    }
-
-    private var recentlyAddedGrid: some View {
-        contentGrid(items: recentlyAddedItems, isLoading: isLoading && hubs.isEmpty)
-    }
-
-    // MARK: - Playlists
-
-    private var playlistsGrid: some View {
+    private func albumGrid(items: [PlexMetadata]) -> some View {
         ScrollView(.vertical, showsIndicators: false) {
-            if playlists.isEmpty && loadedCategories.contains(.playlists) {
-                emptyStateView("No playlists found")
-            } else if playlists.isEmpty {
-                loadingIndicator
+            if items.isEmpty && isLoading {
+                ProgressView()
+                    .frame(maxWidth: .infinity, minHeight: 300)
+            } else if items.isEmpty {
+                emptyState
             } else {
-                LazyVGrid(columns: gridColumns, spacing: 30) {
-                    ForEach(playlists, id: \.ratingKey) { playlist in
-                        MusicPosterCard(item: playlist, style: .square) {
-                            selectedPlaylist = playlist
+                LazyVGrid(columns: columns, spacing: ScaledDimensions.rowItemSpacing) {
+                    ForEach(Array(items.enumerated()), id: \.element.ratingKey) { _, item in
+                        Button {
+                            selectedItem = item
+                        } label: {
+                            EquatableView(content: MediaPosterCard(
+                                item: item,
+                                serverURL: authManager.selectedServerURL ?? "",
+                                authToken: authManager.selectedServerToken ?? ""
+                            ))
                         }
-                        .focused($focusedContentId, equals: playlist.ratingKey)
-                        .musicItemContextMenu(item: playlist, style: .album)
+                        .buttonStyle(CardButtonStyle())
+                        .contextMenu {
+                            Button { musicQueue.playNow(track: item) } label: {
+                                Label("Play", systemImage: "play.fill")
+                            }
+                            Button {
+                                Task {
+                                    guard let serverURL = authManager.selectedServerURL,
+                                          let token = authManager.selectedServerToken,
+                                          let ratingKey = item.ratingKey else { return }
+                                    let tracks = try? await networkManager.getChildren(
+                                        serverURL: serverURL, authToken: token, ratingKey: ratingKey
+                                    )
+                                    if let tracks, !tracks.isEmpty {
+                                        var shuffled = tracks; shuffled.shuffle()
+                                        musicQueue.playAlbum(tracks: shuffled)
+                                    }
+                                }
+                            } label: {
+                                Label("Shuffle", systemImage: "shuffle")
+                            }
+                            Button {
+                                Task {
+                                    guard let serverURL = authManager.selectedServerURL,
+                                          let token = authManager.selectedServerToken,
+                                          let ratingKey = item.ratingKey else { return }
+                                    let tracks = try? await networkManager.getChildren(
+                                        serverURL: serverURL, authToken: token, ratingKey: ratingKey
+                                    )
+                                    if let tracks { musicQueue.addToEnd(tracks: tracks) }
+                                }
+                            } label: {
+                                Label("Play Next", systemImage: "text.line.first.and.arrowtriangle.forward")
+                            }
+                        }
                     }
                 }
-                .padding(.horizontal, 40)
-                .padding(.bottom, musicQueue.isActive ? 120 : 40)
+                .padding(.horizontal, ScaledDimensions.rowHorizontalPadding)
+                .padding(.vertical, ScaledDimensions.rowVerticalPadding)
             }
         }
     }
 
-    // MARK: - Artists
+    // MARK: - Artist Grid
 
-    private var artistsGrid: some View {
+    private var artistGrid: some View {
         ScrollView(.vertical, showsIndicators: false) {
-            if allArtists.isEmpty && loadedCategories.contains(.artists) {
-                emptyStateView("No artists found")
+            if allArtists.isEmpty && !loadedCategories.contains(.artists) {
+                ProgressView()
+                    .frame(maxWidth: .infinity, minHeight: 300)
             } else if allArtists.isEmpty {
-                loadingIndicator
+                emptyState
             } else {
-                LazyVGrid(columns: gridColumns, spacing: 30) {
-                    ForEach(allArtists, id: \.ratingKey) { artist in
-                        MusicPosterCard(item: artist, style: .circular) {
-                            selectedArtist = artist
+                LazyVGrid(columns: columns, spacing: ScaledDimensions.rowItemSpacing) {
+                    ForEach(Array(allArtists.enumerated()), id: \.element.ratingKey) { _, artist in
+                        Button {
+                            selectedItem = artist
+                        } label: {
+                            VStack(spacing: 10) {
+                                // Circular artist photo
+                                artistPhoto(for: artist)
+                                    .frame(width: ScaledDimensions.squarePosterSize * scale,
+                                           height: ScaledDimensions.squarePosterSize * scale)
+                                    .clipShape(Circle())
+                                    .hoverEffect(.highlight)
+                                    .shadow(color: .black.opacity(0.35), radius: 8, y: 6)
+
+                                Text(artist.title ?? "Unknown")
+                                    .font(.system(size: ScaledDimensions.posterTitleSize))
+                                    .foregroundStyle(.white)
+                                    .lineLimit(1)
+                            }
                         }
-                        .focused($focusedContentId, equals: artist.ratingKey)
+                        .buttonStyle(CardButtonStyle())
                     }
                 }
-                .padding(.horizontal, 40)
-                .padding(.bottom, musicQueue.isActive ? 120 : 40)
+                .padding(.horizontal, ScaledDimensions.rowHorizontalPadding)
+                .padding(.vertical, ScaledDimensions.rowVerticalPadding)
             }
         }
     }
 
-    // MARK: - Albums
-
-    private var albumsGrid: some View {
-        contentGrid(items: allAlbums, isLoading: allAlbums.isEmpty && !loadedCategories.contains(.albums))
+    private func artistPhoto(for artist: PlexMetadata) -> some View {
+        let url = artworkURL(for: artist)
+        return CachedAsyncImage(url: url) { phase in
+            switch phase {
+            case .success(let image):
+                image.resizable().aspectRatio(contentMode: .fill)
+            default:
+                Circle()
+                    .fill(.white.opacity(0.06))
+                    .overlay {
+                        Image(systemName: "person.fill")
+                            .font(.system(size: 40))
+                            .foregroundStyle(.white.opacity(0.2))
+                    }
+            }
+        }
     }
 
-    // MARK: - Songs
+    // MARK: - Songs List
 
     private var songsList: some View {
         ScrollView(.vertical, showsIndicators: false) {
-            if allTracks.isEmpty && loadedCategories.contains(.songs) {
-                emptyStateView("No songs found")
+            if allTracks.isEmpty && !loadedCategories.contains(.songs) {
+                ProgressView()
+                    .frame(maxWidth: .infinity, minHeight: 300)
             } else if allTracks.isEmpty {
-                loadingIndicator
+                emptyState
             } else {
                 LazyVStack(spacing: 0) {
                     ForEach(Array(allTracks.enumerated()), id: \.element.ratingKey) { index, track in
@@ -365,271 +348,184 @@ struct MusicHomeView: View {
                         Button {
                             musicQueue.playAlbum(tracks: allTracks, startingAt: index)
                         } label: {
-                            HStack(spacing: 16) {
-                                // Track number or playback indicator
+                            HStack(spacing: 14) {
                                 if isCurrent {
-                                    PlaybackIndicator(
-                                        isPlaying: musicQueue.playbackState == .playing,
-                                        size: .small
-                                    )
-                                    .frame(width: 30)
+                                    PlaybackIndicator(isPlaying: musicQueue.playbackState == .playing, size: .small)
+                                        .frame(width: 28)
                                 } else {
                                     Text("\(index + 1)")
-                                        .font(.system(size: 18).monospacedDigit())
-                                        .foregroundStyle(.white.opacity(0.4))
-                                        .frame(width: 30)
+                                        .font(.system(size: 17).monospacedDigit())
+                                        .foregroundStyle(.secondary)
+                                        .frame(width: 28, alignment: .trailing)
                                 }
 
-                                // Title
                                 Text(track.title ?? "Unknown")
-                                    .font(.system(size: 22, weight: isCurrent ? .semibold : .regular))
-                                    .foregroundStyle(isCurrent ? .white : .white.opacity(0.9))
+                                    .font(.system(size: 20))
+                                    .foregroundStyle(isCurrent ? .white : .primary)
                                     .lineLimit(1)
 
                                 Spacer()
 
-                                // Artist
                                 Text(track.grandparentTitle ?? "")
-                                    .font(.system(size: 18))
-                                    .foregroundStyle(.white.opacity(0.4))
+                                    .font(.system(size: 17))
+                                    .foregroundStyle(.secondary)
                                     .lineLimit(1)
 
-                                // Duration
                                 if let duration = track.duration {
                                     Text(formatDuration(duration))
-                                        .font(.system(size: 18).monospacedDigit())
-                                        .foregroundStyle(.white.opacity(0.4))
-                                        .frame(width: 60, alignment: .trailing)
+                                        .font(.system(size: 17).monospacedDigit())
+                                        .foregroundStyle(.secondary)
+                                        .frame(width: 55, alignment: .trailing)
                                 }
                             }
-                            .padding(.vertical, 14)
-                            .padding(.horizontal, 20)
+                            .padding(.vertical, 12)
                         }
                         .buttonStyle(.plain)
-                        .focused($focusedContentId, equals: track.ratingKey)
-                        .musicItemContextMenu(item: track, style: .track)
+                        .contextMenu {
+                            Button { musicQueue.addNext(track: track) } label: {
+                                Label("Play Next", systemImage: "text.line.first.and.arrowtriangle.forward")
+                            }
+                            Button { musicQueue.addToEnd(track: track) } label: {
+                                Label("Play After", systemImage: "text.line.last.and.arrowtriangle.forward")
+                            }
+                        }
 
                         if index < allTracks.count - 1 {
                             Divider()
-                                .background(.white.opacity(0.06))
-                                .padding(.leading, 66)
+                                .padding(.leading, 42)
                         }
                     }
                 }
-                .padding(.horizontal, 40)
-                .padding(.bottom, musicQueue.isActive ? 120 : 40)
+                .padding(.horizontal, ScaledDimensions.rowHorizontalPadding)
+                .padding(.vertical, ScaledDimensions.rowVerticalPadding)
             }
         }
     }
 
-    // MARK: - Shared Components
+    // MARK: - Shared
 
-    private var gridColumns: [GridItem] {
-        [GridItem(.adaptive(minimum: 180, maximum: 220), spacing: 24)]
-    }
-
-    private func contentGrid(items: [PlexMetadata], isLoading: Bool) -> some View {
-        ScrollView(.vertical, showsIndicators: false) {
-            if items.isEmpty && isLoading {
-                loadingIndicator
-            } else if items.isEmpty {
-                emptyStateView("No items found")
-            } else {
-                LazyVGrid(columns: gridColumns, spacing: 30) {
-                    ForEach(items, id: \.ratingKey) { item in
-                        MusicPosterCard(item: item, style: item.type == "artist" ? .circular : .square) {
-                            handleItemSelected(item)
-                        }
-                        .focused($focusedContentId, equals: item.ratingKey)
-                        .musicItemContextMenu(item: item, style: item.type == "track" ? .track : .album)
-                    }
-                }
-                .padding(.horizontal, 40)
-                .padding(.bottom, musicQueue.isActive ? 120 : 40)
-            }
-        }
-    }
-
-    private var loadingIndicator: some View {
-        VStack {
-            Spacer()
-            ProgressView()
-                .scaleEffect(1.5)
-            Spacer()
-        }
-        .frame(maxWidth: .infinity, minHeight: 300)
-    }
-
-    private func emptyStateView(_ message: String) -> some View {
-        VStack(spacing: 16) {
-            Spacer()
+    private var emptyState: some View {
+        VStack(spacing: 12) {
             Image(systemName: "music.note")
-                .font(.system(size: 48))
-                .foregroundStyle(.white.opacity(0.3))
-            Text(message)
-                .font(.system(size: 22))
-                .foregroundStyle(.white.opacity(0.5))
-            Spacer()
+                .font(.system(size: 44))
+                .foregroundStyle(.white.opacity(0.2))
+            Text("No items")
+                .font(.system(size: 20))
+                .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, minHeight: 300)
     }
 
-    // MARK: - Navigation
-
-    private func handleItemSelected(_ item: PlexMetadata) {
-        switch item.type {
-        case "artist":
-            selectedArtist = item
-        case "album":
-            selectedAlbum = item
-        case "track":
-            musicQueue.playNow(track: item)
-        default:
-            selectedAlbum = item
+    private var contentCountText: String {
+        switch selectedCategory {
+        case .recentlyAdded: return ""
+        case .playlists: return playlists.isEmpty ? "" : "\(playlists.count) playlists"
+        case .artists: return allArtists.isEmpty ? "" : "\(allArtists.count) artists"
+        case .albums: return allAlbums.isEmpty ? "" : "\(allAlbums.count) albums"
+        case .songs: return allTracks.isEmpty ? "" : "\(allTracks.count) songs"
         }
+    }
+
+    private func artworkURL(for item: PlexMetadata) -> URL? {
+        guard let thumb = item.thumb ?? item.parentThumb,
+              let serverURL = authManager.selectedServerURL,
+              let token = authManager.selectedServerToken else { return nil }
+        return URL(string: "\(serverURL)\(thumb)?X-Plex-Token=\(token)")
+    }
+
+    private func formatDuration(_ ms: Int) -> String {
+        let s = ms / 1000
+        return "\(s / 60):\(String(format: "%02d", s % 60))"
     }
 
     // MARK: - Data Loading
 
-    private func loadInitialData() async {
-        await loadHubs()
-        await loadGenres()
-    }
-
-    private func loadCategoryData(_ category: MusicLibraryCategory) async {
-        guard !loadedCategories.contains(category) else { return }
+    private func loadRecentlyAdded() async {
+        if let cached = dataStore.libraryHubs[libraryKey], !cached.isEmpty {
+            recentlyAddedItems = cached.flatMap { $0.Metadata ?? [] }
+            return
+        }
 
         guard let serverURL = authManager.selectedServerURL,
               let token = authManager.selectedServerToken else { return }
 
-        switch category {
-        case .recentlyAdded:
-            // Already loaded via hubs
-            break
-        case .playlists:
-            do {
-                playlists = try await networkManager.getPlaylists(
-                    serverURL: serverURL, authToken: token
-                )
-            } catch {
-                print("MusicHomeView: Failed to load playlists: \(error)")
-            }
-        case .artists:
-            do {
-                allArtists = try await networkManager.getLibraryItems(
-                    serverURL: serverURL, authToken: token,
-                    sectionId: libraryKey, start: 0, size: 500
-                )
-                // Filter to artists only (type 8 in Plex)
-                allArtists = allArtists.filter { $0.type == "artist" }
-            } catch {
-                print("MusicHomeView: Failed to load artists: \(error)")
-            }
-        case .albums:
-            do {
-                let result = try await networkManager.getLibraryItemsWithTotal(
-                    serverURL: serverURL, authToken: token,
-                    sectionId: libraryKey, start: 0, size: 500,
-                    sort: "-addedAt"
-                )
-                allAlbums = result.items.filter { $0.type == "album" }
-                // If we got artist-level items, load albums separately
-                if allAlbums.isEmpty {
-                    allAlbums = result.items
-                }
-            } catch {
-                print("MusicHomeView: Failed to load albums: \(error)")
-            }
-        case .songs:
-            do {
-                allTracks = try await networkManager.getLibraryItems(
-                    serverURL: serverURL, authToken: token,
-                    sectionId: libraryKey, start: 0, size: 500
-                )
-                allTracks = allTracks.filter { $0.type == "track" }
-            } catch {
-                print("MusicHomeView: Failed to load tracks: \(error)")
-            }
-        }
-
-        loadedCategories.insert(category)
-    }
-
-    private func loadHubs() async {
-        if let cached = dataStore.libraryHubs[libraryKey], !cached.isEmpty {
-            hubs = cached
-            return
-        }
-
-        guard let serverURL = authManager.selectedServerURL,
-              let token = authManager.selectedServerToken else {
-            error = "Not connected to a server"
-            return
-        }
-
         isLoading = true
-        error = nil
-
         do {
-            hubs = try await networkManager.getLibraryHubs(
+            let hubs = try await networkManager.getLibraryHubs(
                 serverURL: serverURL, authToken: token, sectionId: libraryKey
             )
-            isLoading = false
+            recentlyAddedItems = hubs.flatMap { $0.Metadata ?? [] }
         } catch {
-            self.error = "Failed to load library: \(error.localizedDescription)"
-            isLoading = false
+            print("MusicHome: Failed to load hubs: \(error)")
         }
+        isLoading = false
     }
 
     private func loadGenres() async {
         guard let serverURL = authManager.selectedServerURL,
               let token = authManager.selectedServerToken else { return }
 
-        // Extract genres from hubs data
-        var genreSet = Set<String>()
-        for hub in hubs {
-            for item in hub.Metadata ?? [] {
-                for genre in item.Genre ?? [] {
-                    if let tag = genre.tag {
-                        genreSet.insert(tag)
-                    }
-                }
+        guard let url = URL(string: "\(serverURL)/library/sections/\(libraryKey)/genre?X-Plex-Token=\(token)") else { return }
+
+        do {
+            struct GenreResponse: Codable {
+                struct Container: Codable { var Directory: [Entry]? }
+                struct Entry: Codable { var title: String? }
+                var MediaContainer: Container
             }
+            let data = try await networkManager.requestData(url, method: "GET", headers: ["X-Plex-Token": token])
+            let response = try JSONDecoder().decode(GenreResponse.self, from: data)
+            genres = (response.MediaContainer.Directory ?? []).compactMap(\.title).sorted()
+        } catch {
+            print("MusicHome: Failed to load genres: \(error)")
         }
-        genres = genreSet.sorted()
     }
 
-    private func playAllContent(shuffled: Bool) async {
+    private func loadCategoryData(_ category: MusicLibraryCategory) async {
+        guard !loadedCategories.contains(category) else { return }
         guard let serverURL = authManager.selectedServerURL,
               let token = authManager.selectedServerToken else { return }
 
-        var tracks: [PlexMetadata] = []
+        switch category {
+        case .recentlyAdded:
+            break // Already loaded
+        case .playlists:
+            playlists = (try? await networkManager.getPlaylists(serverURL: serverURL, authToken: token)) ?? []
+        case .artists:
+            let items = (try? await networkManager.getLibraryItems(
+                serverURL: serverURL, authToken: token, sectionId: libraryKey, start: 0, size: 500
+            )) ?? []
+            allArtists = items.filter { $0.type == "artist" }
+        case .albums:
+            let result = (try? await networkManager.getLibraryItemsWithTotal(
+                serverURL: serverURL, authToken: token, sectionId: libraryKey, start: 0, size: 500, sort: "-addedAt"
+            ))
+            let items = result?.items ?? []
+            allAlbums = items.filter { $0.type == "album" }
+            if allAlbums.isEmpty { allAlbums = items }
+        case .songs:
+            let items = (try? await networkManager.getLibraryItems(
+                serverURL: serverURL, authToken: token, sectionId: libraryKey, start: 0, size: 500
+            )) ?? []
+            allTracks = items.filter { $0.type == "track" }
+        }
+        loadedCategories.insert(category)
+    }
 
-        if selectedCategory == .songs {
+    private func playAll(shuffled: Bool) async {
+        guard let serverURL = authManager.selectedServerURL,
+              let token = authManager.selectedServerToken else { return }
+
+        var tracks: [PlexMetadata]
+        if selectedCategory == .songs, !allTracks.isEmpty {
             tracks = allTracks
         } else {
-            // Load all tracks from library
-            do {
-                tracks = try await networkManager.getLibraryItems(
-                    serverURL: serverURL, authToken: token,
-                    sectionId: libraryKey, start: 0, size: 1000
-                ).filter { $0.type == "track" }
-            } catch {
-                print("MusicHomeView: Failed to load tracks for playback: \(error)")
-                return
-            }
+            tracks = (try? await networkManager.getLibraryItems(
+                serverURL: serverURL, authToken: token, sectionId: libraryKey, start: 0, size: 1000
+            ).filter { $0.type == "track" }) ?? []
         }
 
         if shuffled { tracks.shuffle() }
-        if !tracks.isEmpty {
-            musicQueue.playAlbum(tracks: tracks, startingAt: 0)
-        }
-    }
-
-    private func formatDuration(_ ms: Int) -> String {
-        let totalSeconds = ms / 1000
-        let minutes = totalSeconds / 60
-        let seconds = totalSeconds % 60
-        return "\(minutes):\(String(format: "%02d", seconds))"
+        if !tracks.isEmpty { musicQueue.playAlbum(tracks: tracks) }
     }
 }
