@@ -293,7 +293,11 @@ struct TVSidebarView: View {
                     }
                 case .library(let key):
                     if let lib = dataStore.libraries.first(where: { $0.key == key }) {
-                        PlexLibraryView(libraryKey: lib.key, libraryTitle: lib.title)
+                        if lib.isMusicLibrary {
+                            MusicHomeView(libraryKey: lib.key, libraryTitle: lib.title)
+                        } else {
+                            PlexLibraryView(libraryKey: lib.key, libraryTitle: lib.title)
+                        }
                     }
                 case .liveTV(let sourceId):
                     LiveTVContainerView(sourceIdFilter: sourceId)

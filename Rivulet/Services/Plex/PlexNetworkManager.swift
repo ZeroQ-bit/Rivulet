@@ -1029,6 +1029,64 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
         )
     }
 
+    // MARK: - Playlists
+
+    /// Get audio playlists
+    func getPlaylists(serverURL: String, authToken: String, playlistType: String = "audio") async throws -> [PlexMetadata] {
+        guard var components = URLComponents(string: "\(serverURL)/playlists") else {
+            throw PlexAPIError.invalidURL
+        }
+
+        components.queryItems = [
+            URLQueryItem(name: "playlistType", value: playlistType),
+            URLQueryItem(name: "X-Plex-Token", value: authToken)
+        ]
+
+        guard let url = components.url else { throw PlexAPIError.invalidURL }
+
+        let data = try await requestData(url, method: "GET", headers: ["X-Plex-Token": authToken])
+        let container = try JSONDecoder().decode(PlexResponse.self, from: data)
+        return container.MediaContainer.Metadata ?? []
+    }
+
+    /// Get items in a playlist
+    func getPlaylistItems(serverURL: String, authToken: String, ratingKey: String) async throws -> [PlexMetadata] {
+        guard var components = URLComponents(string: "\(serverURL)/playlists/\(ratingKey)/items") else {
+            throw PlexAPIError.invalidURL
+        }
+
+        components.queryItems = [
+            URLQueryItem(name: "X-Plex-Token", value: authToken)
+        ]
+
+        guard let url = components.url else { throw PlexAPIError.invalidURL }
+
+        let data = try await requestData(url, method: "GET", headers: ["X-Plex-Token": authToken])
+        let container = try JSONDecoder().decode(PlexResponse.self, from: data)
+        return container.MediaContainer.Metadata ?? []
+    }
+
+    /// Create a new playlist
+    func createPlaylist(serverURL: String, authToken: String, title: String, type: String = "audio", ratingKeys: [String]) async throws {
+        guard var components = URLComponents(string: "\(serverURL)/playlists") else {
+            throw PlexAPIError.invalidURL
+        }
+
+        let uri = "server://\(PlexAPI.clientIdentifier)/com.plexapp.plugins.library/library/metadata/\(ratingKeys.joined(separator: ","))"
+
+        components.queryItems = [
+            URLQueryItem(name: "type", value: type),
+            URLQueryItem(name: "title", value: title),
+            URLQueryItem(name: "smart", value: "0"),
+            URLQueryItem(name: "uri", value: uri),
+            URLQueryItem(name: "X-Plex-Token", value: authToken)
+        ]
+
+        guard let url = components.url else { throw PlexAPIError.invalidURL }
+
+        _ = try await requestData(url, method: "POST", headers: ["X-Plex-Token": authToken])
+    }
+
     // MARK: - Streaming URLs
     
     /// Playback strategy - ordered by preference
