@@ -109,9 +109,17 @@ struct MusicHomeView: View {
                         Task { await loadCategoryData(category) }
                     } label: {
                         Label(category.title, systemImage: category.icon)
-                            .font(.system(size: 29))
+                            .font(.system(size: 29, weight: selectedCategory == category ? .semibold : .regular))
+                            .foregroundStyle(selectedCategory == category ? .white : .secondary)
                             .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.vertical, 10)
+                            .padding(.horizontal, 16)
+                            .background(
+                                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                    .fill(selectedCategory == category ? .white.opacity(0.1) : .clear)
+                            )
                     }
+                    .buttonStyle(.plain)
                 }
 
                 // Genres section
@@ -215,25 +223,7 @@ struct MusicHomeView: View {
                         Button {
                             selectedItem = item
                         } label: {
-                            VStack(alignment: .leading, spacing: 8) {
-                                EquatableView(content: MediaPosterCard(
-                                    item: item,
-                                    serverURL: authManager.selectedServerURL ?? "",
-                                    authToken: authManager.selectedServerToken ?? ""
-                                ))
-
-                                // Album title
-                                Text(item.title ?? "Unknown")
-                                    .font(.system(size: ScaledDimensions.posterSubtitleSize, weight: .medium))
-                                    .foregroundStyle(.white)
-                                    .lineLimit(1)
-
-                                // Artist name
-                                Text(item.parentTitle ?? item.grandparentTitle ?? "Unknown Artist")
-                                    .font(.system(size: ScaledDimensions.posterSubtitleSize - 2))
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(1)
-                            }
+                            musicAlbumCard(item: item)
                         }
                         .buttonStyle(CardButtonStyle())
                         .contextMenu {
@@ -427,6 +417,46 @@ struct MusicHomeView: View {
         case .albums: return allAlbums.isEmpty ? "" : "\(allAlbums.count) albums"
         case .songs: return allTracks.isEmpty ? "" : "\(allTracks.count) songs"
         }
+    }
+
+    /// Album card with artwork + title + artist, all inside one hoverEffect
+    private func musicAlbumCard(item: PlexMetadata) -> some View {
+        let posterSize = ScaledDimensions.squarePosterSize * scale
+        return VStack(alignment: .leading, spacing: 8) {
+            CachedAsyncImage(url: artworkURL(for: item)) { phase in
+                switch phase {
+                case .success(let image):
+                    image.resizable().aspectRatio(contentMode: .fill)
+                case .empty:
+                    Rectangle().fill(Color(white: 0.15))
+                        .overlay { ProgressView().tint(.white.opacity(0.3)) }
+                case .failure:
+                    Rectangle().fill(Color(white: 0.15))
+                        .overlay {
+                            Image(systemName: "music.note")
+                                .font(.system(size: 40))
+                                .foregroundStyle(.white.opacity(0.2))
+                        }
+                @unknown default:
+                    Rectangle().fill(Color(white: 0.15))
+                }
+            }
+            .frame(width: posterSize, height: posterSize)
+            .clipShape(RoundedRectangle(cornerRadius: ScaledDimensions.posterCornerRadius, style: .continuous))
+
+            Text(item.title ?? "Unknown")
+                .font(.system(size: ScaledDimensions.posterSubtitleSize, weight: .medium))
+                .foregroundStyle(.white)
+                .lineLimit(1)
+                .frame(width: posterSize, alignment: .leading)
+
+            Text(item.parentTitle ?? item.grandparentTitle ?? "Unknown Artist")
+                .font(.system(size: ScaledDimensions.posterSubtitleSize - 2))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .frame(width: posterSize, alignment: .leading)
+        }
+        .hoverEffect(.highlight)
     }
 
     private func artworkURL(for item: PlexMetadata) -> URL? {
