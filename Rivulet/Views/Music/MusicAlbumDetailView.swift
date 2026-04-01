@@ -2,15 +2,16 @@
 //  MusicAlbumDetailView.swift
 //  Rivulet
 //
-//  Dedicated album detail page with artwork, track list, and playback actions
+//  Album detail page matching Apple Music tvOS design.
+//  Large artwork left, metadata + plain track list right.
 //
 
 import SwiftUI
 
-/// Full-screen album detail with large artwork, track listing, and action buttons.
+/// Album detail with artwork, metadata, action buttons, and plain track list.
+/// Pushed via NavigationStack — no fullScreenCover.
 struct MusicAlbumDetailView: View {
     let album: PlexMetadata
-    @Binding var isPresented: Bool
 
     @ObservedObject private var authManager = PlexAuthManager.shared
     @ObservedObject private var musicQueue = MusicQueue.shared
@@ -23,13 +24,14 @@ struct MusicAlbumDetailView: View {
     private enum AlbumFocusElement: Hashable {
         case play
         case shuffle
-        case addToQueue
-        case track(String) // ratingKey
+        case more
+        case track(String)
     }
 
     private let networkManager = PlexNetworkManager.shared
 
-    /// Album art URL
+    // MARK: - Computed Properties
+
     private var artworkURL: URL? {
         guard let thumb = album.thumb ?? album.parentThumb,
               let serverURL = authManager.selectedServerURL,
@@ -37,55 +39,51 @@ struct MusicAlbumDetailView: View {
         return URL(string: "\(serverURL)\(thumb)?X-Plex-Token=\(token)")
     }
 
-    /// Artist name from various metadata fields
     private var artistName: String {
         album.parentTitle ?? album.grandparentTitle ?? "Unknown Artist"
     }
 
-    /// Genre string
     private var genreText: String? {
         guard let genres = album.Genre, !genres.isEmpty else { return nil }
         return genres.compactMap(\.tag).joined(separator: ", ")
     }
 
-    /// Total duration of all tracks
-    private var totalDuration: Int {
-        tracks.compactMap(\.duration).reduce(0, +)
+    private var metadataLine: String {
+        var parts: [String] = []
+        if let genre = genreText { parts.append(genre) }
+        if let year = album.year { parts.append(String(year)) }
+        return parts.joined(separator: " \u{00B7} ")
     }
 
-    /// Formatted total duration
-    private var formattedTotalDuration: String {
-        let totalSeconds = totalDuration / 1000
+    private var totalDuration: String {
+        let totalMs = tracks.compactMap(\.duration).reduce(0, +)
+        let totalSeconds = totalMs / 1000
         let hours = totalSeconds / 3600
         let minutes = (totalSeconds % 3600) / 60
-
         if hours > 0 {
             return "\(hours) hr \(minutes) min"
-        } else {
-            return "\(minutes) min"
         }
+        return "\(minutes) min"
     }
 
-    /// Check if a track is currently playing
     private func isCurrentTrack(_ track: PlexMetadata) -> Bool {
         guard let currentKey = musicQueue.currentTrack?.ratingKey,
               let trackKey = track.ratingKey else { return false }
         return currentKey == trackKey
     }
 
+    // MARK: - Body
+
     var body: some View {
         ZStack {
-            // Dark background
-            Color.black.ignoresSafeArea()
-
             // Subtle blurred artwork backdrop
             backdrop
 
             // Content
-            HStack(alignment: .top, spacing: 60) {
-                // Left: Album art + metadata
+            HStack(alignment: .top, spacing: 50) {
+                // Left: Album artwork
                 leftColumn
-                    .frame(width: 400)
+                    .frame(width: 340)
 
                 // Right: Track list
                 rightColumn
@@ -95,9 +93,6 @@ struct MusicAlbumDetailView: View {
         }
         .onAppear {
             focusedElement = .play
-        }
-        .onExitCommand {
-            isPresented = false
         }
         .task {
             await loadTracks()
@@ -116,7 +111,7 @@ struct MusicAlbumDetailView: View {
                         .frame(width: geo.size.width, height: geo.size.height)
                         .clipped()
                         .blur(radius: 60)
-                        .opacity(0.2)
+                        .opacity(0.15)
                 }
             }
         }
@@ -126,7 +121,7 @@ struct MusicAlbumDetailView: View {
     // MARK: - Left Column
 
     private var leftColumn: some View {
-        VStack(alignment: .leading, spacing: 20) {
+        VStack(alignment: .leading, spacing: 16) {
             // Large album art
             CachedAsyncImage(url: artworkURL) { phase in
                 switch phase {
@@ -134,34 +129,24 @@ struct MusicAlbumDetailView: View {
                     image
                         .resizable()
                         .aspectRatio(contentMode: .fill)
-                case .empty:
-                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                case .empty, .failure:
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
                         .fill(.white.opacity(0.06))
                         .overlay {
                             Image(systemName: "music.note")
                                 .font(.system(size: 60))
                                 .foregroundStyle(.white.opacity(0.2))
                         }
-                case .failure:
-                    RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        .fill(.white.opacity(0.06))
-                        .overlay {
-                            Image(systemName: "music.note")
-                                .font(.system(size: 60))
-                                .foregroundStyle(.white.opacity(0.2))
-                        }
+                @unknown default:
+                    EmptyView()
                 }
             }
-            .frame(width: 350, height: 350)
-            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .strokeBorder(.white.opacity(0.1), lineWidth: 1)
-            )
+            .frame(width: 300, height: 300)
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
 
             // Album title
             Text(album.title ?? "Unknown Album")
-                .font(.system(size: 32, weight: .bold))
+                .font(.system(size: 30, weight: .bold))
                 .foregroundStyle(.white)
                 .lineLimit(2)
 
@@ -170,24 +155,11 @@ struct MusicAlbumDetailView: View {
                 .font(.system(size: 22))
                 .foregroundStyle(.white.opacity(0.7))
 
-            // Year + Genre
-            HStack(spacing: 12) {
-                if let year = album.year {
-                    Text(String(year))
-                        .font(.system(size: 18))
-                        .foregroundStyle(.white.opacity(0.5))
-                }
-
-                if let genre = genreText {
-                    if album.year != nil {
-                        Text("*")
-                            .foregroundStyle(.white.opacity(0.3))
-                    }
-                    Text(genre)
-                        .font(.system(size: 18))
-                        .foregroundStyle(.white.opacity(0.5))
-                        .lineLimit(1)
-                }
+            // Genre + Year
+            if !metadataLine.isEmpty {
+                Text(metadataLine)
+                    .font(.system(size: 18))
+                    .foregroundStyle(.white.opacity(0.5))
             }
 
             // Action buttons
@@ -195,10 +167,10 @@ struct MusicAlbumDetailView: View {
 
             // Summary stats
             if !tracks.isEmpty {
-                Text("\(tracks.count) tracks, \(formattedTotalDuration)")
-                    .font(.system(size: 18))
+                Text("\(tracks.count) tracks, \(totalDuration)")
+                    .font(.system(size: 16))
                     .foregroundStyle(.white.opacity(0.4))
-                    .padding(.top, 8)
+                    .padding(.top, 4)
             }
         }
     }
@@ -206,17 +178,17 @@ struct MusicAlbumDetailView: View {
     // MARK: - Action Row
 
     private var actionRow: some View {
-        HStack(spacing: 16) {
+        HStack(spacing: 12) {
             // Play
             Button {
                 musicQueue.playAlbum(tracks: tracks, startingAt: 0)
             } label: {
-                HStack(spacing: 8) {
+                HStack(spacing: 6) {
                     Image(systemName: "play.fill")
                     Text("Play")
                 }
-                .font(.system(size: 20, weight: .semibold))
-                .frame(width: 120, height: 48)
+                .font(.system(size: 18, weight: .semibold))
+                .frame(width: 100, height: 44)
             }
             .buttonStyle(AppStoreActionButtonStyle(
                 isFocused: focusedElement == .play,
@@ -231,12 +203,12 @@ struct MusicAlbumDetailView: View {
                 shuffled.shuffle()
                 musicQueue.playAlbum(tracks: shuffled, startingAt: 0)
             } label: {
-                HStack(spacing: 8) {
+                HStack(spacing: 6) {
                     Image(systemName: "shuffle")
                     Text("Shuffle")
                 }
-                .font(.system(size: 20, weight: .semibold))
-                .frame(width: 140, height: 48)
+                .font(.system(size: 18, weight: .semibold))
+                .frame(width: 110, height: 44)
             }
             .buttonStyle(AppStoreActionButtonStyle(
                 isFocused: focusedElement == .shuffle,
@@ -245,23 +217,52 @@ struct MusicAlbumDetailView: View {
             .focused($focusedElement, equals: .shuffle)
             .disabled(tracks.isEmpty)
 
-            // Add to Queue
+            // More (...) button with native context menu
             Button {
-                musicQueue.addToEnd(tracks: tracks)
+                // No-op: context menu is triggered by the system
             } label: {
-                HStack(spacing: 8) {
-                    Image(systemName: "text.badge.plus")
-                    Text("Queue")
-                }
-                .font(.system(size: 20, weight: .semibold))
-                .frame(width: 130, height: 48)
+                Image(systemName: "ellipsis")
+                    .font(.system(size: 18, weight: .semibold))
+                    .frame(width: 44, height: 44)
             }
             .buttonStyle(AppStoreActionButtonStyle(
-                isFocused: focusedElement == .addToQueue,
+                isFocused: focusedElement == .more,
                 isPrimary: false
             ))
-            .focused($focusedElement, equals: .addToQueue)
-            .disabled(tracks.isEmpty)
+            .focused($focusedElement, equals: .more)
+            .contextMenu {
+                Button {
+                    musicQueue.playAlbum(tracks: tracks, startingAt: 0)
+                } label: {
+                    Label("Play", systemImage: "play.fill")
+                }
+
+                Button {
+                    var shuffled = tracks
+                    shuffled.shuffle()
+                    musicQueue.playAlbum(tracks: shuffled, startingAt: 0)
+                } label: {
+                    Label("Shuffle", systemImage: "shuffle")
+                }
+
+                Divider()
+
+                Button {
+                    musicQueue.addToEnd(tracks: tracks)
+                } label: {
+                    Label("Add to Queue", systemImage: "text.append")
+                }
+
+                if let firstTrack = tracks.first {
+                    Button {
+                        for track in tracks.reversed() {
+                            musicQueue.addNext(track: track)
+                        }
+                    } label: {
+                        Label("Play Next", systemImage: "text.line.first.and.arrowtriangle.forward")
+                    }
+                }
+            }
         }
     }
 
@@ -288,18 +289,66 @@ struct MusicAlbumDetailView: View {
                 .frame(maxWidth: .infinity)
             } else {
                 ScrollView(.vertical, showsIndicators: false) {
-                    LazyVStack(spacing: 2) {
+                    LazyVStack(spacing: 0) {
                         ForEach(Array(tracks.enumerated()), id: \.element.ratingKey) { index, track in
-                            TrackRow(
-                                track: track,
-                                index: index,
-                                isCurrent: isCurrentTrack(track),
-                                isPlaying: isCurrentTrack(track) && musicQueue.playbackState == .playing,
-                                isFocused: focusedElement == .track(track.ratingKey ?? "")
-                            ) {
+                            let isCurrent = isCurrentTrack(track)
+                            let isPlaying = isCurrent && musicQueue.playbackState == .playing
+
+                            Button {
                                 musicQueue.playAlbum(tracks: tracks, startingAt: index)
+                            } label: {
+                                HStack(spacing: 14) {
+                                    // Track number or playback indicator
+                                    if isCurrent {
+                                        PlaybackIndicator(isPlaying: isPlaying, size: .small)
+                                            .frame(width: 28, alignment: .center)
+                                    } else {
+                                        Text("\(track.index ?? (index + 1))")
+                                            .font(.system(size: 20).monospacedDigit())
+                                            .foregroundStyle(.white.opacity(0.4))
+                                            .frame(width: 28, alignment: .center)
+                                    }
+
+                                    // Track title
+                                    Text(track.title ?? "Track \(index + 1)")
+                                        .font(.system(size: 22, weight: isCurrent ? .semibold : .regular))
+                                        .foregroundStyle(isCurrent ? .white : .white.opacity(0.9))
+                                        .lineLimit(1)
+
+                                    Spacer()
+
+                                    // Duration
+                                    if let duration = track.duration {
+                                        Text(formatDuration(duration))
+                                            .font(.system(size: 18).monospacedDigit())
+                                            .foregroundStyle(.white.opacity(0.4))
+                                    }
+                                }
+                                .padding(.vertical, 14)
+                                .padding(.horizontal, 16)
                             }
+                            .buttonStyle(.plain)
                             .focused($focusedElement, equals: .track(track.ratingKey ?? ""))
+                            .contextMenu {
+                                Button {
+                                    musicQueue.addNext(track: track)
+                                } label: {
+                                    Label("Play Next", systemImage: "text.line.first.and.arrowtriangle.forward")
+                                }
+
+                                Button {
+                                    musicQueue.addToEnd(track: track)
+                                } label: {
+                                    Label("Add to Queue", systemImage: "text.append")
+                                }
+                            }
+
+                            // Separator
+                            if index < tracks.count - 1 {
+                                Divider()
+                                    .background(.white.opacity(0.06))
+                                    .padding(.leading, 58)
+                            }
                         }
                     }
                     .padding(.bottom, musicQueue.isActive ? 120 : 40)
@@ -321,9 +370,7 @@ struct MusicAlbumDetailView: View {
 
         do {
             tracks = try await networkManager.getChildren(
-                serverURL: serverURL,
-                authToken: token,
-                ratingKey: ratingKey
+                serverURL: serverURL, authToken: token, ratingKey: ratingKey
             )
             isLoading = false
         } catch {
@@ -331,74 +378,11 @@ struct MusicAlbumDetailView: View {
             isLoading = false
         }
     }
-}
 
-// MARK: - Track Row
-
-/// A single track row in the album track list.
-private struct TrackRow: View {
-    let track: PlexMetadata
-    let index: Int
-    let isCurrent: Bool
-    let isPlaying: Bool
-    let isFocused: Bool
-    let action: () -> Void
-
-    /// Format duration from milliseconds to m:ss
-    private var formattedDuration: String {
-        guard let durationMs = track.duration else { return "" }
-        let totalSeconds = durationMs / 1000
+    private func formatDuration(_ ms: Int) -> String {
+        let totalSeconds = ms / 1000
         let minutes = totalSeconds / 60
         let seconds = totalSeconds % 60
         return "\(minutes):\(String(format: "%02d", seconds))"
-    }
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 16) {
-                // Track number or playback indicator
-                ZStack {
-                    if isCurrent {
-                        PlaybackIndicator(isPlaying: isPlaying, size: .small)
-                    } else {
-                        Text("\(track.index ?? (index + 1))")
-                            .font(.system(size: 20).monospacedDigit())
-                            .foregroundStyle(.white.opacity(0.5))
-                    }
-                }
-                .frame(width: 30, alignment: .center)
-
-                // Track title
-                Text(track.title ?? "Track \(index + 1)")
-                    .font(.system(size: 22, weight: isCurrent ? .semibold : .regular))
-                    .foregroundStyle(isCurrent ? .white : .white.opacity(0.9))
-                    .lineLimit(1)
-
-                Spacer()
-
-                // Duration
-                Text(formattedDuration)
-                    .font(.system(size: 20).monospacedDigit())
-                    .foregroundStyle(.white.opacity(0.4))
-            }
-            .padding(.vertical, 14)
-            .padding(.horizontal, 20)
-            .background(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(isFocused ? .white.opacity(0.18) : (isCurrent ? .white.opacity(0.06) : .clear))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .strokeBorder(
-                                isFocused ? .white.opacity(0.25) : .clear,
-                                lineWidth: 1
-                            )
-                    )
-            )
-        }
-        .buttonStyle(GlassRowButtonStyle())
-        .hoverEffectDisabled()
-        .focusEffectDisabled()
-        .scaleEffect(isFocused ? 1.02 : 1.0)
-        .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isFocused)
     }
 }

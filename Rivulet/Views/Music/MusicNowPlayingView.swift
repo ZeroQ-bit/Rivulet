@@ -2,8 +2,9 @@
 //  MusicNowPlayingView.swift
 //  Rivulet
 //
-//  Full-screen Now Playing view matching Apple Music tvOS patterns.
-//  Centered album art, controls on demand, horizontal queue carousel.
+//  Now Playing view matching Apple Music tvOS design.
+//  Centered layout: album name top, large art center, track+artist below,
+//  thin progress bar near bottom, action pills at bottom edges.
 //
 
 import SwiftUI
@@ -12,8 +13,11 @@ struct MusicNowPlayingView: View {
     @Binding var isPresented: Bool
     @ObservedObject private var musicQueue = MusicQueue.shared
     @ObservedObject private var authManager = PlexAuthManager.shared
+
     @State private var showControls = false
+    @State private var showQueue = false
     @State private var controlsTimer: Timer?
+
     @FocusState private var focusedControl: NowPlayingControl?
 
     enum NowPlayingControl: Hashable {
@@ -22,30 +26,67 @@ struct MusicNowPlayingView: View {
         case next
         case shuffle
         case repeatMode
+        case info
+        case contextMenu
+        case lyrics
+        case queue
         case progressBar
-        case queueItem(String) // ratingKey
     }
+
+    // MARK: - Body
 
     var body: some View {
         ZStack {
             // Blurred album art backdrop
             albumArtBackdrop
 
-            // Content
+            // Main content
             VStack(spacing: 0) {
+                // Album name — top center
+                Text(albumName)
+                    .font(.system(size: 20, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.5))
+                    .lineLimit(1)
+                    .padding(.top, 50)
+
                 Spacer()
 
+                // Large centered album art
+                albumArtView
+                    .frame(width: 420, height: 420)
+                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .shadow(color: .black.opacity(0.5), radius: 40, y: 20)
+
+                // Track title with playback indicator
+                HStack(spacing: 12) {
+                    if musicQueue.playbackState == .playing {
+                        PlaybackIndicator(isPlaying: true, size: .medium)
+                    }
+
+                    Text(musicQueue.currentTrack?.title ?? "Not Playing")
+                        .font(.system(size: 32, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .lineLimit(1)
+                }
+                .padding(.top, 28)
+
+                // Artist name
+                Text(artistName)
+                    .font(.system(size: 22))
+                    .foregroundStyle(.white.opacity(0.6))
+                    .lineLimit(1)
+                    .padding(.top, 6)
+
+                Spacer()
+
+                // Transport controls (only when shown)
                 if showControls {
-                    controlsView
+                    transportControls
                         .transition(.opacity.combined(with: .move(edge: .bottom)))
-                } else {
-                    ambientView
-                        .transition(.opacity)
+                        .padding(.bottom, 10)
                 }
 
-                Spacer()
-
-                // Progress bar (always visible, thin when ambient)
+                // Progress bar — near bottom
                 MusicProgressBar(
                     currentTime: musicQueue.currentTime,
                     duration: musicQueue.duration,
@@ -53,12 +94,19 @@ struct MusicNowPlayingView: View {
                     onSeek: { time in musicQueue.seek(to: time) }
                 )
                 .padding(.horizontal, 80)
-                .padding(.bottom, showControls ? 40 : 20)
+                .padding(.bottom, 12)
+
+                // Bottom bar: Info left, action icons right
+                bottomBar
+                    .padding(.horizontal, 80)
+                    .padding(.bottom, 40)
             }
         }
         .ignoresSafeArea()
         .onExitCommand {
-            if showControls {
+            if showQueue {
+                showQueue = false
+            } else if showControls {
                 hideControls()
             } else {
                 isPresented = false
@@ -90,89 +138,15 @@ struct MusicNowPlayingView: View {
             }
         }
         .animation(.easeInOut(duration: 0.4), value: showControls)
-        .onChange(of: musicQueue.currentTrack?.ratingKey) { _, _ in
-            // Reset controls visibility on track change
+        .fullScreenCover(isPresented: $showQueue) {
+            MusicQueueListView(isPresented: $showQueue)
+                .presentationBackground(.clear)
         }
     }
 
-    // MARK: - Ambient View (Controls Hidden)
+    // MARK: - Transport Controls
 
-    private var ambientView: some View {
-        VStack(spacing: 24) {
-            // Large centered album art
-            albumArtView
-                .frame(width: 500, height: 500)
-                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-                .shadow(color: .black.opacity(0.5), radius: 40, y: 20)
-
-            // Track info
-            VStack(spacing: 8) {
-                Text(musicQueue.currentTrack?.title ?? "Not Playing")
-                    .font(.system(size: 36, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .lineLimit(1)
-
-                Text(artistName)
-                    .font(.system(size: 24, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.7))
-                    .lineLimit(1)
-
-                Text(albumName)
-                    .font(.system(size: 20))
-                    .foregroundStyle(.white.opacity(0.5))
-                    .lineLimit(1)
-            }
-        }
-    }
-
-    // MARK: - Controls View (Revealed)
-
-    private var controlsView: some View {
-        VStack(spacing: 32) {
-            HStack(spacing: 60) {
-                // Album art (smaller when controls shown)
-                albumArtView
-                    .frame(width: 340, height: 340)
-                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                    .shadow(color: .black.opacity(0.4), radius: 30, y: 10)
-
-                // Track info + controls
-                VStack(alignment: .leading, spacing: 24) {
-                    // Track metadata
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text(musicQueue.currentTrack?.title ?? "Not Playing")
-                            .font(.system(size: 32, weight: .semibold))
-                            .foregroundStyle(.white)
-                            .lineLimit(1)
-
-                        Text(artistName)
-                            .font(.system(size: 22, weight: .medium))
-                            .foregroundStyle(.white.opacity(0.7))
-                            .lineLimit(1)
-
-                        Text(albumName)
-                            .font(.system(size: 18))
-                            .foregroundStyle(.white.opacity(0.5))
-                            .lineLimit(1)
-                    }
-
-                    // Playback controls
-                    playbackControls
-
-                    // Up Next
-                    if !musicQueue.queue.isEmpty {
-                        upNextSection
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .padding(.horizontal, 80)
-        }
-    }
-
-    // MARK: - Playback Controls
-
-    private var playbackControls: some View {
+    private var transportControls: some View {
         HStack(spacing: 40) {
             // Shuffle
             controlButton(
@@ -184,14 +158,11 @@ struct MusicNowPlayingView: View {
             }
 
             // Previous
-            controlButton(
-                icon: "backward.fill",
-                control: .previous
-            ) {
+            controlButton(icon: "backward.fill", control: .previous) {
                 musicQueue.skipToPrevious()
             }
 
-            // Play/Pause (larger)
+            // Play/Pause
             controlButton(
                 icon: musicQueue.playbackState == .playing ? "pause.fill" : "play.fill",
                 control: .playPause,
@@ -201,10 +172,7 @@ struct MusicNowPlayingView: View {
             }
 
             // Next
-            controlButton(
-                icon: "forward.fill",
-                control: .next
-            ) {
+            controlButton(icon: "forward.fill", control: .next) {
                 musicQueue.skipToNext()
             }
 
@@ -226,10 +194,15 @@ struct MusicNowPlayingView: View {
         isLarge: Bool = false,
         action: @escaping () -> Void
     ) -> some View {
-        Button(action: action) {
+        Button(action: {
+            action()
+            resetControlsTimer()
+        }) {
             Image(systemName: icon)
                 .font(.system(size: isLarge ? 36 : 24, weight: .medium))
-                .foregroundStyle(isActive ? .white : .white.opacity(focusedControl == control ? 1.0 : 0.6))
+                .foregroundStyle(
+                    isActive ? .white : .white.opacity(focusedControl == control ? 1.0 : 0.6)
+                )
                 .frame(width: isLarge ? 72 : 48, height: isLarge ? 72 : 48)
                 .background(
                     Circle()
@@ -238,65 +211,88 @@ struct MusicNowPlayingView: View {
         }
         .buttonStyle(.plain)
         .focused($focusedControl, equals: control)
-        .scaleEffect(focusedControl == control ? 1.15 : 1.0)
-        .animation(.spring(response: 0.3, dampingFraction: 0.7), value: focusedControl == control)
     }
 
-    // MARK: - Up Next Section
+    // MARK: - Bottom Bar
 
-    private var upNextSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Up Next")
-                .font(.system(size: 18, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.5))
-
-            VStack(spacing: 8) {
-                ForEach(Array(musicQueue.queue.prefix(3).enumerated()), id: \.element.ratingKey) { index, track in
-                    queueTrackRow(track: track, index: index)
+    private var bottomBar: some View {
+        HStack {
+            // Left: Info pill
+            Button {
+                // Info action (could show track details)
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "info.circle")
+                    Text("Info")
                 }
+                .font(.system(size: 16, weight: .medium))
+                .foregroundStyle(focusedControl == .info ? .black : .white.opacity(0.6))
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+                .background(
+                    Capsule()
+                        .fill(focusedControl == .info ? .white : .white.opacity(0.12))
+                )
+            }
+            .buttonStyle(.plain)
+            .focused($focusedControl, equals: .info)
+
+            Spacer()
+
+            // Right: Action circle buttons
+            HStack(spacing: 16) {
+                // Context menu (...)
+                bottomCircleButton(icon: "ellipsis", control: .contextMenu)
+                    .contextMenu {
+                        if let track = musicQueue.currentTrack {
+                            Button {
+                                musicQueue.addNext(track: track)
+                            } label: {
+                                Label("Play Next", systemImage: "text.line.first.and.arrowtriangle.forward")
+                            }
+
+                            Button {
+                                musicQueue.addToEnd(track: track)
+                            } label: {
+                                Label("Add to Queue", systemImage: "text.append")
+                            }
+                        }
+                    }
+
+                // Queue
+                Button {
+                    showQueue = true
+                } label: {
+                    Image(systemName: "list.bullet")
+                        .font(.system(size: 16, weight: .medium))
+                        .foregroundStyle(focusedControl == .queue ? .black : .white.opacity(0.6))
+                        .frame(width: 36, height: 36)
+                        .background(
+                            Circle()
+                                .fill(focusedControl == .queue ? .white : .white.opacity(0.12))
+                        )
+                }
+                .buttonStyle(.plain)
+                .focused($focusedControl, equals: .queue)
             }
         }
     }
 
-    private func queueTrackRow(track: PlexMetadata, index: Int) -> some View {
+    private func bottomCircleButton(icon: String, control: NowPlayingControl) -> some View {
         Button {
-            musicQueue.jumpToQueueItem(at: index)
+            // No-op for buttons that use contextMenu
         } label: {
-            HStack(spacing: 12) {
-                // Small album art
-                queueArtView(for: track)
-                    .frame(width: 40, height: 40)
-                    .clipShape(RoundedRectangle(cornerRadius: 6))
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(track.title ?? "Unknown")
-                        .font(.system(size: 16, weight: .medium))
-                        .foregroundStyle(.white.opacity(0.8))
-                        .lineLimit(1)
-
-                    Text(track.grandparentTitle ?? track.parentTitle ?? "")
-                        .font(.system(size: 14))
-                        .foregroundStyle(.white.opacity(0.4))
-                        .lineLimit(1)
-                }
-
-                Spacer()
-
-                if let duration = track.duration {
-                    Text(formatDuration(duration))
-                        .font(.system(size: 14, design: .monospaced))
-                        .foregroundStyle(.white.opacity(0.4))
-                }
-            }
-            .padding(.vertical, 8)
-            .padding(.horizontal, 12)
-            .background(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(focusedControl == .queueItem(track.ratingKey ?? "") ? .white.opacity(0.15) : .white.opacity(0.05))
-            )
+            Image(systemName: icon)
+                .font(.system(size: 16, weight: .medium))
+                .foregroundStyle(focusedControl == control ? .black : .white.opacity(0.6))
+                .frame(width: 36, height: 36)
+                .background(
+                    Circle()
+                        .fill(focusedControl == control ? .white : .white.opacity(0.12))
+                )
         }
         .buttonStyle(.plain)
-        .focused($focusedControl, equals: .queueItem(track.ratingKey ?? ""))
+        .focused($focusedControl, equals: control)
     }
 
     // MARK: - Album Art
@@ -308,9 +304,7 @@ struct MusicNowPlayingView: View {
                     switch phase {
                     case .success(let image):
                         image.resizable().aspectRatio(contentMode: .fill)
-                    case .empty:
-                        artPlaceholder
-                    case .failure:
+                    case .empty, .failure:
                         artPlaceholder
                     @unknown default:
                         artPlaceholder
@@ -330,23 +324,6 @@ struct MusicNowPlayingView: View {
                     .font(.system(size: 60, weight: .ultraLight))
                     .foregroundStyle(.white.opacity(0.3))
             }
-    }
-
-    private func queueArtView(for track: PlexMetadata) -> some View {
-        Group {
-            if let url = artURL(for: track) {
-                CachedAsyncImage(url: url) { phase in
-                    switch phase {
-                    case .success(let image):
-                        image.resizable().aspectRatio(contentMode: .fill)
-                    default:
-                        Rectangle().fill(Color(white: 0.15))
-                    }
-                }
-            } else {
-                Rectangle().fill(Color(white: 0.15))
-            }
-        }
     }
 
     // MARK: - Backdrop
@@ -391,13 +368,6 @@ struct MusicNowPlayingView: View {
         return URL(string: "\(serverURL)\(thumb)?X-Plex-Token=\(token)")
     }
 
-    private func artURL(for track: PlexMetadata) -> URL? {
-        guard let thumb = track.thumb ?? track.parentThumb,
-              let serverURL = authManager.selectedServerURL,
-              let token = authManager.selectedServerToken else { return nil }
-        return URL(string: "\(serverURL)\(thumb)?X-Plex-Token=\(token)")
-    }
-
     private var repeatIcon: String {
         switch musicQueue.repeatMode {
         case .off: return "repeat"
@@ -426,12 +396,5 @@ struct MusicNowPlayingView: View {
                 hideControls()
             }
         }
-    }
-
-    private func formatDuration(_ ms: Int) -> String {
-        let totalSeconds = ms / 1000
-        let minutes = totalSeconds / 60
-        let seconds = totalSeconds % 60
-        return String(format: "%d:%02d", minutes, seconds)
     }
 }

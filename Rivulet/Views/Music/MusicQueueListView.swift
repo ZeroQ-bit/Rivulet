@@ -3,6 +3,7 @@
 //  Rivulet
 //
 //  Full queue list view with Now Playing, Up Next, and History sections.
+//  Uses plain track rows with native context menus.
 //
 
 import SwiftUI
@@ -95,8 +96,6 @@ struct MusicQueueListView: View {
                 }
                 .buttonStyle(.plain)
                 .focused($focusedItem, equals: .clearQueue)
-                .scaleEffect(focusedItem == .clearQueue ? 1.05 : 1.0)
-                .animation(.spring(response: 0.3, dampingFraction: 0.7), value: focusedItem == .clearQueue)
             }
         }
     }
@@ -110,7 +109,7 @@ struct MusicQueueListView: View {
                 .foregroundStyle(.white.opacity(0.5))
 
             Button {
-                // Already playing, no action needed
+                // Already playing
             } label: {
                 trackRow(
                     track: track,
@@ -146,15 +145,18 @@ struct MusicQueueListView: View {
                     trackRow(
                         track: track,
                         number: index + 1,
-                        isFocused: focusedItem == .upNext(index),
-                        showRemove: true,
-                        onRemove: {
-                            musicQueue.removeFromQueue(at: index)
-                        }
+                        isFocused: focusedItem == .upNext(index)
                     )
                 }
                 .buttonStyle(.plain)
                 .focused($focusedItem, equals: .upNext(index))
+                .contextMenu {
+                    Button {
+                        musicQueue.removeFromQueue(at: index)
+                    } label: {
+                        Label("Remove from Queue", systemImage: "minus.circle")
+                    }
+                }
             }
         }
     }
@@ -177,7 +179,6 @@ struct MusicQueueListView: View {
 
             ForEach(Array(musicQueue.history.enumerated()), id: \.element.ratingKey) { index, track in
                 Button {
-                    // Replay from history — not directly supported but we can use playNow
                     musicQueue.playNow(track: track)
                 } label: {
                     trackRow(
@@ -199,9 +200,7 @@ struct MusicQueueListView: View {
         number: Int? = nil,
         showIndicator: Bool = false,
         isFocused: Bool = false,
-        isDimmed: Bool = false,
-        showRemove: Bool = false,
-        onRemove: (() -> Void)? = nil
+        isDimmed: Bool = false
     ) -> some View {
         HStack(spacing: 16) {
             // Track number or indicator
@@ -213,7 +212,7 @@ struct MusicQueueListView: View {
                 .frame(width: 24)
             } else if let number {
                 Text("\(number)")
-                    .font(.system(size: 16, design: .monospaced))
+                    .font(.system(size: 16).monospacedDigit())
                     .foregroundStyle(.white.opacity(0.4))
                     .frame(width: 24)
             }
@@ -241,17 +240,16 @@ struct MusicQueueListView: View {
             // Duration
             if let duration = track.duration {
                 Text(formatDuration(duration))
-                    .font(.system(size: 16, design: .monospaced))
+                    .font(.system(size: 16).monospacedDigit())
                     .foregroundStyle(.white.opacity(0.4))
             }
         }
         .padding(.vertical, 12)
         .padding(.horizontal, 20)
         .background(
-            GlassRowBackground(isFocused: isFocused, cornerRadius: 14)
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(isFocused ? .white.opacity(0.15) : .white.opacity(0.05))
         )
-        .scaleEffect(isFocused ? 1.02 : 1.0)
-        .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isFocused)
         .opacity(isDimmed ? 0.7 : 1.0)
     }
 

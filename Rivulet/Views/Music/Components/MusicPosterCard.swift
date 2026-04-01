@@ -2,18 +2,24 @@
 //  MusicPosterCard.swift
 //  Rivulet
 //
-//  Square album/artist card with glass focus styling
+//  Square album/artist card with standard tvOS focus treatment.
+//  Artists use circular clip shape, albums use square.
 //
 
 import SwiftUI
 
-/// Square artwork card for albums and artists in music shelves.
-/// Shows artwork, title, and subtitle with glass focus treatment.
+/// Card style: square for albums, circular for artists
+enum MusicPosterCardStyle {
+    case square
+    case circular
+}
+
+/// Artwork card for albums and artists in music grids.
+/// Uses standard tvOS focus effects instead of custom glass styling.
 struct MusicPosterCard: View {
     let item: PlexMetadata
+    var style: MusicPosterCardStyle = .square
     let action: () -> Void
-
-    @FocusState private var isFocused: Bool
 
     /// Artwork URL built from the item's thumb
     private var artworkURL: URL? {
@@ -23,11 +29,14 @@ struct MusicPosterCard: View {
         return URL(string: "\(serverURL)\(thumb)?X-Plex-Token=\(token)")
     }
 
-    /// Subtitle: artist name for albums, year for artists
+    /// Subtitle: artist name for albums, album count or year for artists
     private var subtitle: String? {
         if item.type == "album" {
             return item.parentTitle ?? item.grandparentTitle
         } else if item.type == "artist" {
+            if let count = item.leafCount {
+                return "\(count) albums"
+            }
             if let year = item.year { return String(year) }
             return nil
         } else {
@@ -35,71 +44,95 @@ struct MusicPosterCard: View {
         }
     }
 
+    /// Resolved card style — auto-detect from item type if not explicitly set
+    private var resolvedStyle: MusicPosterCardStyle {
+        if item.type == "artist" { return .circular }
+        return style
+    }
+
     var body: some View {
         Button(action: action) {
-            VStack(alignment: .leading, spacing: 8) {
-                // Square artwork
-                CachedAsyncImage(url: artworkURL) { phase in
-                    switch phase {
-                    case .success(let image):
-                        image
-                            .resizable()
-                            .aspectRatio(contentMode: .fill)
-                    case .empty:
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .fill(.white.opacity(0.06))
-                            .overlay {
-                                Image(systemName: item.type == "artist" ? "person.fill" : "music.note")
-                                    .font(.system(size: 40))
-                                    .foregroundStyle(.white.opacity(0.2))
-                            }
-                    case .failure:
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .fill(.white.opacity(0.06))
-                            .overlay {
-                                Image(systemName: "music.note")
-                                    .font(.system(size: 40))
-                                    .foregroundStyle(.white.opacity(0.2))
-                            }
-                    }
-                }
-                .frame(width: 180, height: 180)
-                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .strokeBorder(
-                            isFocused ? .white.opacity(0.25) : .white.opacity(0.08),
-                            lineWidth: 1
-                        )
-                )
+            VStack(spacing: 8) {
+                // Artwork
+                artworkView
+                    .frame(width: 180, height: 180)
 
                 // Title
                 Text(item.title ?? "Unknown")
-                    .font(.system(size: 20, weight: .medium))
+                    .font(.system(size: 18, weight: .medium))
                     .foregroundStyle(.white)
                     .lineLimit(1)
-                    .frame(width: 180, alignment: .leading)
+                    .frame(width: 180, alignment: resolvedStyle == .circular ? .center : .leading)
 
                 // Subtitle
                 if let subtitle {
                     Text(subtitle)
-                        .font(.system(size: 16))
-                        .foregroundStyle(.white.opacity(0.6))
+                        .font(.system(size: 15))
+                        .foregroundStyle(.white.opacity(0.5))
                         .lineLimit(1)
-                        .frame(width: 180, alignment: .leading)
+                        .frame(width: 180, alignment: resolvedStyle == .circular ? .center : .leading)
                 }
             }
-            .padding(8)
-            .background(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .fill(isFocused ? .white.opacity(0.18) : .clear)
-            )
         }
-        .buttonStyle(GlassRowButtonStyle())
-        .focused($isFocused)
-        .hoverEffectDisabled()
-        .focusEffectDisabled()
-        .scaleEffect(isFocused ? 1.02 : 1.0)
-        .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isFocused)
+        .buttonStyle(.card)
+    }
+
+    // MARK: - Artwork
+
+    @ViewBuilder
+    private var artworkView: some View {
+        CachedAsyncImage(url: artworkURL) { phase in
+            switch phase {
+            case .success(let image):
+                image
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+            case .empty, .failure:
+                placeholderView
+            @unknown default:
+                placeholderView
+            }
+        }
+        .if(resolvedStyle == .circular) { view in
+            view.clipShape(Circle())
+        }
+        .if(resolvedStyle == .square) { view in
+            view.clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        }
+    }
+
+    private var placeholderView: some View {
+        Group {
+            if resolvedStyle == .circular {
+                Circle()
+                    .fill(.white.opacity(0.06))
+                    .overlay {
+                        Image(systemName: "person.fill")
+                            .font(.system(size: 40))
+                            .foregroundStyle(.white.opacity(0.2))
+                    }
+            } else {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(.white.opacity(0.06))
+                    .overlay {
+                        Image(systemName: "music.note")
+                            .font(.system(size: 40))
+                            .foregroundStyle(.white.opacity(0.2))
+                    }
+            }
+        }
+    }
+}
+
+// MARK: - Conditional Modifier Helper
+
+private extension View {
+    @ViewBuilder
+    func `if`<Transform: View>(_ condition: Bool, transform: (Self) -> Transform) -> some View {
+        if condition {
+            transform(self)
+        } else {
+            self
+        }
     }
 }

@@ -24,7 +24,6 @@ struct MusicQueueCarousel: View {
                     carouselCard(track: track, isCurrent: false)
                         .focused($focusedKey, equals: "history-\(track.ratingKey ?? "\(index)")")
                         .onSubmit {
-                            // Jump to history item: move current + queue to after, rebuild
                             jumpToHistoryItem(at: index)
                         }
                 }
@@ -75,8 +74,8 @@ struct MusicQueueCarousel: View {
                         .overlay(
                             RoundedRectangle(cornerRadius: 12, style: .continuous)
                                 .strokeBorder(
-                                    isCurrent ? .white.opacity(0.5) : (isFocused ? .white.opacity(0.3) : .clear),
-                                    lineWidth: isCurrent ? 2 : 1
+                                    isCurrent ? .white.opacity(0.5) : .clear,
+                                    lineWidth: isCurrent ? 2 : 0
                                 )
                         )
                         .shadow(

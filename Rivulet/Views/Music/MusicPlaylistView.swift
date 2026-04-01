@@ -3,6 +3,7 @@
 //  Rivulet
 //
 //  Playlist detail view showing tracks with play/shuffle actions.
+//  Matches album detail layout with artwork left, track list right.
 //
 
 import SwiftUI
@@ -10,6 +11,7 @@ import SwiftUI
 struct MusicPlaylistView: View {
     let playlist: PlexMetadata
     @ObservedObject private var authManager = PlexAuthManager.shared
+    @ObservedObject private var musicQueue = MusicQueue.shared
 
     @State private var tracks: [PlexMetadata] = []
     @State private var isLoading = true
@@ -19,13 +21,11 @@ struct MusicPlaylistView: View {
     enum PlaylistFocusItem: Hashable {
         case play
         case shuffle
-        case track(String) // ratingKey
+        case track(String)
     }
 
     var body: some View {
         ZStack {
-            Color.black.ignoresSafeArea()
-
             if isLoading {
                 ProgressView()
             } else if let error {
@@ -49,20 +49,85 @@ struct MusicPlaylistView: View {
     // MARK: - Content
 
     private var contentView: some View {
-        HStack(alignment: .top, spacing: 60) {
+        HStack(alignment: .top, spacing: 50) {
             // Left: Playlist info
             playlistInfo
-                .frame(width: 360)
-                .padding(.top, 80)
+                .frame(width: 340)
+                .padding(.top, 60)
 
             // Right: Track list
             ScrollView {
-                LazyVStack(spacing: 4) {
+                LazyVStack(spacing: 0) {
                     ForEach(Array(tracks.enumerated()), id: \.element.ratingKey) { index, track in
-                        trackRow(track: track, number: index + 1)
+                        let isCurrent = musicQueue.currentTrack?.ratingKey == track.ratingKey
+
+                        Button {
+                            musicQueue.playAlbum(tracks: tracks, startingAt: index)
+                        } label: {
+                            HStack(spacing: 16) {
+                                // Track number or playing indicator
+                                if isCurrent {
+                                    PlaybackIndicator(
+                                        isPlaying: musicQueue.playbackState == .playing,
+                                        size: .small
+                                    )
+                                    .frame(width: 28)
+                                } else {
+                                    Text("\(index + 1)")
+                                        .font(.system(size: 18).monospacedDigit())
+                                        .foregroundStyle(.white.opacity(0.4))
+                                        .frame(width: 28)
+                                }
+
+                                // Track info
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(track.title ?? "Unknown")
+                                        .font(.system(size: 22, weight: isCurrent ? .semibold : .regular))
+                                        .foregroundStyle(isCurrent ? .white : .white.opacity(0.9))
+                                        .lineLimit(1)
+
+                                    Text(track.grandparentTitle ?? track.parentTitle ?? "")
+                                        .font(.system(size: 16))
+                                        .foregroundStyle(.white.opacity(0.5))
+                                        .lineLimit(1)
+                                }
+
+                                Spacer()
+
+                                // Duration
+                                if let duration = track.duration {
+                                    Text(formatDuration(duration))
+                                        .font(.system(size: 18).monospacedDigit())
+                                        .foregroundStyle(.white.opacity(0.4))
+                                }
+                            }
+                            .padding(.vertical, 14)
+                            .padding(.horizontal, 20)
+                        }
+                        .buttonStyle(.plain)
+                        .focused($focusedItem, equals: .track(track.ratingKey ?? ""))
+                        .contextMenu {
+                            Button {
+                                musicQueue.addNext(track: track)
+                            } label: {
+                                Label("Play Next", systemImage: "text.line.first.and.arrowtriangle.forward")
+                            }
+
+                            Button {
+                                musicQueue.addToEnd(track: track)
+                            } label: {
+                                Label("Add to Queue", systemImage: "text.append")
+                            }
+                        }
+
+                        if index < tracks.count - 1 {
+                            Divider()
+                                .background(.white.opacity(0.06))
+                                .padding(.leading, 64)
+                        }
                     }
                 }
-                .padding(.vertical, 80)
+                .padding(.vertical, 60)
             }
             .frame(maxWidth: .infinity)
         }
@@ -72,12 +137,11 @@ struct MusicPlaylistView: View {
     // MARK: - Playlist Info
 
     private var playlistInfo: some View {
-        VStack(spacing: 24) {
+        VStack(spacing: 20) {
             // Artwork
             playlistArtView
                 .frame(width: 300, height: 300)
-                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-                .shadow(color: .black.opacity(0.4), radius: 20, y: 10)
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
 
             // Title
             VStack(spacing: 8) {
@@ -88,7 +152,7 @@ struct MusicPlaylistView: View {
                     .multilineTextAlignment(.center)
 
                 if !tracks.isEmpty {
-                    Text("\(tracks.count) tracks \u{2022} \(totalDuration)")
+                    Text("\(tracks.count) tracks \u{00B7} \(totalDuration)")
                         .font(.system(size: 18))
                         .foregroundStyle(.white.opacity(0.5))
                 }
@@ -103,114 +167,42 @@ struct MusicPlaylistView: View {
             }
 
             // Action buttons
-            VStack(spacing: 12) {
-                actionButton(
-                    icon: "play.fill",
-                    label: "Play",
-                    item: .play
-                ) {
-                    MusicQueue.shared.playAlbum(tracks: tracks)
+            HStack(spacing: 12) {
+                Button {
+                    musicQueue.playAlbum(tracks: tracks)
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "play.fill")
+                        Text("Play")
+                    }
+                    .font(.system(size: 18, weight: .semibold))
+                    .frame(width: 110, height: 44)
                 }
+                .buttonStyle(AppStoreActionButtonStyle(
+                    isFocused: focusedItem == .play,
+                    isPrimary: true
+                ))
+                .focused($focusedItem, equals: .play)
 
-                actionButton(
-                    icon: "shuffle",
-                    label: "Shuffle",
-                    item: .shuffle
-                ) {
+                Button {
                     var shuffled = tracks
                     shuffled.shuffle()
-                    MusicQueue.shared.playAlbum(tracks: shuffled)
-                }
-            }
-        }
-    }
-
-    // MARK: - Action Button
-
-    private func actionButton(
-        icon: String,
-        label: String,
-        item: PlaylistFocusItem,
-        action: @escaping () -> Void
-    ) -> some View {
-        let isFocused = focusedItem == item
-        return Button(action: action) {
-            HStack(spacing: 10) {
-                Image(systemName: icon)
+                    musicQueue.playAlbum(tracks: shuffled)
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "shuffle")
+                        Text("Shuffle")
+                    }
                     .font(.system(size: 18, weight: .semibold))
-                Text(label)
-                    .font(.system(size: 18, weight: .semibold))
+                    .frame(width: 120, height: 44)
+                }
+                .buttonStyle(AppStoreActionButtonStyle(
+                    isFocused: focusedItem == .shuffle,
+                    isPrimary: false
+                ))
+                .focused($focusedItem, equals: .shuffle)
             }
-            .foregroundStyle(isFocused ? .black : .white)
-            .frame(maxWidth: .infinity)
-            .frame(height: 52)
-            .background(
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(isFocused ? .white : .white.opacity(0.15))
-            )
         }
-        .buttonStyle(.plain)
-        .focused($focusedItem, equals: item)
-        .scaleEffect(isFocused ? 1.05 : 1.0)
-        .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isFocused)
-    }
-
-    // MARK: - Track Row
-
-    private func trackRow(track: PlexMetadata, number: Int) -> some View {
-        let isCurrent = MusicQueue.shared.currentTrack?.ratingKey == track.ratingKey
-        let isFocused = focusedItem == .track(track.ratingKey ?? "")
-
-        return Button {
-            MusicQueue.shared.playAlbum(tracks: tracks, startingAt: number - 1)
-        } label: {
-            HStack(spacing: 16) {
-                // Track number or playing indicator
-                if isCurrent {
-                    PlaybackIndicator(
-                        isPlaying: MusicQueue.shared.playbackState == .playing,
-                        size: .small
-                    )
-                    .frame(width: 28)
-                } else {
-                    Text("\(number)")
-                        .font(.system(size: 16, design: .monospaced))
-                        .foregroundStyle(.white.opacity(0.4))
-                        .frame(width: 28)
-                }
-
-                // Track info
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(track.title ?? "Unknown")
-                        .font(.system(size: 20, weight: .medium))
-                        .foregroundStyle(.white.opacity(isCurrent ? 1.0 : 0.9))
-                        .lineLimit(1)
-
-                    Text(track.grandparentTitle ?? track.parentTitle ?? "")
-                        .font(.system(size: 16))
-                        .foregroundStyle(.white.opacity(0.5))
-                        .lineLimit(1)
-                }
-
-                Spacer()
-
-                // Duration
-                if let duration = track.duration {
-                    Text(formatDuration(duration))
-                        .font(.system(size: 16, design: .monospaced))
-                        .foregroundStyle(.white.opacity(0.4))
-                }
-            }
-            .padding(.vertical, 12)
-            .padding(.horizontal, 20)
-            .background(
-                GlassRowBackground(isFocused: isFocused, cornerRadius: 12)
-            )
-        }
-        .buttonStyle(.plain)
-        .focused($focusedItem, equals: .track(track.ratingKey ?? ""))
-        .scaleEffect(isFocused ? 1.02 : 1.0)
-        .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isFocused)
     }
 
     // MARK: - Artwork
@@ -227,7 +219,6 @@ struct MusicPlaylistView: View {
                     }
                 }
             } else if tracks.count >= 4 {
-                // Composite artwork from first 4 tracks
                 compositeArt
             } else {
                 compositeArtPlaceholder
@@ -313,9 +304,7 @@ struct MusicPlaylistView: View {
 
         do {
             tracks = try await PlexNetworkManager.shared.getChildren(
-                serverURL: serverURL,
-                authToken: token,
-                ratingKey: ratingKey
+                serverURL: serverURL, authToken: token, ratingKey: ratingKey
             )
             isLoading = false
 

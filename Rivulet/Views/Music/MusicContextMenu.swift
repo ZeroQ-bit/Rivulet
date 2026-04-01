@@ -2,321 +2,135 @@
 //  MusicContextMenu.swift
 //  Rivulet
 //
-//  Context menu for music items, presented as a fullScreenCover with glass background.
-//  Options differ by item type (track, album, artist).
+//  Native tvOS context menu modifier for music items.
+//  Replaces the old fullScreenCover-based custom context menu.
 //
 
 import SwiftUI
 
-/// Actions that can be performed from the context menu
-enum MusicContextAction {
-    case playNext
-    case addToQueue
-    case playAlbum
-    case shuffleAlbum
-    case goToAlbum(ratingKey: String)
-    case goToArtist(ratingKey: String)
+// MARK: - Context Menu Styles
+
+/// Determines which context menu options to show
+enum MusicContextMenuStyle {
+    case track
+    case album
 }
 
-struct MusicContextMenu: View {
+// MARK: - View Modifier
+
+/// Adds a native tvOS `.contextMenu` to a music item view.
+struct MusicItemContextMenuModifier: ViewModifier {
     let item: PlexMetadata
-    @Binding var isPresented: Bool
-    var onAction: ((MusicContextAction) -> Void)?
+    let style: MusicContextMenuStyle
 
-    @FocusState private var focusedOption: MenuOption?
-    @ObservedObject private var authManager = PlexAuthManager.shared
+    @ObservedObject private var musicQueue = MusicQueue.shared
 
-    private enum MenuOption: Hashable {
-        case playNext
-        case addToQueue
-        case playAlbum
-        case shuffleAlbum
-        case goToAlbum
-        case goToArtist
-    }
-
-    /// Whether this item is a track (vs album/playlist)
-    private var isTrack: Bool {
-        item.type == "track"
-    }
-
-    /// Whether this item is an album
-    private var isAlbum: Bool {
-        item.type == "album"
-    }
-
-    var body: some View {
-        ZStack {
-            // Dimmed background
-            Color.black.opacity(0.7)
-                .ignoresSafeArea()
-
-            HStack(spacing: 48) {
-                // Item preview
-                itemPreview
-                    .frame(width: 300)
-
-                // Menu options
-                VStack(alignment: .leading, spacing: 8) {
-                    if isTrack {
-                        trackOptions
-                    } else if isAlbum {
-                        albumOptions
-                    } else {
-                        // Fallback: generic options
-                        genericOptions
-                    }
-                }
-                .frame(width: 360)
-            }
-            .padding(60)
-        }
-        .onAppear {
-            focusedOption = .playNext
-        }
-        .onExitCommand {
-            isPresented = false
-        }
-    }
-
-    // MARK: - Item Preview
-
-    private var itemPreview: some View {
-        VStack(spacing: 16) {
-            // Artwork
-            itemArtView
-                .frame(width: 240, height: 240)
-                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                .shadow(color: .black.opacity(0.5), radius: 20, y: 10)
-
-            // Title
-            Text(item.title ?? "Unknown")
-                .font(.system(size: 24, weight: .semibold))
-                .foregroundStyle(.white)
-                .lineLimit(2)
-                .multilineTextAlignment(.center)
-
-            // Subtitle
-            if isTrack {
-                VStack(spacing: 4) {
-                    Text(item.grandparentTitle ?? "Unknown Artist")
-                        .font(.system(size: 18))
-                        .foregroundStyle(.white.opacity(0.6))
-                        .lineLimit(1)
-
-                    Text(item.parentTitle ?? "")
-                        .font(.system(size: 16))
-                        .foregroundStyle(.white.opacity(0.4))
-                        .lineLimit(1)
-                }
-            } else if isAlbum {
-                Text(item.parentTitle ?? "Unknown Artist")
-                    .font(.system(size: 18))
-                    .foregroundStyle(.white.opacity(0.6))
-                    .lineLimit(1)
+    func body(content: Content) -> some View {
+        content.contextMenu {
+            switch style {
+            case .track:
+                trackMenu
+            case .album:
+                albumMenu
             }
         }
     }
 
-    // MARK: - Track Options
+    // MARK: - Track Menu
 
-    private var trackOptions: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            menuButton(
-                icon: "text.line.first.and.arrowtriangle.forward",
-                label: "Play Next",
-                option: .playNext
-            ) {
-                MusicQueue.shared.addNext(track: item)
-                onAction?(.playNext)
-                isPresented = false
-            }
+    @ViewBuilder
+    private var trackMenu: some View {
+        Button {
+            musicQueue.addNext(track: item)
+        } label: {
+            Label("Play Next", systemImage: "text.line.first.and.arrowtriangle.forward")
+        }
 
-            menuButton(
-                icon: "text.append",
-                label: "Add to Queue",
-                option: .addToQueue
-            ) {
-                MusicQueue.shared.addToEnd(track: item)
-                onAction?(.addToQueue)
-                isPresented = false
-            }
-
-            if let albumKey = item.parentRatingKey {
-                Divider()
-                    .background(.white.opacity(0.1))
-                    .padding(.vertical, 4)
-
-                menuButton(
-                    icon: "square.stack",
-                    label: "Go to Album",
-                    option: .goToAlbum
-                ) {
-                    onAction?(.goToAlbum(ratingKey: albumKey))
-                    isPresented = false
-                }
-            }
-
-            if let artistKey = item.grandparentRatingKey {
-                menuButton(
-                    icon: "music.mic",
-                    label: "Go to Artist",
-                    option: .goToArtist
-                ) {
-                    onAction?(.goToArtist(ratingKey: artistKey))
-                    isPresented = false
-                }
-            }
+        Button {
+            musicQueue.addToEnd(track: item)
+        } label: {
+            Label("Add to Queue", systemImage: "text.append")
         }
     }
 
-    // MARK: - Album Options
+    // MARK: - Album Menu
 
-    private var albumOptions: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            menuButton(
-                icon: "play.fill",
-                label: "Play",
-                option: .playAlbum
-            ) {
-                onAction?(.playAlbum)
-                isPresented = false
-            }
+    @ViewBuilder
+    private var albumMenu: some View {
+        Button {
+            Task { await playAlbum(shuffled: false) }
+        } label: {
+            Label("Play", systemImage: "play.fill")
+        }
 
-            menuButton(
-                icon: "shuffle",
-                label: "Shuffle",
-                option: .shuffleAlbum
-            ) {
-                onAction?(.shuffleAlbum)
-                isPresented = false
-            }
+        Button {
+            Task { await playAlbum(shuffled: true) }
+        } label: {
+            Label("Shuffle", systemImage: "shuffle")
+        }
 
-            Divider()
-                .background(.white.opacity(0.1))
-                .padding(.vertical, 4)
+        Divider()
 
-            menuButton(
-                icon: "text.line.first.and.arrowtriangle.forward",
-                label: "Play Next",
-                option: .playNext
-            ) {
-                onAction?(.playNext)
-                isPresented = false
-            }
+        Button {
+            Task { await addAlbumToQueue(next: true) }
+        } label: {
+            Label("Play Next", systemImage: "text.line.first.and.arrowtriangle.forward")
+        }
 
-            menuButton(
-                icon: "text.append",
-                label: "Add to Queue",
-                option: .addToQueue
-            ) {
-                onAction?(.addToQueue)
-                isPresented = false
-            }
+        Button {
+            Task { await addAlbumToQueue(next: false) }
+        } label: {
+            Label("Add to Queue", systemImage: "text.append")
         }
     }
 
-    // MARK: - Generic Options
+    // MARK: - Album Actions
 
-    private var genericOptions: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            menuButton(
-                icon: "text.line.first.and.arrowtriangle.forward",
-                label: "Play Next",
-                option: .playNext
-            ) {
-                MusicQueue.shared.addNext(track: item)
-                onAction?(.playNext)
-                isPresented = false
-            }
+    private func playAlbum(shuffled: Bool) async {
+        guard let serverURL = PlexAuthManager.shared.selectedServerURL,
+              let token = PlexAuthManager.shared.selectedServerToken,
+              let ratingKey = item.ratingKey else { return }
 
-            menuButton(
-                icon: "text.append",
-                label: "Add to Queue",
-                option: .addToQueue
-            ) {
-                MusicQueue.shared.addToEnd(track: item)
-                onAction?(.addToQueue)
-                isPresented = false
-            }
-        }
-    }
-
-    // MARK: - Menu Button
-
-    private func menuButton(
-        icon: String,
-        label: String,
-        option: MenuOption,
-        action: @escaping () -> Void
-    ) -> some View {
-        let isFocused = focusedOption == option
-        return Button(action: action) {
-            HStack(spacing: 16) {
-                Image(systemName: icon)
-                    .font(.system(size: 22, weight: .medium))
-                    .frame(width: 28)
-                    .foregroundStyle(isFocused ? .black : .white.opacity(0.8))
-
-                Text(label)
-                    .font(.system(size: 22, weight: .medium))
-                    .foregroundStyle(isFocused ? .black : .white.opacity(0.9))
-
-                Spacer()
-            }
-            .padding(.horizontal, 24)
-            .padding(.vertical, 16)
-            .background(
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(isFocused ? .white : .white.opacity(0.08))
+        do {
+            var tracks = try await PlexNetworkManager.shared.getChildren(
+                serverURL: serverURL, authToken: token, ratingKey: ratingKey
             )
-            .overlay(
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .strokeBorder(
-                        isFocused ? .clear : .white.opacity(0.08),
-                        lineWidth: 1
-                    )
-            )
+            if shuffled { tracks.shuffle() }
+            if !tracks.isEmpty {
+                musicQueue.playAlbum(tracks: tracks, startingAt: 0)
+            }
+        } catch {
+            print("MusicContextMenu: Failed to load tracks: \(error)")
         }
-        .buttonStyle(.plain)
-        .focused($focusedOption, equals: option)
-        .scaleEffect(isFocused ? 1.03 : 1.0)
-        .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isFocused)
     }
 
-    // MARK: - Artwork
+    private func addAlbumToQueue(next: Bool) async {
+        guard let serverURL = PlexAuthManager.shared.selectedServerURL,
+              let token = PlexAuthManager.shared.selectedServerToken,
+              let ratingKey = item.ratingKey else { return }
 
-    private var itemArtView: some View {
-        Group {
-            if let url = itemArtURL {
-                CachedAsyncImage(url: url) { phase in
-                    switch phase {
-                    case .success(let image):
-                        image.resizable().aspectRatio(contentMode: .fill)
-                    default:
-                        artPlaceholder
-                    }
+        do {
+            let tracks = try await PlexNetworkManager.shared.getChildren(
+                serverURL: serverURL, authToken: token, ratingKey: ratingKey
+            )
+            if next {
+                for track in tracks.reversed() {
+                    musicQueue.addNext(track: track)
                 }
             } else {
-                artPlaceholder
+                musicQueue.addToEnd(tracks: tracks)
             }
+        } catch {
+            print("MusicContextMenu: Failed to load tracks: \(error)")
         }
     }
+}
 
-    private var artPlaceholder: some View {
-        Rectangle()
-            .fill(Color(white: 0.12))
-            .overlay {
-                Image(systemName: isAlbum ? "square.stack" : "music.note")
-                    .font(.system(size: 48, weight: .ultraLight))
-                    .foregroundStyle(.white.opacity(0.3))
-            }
-    }
+// MARK: - View Extension
 
-    private var itemArtURL: URL? {
-        guard let thumb = item.thumb ?? item.parentThumb,
-              let serverURL = authManager.selectedServerURL,
-              let token = authManager.selectedServerToken else { return nil }
-        return URL(string: "\(serverURL)\(thumb)?X-Plex-Token=\(token)")
+extension View {
+    /// Adds a native tvOS context menu for music items.
+    func musicItemContextMenu(item: PlexMetadata, style: MusicContextMenuStyle) -> some View {
+        modifier(MusicItemContextMenuModifier(item: item, style: style))
     }
 }
