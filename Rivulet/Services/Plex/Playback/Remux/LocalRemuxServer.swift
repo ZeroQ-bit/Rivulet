@@ -55,6 +55,11 @@ final class LocalRemuxServer {
     /// Cached init segment
     private var initSegment: Data?
 
+    /// Actual segment durations — updated as segments are generated.
+    /// AVPlayer re-fetches EVENT playlists, so updated durations replace estimates.
+    private var actualSegmentDurations: [Int: TimeInterval] = [:]
+    private let durationLock = NSLock()
+
     /// Start offset for EXT-X-START — tells AVPlayer to begin at this time
     /// instead of segment 0, avoiding wrong-position playback + deferred seek.
     var startOffset: TimeInterval = 0
@@ -286,10 +291,27 @@ final class LocalRemuxServer {
     private func serveMediaPlaylist(on connection: NWConnection) {
         let segments = sessionInfo.segments
 
+        // Use actual segment durations when available (from generated segments).
+        // AVPlayer maps segment content to the EXTINF timeline — mismatches cause
+        // gaps that accumulate and eventually prevent decoding.
+        durationLock.lock()
+        let durations = actualSegmentDurations
+        durationLock.unlock()
+
+        // Compute target duration from actual + estimated
+        var maxDuration = 6.0
+        for seg in segments {
+            let dur = durations[seg.index] ?? seg.duration
+            if dur > maxDuration { maxDuration = dur }
+        }
+
         var playlist = "#EXTM3U\n"
         playlist += "#EXT-X-VERSION:7\n"
-        playlist += "#EXT-X-TARGETDURATION:\(Int(ceil(segments.map(\.duration).max() ?? 6.0)))\n"
-        playlist += "#EXT-X-PLAYLIST-TYPE:VOD\n"
+        playlist += "#EXT-X-TARGETDURATION:\(Int(ceil(maxDuration)))\n"
+        // Omit EXT-X-PLAYLIST-TYPE so AVPlayer may re-fetch the playlist.
+        // This lets us update EXTINF durations as segments are generated,
+        // ensuring the timeline matches actual content (not estimated 6.0s).
+        // VOD causes AVPlayer to cache and never see updated durations.
         playlist += "#EXT-X-MEDIA-SEQUENCE:0\n"
         playlist += "#EXT-X-INDEPENDENT-SEGMENTS\n"
         if startOffset > 0 {
@@ -298,7 +320,8 @@ final class LocalRemuxServer {
         playlist += "#EXT-X-MAP:URI=\"init.mp4\"\n"
 
         for segment in segments {
-            playlist += "#EXTINF:\(String(format: "%.6f", segment.duration)),\n"
+            let duration = durations[segment.index] ?? segment.duration
+            playlist += "#EXTINF:\(String(format: "%.6f", duration)),\n"
             playlist += "segment_\(segment.index).m4s\n"
         }
 
@@ -383,6 +406,9 @@ final class LocalRemuxServer {
             do {
                 let generationStart = Date()
                 let data = try await self.session.generateSegment(index: index)
+                if let dur = await self.session.lastSegmentActualDuration {
+                    self.recordSegmentDuration(index: index, duration: dur)
+                }
                 self.inFlightSegments.remove(index)
                 self.cacheSegment(index: index, data: data)
                 let elapsedMs = Int(Date().timeIntervalSince(generationStart) * 1000)
@@ -442,6 +468,9 @@ final class LocalRemuxServer {
         do {
             let generationStart = Date()
             let data = try await session.generateSegment(index: index)
+            if let dur = await session.lastSegmentActualDuration {
+                recordSegmentDuration(index: index, duration: dur)
+            }
             inFlightSegments.remove(index)
             cacheSegment(index: index, data: data)
             let elapsedMs = Int(Date().timeIntervalSince(generationStart) * 1000)
@@ -488,6 +517,9 @@ final class LocalRemuxServer {
 
                 do {
                     let data = try await self.session.generateSegment(index: i)
+                    if let dur = await self.session.lastSegmentActualDuration {
+                        self.recordSegmentDuration(index: i, duration: dur)
+                    }
                     self.inFlightSegments.remove(i)
                     self.cacheSegment(index: i, data: data)
                     print("[Remux] Read-ahead segment \(i) cached (\(data.count) bytes)")
@@ -503,6 +535,13 @@ final class LocalRemuxServer {
 
         // Clean up completed tasks
         readAheadTasks.removeAll { $0.isCancelled }
+    }
+
+    /// Record the actual duration of a generated segment.
+    func recordSegmentDuration(index: Int, duration: TimeInterval) {
+        durationLock.lock()
+        actualSegmentDurations[index] = duration
+        durationLock.unlock()
     }
 
     // MARK: - Cache Management

@@ -121,6 +121,11 @@ actor FFmpegRemuxSession {
     private var continuationVideoDTS: Int64?
     private var continuationVideoPTSShift: Int64 = 0
 
+    /// Actual duration of the last generated segment (in seconds).
+    /// Used to update EXTINF durations in the playlist for timeline alignment.
+    private(set) var lastSegmentActualDuration: TimeInterval?
+    private(set) var lastSegmentIndex: Int?
+
     // Target segment duration in seconds
     private let targetSegmentDuration: TimeInterval = 6.0
     // Hard ceiling to avoid pathological scans on damaged/odd streams.
@@ -420,11 +425,18 @@ actor FFmpegRemuxSession {
         continuationVideoDTS = result.endVideoDTS
         continuationVideoPTSShift = result.videoPTSShift
 
+        // Compute actual segment duration from the DTS range for EXTINF accuracy.
+        let dtsDuration = result.endVideoDTS - result.startVideoDTS
+        let timebaseFactor = Double(videoTimebase.num) / Double(videoTimebase.den)
+        let actualDuration = Double(dtsDuration) * timebaseFactor
+        lastSegmentActualDuration = actualDuration > 0 ? actualDuration : segment.duration
+        lastSegmentIndex = index
+
         let elapsedMs = Int(Date().timeIntervalSince(generationStart) * 1000)
         let seqLabel = isSequential ? " (seq)" : (isFirstSegmentFromStart ? " (first)" : "")
         let boxes = topLevelBoxes(in: segmentData).joined(separator: "+")
         print("[Remux] Segment \(index)\(seqLabel): \(segmentData.count) bytes [\(boxes)], " +
-              "duration=\(String(format: "%.2f", segment.duration))s, elapsed=\(elapsedMs)ms")
+              "actualDur=\(String(format: "%.3f", lastSegmentActualDuration!))s, elapsed=\(elapsedMs)ms")
 
         return segmentData
     }
@@ -955,6 +967,8 @@ actor FFmpegRemuxSession {
         let data: Data
         let actualStartPTS: Int64
         let nextSegmentStartPTS: Int64?
+        /// The first DTS written (used to compute actual segment duration).
+        let startVideoDTS: Int64
         /// The DTS value the next segment should start at for continuity.
         let endVideoDTS: Int64
         /// The PTS shift applied in this segment (carry over for continuity).
@@ -1081,6 +1095,7 @@ actor FFmpegRemuxSession {
         var videoPacketCount = 0
         var audioPacketCount = 0
         var foundFirstKeyframe = false
+        var firstWrittenVideoDTS: Int64 = 0
         var actualStartPTS: Int64?
         var nextSegmentStartPTS: Int64?
         // For sequential segments, carry over DTS from the previous segment to ensure
@@ -1210,6 +1225,9 @@ actor FFmpegRemuxSession {
                     let writeRet = av_write_frame(outCtx, packet)
                     if writeRet < 0 {
                         print("[Remux] Warning: video write failed for segment \(segmentIndex): \(writeRet)")
+                    }
+                    if videoPacketCount == 0 {
+                        firstWrittenVideoDTS = packet.pointee.dts
                     }
                     videoPacketCount += 1
 
@@ -1371,6 +1389,7 @@ actor FFmpegRemuxSession {
             data: segmentData,
             actualStartPTS: actualStartPTS ?? startPTS,
             nextSegmentStartPTS: nextSegmentStartPTS,
+            startVideoDTS: firstWrittenVideoDTS,
             endVideoDTS: nextVideoDTS,
             videoPTSShift: videoPTSShift
         )

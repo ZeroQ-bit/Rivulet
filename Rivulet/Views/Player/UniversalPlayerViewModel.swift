@@ -1702,8 +1702,9 @@ final class UniversalPlayerViewModel: ObservableObject {
         let targetSegIdx = startTime.map { max(0, Int($0 / sessionInfo.segments.first!.duration)) } ?? 0
         let clampedIdx = min(targetSegIdx, sessionInfo.segments.count - 1)
         let segData = try await session.generateSegment(index: clampedIdx)
+        let prefetchDuration = await session.lastSegmentActualDuration
         let prefetchMs = Int(Date().timeIntervalSince(prefetchStart) * 1000)
-        print("[Remux] Prefetch: init + segment \(clampedIdx) in \(prefetchMs)ms")
+        print("[Remux] Prefetch: init + segment \(clampedIdx) in \(prefetchMs)ms (actualDur=\(String(format: "%.3f", prefetchDuration ?? 0))s)")
 
         let server = LocalRemuxServer(
             session: session,
@@ -1711,6 +1712,10 @@ final class UniversalPlayerViewModel: ObservableObject {
             prebuiltInitSegment: initData,
             prebuiltSegments: [clampedIdx: segData]
         )
+        // Record the prefetched segment's actual duration
+        if let dur = prefetchDuration {
+            server.recordSegmentDuration(index: clampedIdx, duration: dur)
+        }
         if let startTime, startTime > 0 {
             server.startOffset = startTime
         }
