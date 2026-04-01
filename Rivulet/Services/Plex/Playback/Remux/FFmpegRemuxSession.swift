@@ -1316,6 +1316,10 @@ actor FFmpegRemuxSession {
                         packet.pointee.pts = packet.pointee.dts
                     }
                     nextVideoDTS += frameDur
+                    // Ensure the muxer writes a non-zero sample duration in the trun.
+                    // Without this, rescaling turns small durations to 0 via integer
+                    // division (e.g., 1 tick at 1/1000 → 0 ticks at 1/25).
+                    packet.pointee.duration = frameDur
 
                     let writeRet = av_write_frame(outCtx, packet)
                     if writeRet < 0 {
@@ -1475,10 +1479,16 @@ actor FFmpegRemuxSession {
         Unmanaged<OutputWriter>.fromOpaque(opaquePtr).release()
 
         // Strip ftyp/moov so each media segment only contains moof+mdat fragment data.
-        let segmentData = stripMoovBox(from: outputData)
+        var segmentData = stripMoovBox(from: outputData)
         guard isValidMediaFragment(segmentData) else {
             throw RemuxError.writeFailed("Invalid media fragment structure for segment \(segmentIndex)")
         }
+
+        // Patch the video track's tfdt with the actual baseMediaDecodeTime.
+        // delay_moov normalizes all timestamps to start at 0 for each muxer context,
+        // so the tfdt is always 0. We overwrite it with the correct DTS value
+        // to ensure timeline continuity across segments.
+        patchVideoTfdt(in: &segmentData, baseDecodeTime: firstWrittenVideoDTS)
 
         // Compute actual duration using the OUTPUT timebase (which the muxer may
         // have changed from the source timebase during avformat_write_header).
@@ -1627,6 +1637,70 @@ actor FFmpegRemuxSession {
             offset += boxSize
         }
         return boxes
+    }
+
+    // MARK: - Private: tfdt Patching
+
+    /// Patch the video track's baseMediaDecodeTime (tfdt) in a moof+mdat fragment.
+    /// delay_moov normalizes timestamps to start at 0 for each muxer context,
+    /// so we overwrite the tfdt with the actual DTS for timeline continuity.
+    private func patchVideoTfdt(in data: inout Data, baseDecodeTime: Int64) {
+        var offset = 0
+        while offset + 8 <= data.count {
+            let boxSize = Int(data.loadBigEndianUInt32(at: offset))
+            let boxType = String(data: data[offset+4..<offset+8], encoding: .ascii) ?? ""
+            guard boxSize >= 8 && offset + boxSize <= data.count else { break }
+
+            if boxType == "moof" {
+                // Find the first traf (video track) → tfdt
+                var trafOffset = offset + 8
+                let moofEnd = offset + boxSize
+                while trafOffset + 8 <= moofEnd {
+                    let trafSize = Int(data.loadBigEndianUInt32(at: trafOffset))
+                    let trafType = String(data: data[trafOffset+4..<trafOffset+8], encoding: .ascii) ?? ""
+                    guard trafSize >= 8 && trafOffset + trafSize <= moofEnd else { break }
+
+                    if trafType == "traf" {
+                        // Find tfdt inside this traf
+                        var childOffset = trafOffset + 8
+                        let trafEnd = trafOffset + trafSize
+                        while childOffset + 8 <= trafEnd {
+                            let childSize = Int(data.loadBigEndianUInt32(at: childOffset))
+                            let childType = String(data: data[childOffset+4..<childOffset+8], encoding: .ascii) ?? ""
+                            guard childSize >= 8 && childOffset + childSize <= trafEnd else { break }
+
+                            if childType == "tfdt" {
+                                let version = data[childOffset + 8]
+                                if version == 1 && childSize >= 20 {
+                                    // 64-bit baseMediaDecodeTime
+                                    let val = UInt64(bitPattern: baseDecodeTime)
+                                    data[childOffset + 12] = UInt8((val >> 56) & 0xFF)
+                                    data[childOffset + 13] = UInt8((val >> 48) & 0xFF)
+                                    data[childOffset + 14] = UInt8((val >> 40) & 0xFF)
+                                    data[childOffset + 15] = UInt8((val >> 32) & 0xFF)
+                                    data[childOffset + 16] = UInt8((val >> 24) & 0xFF)
+                                    data[childOffset + 17] = UInt8((val >> 16) & 0xFF)
+                                    data[childOffset + 18] = UInt8((val >> 8) & 0xFF)
+                                    data[childOffset + 19] = UInt8(val & 0xFF)
+                                } else if childSize >= 16 {
+                                    // 32-bit baseMediaDecodeTime
+                                    let val = UInt32(truncatingIfNeeded: baseDecodeTime)
+                                    data[childOffset + 12] = UInt8((val >> 24) & 0xFF)
+                                    data[childOffset + 13] = UInt8((val >> 16) & 0xFF)
+                                    data[childOffset + 14] = UInt8((val >> 8) & 0xFF)
+                                    data[childOffset + 15] = UInt8(val & 0xFF)
+                                }
+                                return  // Patched video track's tfdt — done
+                            }
+                            childOffset += childSize
+                        }
+                        return  // Found first traf (video) but no tfdt — shouldn't happen
+                    }
+                    trafOffset += trafSize
+                }
+            }
+            offset += boxSize
+        }
     }
 
     // MARK: - Private: fMP4 Diagnostics
