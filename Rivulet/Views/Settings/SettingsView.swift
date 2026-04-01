@@ -11,7 +11,7 @@ import SwiftUI
 
 enum SettingsPage: Hashable, CaseIterable {
     case root
-    case appearance, playback, liveTV, servers, about
+    case appearance, playback, music, liveTV, servers, about
     case plex, iptv, libraries, cache, userProfiles
     case liveTVSourceDetail
     case addLiveTVSource, addPlexLiveTV, addDispatcharrSource, addM3USource
@@ -22,6 +22,7 @@ enum SettingsPage: Hashable, CaseIterable {
         case .root: return "Settings"
         case .appearance: return "Appearance"
         case .playback: return "Playback"
+        case .music: return "Music"
         case .liveTV: return "Live TV"
         case .servers: return "Servers"
         case .about: return "About"
@@ -417,6 +418,8 @@ struct SettingsView: View {
             appearanceSettings
         case .playback:
             playbackSettings
+        case .music:
+            musicSettings
         case .liveTV:
             liveTVSettings
         case .servers:
@@ -493,6 +496,13 @@ struct SettingsView: View {
                 subtitle: "",
                 action: { navigate(to: .playback) },
                 onFocusChange: { if $0 { focusState.focusedSettingId = "cat_playback" } }
+            )
+
+            SettingsRow(
+                title: "Music",
+                subtitle: "",
+                action: { navigate(to: .music) },
+                onFocusChange: { if $0 { focusState.focusedSettingId = "cat_music" } }
             )
 
             SettingsRow(
@@ -698,6 +708,40 @@ struct SettingsView: View {
                 subtitle: "",
                 isOn: $allowFourStreams,
                 onFocusChange: { if $0 { focusState.focusedSettingId = "allowFourStreams" } }
+            )
+        }
+    }
+
+    // MARK: - Music Settings
+
+    @AppStorage("musicLoudnessNormalization") private var musicLoudnessNormalization = false
+    @AppStorage("musicCrossfadeDuration") private var musicCrossfadeDuration = 0
+    @AppStorage("musicShowQualityBadges") private var musicShowQualityBadges = true
+
+    private var musicSettings: some View {
+        Group {
+            SettingsToggleRow(
+                title: "Loudness Normalization",
+                subtitle: "Even out volume differences between tracks using ReplayGain",
+                isOn: $musicLoudnessNormalization,
+                onFocusChange: { if $0 { focusState.focusedSettingId = "musicLoudness" } }
+            )
+
+            SettingsPickerRow(
+                title: "Crossfade",
+                options: ["Off", "3s", "5s", "8s", "12s"],
+                selectedIndex: Binding(
+                    get: { [0, 3, 5, 8, 12].firstIndex(of: musicCrossfadeDuration) ?? 0 },
+                    set: { musicCrossfadeDuration = [0, 3, 5, 8, 12][$0] }
+                ),
+                onFocusChange: { if $0 { focusState.focusedSettingId = "musicCrossfade" } }
+            )
+
+            SettingsToggleRow(
+                title: "Audio Quality Badges",
+                subtitle: "Show codec and quality indicators on tracks and albums",
+                isOn: $musicShowQualityBadges,
+                onFocusChange: { if $0 { focusState.focusedSettingId = "musicQualityBadges" } }
             )
         }
     }

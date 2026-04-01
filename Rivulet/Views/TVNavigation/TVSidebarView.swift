@@ -17,6 +17,7 @@ struct TVSidebarView: View {
     @StateObject private var profileManager = PlexUserProfileManager.shared
     @StateObject private var nestedNavState = NestedNavigationState()
     @StateObject private var deepLinkHandler = DeepLinkHandler.shared
+    @StateObject private var musicQueue = MusicQueue.shared
     @AppStorage("combineLiveTVSources") private var combineLiveTVSources = true
     @AppStorage("liveTVAboveLibraries") private var liveTVAboveLibraries = false
     @AppStorage("displaySize") private var displaySizeRaw = DisplaySize.normal.rawValue
@@ -179,6 +180,11 @@ struct TVSidebarView: View {
             )
             .presentationBackground(.clear)
         }
+        // Music Now Playing overlay
+        .fullScreenCover(isPresented: $musicQueue.showNowPlaying) {
+            MusicNowPlayingView(isPresented: $musicQueue.showNowPlaying)
+                .presentationBackground(.black)
+        }
     }
 
     // MARK: - Tab Definitions
@@ -287,7 +293,11 @@ struct TVSidebarView: View {
                     }
                 case .library(let key):
                     if let lib = dataStore.libraries.first(where: { $0.key == key }) {
-                        PlexLibraryView(libraryKey: lib.key, libraryTitle: lib.title)
+                        if lib.isMusicLibrary {
+                            MusicHomeView(libraryKey: lib.key, libraryTitle: lib.title)
+                        } else {
+                            PlexLibraryView(libraryKey: lib.key, libraryTitle: lib.title)
+                        }
                     }
                 case .liveTV(let sourceId):
                     LiveTVContainerView(sourceIdFilter: sourceId)

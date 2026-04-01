@@ -1129,10 +1129,9 @@ struct PlexDetailView: View {
                 ratingKey: ratingKey
             )
 
-            if let firstTrack = allTracks.first {
+            if !allTracks.isEmpty {
                 artistTracks = allTracks
-                selectedTrack = firstTrack
-                showPlayer = true
+                MusicQueue.shared.playAlbum(tracks: allTracks, startingAt: 0)
             }
         } catch {
             print("Failed to load artist tracks: \(error)")
@@ -1227,8 +1226,9 @@ struct PlexDetailView: View {
                 .disabled(isLoadingArtistTracks)
             } else if currentItem.type == "album" {
                 Button {
-                    if let firstTrack = tracks.first { selectedTrack = firstTrack }
-                    showPlayer = true
+                    if !tracks.isEmpty {
+                        MusicQueue.shared.playAlbum(tracks: tracks, startingAt: 0)
+                    }
                 } label: {
                     HStack(spacing: 10) {
                         Image(systemName: "play.fill")
@@ -1556,8 +1556,7 @@ struct PlexDetailView: View {
                             focusedId: $focusedTrackId,
                             onPlay: {
                                 savedTrackFocus = track.ratingKey
-                                selectedTrack = track
-                                showPlayer = true
+                                MusicQueue.shared.playAlbum(tracks: tracks, startingAt: index)
                             }
                         )
                     }
