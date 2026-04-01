@@ -121,6 +121,7 @@ actor FFmpegRemuxSession {
     // Reset to nil after seeks (non-sequential segments start fresh).
     private var continuationVideoDTS: Int64?
     private var continuationVideoPTSShift: Int64 = 0
+    private var segmentsGenerated: Int = 0
 
     /// Actual duration of the last generated segment (in seconds).
     /// Used to update EXTINF durations in the playlist for timeline alignment.
@@ -267,12 +268,12 @@ actor FFmpegRemuxSession {
             duration = Double(openCtx.pointee.duration) / Double(AV_TIME_BASE)
         }
 
-        // Try to build segment list from actual keyframe positions (MKV Cues, MP4 stss).
-        // Falls back to estimated 6s segments if index isn't available yet.
-        let gotKeyframeIndex = buildKeyframeSegmentList()
-        if !gotKeyframeIndex {
-            buildEstimatedSegmentList()
-        }
+        // Build estimated segment list. The actual segment content may differ from
+        // the estimated EXTINF durations, but AVPlayer uses the tfdt (baseMediaDecodeTime)
+        // for timeline positioning, not EXTINF. With correct tfdt patching and sample
+        // durations, playback is smooth despite EXTINF approximation.
+        buildEstimatedSegmentList()
+        let gotKeyframeIndex = false
 
         isOpen = true
         isCancelled = false
@@ -439,10 +440,11 @@ actor FFmpegRemuxSession {
         print("[Remux] Segment \(index)\(seqLabel): \(segmentData.count) bytes [\(boxes)], " +
               "actualDur=\(String(format: "%.3f", lastSegmentActualDuration!))s, elapsed=\(elapsedMs)ms")
 
-        // Log moof structure for first few segments to diagnose playback issues
-        if index <= 3 {
+        // Log moof structure for first 3 segments generated to verify tfdt/duration
+        if segmentsGenerated < 3 {
             logMoofStructure(segmentData, segmentIndex: index)
         }
+        segmentsGenerated += 1
 
         return segmentData
     }
