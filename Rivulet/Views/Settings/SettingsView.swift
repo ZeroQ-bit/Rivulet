@@ -250,7 +250,7 @@ struct SettingsView: View {
     @AppStorage("autoSkipIntro") private var autoSkipIntro = false
     @AppStorage("autoSkipCredits") private var autoSkipCredits = false
     @AppStorage("autoSkipAds") private var autoSkipAds = false
-    @AppStorage("useLocalRemux") private var useLocalRemux = false
+    @AppStorage("useApplePlayer") private var useApplePlayer = true
     @AppStorage("autoplayCountdown") private var autoplayCountdownRaw = AutoplayCountdown.fiveSeconds.rawValue
     @AppStorage("displaySize") private var displaySizeRaw = DisplaySize.normal.rawValue
 
@@ -636,10 +636,10 @@ struct SettingsView: View {
             )
 
             SettingsToggleRow(
-                title: "Direct Play",
-                subtitle: "",
-                isOn: $useLocalRemux,
-                onFocusChange: { if $0 { focusState.focusedSettingId = "useLocalRemux" } }
+                title: "Use Apple's Player",
+                subtitle: "Uses AVPlayer for all video. More compatible, but fewer features.",
+                isOn: $useApplePlayer,
+                onFocusChange: { if $0 { focusState.focusedSettingId = "useApplePlayer" } }
             )
 
         }

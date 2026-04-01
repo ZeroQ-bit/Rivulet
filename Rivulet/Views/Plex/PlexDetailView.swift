@@ -1678,10 +1678,29 @@ struct PlexDetailView: View {
                     loadingArtImage: artImage,
                     loadingThumbImage: thumbImage
                 )
-                let nativePlayer = NativePlayerViewController(viewModel: viewModel)
-                nativePlayer.onDismiss = { [weak viewModel] in
-                    lastPlayedMetadata = viewModel?.metadata
-                    showPlayer = false
+
+                let useApplePlayer = UserDefaults.standard.bool(forKey: "useApplePlayer")
+                let playerVC: UIViewController
+                if useApplePlayer {
+                    let nativePlayer = NativePlayerViewController(viewModel: viewModel)
+                    nativePlayer.onDismiss = { [weak viewModel] in
+                        lastPlayedMetadata = viewModel?.metadata
+                        showPlayer = false
+                    }
+                    playerVC = nativePlayer
+                } else {
+                    let inputCoordinator = PlaybackInputCoordinator()
+                    let playerView = UniversalPlayerView(viewModel: viewModel, inputCoordinator: inputCoordinator)
+                    let container = PlayerContainerViewController(
+                        rootView: playerView,
+                        viewModel: viewModel,
+                        inputCoordinator: inputCoordinator
+                    )
+                    container.onDismiss = { [weak viewModel] in
+                        lastPlayedMetadata = viewModel?.metadata
+                        showPlayer = false
+                    }
+                    playerVC = container
                 }
 
                 if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
@@ -1690,7 +1709,7 @@ struct PlexDetailView: View {
                     while let presented = topVC.presentedViewController {
                         topVC = presented
                     }
-                    topVC.present(nativePlayer, animated: true)
+                    topVC.present(playerVC, animated: true)
                 }
             }
         }

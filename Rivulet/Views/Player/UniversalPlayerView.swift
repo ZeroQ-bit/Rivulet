@@ -997,8 +997,14 @@ struct UniversalPlayerView: View {
     // MARK: - Player Layer
 
     @ViewBuilder
+    @ViewBuilder
     private var playerLayer: some View {
-        if let player = viewModel.player, viewModel.streamURL != nil {
+        if let rp = viewModel.rivuletPlayer {
+            SampleBufferDisplayView(player: rp)
+                .scaleEffect(viewModel.videoFrameState.scale, anchor: .topLeading)
+                .offset(viewModel.videoFrameState.offset)
+                .animation(.spring(response: 0.5, dampingFraction: 0.85), value: viewModel.videoFrameState)
+        } else if let player = viewModel.player, viewModel.streamURL != nil {
             AVPlayerLayerView(player: player)
                 .scaleEffect(viewModel.videoFrameState.scale, anchor: .topLeading)
                 .offset(viewModel.videoFrameState.offset)

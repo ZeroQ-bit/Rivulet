@@ -129,10 +129,10 @@ enum SettingsDescriptorStore {
             iconColor: .purple,
             description: "How long to wait before automatically playing the next episode. Set to Off to disable autoplay."
         ),
-        "useLocalRemux": SettingDescriptor(
-            icon: "arrow.triangle.swap",
-            iconColor: .teal,
-            description: "Remuxes MKV files locally using FFmpeg instead of relying on Plex server. Enables true direct play for all containers with native AirPlay and HomePod support."
+        "useApplePlayer": SettingDescriptor(
+            icon: "play.rectangle",
+            iconColor: .blue,
+            description: "Uses Apple's built-in AVPlayer for all video playback. This will cause more direct streams from the Plex server, but is the most stable option. When off, Rivulet uses its own custom player with FFmpeg for direct play of all containers."
         ),
         "avPlayerDV": SettingDescriptor(
             icon: "sparkles.tv",

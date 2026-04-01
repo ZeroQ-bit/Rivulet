@@ -429,8 +429,9 @@ final class UniversalPlayerViewModel: ObservableObject {
     /// Whether DV profile conversion (P7/P8.6 → P8.1) is needed
     private var requiresProfileConversion = false
 
-    /// Stub — legacy RivuletPlayer removed. Returns nil so all guard-let paths bail safely.
-    private var rivuletPlayer: RivuletPlayer? { nil }
+    /// Custom player using FFmpeg demux + AVSampleBufferDisplayLayer.
+    /// Created when "Use Apple's Player" is off; nil when using AVPlayerViewController.
+    private(set) var rivuletPlayer: RivuletPlayer?
 
     /// Subtitle manager for custom subtitle rendering.
     let subtitleManager = SubtitleManager()
@@ -641,14 +642,14 @@ final class UniversalPlayerViewModel: ObservableObject {
             await fetchFullMetadataIfNeeded()
         }
 
-        let useLocalRemux = UserDefaults.standard.bool(forKey: "useLocalRemux")
+        let useApplePlayer = UserDefaults.standard.bool(forKey: "useApplePlayer")
         let routingContext = ContentRoutingContext(
             metadata: metadata,
             serverURL: URL(string: serverURL)!,
             authToken: authToken,
             requiresProfileConversion: requiresProfileConversion,
             playbackPolicy: .directPlayFirst,
-            useLocalRemux: useLocalRemux
+            useLocalRemux: !useApplePlayer  // RivuletPlayer handles locally
         )
         let plan = ContentRouter.plan(for: routingContext)
         playbackPlan = plan
@@ -993,7 +994,10 @@ final class UniversalPlayerViewModel: ObservableObject {
     // MARK: - Computed Properties
 
     var isPlaying: Bool {
-        (player?.rate ?? 0) > 0
+        if let rp = rivuletPlayer {
+            return rp.isPlaying
+        }
+        return (player?.rate ?? 0) > 0
     }
 
     /// Log the selection decision to Sentry for debugging DV routing.
@@ -1035,18 +1039,6 @@ final class UniversalPlayerViewModel: ObservableObject {
     }
 
     func startPlayback() async {
-        await ensureStreamURLPrepared()
-
-        guard let url = streamURL else {
-            errorMessage = "No stream URL available"
-            playbackState = .failed(.invalidURL)
-            return
-        }
-        hasAttemptedRivuletHLSFallback = false
-        isAttemptingRivuletHLSFallback = false
-
-        addPlaybackSelectionBreadcrumb(reason: "startPlayback")
-
         // Fetch detailed metadata if markers or chapters are missing
         let hasMarkers = !(metadata.Marker ?? []).isEmpty
         let hasChapters = !(metadata.Chapter ?? []).isEmpty
@@ -1058,19 +1050,160 @@ final class UniversalPlayerViewModel: ObservableObject {
         // Fetch season/show poster for Now Playing artwork (episodes)
         await fetchSeasonPosterIfNeeded()
 
+        let useApplePlayer = UserDefaults.standard.bool(forKey: "useApplePlayer")
+
+        if !useApplePlayer {
+            await startRivuletPlayback()
+        } else {
+            await startAVPlayerPlayback()
+        }
+    }
+
+    // MARK: - RivuletPlayer Startup
+
+    private func startRivuletPlayback() async {
+        // Fetch full metadata if Media array is missing
+        if metadata.Media == nil || metadata.Media?.isEmpty == true {
+            await fetchFullMetadataIfNeeded()
+        }
+
+        addPlaybackSelectionBreadcrumb(reason: "startRivuletPlayback")
+
         do {
             DisplayCriteriaManager.shared.configureForContent(
                 videoStream: metadata.primaryVideoStream
             )
 
-            let useLocalRemux = UserDefaults.standard.bool(forKey: "useLocalRemux")
+            let routingContext = ContentRoutingContext(
+                metadata: metadata,
+                serverURL: URL(string: serverURL)!,
+                authToken: authToken,
+                requiresProfileConversion: requiresProfileConversion,
+                playbackPolicy: .directPlayFirst,
+                useLocalRemux: true  // RivuletPlayer always handles locally
+            )
+            let plan = ContentRouter.plan(for: routingContext)
+            playbackPlan = plan
+
+            let rp = RivuletPlayer()
+            self.rivuletPlayer = rp
+
+            // Wire up subtitle callbacks
+            rp.onSubtitleCue = { [weak self] text, start, end in
+                self?.subtitleManager.addCue(text: text, startTime: start, endTime: end)
+            }
+            rp.onBitmapSubtitleCue = { [weak self] cue in
+                self?.subtitleManager.addBitmapCue(cue)
+            }
+
+            try await rp.load(route: plan.primary, startTime: startOffset)
+            rp.play()
+
+            playbackState = .playing
+            self.duration = rp.duration
+
+            // Observe RivuletPlayer state
+            rp.playbackStatePublisher
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self] state in
+                    self?.handleRivuletStateChange(state)
+                }
+                .store(in: &cancellables)
+
+            rp.timePublisher
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self] time in
+                    self?.currentTime = time
+                    self?.checkMarkers(at: time)
+                }
+                .store(in: &cancellables)
+
+            rp.errorPublisher
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self] error in
+                    self?.errorMessage = error.userFacingDescription
+                    self?.playbackState = .failed(.loadFailed(error.localizedDescription))
+                }
+                .store(in: &cancellables)
+
+            updateTrackLists()
+            preloadThumbnails()
+            startControlsHideTimer()
+            configureSubtitleClockSyncForCurrentPlayer()
+
+            // Index for Siri Suggestions
+            let activity = NSUserActivity(activityType: "com.rivulet.playMedia")
+            activity.title = metadata.title
+            activity.isEligibleForSearch = true
+            activity.userInfo = ["ratingKey": metadata.ratingKey ?? ""]
+            activity.targetContentIdentifier = "rivulet://play?ratingKey=\(metadata.ratingKey ?? "")"
+            self.userActivity = activity
+            activity.becomeCurrent()
+        } catch {
+            let technicalError = error.localizedDescription
+            if let playerError = error as? PlayerError {
+                errorMessage = playerError.userFacingDescription
+            } else {
+                errorMessage = "Something went wrong during playback. Please try again."
+            }
+            playbackState = .failed(.loadFailed(technicalError))
+
+            SentrySDK.capture(error: error) { scope in
+                scope.setTag(value: "playback", key: "component")
+                scope.setTag(value: "rivulet", key: "player_type")
+                scope.setExtra(value: self.metadata.title ?? "unknown", key: "media_title")
+                scope.setExtra(value: self.metadata.type ?? "unknown", key: "media_type")
+                scope.setExtra(value: self.metadata.ratingKey ?? "unknown", key: "rating_key")
+                scope.setExtra(value: self.startOffset ?? 0, key: "start_offset")
+            }
+        }
+    }
+
+    private func handleRivuletStateChange(_ state: UniversalPlaybackState) {
+        switch state {
+        case .playing:
+            playbackState = .playing
+        case .paused:
+            playbackState = .paused
+        case .buffering:
+            playbackState = .buffering
+        case .ended:
+            playbackState = .ended
+        case .failed:
+            // Error details come through errorPublisher
+            break
+        default:
+            break
+        }
+    }
+
+    // MARK: - AVPlayer Startup
+
+    private func startAVPlayerPlayback() async {
+        await ensureStreamURLPrepared()
+
+        guard let url = streamURL else {
+            errorMessage = "No stream URL available"
+            playbackState = .failed(.invalidURL)
+            return
+        }
+        hasAttemptedRivuletHLSFallback = false
+        isAttemptingRivuletHLSFallback = false
+
+        addPlaybackSelectionBreadcrumb(reason: "startAVPlayerPlayback")
+
+        do {
+            DisplayCriteriaManager.shared.configureForContent(
+                videoStream: metadata.primaryVideoStream
+            )
+
             let plan = playbackPlan ?? ContentRouter.plan(for: ContentRoutingContext(
                 metadata: metadata,
                 serverURL: URL(string: serverURL)!,
                 authToken: authToken,
                 requiresProfileConversion: requiresProfileConversion,
                 playbackPolicy: .directPlayFirst,
-                useLocalRemux: useLocalRemux
+                useLocalRemux: false
             ))
             try await startWithFallback(plan: plan, startTime: startOffset)
 
@@ -1079,19 +1212,13 @@ final class UniversalPlayerViewModel: ObservableObject {
             let bufferFull = player?.currentItem?.isPlaybackBufferFull ?? false
             let likelyKeepUp = player?.currentItem?.isPlaybackLikelyToKeepUp ?? false
             print("[Remux] play() — status=\(itemStatus) bufferEmpty=\(bufferEmpty) bufferFull=\(bufferFull) likelyKeepUp=\(likelyKeepUp)")
-            // Use playImmediately to skip the buffering rate evaluation on startup.
-            // After seeks, AVPlayer evaluates the first segment's delivery rate and
-            // deadlocks if it's slow (HTTP seek overhead). playImmediately bypasses
-            // this for the initial play only — AVPlayerViewController's scrub resume
-            // calls regular play() which works normally with cached read-ahead data.
             if remuxServer != nil {
                 player?.playImmediately(atRate: 1.0)
             } else {
                 player?.play()
             }
 
-
-            // Index for Siri Suggestions — watched content gets higher priority
+            // Index for Siri Suggestions
             let activity = NSUserActivity(activityType: "com.rivulet.playMedia")
             activity.title = metadata.title
             activity.isEligibleForSearch = true
@@ -1103,10 +1230,7 @@ final class UniversalPlayerViewModel: ObservableObject {
                 self.duration = dur
             }
             updateTrackLists()
-
-            // Preload thumbnails for scrubbing
             preloadThumbnails()
-
             startControlsHideTimer()
         } catch {
             let technicalError = error.localizedDescription
@@ -1934,6 +2058,11 @@ final class UniversalPlayerViewModel: ObservableObject {
         streamPreparationTask?.cancel()
         streamPreparationTask = nil
         subtitleClockSync.stop()
+
+        // Stop RivuletPlayer if active
+        rivuletPlayer?.stop()
+        rivuletPlayer = nil
+
         teardownAVPlayerObservers()
         player?.pause()
         player?.replaceCurrentItem(with: nil)
@@ -2006,14 +2135,22 @@ final class UniversalPlayerViewModel: ObservableObject {
     // MARK: - Active Player Helpers
 
     private func activePlayer_play() {
-        player?.play()
+        if let rp = rivuletPlayer {
+            rp.play()
+        } else {
+            player?.play()
+        }
     }
 
     private func activePlayer_pause() {
-        if remuxServer != nil {
-            print("[Remux] activePlayer_pause() called")
+        if let rp = rivuletPlayer {
+            rp.pause()
+        } else {
+            if remuxServer != nil {
+                print("[Remux] activePlayer_pause() called")
+            }
+            player?.pause()
         }
-        player?.pause()
     }
 
     // MARK: - Info Panel Navigation
@@ -2027,7 +2164,11 @@ final class UniversalPlayerViewModel: ObservableObject {
     }
 
     func seek(to time: TimeInterval) async {
-        await player?.seek(to: CMTime(seconds: time, preferredTimescale: 600))
+        if let rp = rivuletPlayer {
+            await rp.seek(to: time)
+        } else {
+            await player?.seek(to: CMTime(seconds: time, preferredTimescale: 600))
+        }
         subtitleClockSync.didSeek()
         showControlsTemporarily()
     }
@@ -2035,7 +2176,11 @@ final class UniversalPlayerViewModel: ObservableObject {
     func seekRelative(by seconds: TimeInterval) async {
         hidePausedPoster()
         let targetTime = max(0, min(currentTime + seconds, duration))
-        await player?.seek(to: CMTime(seconds: targetTime, preferredTimescale: 600))
+        if let rp = rivuletPlayer {
+            await rp.seek(to: targetTime)
+        } else {
+            await player?.seek(to: CMTime(seconds: targetTime, preferredTimescale: 600))
+        }
         subtitleClockSync.didSeek()
         showControlsTemporarily()
 

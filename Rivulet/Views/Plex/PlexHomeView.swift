@@ -262,7 +262,7 @@ struct PlexHomeView: View {
     // MARK: - Direct Playback (Continue Watching)
 
     /// Play an item directly without navigating to detail view
-    private func playItemDirectly(_ item: PlexMetadata) {
+    private func playItemDirectly(_ item: PlexMetadata, fromBeginning: Bool = false) {
         Task {
             guard let serverURL = authManager.selectedServerURL,
                   let token = authManager.selectedServerToken else { return }
@@ -270,7 +270,11 @@ struct PlexHomeView: View {
             let (artImage, thumbImage) = await getPlayerImages(for: item, serverURL: serverURL, authToken: token)
 
             await MainActor.run {
-                let resumeOffset = item.viewOffset.map { Double($0) / 1000.0 }
+                let resumeOffset: Double? = if fromBeginning {
+                    nil
+                } else {
+                    item.viewOffset.map { Double($0) / 1000.0 }
+                }
 
                 let viewModel = UniversalPlayerViewModel(
                     metadata: item,
@@ -280,11 +284,26 @@ struct PlexHomeView: View {
                     loadingArtImage: artImage,
                     loadingThumbImage: thumbImage
                 )
-                let nativePlayer = NativePlayerViewController(viewModel: viewModel)
-                nativePlayer.onDismiss = {
-                    Task {
-                        await dataStore.refreshHubs()
+                let useApplePlayer = UserDefaults.standard.bool(forKey: "useApplePlayer")
+                let playerVC: UIViewController
+                if useApplePlayer {
+                    let nativePlayer = NativePlayerViewController(viewModel: viewModel)
+                    nativePlayer.onDismiss = {
+                        Task { await dataStore.refreshHubs() }
                     }
+                    playerVC = nativePlayer
+                } else {
+                    let inputCoordinator = PlaybackInputCoordinator()
+                    let playerView = UniversalPlayerView(viewModel: viewModel, inputCoordinator: inputCoordinator)
+                    let container = PlayerContainerViewController(
+                        rootView: playerView,
+                        viewModel: viewModel,
+                        inputCoordinator: inputCoordinator
+                    )
+                    container.onDismiss = {
+                        Task { await dataStore.refreshHubs() }
+                    }
+                    playerVC = container
                 }
 
                 if let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
@@ -293,7 +312,7 @@ struct PlexHomeView: View {
                     while let presented = topVC.presentedViewController {
                         topVC = presented
                     }
-                    topVC.present(nativePlayer, animated: true)
+                    topVC.present(playerVC, animated: true)
                 }
             }
         }
@@ -485,6 +504,9 @@ struct PlexHomeView: View {
                                 },
                                 onPlayItem: { item in
                                     playItemDirectly(item)
+                                },
+                                onPlayFromBeginning: { item in
+                                    playItemDirectly(item, fromBeginning: true)
                                 },
                                 onGoToItem: { item in
                                     selectedItem = item
@@ -948,6 +970,7 @@ struct ContinueWatchingContextMenuModifier: ViewModifier {
     let isContinueWatching: Bool
     let contextMenuSource: MediaItemContextSource
     var onGoToItem: ((PlexMetadata) -> Void)?
+    var onPlayFromBeginning: ((PlexMetadata) -> Void)?
     var onRefreshNeeded: MediaItemRefreshCallback?
 
     @State private var isPerformingAction = false
@@ -957,6 +980,13 @@ struct ContinueWatchingContextMenuModifier: ViewModifier {
     func body(content: Content) -> some View {
         if isContinueWatching {
             content.contextMenu {
+                // Watch from Beginning
+                Button {
+                    onPlayFromBeginning?(item)
+                } label: {
+                    Label("Watch from Beginning", systemImage: "arrow.counterclockwise")
+                }
+
                 // Go to Episode
                 Button {
                     onGoToItem?(item)
@@ -1092,6 +1122,7 @@ struct InfiniteContentRow: View {
     var contextMenuSource: MediaItemContextSource = .other
     var onItemSelected: ((PlexMetadata) -> Void)?
     var onPlayItem: ((PlexMetadata) -> Void)?
+    var onPlayFromBeginning: ((PlexMetadata) -> Void)?
     var onGoToItem: ((PlexMetadata) -> Void)?
     var onRefreshNeeded: MediaItemRefreshCallback?
     var onPreviewRequested: ((PreviewRequest) -> Void)?
@@ -1207,6 +1238,7 @@ struct InfiniteContentRow: View {
                             isContinueWatching: isContinueWatching,
                             contextMenuSource: contextMenuSource,
                             onGoToItem: onGoToItem,
+                            onPlayFromBeginning: onPlayFromBeginning,
                             onRefreshNeeded: onRefreshNeeded
                         ))
                         .onAppear {

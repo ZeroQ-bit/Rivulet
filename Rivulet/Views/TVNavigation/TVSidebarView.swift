@@ -359,7 +359,20 @@ struct TVSidebarView: View {
                     loadingArtImage: artImage,
                     loadingThumbImage: thumbImage
                 )
-                let nativePlayer = NativePlayerViewController(viewModel: viewModel)
+                let useApplePlayer = UserDefaults.standard.bool(forKey: "useApplePlayer")
+                let playerVC: UIViewController
+                if useApplePlayer {
+                    playerVC = NativePlayerViewController(viewModel: viewModel)
+                } else {
+                    let inputCoordinator = PlaybackInputCoordinator()
+                    let playerView = UniversalPlayerView(viewModel: viewModel, inputCoordinator: inputCoordinator)
+                    let container = PlayerContainerViewController(
+                        rootView: playerView,
+                        viewModel: viewModel,
+                        inputCoordinator: inputCoordinator
+                    )
+                    playerVC = container
+                }
 
                 if let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
                    let rootVC = scene.windows.first?.rootViewController {
@@ -367,7 +380,7 @@ struct TVSidebarView: View {
                     while let presented = topVC.presentedViewController {
                         topVC = presented
                     }
-                    topVC.present(nativePlayer, animated: true)
+                    topVC.present(playerVC, animated: true)
                 }
             }
         }

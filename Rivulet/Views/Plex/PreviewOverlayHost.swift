@@ -536,9 +536,14 @@ struct PreviewOverlayHost: View {
 
     private func cardZIndex(for index: Int) -> Double {
         switch stateMachine.phase {
-        case .entryMorph, .carouselStable:
-            // Apple TV+ carousel behavior: cards stay on a single visual plane.
+        case .entryMorph:
             return 1
+        case .carouselStable:
+            // Keep the card nearest the visual center on top so side-card overscan
+            // never draws above the center card in one paging direction.
+            // This preserves a flat carousel plane while fixing directional asymmetry.
+            let slotDistance = abs(carouselSlotPosition(for: index))
+            return 100 - (slotDistance * 10)
         case .expandingHero, .expandedHero, .detailsStable, .exiting:
             return index == selectedIndex ? 2 : 1
         }
