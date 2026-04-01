@@ -73,6 +73,41 @@ struct AppStoreActionButtonStyle: ButtonStyle {
     }
 }
 
+// MARK: - Self-Focused Action Button Style
+
+/// Like `AppStoreActionButtonStyle` but tracks focus internally via its own `@FocusState`.
+/// Use when there's no external focus state enum — lets tvOS handle focus naturally.
+struct SelfFocusedActionButtonStyle: ButtonStyle {
+    @FocusState private var isFocused: Bool
+    var cornerRadius: CGFloat = 16
+    var isPrimary: Bool = true
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .foregroundStyle(isFocused ? .black : .white)
+            .background(
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .fill(isFocused ? .white : (isPrimary ? .white.opacity(0.2) : .white.opacity(0.12)))
+            )
+            .background(
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .fill(.ultraThinMaterial)
+                    .opacity(isFocused ? 0 : 1)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .stroke(isFocused ? .clear : .white.opacity(0.2), lineWidth: 0.5)
+            )
+            .scaleEffect(isFocused ? 1.08 : 1.0)
+            .scaleEffect(configuration.isPressed ? 0.95 : 1.0)
+            .focused($isFocused)
+            .hoverEffectDisabled()
+            .focusEffectDisabled()
+            .animation(.spring(response: 0.25, dampingFraction: 0.8), value: isFocused)
+            .animation(.spring(response: 0.15, dampingFraction: 0.9), value: configuration.isPressed)
+    }
+}
+
 // MARK: - Glass Row Button Style
 
 /// A unified button style for list rows that provides tvOS 26 liquid glass aesthetics.

@@ -16,13 +16,6 @@ struct MusicPlaylistView: View {
     @State private var tracks: [PlexMetadata] = []
     @State private var isLoading = true
     @State private var error: String?
-    @FocusState private var focusedItem: PlaylistFocusItem?
-
-    enum PlaylistFocusItem: Hashable {
-        case play
-        case shuffle
-        case track(String)
-    }
 
     var body: some View {
         ZStack {
@@ -105,7 +98,6 @@ struct MusicPlaylistView: View {
                             .padding(.horizontal, 20)
                         }
                         .buttonStyle(.plain)
-                        .focused($focusedItem, equals: .track(track.ratingKey ?? ""))
                         .contextMenu {
                             Button {
                                 musicQueue.addNext(track: track)
@@ -178,11 +170,7 @@ struct MusicPlaylistView: View {
                     .font(.system(size: 18, weight: .semibold))
                     .frame(width: 110, height: 44)
                 }
-                .buttonStyle(AppStoreActionButtonStyle(
-                    isFocused: focusedItem == .play,
-                    isPrimary: true
-                ))
-                .focused($focusedItem, equals: .play)
+                .buttonStyle(SelfFocusedActionButtonStyle(isPrimary: true))
 
                 Button {
                     var shuffled = tracks
@@ -196,11 +184,7 @@ struct MusicPlaylistView: View {
                     .font(.system(size: 18, weight: .semibold))
                     .frame(width: 120, height: 44)
                 }
-                .buttonStyle(AppStoreActionButtonStyle(
-                    isFocused: focusedItem == .shuffle,
-                    isPrimary: false
-                ))
-                .focused($focusedItem, equals: .shuffle)
+                .buttonStyle(SelfFocusedActionButtonStyle(isPrimary: false))
             }
         }
     }
@@ -307,10 +291,6 @@ struct MusicPlaylistView: View {
                 serverURL: serverURL, authToken: token, ratingKey: ratingKey
             )
             isLoading = false
-
-            if focusedItem == nil {
-                focusedItem = .play
-            }
         } catch {
             self.error = "Failed to load tracks"
             isLoading = false

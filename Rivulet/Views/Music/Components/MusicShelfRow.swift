@@ -14,8 +14,6 @@ struct MusicShelfRow: View {
     let items: [PlexMetadata]
     let onSelect: (PlexMetadata) -> Void
 
-    @FocusState private var focusedItemId: String?
-
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             // Header
@@ -41,14 +39,12 @@ struct MusicShelfRow: View {
                         MusicPosterCard(item: item) {
                             onSelect(item)
                         }
-                        .focused($focusedItemId, equals: item.ratingKey)
                     }
                 }
                 .padding(.horizontal, 50)
                 .padding(.vertical, 8)
             }
             .focusSection()
-            .remembersFocus(key: "musicShelf_\(title)", focusedId: $focusedItemId)
         }
     }
 }

@@ -25,14 +25,6 @@ struct MusicArtistDetailView: View {
     // Navigation
     @State private var selectedAlbum: PlexMetadata?
 
-    @FocusState private var focusedElement: ArtistFocusElement?
-
-    private enum ArtistFocusElement: Hashable {
-        case playAll
-        case shuffle
-        case album(String)
-    }
-
     private let networkManager = PlexNetworkManager.shared
 
     // MARK: - Computed Properties
@@ -171,11 +163,7 @@ struct MusicArtistDetailView: View {
                 .font(.system(size: 18, weight: .semibold))
                 .frame(width: 130, height: 44)
             }
-            .buttonStyle(AppStoreActionButtonStyle(
-                isFocused: focusedElement == .playAll,
-                isPrimary: true
-            ))
-            .focused($focusedElement, equals: .playAll)
+            .buttonStyle(SelfFocusedActionButtonStyle(isPrimary: true))
             .disabled(isPlayingAll || isShuffling)
 
             // Shuffle
@@ -194,11 +182,7 @@ struct MusicArtistDetailView: View {
                 .font(.system(size: 18, weight: .semibold))
                 .frame(width: 120, height: 44)
             }
-            .buttonStyle(AppStoreActionButtonStyle(
-                isFocused: focusedElement == .shuffle,
-                isPrimary: false
-            ))
-            .focused($focusedElement, equals: .shuffle)
+            .buttonStyle(SelfFocusedActionButtonStyle(isPrimary: false))
             .disabled(isPlayingAll || isShuffling)
         }
     }
@@ -211,7 +195,6 @@ struct MusicArtistDetailView: View {
                 MusicPosterCard(item: album, style: .square) {
                     selectedAlbum = album
                 }
-                .focused($focusedElement, equals: .album(album.ratingKey ?? ""))
                 .musicItemContextMenu(item: album, style: .album)
             }
         }

@@ -11,14 +11,6 @@ import SwiftUI
 struct MusicQueueListView: View {
     @Binding var isPresented: Bool
     @ObservedObject private var musicQueue = MusicQueue.shared
-    @FocusState private var focusedItem: QueueFocusItem?
-
-    enum QueueFocusItem: Hashable {
-        case clearQueue
-        case nowPlaying
-        case upNext(Int)
-        case history(Int)
-    }
 
     var body: some View {
         ZStack {
@@ -56,9 +48,6 @@ struct MusicQueueListView: View {
                 }
             }
         }
-        .onAppear {
-            focusedItem = .nowPlaying
-        }
         .onExitCommand {
             isPresented = false
         }
@@ -86,16 +75,8 @@ struct MusicQueueListView: View {
                         Text("Clear Queue")
                             .font(.system(size: 18, weight: .medium))
                     }
-                    .foregroundStyle(focusedItem == .clearQueue ? .black : .white.opacity(0.7))
-                    .padding(.horizontal, 20)
-                    .padding(.vertical, 10)
-                    .background(
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .fill(focusedItem == .clearQueue ? .white : .white.opacity(0.12))
-                    )
                 }
-                .buttonStyle(.plain)
-                .focused($focusedItem, equals: .clearQueue)
+                .buttonStyle(AppStoreButtonStyle(cornerRadius: 12))
             }
         }
     }
@@ -113,12 +94,10 @@ struct MusicQueueListView: View {
             } label: {
                 trackRow(
                     track: track,
-                    showIndicator: true,
-                    isFocused: focusedItem == .nowPlaying
+                    showIndicator: true
                 )
             }
             .buttonStyle(.plain)
-            .focused($focusedItem, equals: .nowPlaying)
         }
     }
 
@@ -144,12 +123,10 @@ struct MusicQueueListView: View {
                 } label: {
                     trackRow(
                         track: track,
-                        number: index + 1,
-                        isFocused: focusedItem == .upNext(index)
+                        number: index + 1
                     )
                 }
                 .buttonStyle(.plain)
-                .focused($focusedItem, equals: .upNext(index))
                 .contextMenu {
                     Button {
                         musicQueue.removeFromQueue(at: index)
@@ -183,12 +160,10 @@ struct MusicQueueListView: View {
                 } label: {
                     trackRow(
                         track: track,
-                        isFocused: focusedItem == .history(index),
                         isDimmed: true
                     )
                 }
                 .buttonStyle(.plain)
-                .focused($focusedItem, equals: .history(index))
             }
         }
     }
@@ -199,7 +174,6 @@ struct MusicQueueListView: View {
         track: PlexMetadata,
         number: Int? = nil,
         showIndicator: Bool = false,
-        isFocused: Bool = false,
         isDimmed: Bool = false
     ) -> some View {
         HStack(spacing: 16) {
@@ -248,7 +222,7 @@ struct MusicQueueListView: View {
         .padding(.horizontal, 20)
         .background(
             RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(isFocused ? .white.opacity(0.15) : .white.opacity(0.05))
+                .fill(.white.opacity(0.05))
         )
         .opacity(isDimmed ? 0.7 : 1.0)
     }

@@ -19,15 +19,6 @@ struct MusicAlbumDetailView: View {
     @State private var tracks: [PlexMetadata] = []
     @State private var isLoading = true
 
-    @FocusState private var focusedElement: AlbumFocusElement?
-
-    private enum AlbumFocusElement: Hashable {
-        case play
-        case shuffle
-        case more
-        case track(String)
-    }
-
     private let networkManager = PlexNetworkManager.shared
 
     // MARK: - Computed Properties
@@ -90,9 +81,6 @@ struct MusicAlbumDetailView: View {
             }
             .padding(.horizontal, 80)
             .padding(.top, 60)
-        }
-        .onAppear {
-            focusedElement = .play
         }
         .task {
             await loadTracks()
@@ -190,11 +178,7 @@ struct MusicAlbumDetailView: View {
                 .font(.system(size: 18, weight: .semibold))
                 .frame(width: 100, height: 44)
             }
-            .buttonStyle(AppStoreActionButtonStyle(
-                isFocused: focusedElement == .play,
-                isPrimary: true
-            ))
-            .focused($focusedElement, equals: .play)
+            .buttonStyle(SelfFocusedActionButtonStyle(isPrimary: true))
             .disabled(tracks.isEmpty)
 
             // Shuffle
@@ -210,11 +194,7 @@ struct MusicAlbumDetailView: View {
                 .font(.system(size: 18, weight: .semibold))
                 .frame(width: 110, height: 44)
             }
-            .buttonStyle(AppStoreActionButtonStyle(
-                isFocused: focusedElement == .shuffle,
-                isPrimary: false
-            ))
-            .focused($focusedElement, equals: .shuffle)
+            .buttonStyle(SelfFocusedActionButtonStyle(isPrimary: false))
             .disabled(tracks.isEmpty)
 
             // More (...) button with native context menu
@@ -225,11 +205,7 @@ struct MusicAlbumDetailView: View {
                     .font(.system(size: 18, weight: .semibold))
                     .frame(width: 44, height: 44)
             }
-            .buttonStyle(AppStoreActionButtonStyle(
-                isFocused: focusedElement == .more,
-                isPrimary: false
-            ))
-            .focused($focusedElement, equals: .more)
+            .buttonStyle(SelfFocusedActionButtonStyle(isPrimary: false))
             .contextMenu {
                 Button {
                     musicQueue.playAlbum(tracks: tracks, startingAt: 0)
@@ -328,7 +304,6 @@ struct MusicAlbumDetailView: View {
                                 .padding(.horizontal, 16)
                             }
                             .buttonStyle(.plain)
-                            .focused($focusedElement, equals: .track(track.ratingKey ?? ""))
                             .contextMenu {
                                 Button {
                                     musicQueue.addNext(track: track)

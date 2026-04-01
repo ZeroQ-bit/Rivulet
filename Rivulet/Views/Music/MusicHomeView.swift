@@ -26,6 +26,16 @@ enum MusicLibraryCategory: String, Hashable, CaseIterable {
         case .songs: return "Songs"
         }
     }
+
+    var icon: String {
+        switch self {
+        case .recentlyAdded: return "clock"
+        case .playlists: return "music.note.list"
+        case .artists: return "music.mic"
+        case .albums: return "square.stack"
+        case .songs: return "music.note"
+        }
+    }
 }
 
 struct MusicHomeView: View {
@@ -52,9 +62,6 @@ struct MusicHomeView: View {
     // Navigation
     @State private var selectedCategory: MusicLibraryCategory = .recentlyAdded
     @State private var selectedItem: PlexMetadata?
-
-    // Focus
-    @FocusState private var sidebarFocus: String?
 
     private let networkManager = PlexNetworkManager.shared
 
@@ -94,57 +101,41 @@ struct MusicHomeView: View {
 
     private var sidebar: some View {
         ScrollView(.vertical, showsIndicators: false) {
-            VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: 4) {
                 // Categories
                 ForEach(MusicLibraryCategory.allCases, id: \.self) { category in
                     Button {
                         selectedCategory = category
                         Task { await loadCategoryData(category) }
                     } label: {
-                        HStack(spacing: 10) {
-                            Text(category.title)
-                                .font(.system(size: 20))
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.vertical, 10)
-                        .padding(.horizontal, 20)
+                        Label(category.title, systemImage: category.icon)
+                            .font(.system(size: 29))
+                            .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    .buttonStyle(.plain)
-                    .focused($sidebarFocus, equals: category.rawValue)
-                    .background(
-                        RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .fill(selectedCategory == category && sidebarFocus != category.rawValue
-                                  ? .white.opacity(0.1) : .clear)
-                    )
                 }
 
                 // Genres section
                 if !genres.isEmpty {
                     Text("Genres")
-                        .font(.system(size: 15, weight: .semibold))
+                        .font(.system(size: 22, weight: .semibold))
                         .foregroundStyle(.white.opacity(0.4))
-                        .padding(.top, 24)
-                        .padding(.bottom, 8)
-                        .padding(.horizontal, 20)
+                        .padding(.top, 28)
+                        .padding(.bottom, 4)
 
                     ForEach(genres, id: \.self) { genre in
                         Button {
                             // Genre filtering — future feature
                         } label: {
                             Text(genre)
-                                .font(.system(size: 20))
+                                .font(.system(size: 29))
                                 .frame(maxWidth: .infinity, alignment: .leading)
-                                .padding(.vertical, 10)
-                                .padding(.horizontal, 20)
                         }
-                        .buttonStyle(.plain)
-                        .focused($sidebarFocus, equals: "genre_\(genre)")
                     }
                 }
             }
-            .padding(.vertical, 40)
+            .padding(40)
         }
-        .frame(width: 260)
+        .frame(width: 340)
         .focusSection()
     }
 

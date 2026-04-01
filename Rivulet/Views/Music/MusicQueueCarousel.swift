@@ -10,7 +10,6 @@ import SwiftUI
 
 struct MusicQueueCarousel: View {
     @ObservedObject var musicQueue: MusicQueue
-    @FocusState private var focusedKey: String?
 
     private let cardSize: CGFloat = 120
     private let currentCardSize: CGFloat = 160
@@ -22,7 +21,6 @@ struct MusicQueueCarousel: View {
                 // History (previous tracks)
                 ForEach(Array(musicQueue.history.enumerated()), id: \.element.ratingKey) { index, track in
                     carouselCard(track: track, isCurrent: false)
-                        .focused($focusedKey, equals: "history-\(track.ratingKey ?? "\(index)")")
                         .onSubmit {
                             jumpToHistoryItem(at: index)
                         }
@@ -31,13 +29,11 @@ struct MusicQueueCarousel: View {
                 // Current track (larger)
                 if let current = musicQueue.currentTrack {
                     carouselCard(track: current, isCurrent: true)
-                        .focused($focusedKey, equals: "current-\(current.ratingKey ?? "")")
                 }
 
                 // Queue (upcoming tracks)
                 ForEach(Array(musicQueue.queue.enumerated()), id: \.element.ratingKey) { index, track in
                     carouselCard(track: track, isCurrent: false)
-                        .focused($focusedKey, equals: "queue-\(track.ratingKey ?? "\(index)")")
                         .onSubmit {
                             musicQueue.jumpToQueueItem(at: index)
                         }
@@ -54,12 +50,6 @@ struct MusicQueueCarousel: View {
 
     @ViewBuilder
     private func carouselCard(track: PlexMetadata, isCurrent: Bool) -> some View {
-        let key = isCurrent
-            ? "current-\(track.ratingKey ?? "")"
-            : (musicQueue.history.contains(where: { $0.ratingKey == track.ratingKey })
-                ? "history-\(track.ratingKey ?? "")"
-                : "queue-\(track.ratingKey ?? "")")
-        let isFocused = focusedKey == key
         let size = isCurrent ? currentCardSize : cardSize
 
         Button {
@@ -114,9 +104,7 @@ struct MusicQueueCarousel: View {
             .frame(width: size + 20)
         }
         .buttonStyle(.plain)
-        .scaleEffect(isFocused ? 1.08 : 1.0)
-        .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isFocused)
-        .opacity(isCurrent ? 1.0 : (isFocused ? 0.9 : 0.6))
+        .opacity(isCurrent ? 1.0 : 0.7)
     }
 
     // MARK: - Art
