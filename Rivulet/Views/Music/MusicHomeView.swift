@@ -143,13 +143,11 @@ struct MusicHomeView: View {
 
     private var contentArea: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // Header — only for categories with counts
-            if selectedCategory != .recentlyAdded {
-                contentHeader
-                    .padding(.horizontal, ScaledDimensions.rowHorizontalPadding)
-                    .padding(.top, 40)
-                    .padding(.bottom, 20)
-            }
+            // Header
+            contentHeader
+                .padding(.horizontal, ScaledDimensions.rowHorizontalPadding)
+                .padding(.top, 40)
+                .padding(.bottom, 20)
 
             // Grid content
             switch selectedCategory {
@@ -178,7 +176,7 @@ struct MusicHomeView: View {
 
             Spacer()
 
-            if selectedCategory == .albums || selectedCategory == .artists || selectedCategory == .songs {
+            if selectedCategory != .playlists {
                 HStack(spacing: 12) {
                     Button {
                         Task { await playAll(shuffled: false) }
@@ -224,13 +222,15 @@ struct MusicHomeView: View {
                                     authToken: authManager.selectedServerToken ?? ""
                                 ))
 
+                                // Album title
                                 Text(item.title ?? "Unknown")
-                                    .font(.system(size: ScaledDimensions.posterTitleSize))
+                                    .font(.system(size: ScaledDimensions.posterSubtitleSize, weight: .medium))
                                     .foregroundStyle(.white)
                                     .lineLimit(1)
 
-                                Text(item.parentTitle ?? item.grandparentTitle ?? "")
-                                    .font(.system(size: ScaledDimensions.posterSubtitleSize))
+                                // Artist name
+                                Text(item.parentTitle ?? item.grandparentTitle ?? "Unknown Artist")
+                                    .font(.system(size: ScaledDimensions.posterSubtitleSize - 2))
                                     .foregroundStyle(.secondary)
                                     .lineLimit(1)
                             }
@@ -444,22 +444,37 @@ struct MusicHomeView: View {
     // MARK: - Data Loading
 
     private func loadRecentlyAdded() async {
-        if let cached = dataStore.libraryHubs[libraryKey], !cached.isEmpty {
-            recentlyAddedItems = cached.flatMap { $0.Metadata ?? [] }
-            return
-        }
-
         guard let serverURL = authManager.selectedServerURL,
               let token = authManager.selectedServerToken else { return }
 
         isLoading = true
+
+        // Try hubs first for curated "Recently Added" content
+        if let cached = dataStore.libraryHubs[libraryKey], !cached.isEmpty {
+            let hubItems = cached.flatMap { $0.Metadata ?? [] }
+            let albums = hubItems.filter { $0.type == "album" }
+            recentlyAddedItems = albums.isEmpty ? hubItems : albums
+            isLoading = false
+            return
+        }
+
         do {
             let hubs = try await networkManager.getLibraryHubs(
                 serverURL: serverURL, authToken: token, sectionId: libraryKey
             )
-            recentlyAddedItems = hubs.flatMap { $0.Metadata ?? [] }
+            let hubItems = hubs.flatMap { $0.Metadata ?? [] }
+            let albums = hubItems.filter { $0.type == "album" }
+            recentlyAddedItems = albums.isEmpty ? hubItems : albums
+
+            // Fallback: if hubs returned nothing, load recent albums directly
+            if recentlyAddedItems.isEmpty {
+                recentlyAddedItems = try await networkManager.getLibraryItems(
+                    serverURL: serverURL, authToken: token, sectionId: libraryKey,
+                    start: 0, size: 50, type: 9
+                )
+            }
         } catch {
-            print("MusicHome: Failed to load hubs: \(error)")
+            print("MusicHome: Failed to load recently added: \(error)")
         }
         isLoading = false
     }
@@ -491,26 +506,24 @@ struct MusicHomeView: View {
 
         switch category {
         case .recentlyAdded:
-            break // Already loaded
+            break // Already loaded via hubs
         case .playlists:
             playlists = (try? await networkManager.getPlaylists(serverURL: serverURL, authToken: token)) ?? []
         case .artists:
-            let items = (try? await networkManager.getLibraryItems(
-                serverURL: serverURL, authToken: token, sectionId: libraryKey, start: 0, size: 500
+            // type=8 for artists in Plex music libraries
+            allArtists = (try? await networkManager.getLibraryItems(
+                serverURL: serverURL, authToken: token, sectionId: libraryKey, start: 0, size: 500, type: 8
             )) ?? []
-            allArtists = items.filter { $0.type == "artist" }
         case .albums:
-            let result = (try? await networkManager.getLibraryItemsWithTotal(
-                serverURL: serverURL, authToken: token, sectionId: libraryKey, start: 0, size: 500, sort: "-addedAt"
-            ))
-            let items = result?.items ?? []
-            allAlbums = items.filter { $0.type == "album" }
-            if allAlbums.isEmpty { allAlbums = items }
-        case .songs:
-            let items = (try? await networkManager.getLibraryItems(
-                serverURL: serverURL, authToken: token, sectionId: libraryKey, start: 0, size: 500
+            // type=9 for albums in Plex music libraries
+            allAlbums = (try? await networkManager.getLibraryItems(
+                serverURL: serverURL, authToken: token, sectionId: libraryKey, start: 0, size: 500, type: 9
             )) ?? []
-            allTracks = items.filter { $0.type == "track" }
+        case .songs:
+            // type=10 for tracks in Plex music libraries
+            allTracks = (try? await networkManager.getLibraryItems(
+                serverURL: serverURL, authToken: token, sectionId: libraryKey, start: 0, size: 500, type: 10
+            )) ?? []
         }
         loadedCategories.insert(category)
     }
@@ -523,9 +536,10 @@ struct MusicHomeView: View {
         if selectedCategory == .songs, !allTracks.isEmpty {
             tracks = allTracks
         } else {
+            // type=10 for tracks
             tracks = (try? await networkManager.getLibraryItems(
-                serverURL: serverURL, authToken: token, sectionId: libraryKey, start: 0, size: 1000
-            ).filter { $0.type == "track" }) ?? []
+                serverURL: serverURL, authToken: token, sectionId: libraryKey, start: 0, size: 1000, type: 10
+            )) ?? []
         }
 
         if shuffled { tracks.shuffle() }
