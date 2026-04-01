@@ -17,6 +17,7 @@ struct TVSidebarView: View {
     @StateObject private var profileManager = PlexUserProfileManager.shared
     @StateObject private var nestedNavState = NestedNavigationState()
     @StateObject private var deepLinkHandler = DeepLinkHandler.shared
+    @StateObject private var musicQueue = MusicQueue.shared
     @AppStorage("combineLiveTVSources") private var combineLiveTVSources = true
     @AppStorage("liveTVAboveLibraries") private var liveTVAboveLibraries = false
     @AppStorage("displaySize") private var displaySizeRaw = DisplaySize.normal.rawValue
@@ -178,6 +179,11 @@ struct TVSidebarView: View {
                 profileManager: profileManager
             )
             .presentationBackground(.clear)
+        }
+        // Music Now Playing overlay
+        .fullScreenCover(isPresented: $musicQueue.showNowPlaying) {
+            MusicNowPlayingView(isPresented: $musicQueue.showNowPlaying)
+                .presentationBackground(.black)
         }
     }
 

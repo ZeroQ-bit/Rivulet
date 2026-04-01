@@ -1,0 +1,431 @@
+//
+//  MusicQueue.swift
+//  Rivulet
+//
+//  Global music queue and state manager. Persists playback while browsing.
+//
+
+import Foundation
+import Combine
+
+/// Repeat mode for music playback
+enum MusicRepeatMode: String, CaseIterable {
+    case off
+    case all
+    case one
+}
+
+/// Playback state for the music player
+enum MusicPlaybackState: Equatable, Sendable {
+    case idle
+    case loading
+    case playing
+    case paused
+}
+
+/// Global music queue manager — singleton that persists across navigation.
+/// Music plays in the background while the user browses other content.
+@MainActor
+final class MusicQueue: ObservableObject {
+
+    // MARK: - Singleton
+
+    static let shared = MusicQueue()
+
+    // MARK: - Published State
+
+    @Published var currentTrack: PlexMetadata?
+    @Published var queue: [PlexMetadata] = []
+    @Published var history: [PlexMetadata] = []
+    @Published var playbackState: MusicPlaybackState = .idle
+    @Published var currentTime: TimeInterval = 0
+    @Published var duration: TimeInterval = 0
+    @Published var repeatMode: MusicRepeatMode = .off
+    @Published var isShuffled: Bool = false
+    @Published var showNowPlaying: Bool = false
+
+    /// Whether music is actively playing or paused (i.e., a session exists)
+    var isActive: Bool { currentTrack != nil }
+
+    // MARK: - Private State
+
+    private let player = MusicPlayer()
+    private let nowPlayingBridge = MusicNowPlayingBridge()
+    private var cancellables = Set<AnyCancellable>()
+    private var originalQueue: [PlexMetadata] = []
+    private var progressTimer: Timer?
+
+    // MARK: - Initialization
+
+    private init() {
+        bindPlayerState()
+    }
+
+    // MARK: - Queue Operations
+
+    /// Play a single track immediately, clearing the queue
+    func playNow(track: PlexMetadata) {
+        history = []
+        queue = []
+        originalQueue = []
+        currentTrack = track
+        startPlayback(track: track)
+    }
+
+    /// Play an album/tracklist starting at a specific index
+    func playAlbum(tracks: [PlexMetadata], startingAt index: Int = 0) {
+        guard !tracks.isEmpty else { return }
+        let clampedIndex = min(index, tracks.count - 1)
+
+        history = Array(tracks.prefix(clampedIndex))
+        currentTrack = tracks[clampedIndex]
+        queue = Array(tracks.suffix(from: clampedIndex + 1))
+        originalQueue = tracks
+
+        if isShuffled {
+            queue.shuffle()
+        }
+
+        startPlayback(track: tracks[clampedIndex])
+        showNowPlaying = true
+    }
+
+    /// Add a track to play next (front of queue)
+    func addNext(track: PlexMetadata) {
+        queue.insert(track, at: 0)
+    }
+
+    /// Add a track to the end of the queue
+    func addToEnd(track: PlexMetadata) {
+        queue.append(track)
+    }
+
+    /// Add multiple tracks to the end of the queue
+    func addToEnd(tracks: [PlexMetadata]) {
+        queue.append(contentsOf: tracks)
+    }
+
+    /// Remove a track from the queue at the given index
+    func removeFromQueue(at index: Int) {
+        guard queue.indices.contains(index) else { return }
+        queue.remove(at: index)
+    }
+
+    /// Move a queue item
+    func moveInQueue(from source: IndexSet, to destination: Int) {
+        queue.move(fromOffsets: source, toOffset: destination)
+    }
+
+    /// Clear the entire queue and stop playback
+    func clearQueue() {
+        stop()
+        queue = []
+        history = []
+        originalQueue = []
+        currentTrack = nil
+    }
+
+    // MARK: - Playback Controls
+
+    func play() {
+        player.play()
+    }
+
+    func pause() {
+        player.pause()
+    }
+
+    func togglePlayPause() {
+        if playbackState == .playing {
+            pause()
+        } else {
+            play()
+        }
+    }
+
+    func stop() {
+        player.stop()
+        progressTimer?.invalidate()
+        progressTimer = nil
+        playbackState = .idle
+        currentTime = 0
+        duration = 0
+        nowPlayingBridge.clear()
+    }
+
+    /// Skip to the next track in the queue
+    func skipToNext() {
+        guard let current = currentTrack else { return }
+
+        // Handle repeat one
+        if repeatMode == .one {
+            player.seek(to: 0)
+            player.play()
+            return
+        }
+
+        // Move current to history
+        history.append(current)
+
+        if let nextTrack = queue.first {
+            queue.removeFirst()
+            currentTrack = nextTrack
+            startPlayback(track: nextTrack)
+        } else if repeatMode == .all && !history.isEmpty {
+            // Rebuild queue from history
+            queue = history
+            history = []
+            if let firstTrack = queue.first {
+                queue.removeFirst()
+                currentTrack = firstTrack
+                startPlayback(track: firstTrack)
+            }
+        } else {
+            // Queue exhausted
+            currentTrack = nil
+            stop()
+        }
+    }
+
+    /// Skip to the previous track
+    func skipToPrevious() {
+        // If more than 3 seconds in, restart current track
+        if currentTime > 3 {
+            player.seek(to: 0)
+            return
+        }
+
+        guard let current = currentTrack else { return }
+
+        if let previousTrack = history.last {
+            history.removeLast()
+            // Put current back at front of queue
+            queue.insert(current, at: 0)
+            currentTrack = previousTrack
+            startPlayback(track: previousTrack)
+        } else {
+            // No history, restart current track
+            player.seek(to: 0)
+        }
+    }
+
+    /// Toggle shuffle mode
+    func toggleShuffle() {
+        isShuffled.toggle()
+        if isShuffled {
+            queue.shuffle()
+        } else {
+            // Restore original order from current position
+            restoreOriginalOrder()
+        }
+        nowPlayingBridge.updateShuffleRepeat(shuffle: isShuffled, repeat: repeatMode)
+    }
+
+    /// Cycle through repeat modes: off → all → one → off
+    func cycleRepeatMode() {
+        switch repeatMode {
+        case .off: repeatMode = .all
+        case .all: repeatMode = .one
+        case .one: repeatMode = .off
+        }
+        nowPlayingBridge.updateShuffleRepeat(shuffle: isShuffled, repeat: repeatMode)
+    }
+
+    /// Seek to a specific time
+    func seek(to time: TimeInterval) {
+        player.seek(to: time)
+    }
+
+    /// Jump to a specific track in the queue
+    func jumpToQueueItem(at index: Int) {
+        guard queue.indices.contains(index) else { return }
+
+        if let current = currentTrack {
+            history.append(current)
+        }
+
+        // Move skipped queue items to history
+        let skipped = Array(queue.prefix(index))
+        history.append(contentsOf: skipped)
+
+        let track = queue[index]
+        queue.removeSubrange(0...index)
+        currentTrack = track
+        startPlayback(track: track)
+    }
+
+    // MARK: - Private Helpers
+
+    private func startPlayback(track: PlexMetadata) {
+        playbackState = .loading
+
+        // Build stream URL
+        guard let serverURL = PlexAuthManager.shared.selectedServerURL,
+              let authToken = PlexAuthManager.shared.selectedServerToken,
+              let ratingKey = track.ratingKey else {
+            playbackState = .idle
+            return
+        }
+
+        let container = track.Media?.first?.container
+        let partKey = track.Media?.first?.Part?.first?.key
+
+        // Try direct play first, then fall back through strategies
+        var streamURL: URL?
+        for strategy in PlexNetworkManager.PlaybackStrategy.allCases {
+            streamURL = PlexNetworkManager.shared.buildStreamURL(
+                serverURL: serverURL,
+                authToken: authToken,
+                ratingKey: ratingKey,
+                partKey: partKey,
+                container: container,
+                strategy: strategy,
+                isAudio: true
+            )
+            if streamURL != nil { break }
+        }
+
+        guard let url = streamURL else {
+            print("🎵 MusicQueue: Failed to build stream URL for \(track.title ?? "unknown")")
+            playbackState = .idle
+            return
+        }
+
+        let headers = [
+            "X-Plex-Token": authToken,
+            "X-Plex-Client-Identifier": PlexAPI.clientIdentifier,
+            "X-Plex-Platform": PlexAPI.platform,
+            "X-Plex-Device": PlexAPI.deviceName
+        ]
+
+        player.load(url: url, headers: headers)
+
+        // Prepare next track for gapless
+        prepareNextTrack()
+
+        // Update Now Playing
+        nowPlayingBridge.update(
+            track: track,
+            queue: queue,
+            history: history,
+            isPlaying: true,
+            currentTime: 0,
+            duration: Double(track.duration ?? 0) / 1000.0
+        )
+
+        // Start progress reporting
+        startProgressTimer(ratingKey: ratingKey, durationMs: track.duration ?? 0)
+    }
+
+    private func prepareNextTrack() {
+        guard let nextTrack = queue.first,
+              let serverURL = PlexAuthManager.shared.selectedServerURL,
+              let authToken = PlexAuthManager.shared.selectedServerToken,
+              let ratingKey = nextTrack.ratingKey else { return }
+
+        let container = nextTrack.Media?.first?.container
+        let partKey = nextTrack.Media?.first?.Part?.first?.key
+
+        var streamURL: URL?
+        for strategy in PlexNetworkManager.PlaybackStrategy.allCases {
+            streamURL = PlexNetworkManager.shared.buildStreamURL(
+                serverURL: serverURL,
+                authToken: authToken,
+                ratingKey: ratingKey,
+                partKey: partKey,
+                container: container,
+                strategy: strategy,
+                isAudio: true
+            )
+            if streamURL != nil { break }
+        }
+
+        if let url = streamURL {
+            let headers = [
+                "X-Plex-Token": authToken,
+                "X-Plex-Client-Identifier": PlexAPI.clientIdentifier,
+                "X-Plex-Platform": PlexAPI.platform,
+                "X-Plex-Device": PlexAPI.deviceName
+            ]
+            player.prepareNext(url: url, headers: headers)
+        }
+    }
+
+    private func bindPlayerState() {
+        player.$state
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] state in
+                guard let self else { return }
+                switch state {
+                case .idle: self.playbackState = .idle
+                case .loading: self.playbackState = .loading
+                case .playing: self.playbackState = .playing
+                case .paused: self.playbackState = .paused
+                case .ended: self.onTrackEnded()
+                }
+            }
+            .store(in: &cancellables)
+
+        player.$currentTime
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] time in
+                self?.currentTime = time
+            }
+            .store(in: &cancellables)
+
+        player.$duration
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] dur in
+                self?.duration = dur
+            }
+            .store(in: &cancellables)
+    }
+
+    private func onTrackEnded() {
+        // Mark as watched
+        if let ratingKey = currentTrack?.ratingKey {
+            Task {
+                await PlexProgressReporter.shared.markAsWatched(ratingKey: ratingKey)
+            }
+        }
+
+        skipToNext()
+    }
+
+    private func startProgressTimer(ratingKey: String, durationMs: Int) {
+        progressTimer?.invalidate()
+        let durationSec = Double(durationMs) / 1000.0
+
+        progressTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, self.playbackState == .playing || self.playbackState == .paused else { return }
+                let state = self.playbackState == .playing ? "playing" : "paused"
+                await PlexProgressReporter.shared.reportProgress(
+                    ratingKey: ratingKey,
+                    time: self.currentTime,
+                    duration: durationSec,
+                    state: state
+                )
+
+                // Update Now Playing time
+                self.nowPlayingBridge.updateTime(
+                    currentTime: self.currentTime,
+                    duration: durationSec,
+                    isPlaying: self.playbackState == .playing
+                )
+            }
+        }
+    }
+
+    private func restoreOriginalOrder() {
+        guard let current = currentTrack else { return }
+        // Find current position in original queue
+        if let currentIndex = originalQueue.firstIndex(where: { $0.ratingKey == current.ratingKey }) {
+            queue = Array(originalQueue.suffix(from: currentIndex + 1))
+                .filter { item in
+                    // Only include items not already in history
+                    !history.contains(where: { $0.ratingKey == item.ratingKey })
+                }
+        }
+    }
+}
