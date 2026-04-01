@@ -439,6 +439,11 @@ actor FFmpegRemuxSession {
         print("[Remux] Segment \(index)\(seqLabel): \(segmentData.count) bytes [\(boxes)], " +
               "actualDur=\(String(format: "%.3f", lastSegmentActualDuration!))s, elapsed=\(elapsedMs)ms")
 
+        // Log moof structure for first few segments to diagnose playback issues
+        if index <= 3 {
+            logMoofStructure(segmentData, segmentIndex: index)
+        }
+
         return segmentData
     }
 
@@ -1624,6 +1629,87 @@ actor FFmpegRemuxSession {
         return boxes
     }
 
+    // MARK: - Private: fMP4 Diagnostics
+
+    /// Parse and log the moof structure of an fMP4 segment for debugging.
+    /// Logs baseMediaDecodeTime, sample count, and duration info per track.
+    private func logMoofStructure(_ data: Data, segmentIndex: Int) {
+        var offset = 0
+        while offset + 8 <= data.count {
+            let boxSize = Int(data.loadBigEndianUInt32(at: offset))
+            let boxType = String(data: data[offset+4..<offset+8], encoding: .ascii) ?? ""
+            guard boxSize >= 8 && offset + boxSize <= data.count else { break }
+
+            if boxType == "moof" {
+                parseMoof(data, moofOffset: offset, moofSize: boxSize, segmentIndex: segmentIndex)
+            }
+            offset += boxSize
+        }
+    }
+
+    private func parseMoof(_ data: Data, moofOffset: Int, moofSize: Int, segmentIndex: Int) {
+        var offset = moofOffset + 8
+        let moofEnd = moofOffset + moofSize
+        var trackIdx = 0
+
+        while offset + 8 <= moofEnd {
+            let boxSize = Int(data.loadBigEndianUInt32(at: offset))
+            let boxType = String(data: data[offset+4..<offset+8], encoding: .ascii) ?? ""
+            guard boxSize >= 8 && offset + boxSize <= moofEnd else { break }
+
+            if boxType == "traf" {
+                parseTraf(data, trafOffset: offset, trafSize: boxSize, segmentIndex: segmentIndex, trackIdx: trackIdx)
+                trackIdx += 1
+            }
+            offset += boxSize
+        }
+    }
+
+    private func parseTraf(_ data: Data, trafOffset: Int, trafSize: Int, segmentIndex: Int, trackIdx: Int) {
+        var offset = trafOffset + 8
+        let trafEnd = trafOffset + trafSize
+        var baseDecodeTime: UInt64 = 0
+        var sampleCount: UInt32 = 0
+        var firstSampleDur: UInt32 = 0
+        var trackId: UInt32 = 0
+
+        while offset + 8 <= trafEnd {
+            let boxSize = Int(data.loadBigEndianUInt32(at: offset))
+            let boxType = String(data: data[offset+4..<offset+8], encoding: .ascii) ?? ""
+            guard boxSize >= 8 && offset + boxSize <= trafEnd else { break }
+
+            if boxType == "tfhd" && boxSize >= 16 {
+                // version(1) + flags(3) + track_id(4)
+                trackId = data.loadBigEndianUInt32(at: offset + 12)
+            } else if boxType == "tfdt" && boxSize >= 16 {
+                let version = data[offset + 8]
+                if version == 1 && boxSize >= 20 {
+                    baseDecodeTime = data.loadBigEndianUInt64(at: offset + 12)
+                } else {
+                    baseDecodeTime = UInt64(data.loadBigEndianUInt32(at: offset + 12))
+                }
+            } else if boxType == "trun" && boxSize >= 12 {
+                let flags = UInt32(data[offset + 9]) << 16 | UInt32(data[offset + 10]) << 8 | UInt32(data[offset + 11])
+                sampleCount = data.loadBigEndianUInt32(at: offset + 12)
+                // If sample-duration-present flag (0x100), read first sample duration
+                if flags & 0x100 != 0 {
+                    var sampleOffset = offset + 16
+                    // Skip data-offset if present (flag 0x1)
+                    if flags & 0x1 != 0 { sampleOffset += 4 }
+                    // Skip first-sample-flags if present (flag 0x4)
+                    if flags & 0x4 != 0 { sampleOffset += 4 }
+                    if sampleOffset + 4 <= offset + boxSize {
+                        firstSampleDur = data.loadBigEndianUInt32(at: sampleOffset)
+                    }
+                }
+            }
+            offset += boxSize
+        }
+
+        let trackLabel = trackIdx == 0 ? "video" : "audio"
+        print("[Remux] Seg\(segmentIndex) \(trackLabel): tfdt=\(baseDecodeTime) samples=\(sampleCount) firstDur=\(firstSampleDur) trackId=\(trackId)")
+    }
+
     // MARK: - Private: EAC3 Output Configuration
 
     /// Configure output codec parameters for EAC3 transcoded audio.
@@ -1730,6 +1816,15 @@ private extension Data {
         return withUnsafeBytes { buf in
             let ptr = buf.baseAddress!.advanced(by: offset).assumingMemoryBound(to: UInt8.self)
             return UInt32(ptr[0]) << 24 | UInt32(ptr[1]) << 16 | UInt32(ptr[2]) << 8 | UInt32(ptr[3])
+        }
+    }
+
+    func loadBigEndianUInt64(at offset: Int) -> UInt64 {
+        guard offset + 8 <= count else { return 0 }
+        return withUnsafeBytes { buf in
+            let ptr = buf.baseAddress!.advanced(by: offset).assumingMemoryBound(to: UInt8.self)
+            return UInt64(ptr[0]) << 56 | UInt64(ptr[1]) << 48 | UInt64(ptr[2]) << 40 | UInt64(ptr[3]) << 32 |
+                   UInt64(ptr[4]) << 24 | UInt64(ptr[5]) << 16 | UInt64(ptr[6]) << 8 | UInt64(ptr[7])
         }
     }
 }
