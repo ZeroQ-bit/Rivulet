@@ -59,18 +59,6 @@ struct MusicProgressBar: View {
         }
         .focusable(isExpanded)
         .focused($isFocused)
-        .digitalCrownRotation(
-            Binding(
-                get: { scrubPosition ?? currentTime },
-                set: { newValue in
-                    let clamped = max(0, min(duration, newValue))
-                    scrubPosition = clamped
-                }
-            ),
-            from: 0,
-            through: duration,
-            sensitivity: .medium
-        )
         .onMoveCommand { direction in
             guard isExpanded, isFocused else { return }
             let step: TimeInterval = 10

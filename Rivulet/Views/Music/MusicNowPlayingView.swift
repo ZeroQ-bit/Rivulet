@@ -10,8 +10,8 @@ import SwiftUI
 
 struct MusicNowPlayingView: View {
     @Binding var isPresented: Bool
-    @StateObject private var musicQueue = MusicQueue.shared
-    @StateObject private var authManager = PlexAuthManager.shared
+    @ObservedObject private var musicQueue = MusicQueue.shared
+    @ObservedObject private var authManager = PlexAuthManager.shared
     @State private var showControls = false
     @State private var controlsTimer: Timer?
     @FocusState private var focusedControl: NowPlayingControl?
@@ -89,16 +89,6 @@ struct MusicNowPlayingView: View {
                 break
             }
         }
-        .gesture(
-            DragGesture(minimumDistance: 20)
-                .onEnded { value in
-                    if value.translation.height > 30 {
-                        revealControls()
-                    } else if value.translation.height < -30 {
-                        hideControls()
-                    }
-                }
-        )
         .animation(.easeInOut(duration: 0.4), value: showControls)
         .onChange(of: musicQueue.currentTrack?.ratingKey) { _, _ in
             // Reset controls visibility on track change

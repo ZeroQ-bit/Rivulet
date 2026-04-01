@@ -7,6 +7,7 @@
 
 import Foundation
 import Combine
+import SwiftUI
 
 /// Repeat mode for music playback
 enum MusicRepeatMode: String, CaseIterable {

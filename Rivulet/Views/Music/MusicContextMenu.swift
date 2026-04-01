@@ -24,7 +24,7 @@ struct MusicContextMenu: View {
     var onAction: ((MusicContextAction) -> Void)?
 
     @FocusState private var focusedOption: MenuOption?
-    @StateObject private var authManager = PlexAuthManager.shared
+    @ObservedObject private var authManager = PlexAuthManager.shared
 
     private enum MenuOption: Hashable {
         case playNext
@@ -50,9 +50,6 @@ struct MusicContextMenu: View {
             // Dimmed background
             Color.black.opacity(0.7)
                 .ignoresSafeArea()
-                .onTapGesture {
-                    isPresented = false
-                }
 
             HStack(spacing: 48) {
                 // Item preview

@@ -15,8 +15,8 @@ struct MusicHomeView: View {
 
     @Environment(\.nestedNavigationState) private var nestedNavState
 
-    @StateObject private var authManager = PlexAuthManager.shared
-    @StateObject private var dataStore = PlexDataStore.shared
+    @ObservedObject private var authManager = PlexAuthManager.shared
+    @ObservedObject private var dataStore = PlexDataStore.shared
     @ObservedObject private var musicQueue = MusicQueue.shared
 
     @State private var hubs: [PlexHub] = []

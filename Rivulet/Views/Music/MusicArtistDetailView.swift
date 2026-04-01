@@ -12,7 +12,7 @@ struct MusicArtistDetailView: View {
     let artist: PlexMetadata
     @Binding var isPresented: Bool
 
-    @StateObject private var authManager = PlexAuthManager.shared
+    @ObservedObject private var authManager = PlexAuthManager.shared
     @ObservedObject private var musicQueue = MusicQueue.shared
 
     @State private var albums: [PlexMetadata] = []

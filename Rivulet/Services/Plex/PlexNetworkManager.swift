@@ -1045,7 +1045,7 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
         guard let url = components.url else { throw PlexAPIError.invalidURL }
 
         let data = try await requestData(url, method: "GET", headers: ["X-Plex-Token": authToken])
-        let container = try JSONDecoder().decode(PlexResponse.self, from: data)
+        let container = try JSONDecoder().decode(PlexMediaContainerWrapper.self, from: data)
         return container.MediaContainer.Metadata ?? []
     }
 
@@ -1062,7 +1062,7 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
         guard let url = components.url else { throw PlexAPIError.invalidURL }
 
         let data = try await requestData(url, method: "GET", headers: ["X-Plex-Token": authToken])
-        let container = try JSONDecoder().decode(PlexResponse.self, from: data)
+        let container = try JSONDecoder().decode(PlexMediaContainerWrapper.self, from: data)
         return container.MediaContainer.Metadata ?? []
     }
 

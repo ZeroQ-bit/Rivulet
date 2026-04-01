@@ -11,7 +11,7 @@ import SwiftUI
 struct MusicVisualizerView: View {
     @Binding var isPresented: Bool
     @ObservedObject private var musicQueue = MusicQueue.shared
-    @StateObject private var authManager = PlexAuthManager.shared
+    @ObservedObject private var authManager = PlexAuthManager.shared
 
     @State private var barHeights: [CGFloat] = Array(repeating: 0.1, count: 32)
     @State private var showControls = false

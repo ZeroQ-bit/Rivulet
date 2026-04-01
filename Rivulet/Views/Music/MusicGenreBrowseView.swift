@@ -9,7 +9,7 @@ import SwiftUI
 
 struct MusicGenreBrowseView: View {
     let libraryKey: String
-    @StateObject private var authManager = PlexAuthManager.shared
+    @ObservedObject private var authManager = PlexAuthManager.shared
     @State private var genres: [String] = []
     @State private var selectedGenre: String?
     @State private var filteredAlbums: [PlexMetadata] = []
@@ -90,9 +90,9 @@ struct MusicGenreBrowseView: View {
                     GridItem(.adaptive(minimum: 180, maximum: 200), spacing: 24)
                 ], spacing: 24) {
                     ForEach(filteredAlbums, id: \.ratingKey) { album in
-                        MusicPosterCard(item: album, onSelect: {
+                        MusicPosterCard(item: album) {
                             // Navigation to album detail would go here
-                        })
+                        }
                     }
                 }
                 .padding(.horizontal, 60)
@@ -141,7 +141,7 @@ struct MusicGenreBrowseView: View {
             ]
             guard let url = components.url else { return }
             let data = try await PlexNetworkManager.shared.requestData(url, method: "GET", headers: ["X-Plex-Token": token])
-            let response = try JSONDecoder().decode(PlexResponse.self, from: data)
+            let response = try JSONDecoder().decode(PlexMediaContainerWrapper.self, from: data)
             filteredAlbums = response.MediaContainer.Metadata ?? []
         } catch {
             print("Failed to load albums for genre: \(error)")

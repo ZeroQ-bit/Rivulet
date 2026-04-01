@@ -47,13 +47,6 @@ final class MusicPlayer: ObservableObject {
 
     init() {}
 
-    deinit {
-        // Clean up on dealloc
-        Task { @MainActor [weak self] in
-            self?.cleanUp()
-        }
-    }
-
     // MARK: - Playback Controls
 
     /// Load and play an audio URL
@@ -99,7 +92,7 @@ final class MusicPlayer: ObservableObject {
 
         // Observe playback end
         didPlayToEndObserver = NotificationCenter.default.addObserver(
-            forName: .AVPlayerItemDidPlayToEndOfTime,
+            forName: AVPlayerItem.didPlayToEndTimeNotification,
             object: nil,
             queue: .main
         ) { [weak self] notification in

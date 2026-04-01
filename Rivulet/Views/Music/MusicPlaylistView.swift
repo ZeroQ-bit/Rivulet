@@ -9,7 +9,7 @@ import SwiftUI
 
 struct MusicPlaylistView: View {
     let playlist: PlexMetadata
-    @StateObject private var authManager = PlexAuthManager.shared
+    @ObservedObject private var authManager = PlexAuthManager.shared
 
     @State private var tracks: [PlexMetadata] = []
     @State private var isLoading = true

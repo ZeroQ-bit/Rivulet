@@ -342,6 +342,7 @@ enum SettingsDescriptorStore {
         case .root: return ("gearshape.fill", .gray)
         case .appearance: return ("paintbrush.fill", .purple)
         case .playback: return ("play.fill", .blue)
+        case .music: return ("music.note", .pink)
         case .liveTV: return ("tv.fill", .green)
         case .servers: return ("server.rack", .orange)
         case .about: return ("info.circle.fill", .gray)

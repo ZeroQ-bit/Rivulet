@@ -7,6 +7,36 @@
 
 import SwiftUI
 
+// MARK: - Crossfade Option
+
+enum CrossfadeOption: String, CaseIterable, Hashable, CustomStringConvertible {
+    case off = "off"
+    case threeSeconds = "3s"
+    case fiveSeconds = "5s"
+    case eightSeconds = "8s"
+    case twelveSeconds = "12s"
+
+    var description: String {
+        switch self {
+        case .off: return "Off"
+        case .threeSeconds: return "3s"
+        case .fiveSeconds: return "5s"
+        case .eightSeconds: return "8s"
+        case .twelveSeconds: return "12s"
+        }
+    }
+
+    var seconds: Int {
+        switch self {
+        case .off: return 0
+        case .threeSeconds: return 3
+        case .fiveSeconds: return 5
+        case .eightSeconds: return 8
+        case .twelveSeconds: return 12
+        }
+    }
+}
+
 // MARK: - Settings Page
 
 enum SettingsPage: Hashable, CaseIterable {
@@ -254,6 +284,16 @@ struct SettingsView: View {
     @AppStorage("useApplePlayer") private var useApplePlayer = true
     @AppStorage("autoplayCountdown") private var autoplayCountdownRaw = AutoplayCountdown.fiveSeconds.rawValue
     @AppStorage("displaySize") private var displaySizeRaw = DisplaySize.normal.rawValue
+    @AppStorage("musicLoudnessNormalization") private var musicLoudnessNormalization = false
+    @AppStorage("musicCrossfadeDuration") private var musicCrossfadeDurationRaw = CrossfadeOption.off.rawValue
+    @AppStorage("musicShowQualityBadges") private var musicShowQualityBadges = true
+
+    private var crossfadeSelection: Binding<CrossfadeOption> {
+        Binding(
+            get: { CrossfadeOption(rawValue: musicCrossfadeDurationRaw) ?? .off },
+            set: { musicCrossfadeDurationRaw = $0.rawValue }
+        )
+    }
 
 
     // Environment
@@ -714,10 +754,6 @@ struct SettingsView: View {
 
     // MARK: - Music Settings
 
-    @AppStorage("musicLoudnessNormalization") private var musicLoudnessNormalization = false
-    @AppStorage("musicCrossfadeDuration") private var musicCrossfadeDuration = 0
-    @AppStorage("musicShowQualityBadges") private var musicShowQualityBadges = true
-
     private var musicSettings: some View {
         Group {
             SettingsToggleRow(
@@ -729,11 +765,9 @@ struct SettingsView: View {
 
             SettingsPickerRow(
                 title: "Crossfade",
-                options: ["Off", "3s", "5s", "8s", "12s"],
-                selectedIndex: Binding(
-                    get: { [0, 3, 5, 8, 12].firstIndex(of: musicCrossfadeDuration) ?? 0 },
-                    set: { musicCrossfadeDuration = [0, 3, 5, 8, 12][$0] }
-                ),
+                subtitle: "",
+                selection: crossfadeSelection,
+                options: CrossfadeOption.allCases,
                 onFocusChange: { if $0 { focusState.focusedSettingId = "musicCrossfade" } }
             )
 
