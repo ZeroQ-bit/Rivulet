@@ -56,5 +56,11 @@ playground.xcworkspace
 # Git worktrees
 worktrees/
 
+# Claude Code scratch state (per-session worktrees, etc.)
+.claude/
+
+# Vendored FFmpeg source tree (cloned via git, not a submodule)
+ffmpeg/
+
 # Secrets (do not commit)
 Rivulet/Config/Secrets.swift
