@@ -409,9 +409,6 @@ final class UniversalPlayerViewModel: ObservableObject {
     private var remuxServer: LocalRemuxServer?
     private var remuxSession: FFmpegRemuxSession?
 
-    /// DV HLS proxy for Plex HLS DV codec patching
-    private var dvProxyServer: DVHLSProxyServer?
-
     /// HLS manifest enricher — injects audio/subtitle track labels into the master playlist.
     /// Must be retained for the lifetime of the AVURLAsset.
     private var hlsManifestEnricher: HLSManifestEnricher?
@@ -2077,8 +2074,6 @@ final class UniversalPlayerViewModel: ObservableObject {
         remuxServer?.stop()
         remuxServer = nil
         remuxSession = nil
-        dvProxyServer?.stop()
-        dvProxyServer = nil
         hlsManifestEnricher = nil
         subtitleManager.clear()
 

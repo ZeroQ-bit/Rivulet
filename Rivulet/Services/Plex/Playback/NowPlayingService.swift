@@ -439,16 +439,6 @@ final class NowPlayingService: ObservableObject {
 
     }
 
-    /// Legacy method - prefer updatePlaybackRateAndState() for state changes
-    private func updatePlaybackRate(isPlaying: Bool) {
-        // Only update rate if we already have Now Playing info set
-        guard var nowPlayingInfo = firstAvailableNowPlayingInfo(), !nowPlayingInfo.isEmpty else {
-            return
-        }
-        nowPlayingInfo[MPNowPlayingInfoPropertyPlaybackRate] = isPlaying ? 1.0 : 0.0
-        setNowPlayingInfoOnAllCenters(nowPlayingInfo)
-    }
-
     private func updateElapsedTime(_ time: TimeInterval, duration: TimeInterval) {
         withNowPlayingInfoOnAllCenters { nowPlayingInfo in
             nowPlayingInfo[MPNowPlayingInfoPropertyElapsedPlaybackTime] = time

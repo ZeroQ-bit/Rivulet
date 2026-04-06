@@ -27,6 +27,11 @@ final class DisplayCriteriaManager {
 
     private init() {}
 
+    /// Whether the system will honor display criteria changes (Match Content enabled)
+    var isDisplayCriteriaMatchingEnabled: Bool {
+        getDisplayManager()?.isDisplayCriteriaMatchingEnabled ?? false
+    }
+
     // MARK: - Public API
 
     /// Configure display criteria by fetching it from the stream URL

@@ -997,7 +997,6 @@ struct UniversalPlayerView: View {
     // MARK: - Player Layer
 
     @ViewBuilder
-    @ViewBuilder
     private var playerLayer: some View {
         if let rp = viewModel.rivuletPlayer {
             SampleBufferDisplayView(player: rp)

@@ -132,13 +132,17 @@ enum PlaybackAudioSessionConfigurator {
             )
         }
 
+        // Resample to the AirPlay route's sample rate (typically 44100Hz).
+        // Without this, 48kHz decoded audio on a 44.1kHz route causes crackling.
+        let airPlayRate = Int(snapshot.sampleRate)
+
         if snapshot.isLikelyMultichannelAirPlay {
             return RouteAudioPolicy(
                 profile: .airPlayMultichannel,
                 useAudioPullMode: true,
                 audioPullStartBufferDuration: 1.0,
                 audioPullResumeBufferDuration: 0.3,
-                targetOutputSampleRate: 0,
+                targetOutputSampleRate: airPlayRate,
                 preferAudioEngineForPCM: false,
                 forceClientDecodeAllAudio: true,
                 forceClientDecodeCodecs: [],
@@ -154,7 +158,7 @@ enum PlaybackAudioSessionConfigurator {
             useAudioPullMode: true,
             audioPullStartBufferDuration: 1.0,
             audioPullResumeBufferDuration: 0.3,
-            targetOutputSampleRate: 0,
+            targetOutputSampleRate: airPlayRate,
             preferAudioEngineForPCM: false,
             forceClientDecodeAllAudio: true,
             forceClientDecodeCodecs: [],
@@ -178,7 +182,7 @@ enum PlaybackAudioSessionConfigurator {
             useAudioPullMode: true,
             audioPullStartBufferDuration: 1.0,
             audioPullResumeBufferDuration: 0.3,
-            targetOutputSampleRate: 0,
+            targetOutputSampleRate: Int(snapshot.sampleRate),
             preferAudioEngineForPCM: false,
             forceClientDecodeAllAudio: true,
             forceClientDecodeCodecs: [],

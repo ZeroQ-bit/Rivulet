@@ -39,14 +39,23 @@ import Libswresample
 /// Decodes TrueHD/DTS audio to interleaved PCM using libavcodec + libswresample.
 final class FFmpegAudioDecoder: @unchecked Sendable {
 
-    /// Audio codecs this decoder handles (everything Apple TV can't natively decode).
-    /// Uses prefix matching via `codecNeedsClientDecode` — "pcm" matches pcm_s24le, pcm_s16le, etc.
+    /// Audio codecs this decoder handles.
+    /// Includes both non-native codecs (DTS, TrueHD) and native codecs (AAC, AC3, etc.)
+    /// because compressed passthrough via AVSampleBufferAudioRenderer is silent on AirPlay —
+    /// all audio must be decoded to PCM for AirPlay output.
+    /// Uses prefix matching — "pcm" matches pcm_s24le, pcm_s16le, etc.
     static let supportedCodecs: Set<String> = [
         "truehd", "mlp",                   // Dolby TrueHD / MLP
         "dts", "dca",                       // DTS Core
         "dts-hd", "dtshd", "dts-hd ma",    // DTS-HD (MA and HRA)
         "pcm",                              // Raw PCM variants (pcm_s24le, pcm_s16le, etc.)
         "flac",                             // FLAC lossless
+        "aac",                              // AAC (silent on AirPlay via passthrough)
+        "ac3",                              // Dolby Digital
+        "eac3", "ec3",                      // Dolby Digital Plus
+        "mp3",                              // MP3
+        "mp2",                              // MP2
+        "alac",                             // Apple Lossless
     ]
 
     /// Whether FFmpeg audio decoding is available

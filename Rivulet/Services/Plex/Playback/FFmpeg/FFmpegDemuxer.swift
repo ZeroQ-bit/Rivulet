@@ -201,6 +201,11 @@ final class FFmpegDemuxer: @unchecked Sendable {
             throw FFmpegError.allocationFailed
         }
 
+        // Disable stream limit — some MKVs have 90+ streams (video + 15 audio + 70 subtitle).
+        // Throughput for high-stream-count files is handled by discarding unwanted packets
+        // in the read loop, not by refusing to open the file.
+        ctx.pointee.max_streams = Int32.max
+
         var options: OpaquePointer? = nil
         if let headers = headers, !headers.isEmpty {
             let headerString = headers.map { "\($0.key): \($0.value)" }.joined(separator: "\r\n")
@@ -796,6 +801,28 @@ final class FFmpegDemuxer: @unchecked Sendable {
 
         let bestAudio = av_find_best_stream(ctx, AVMEDIA_TYPE_AUDIO, -1, -1, nil, 0)
         if bestAudio >= 0 { selectedAudioStream = bestAudio }
+
+        // Tell FFmpeg to discard packets from streams we don't need.
+        // MKVs with 70+ PGS subtitle tracks flood av_read_frame with subtitle packets,
+        // starving video/audio throughput. Marking unwanted streams as AVDISCARD_ALL
+        // lets the demuxer skip them entirely.
+        let streamCount = Int(ctx.pointee.nb_streams)
+        let audioStreamIndices = Set(audioTracks.map { $0.streamIndex })
+        var discardedCount = 0
+        for i in 0..<streamCount {
+            let streamIdx = Int32(i)
+            guard let stream = ctx.pointee.streams[i] else { continue }
+            if streamIdx == selectedVideoStream || audioStreamIndices.contains(streamIdx) {
+                stream.pointee.discard = AVDISCARD_DEFAULT
+            } else {
+                stream.pointee.discard = AVDISCARD_ALL
+                discardedCount += 1
+            }
+        }
+        if discardedCount > 0 {
+            let kept = streamCount - discardedCount
+            print("[FFmpegDemuxer] Stream discard: keeping \(kept) streams, discarding \(discardedCount) (subtitle/attachment)")
+        }
     }
 
     // MARK: - Private: Format Description Creation
@@ -866,12 +893,13 @@ final class FFmpegDemuxer: @unchecked Sendable {
     }
 
     /// Rebuild the video format description with a dvcC (Dolby Vision Configuration Record)
-    /// extension. Call after DV profile conversion to tell VideoToolbox the output DV profile.
+    /// Rebuild the video format description with cleaned parameter sets for single-layer playback.
+    /// Strips EL parameter sets, fixes VPS to signal single-layer, and optionally tags as dvh1.
     ///
     /// - Parameters:
-    ///   - dvProfile: Target DV profile (e.g., 8 for P8.1)
+    ///   - dvProfile: Target DV profile (e.g., 8 for P8.1). Pass nil to keep as hvc1.
     ///   - blCompatId: Base layer signal compatibility ID (1 = HDR10, 4 = HLG)
-    func rebuildFormatDescriptionWithDVCC(dvProfile: UInt8, blCompatId: UInt8) {
+    func rebuildFormatDescriptionForConversion(dvProfile: UInt8? = nil, blCompatId: UInt8 = 1) {
         guard let existingFD = videoFormatDescription else { return }
         guard let existingExts = CMFormatDescriptionGetExtensions(existingFD) as? [CFString: Any],
               let atoms = existingExts[kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms] as? [CFString: Any],
@@ -947,43 +975,57 @@ final class FFmpegDemuxer: @unchecked Sendable {
             return
         }
 
-        // Step 3: Extract the clean hvcC and build final DV format description
-        guard let cleanExts = CMFormatDescriptionGetExtensions(cleanFD) as? [CFString: Any],
-              var cleanAtoms = cleanExts[kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms] as? [CFString: Any] else {
-            print("[FFmpegDemuxer] Failed to extract clean hvcC extensions")
+        // Step 3: For DV, patch the FourCC in VerbatimISOSampleEntry from hvc1→dvh1.
+        // This is the approach that worked in DVSampleBufferPlayer — just changing the
+        // codec tag is sufficient to activate VideoToolbox's DV decoder. No dvcC/dvvC
+        // needed. Keep ALL extensions from the clean FD intact.
+        guard var cleanExts = CMFormatDescriptionGetExtensions(cleanFD) as? [CFString: Any] else {
+            print("[FFmpegDemuxer] Failed to extract clean extensions")
             return
         }
 
-        // Build dvcC (DOVIDecoderConfigurationRecord)
-        let dvLevel: UInt8 = 6  // Level 6 = 4K@24fps
-        let byte2 = (dvProfile << 1) | ((dvLevel >> 5) & 0x01)
-        let byte3 = ((dvLevel & 0x1F) << 3) | (1 << 2) | (0 << 1) | 1  // rpu=1 el=0 bl=1
-        let byte4 = (blCompatId << 4)
-        let dvcCData = Data([0x01, 0x00, byte2, byte3, byte4, 0x00, 0x00, 0x00])
-        cleanAtoms["dvcC" as CFString] = dvcCData as CFData
+        // Patch VerbatimISOSampleEntry: find 'hvc1' FourCC and replace with 'dvh1'
+        if dvProfile != nil, var verbatimData = cleanExts["VerbatimISOSampleEntry" as CFString] as? Data {
+            let hvc1: [UInt8] = [0x68, 0x76, 0x63, 0x31]  // 'hvc1'
+            let dvh1: [UInt8] = [0x64, 0x76, 0x68, 0x31]  // 'dvh1'
+            if let range = verbatimData.range(of: Data(hvc1)) {
+                verbatimData.replaceSubrange(range, with: dvh1)
+                cleanExts["VerbatimISOSampleEntry" as CFString] = verbatimData
+                print("[FFmpegDemuxer] Patched VerbatimISOSampleEntry: hvc1 → dvh1")
+            } else {
+                print("[FFmpegDemuxer] ⚠️ VerbatimISOSampleEntry has no hvc1 FourCC to patch")
+            }
+        }
 
-        // Merge with color metadata from original format description
-        var finalExts = existingExts
-        finalExts[kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms] = cleanAtoms
-        finalExts[kCMFormatDescriptionExtension_ColorPrimaries] = kCMFormatDescriptionColorPrimaries_ITU_R_2020
-        finalExts[kCMFormatDescriptionExtension_TransferFunction] = kCMFormatDescriptionTransferFunction_SMPTE_ST_2084_PQ
-        finalExts[kCMFormatDescriptionExtension_YCbCrMatrix] = kCMFormatDescriptionYCbCrMatrix_ITU_R_2020
+        // Add BT.2020 PQ color metadata
+        cleanExts[kCMFormatDescriptionExtension_ColorPrimaries] = kCMFormatDescriptionColorPrimaries_ITU_R_2020
+        cleanExts[kCMFormatDescriptionExtension_TransferFunction] = kCMFormatDescriptionTransferFunction_SMPTE_ST_2084_PQ
+        cleanExts[kCMFormatDescriptionExtension_YCbCrMatrix] = kCMFormatDescriptionYCbCrMatrix_ITU_R_2020
 
         let dims = CMVideoFormatDescriptionGetDimensions(existingFD)
+        let codecType: CMVideoCodecType = dvProfile != nil ? kCMVideoCodecType_DolbyVisionHEVC : kCMVideoCodecType_HEVC
         var finalDesc: CMFormatDescription?
         let status2 = CMVideoFormatDescriptionCreate(
             allocator: kCFAllocatorDefault,
-            codecType: kCMVideoCodecType_DolbyVisionHEVC,
+            codecType: codecType,
             width: dims.width, height: dims.height,
-            extensions: finalExts as CFDictionary,
+            extensions: cleanExts as CFDictionary,
             formatDescriptionOut: &finalDesc
         )
 
         if status2 == noErr, let result = finalDesc {
             videoFormatDescription = result
-            print("[FFmpegDemuxer] Rebuilt DV format description: dvh1 P\(dvProfile) level=\(dvLevel) bl_compat=\(blCompatId) (clean hvcC + dvcC)")
+            let fourCC = CMFormatDescriptionGetMediaSubType(result)
+            let fourCCStr = String(format: "%c%c%c%c",
+                (fourCC >> 24) & 0xFF, (fourCC >> 16) & 0xFF, (fourCC >> 8) & 0xFF, fourCC & 0xFF)
+            print("[FFmpegDemuxer] Rebuilt FD: codec=\(fourCCStr) (VerbatimISOSampleEntry patched)")
+            if let dvProfile {
+                print("[FFmpegDemuxer] DV format: dvh1 P\(dvProfile) bl_compat=\(blCompatId)")
+            } else {
+                print("[FFmpegDemuxer] Format: hvc1 (clean single-layer VPS, BT.2020 PQ)")
+            }
         } else {
-            print("[FFmpegDemuxer] Failed to create DV format description: \(status2)")
+            print("[FFmpegDemuxer] Failed to create format description: \(status2)")
         }
     }
 
@@ -1353,9 +1395,27 @@ final class FFmpegDemuxer: @unchecked Sendable {
     private func parseDolbyVisionConfig(_ configData: Data, source: String) -> Bool {
         guard configData.count >= 4 else { return false }
 
-        let profile = (configData[2] >> 1) & 0x7F
-        let level = ((configData[2] & 0x01) << 5) | ((configData[3] >> 3) & 0x1F)
-        let blCompat = configData.count >= 5 ? ((configData[4] >> 4) & 0x0F) : nil
+        // FFmpeg's AV_PKT_DATA_DOVI_CONF uses AVDOVIDecoderConfigurationRecord
+        // which has one byte per field (9 bytes total), NOT bitpacked ISO BMFF format.
+        // Detect by size: struct is 9 bytes, bitpacked ISO format is typically 4-5 bytes.
+        let profile: UInt8
+        let level: UInt8
+        let blCompat: UInt8?
+
+        if configData.count >= 8 {
+            // AVDOVIDecoderConfigurationRecord struct layout (one byte per field):
+            // [0] dv_version_major, [1] dv_version_minor, [2] dv_profile,
+            // [3] dv_level, [4] rpu_present_flag, [5] el_present_flag,
+            // [6] bl_present_flag, [7] dv_bl_signal_compatibility_id
+            profile = configData[2]
+            level = configData[3]
+            blCompat = configData[7]
+        } else {
+            // Bitpacked ISO BMFF DOVIDecoderConfigurationRecord (4-5 bytes)
+            profile = (configData[2] >> 1) & 0x7F
+            level = ((configData[2] & 0x01) << 5) | ((configData[3] >> 3) & 0x1F)
+            blCompat = configData.count >= 5 ? ((configData[4] >> 4) & 0x0F) : nil
+        }
 
         dvProfile = profile
         dvLevel = level

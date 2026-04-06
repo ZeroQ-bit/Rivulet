@@ -105,14 +105,8 @@ final class FMP4Demuxer {
     // MARK: - Media Segment Parsing
 
     /// Parse a media segment (moof + mdat) and return individual samples.
-    private var segmentParseCount = 0
-
     func parseMediaSegment(_ data: Data) throws -> [DemuxedSample] {
         let boxes = parseBoxes(data: data, offset: 0, length: data.count)
-
-        segmentParseCount += 1
-        if segmentParseCount == 1 {
-        }
 
         var samples: [DemuxedSample] = []
 

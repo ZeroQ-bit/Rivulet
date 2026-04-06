@@ -108,6 +108,22 @@ struct MediaTrack: Identifiable, Equatable, Sendable {
         }
     }
 
+    /// Normalize subtitle codec names to a canonical lowercase identifier so
+    /// Plex and FFmpeg names compare equal (e.g. "subrip" ↔ "srt",
+    /// "hdmv_pgs_subtitle" ↔ "pgs"). Used for matching, not display.
+    static func normalizedSubtitleCodec(_ codec: String?) -> String {
+        guard let codec = codec?.lowercased() else { return "unknown" }
+        switch codec {
+        case "subrip", "srt": return "srt"
+        case "ass", "ssa": return "ass"
+        case "pgs", "hdmv_pgs_subtitle", "pgssub": return "pgs"
+        case "dvdsub", "dvd_subtitle": return "dvdsub"
+        case "mov_text", "tx3g": return "mov_text"
+        case "webvtt", "vtt": return "webvtt"
+        default: return codec
+        }
+    }
+
     /// Inferred channel count from either explicit channels or parsed from name
     private var inferredChannels: Int? {
         // Use explicit channels if available

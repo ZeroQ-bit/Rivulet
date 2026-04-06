@@ -229,18 +229,6 @@ final class DirectPlayPipeline {
         if previousMaxVideoLookahead == nil {
             previousMaxVideoLookahead = renderer.maxVideoLookahead
         }
-        // DV content needs larger lookahead because VideoToolbox's DV decoder has
-        // variable processing time, causing bursty isReadyForMoreMediaData waits.
-        // Conversion sessions need the most buffer; non-conversion DV still needs
-        // more than plain HEVC to absorb 200-300ms decode stalls.
-        if enableDVConversion {
-            renderer.maxVideoLookahead = 5.0
-        } else if isDolbyVision {
-            renderer.maxVideoLookahead = 0.6
-        } else {
-            renderer.maxVideoLookahead = 0.35
-        }
-        print("[DirectPlay] Renderer lookahead set to \(String(format: "%.1f", renderer.maxVideoLookahead))s")
 
         print("[DirectPlay] Loading: \(url.lastPathComponent) (DV=\(isDolbyVision), conversion=\(enableDVConversion))")
 
@@ -266,45 +254,69 @@ final class DirectPlayPipeline {
               "videoFD=\(demuxer.videoFormatDescription != nil), " +
               "audioFD=\(demuxer.audioFormatDescription != nil)")
 
-        // Set up DV processing if needed
+        // Set DV lookahead AFTER opening demuxer so we use FFmpeg-detected DV state,
+        // not just the caller's hint (which may be wrong for P8 with profile=-1 metadata).
+        if demuxer.hasDolbyVision || enableDVConversion || isDolbyVision {
+            renderer.maxVideoLookahead = 0.6
+        } else {
+            renderer.maxVideoLookahead = 0.35
+        }
+        print("[DirectPlay] Renderer lookahead set to \(String(format: "%.1f", renderer.maxVideoLookahead))s")
+
+        // Set up DV format description and conversion
         if demuxer.hasDolbyVision && enableDVConversion {
+            // P7→P8.1 conversion: strip EL, convert RPUs, tag as dvh1
             requiresProfileConversion = true
             profileConverter = DoviProfileConverter()
             print("[DirectPlay] DV profile conversion enabled (P7/P8.6 → P8.1)")
-
-            // Rebuild the format description with a proper dvcC config box signalling
-            // Profile 8.1 with HDR10-compatible base layer. Without this, VideoToolbox
-            // gets a dvh1-tagged stream with no DV configuration and may use a slow or
-            // incorrect decode path (e.g., attempting dual-layer P7 processing).
-            demuxer.rebuildFormatDescriptionWithDVCC(dvProfile: 8, blCompatId: 1)
+            demuxer.rebuildFormatDescriptionForConversion(dvProfile: 8, blCompatId: 1)
+        } else if demuxer.hasDolbyVision {
+            // P8 native DV: tag as dvh1 so VideoToolbox activates DV decoder.
+            // No RPU conversion needed — VT handles P8 RPUs natively.
+            // EL stripping and VPS fix are no-ops for single-layer P8.
+            let profile = demuxer.dvProfile ?? 8
+            let blCompat = demuxer.dvBLCompatID ?? 1
+            demuxer.rebuildFormatDescriptionForConversion(dvProfile: profile, blCompatId: blCompat)
+            print("[DirectPlay] DV P\(profile) direct: tagged as dvh1 (no conversion)")
         }
 
         // Set up audio path.
-        // For DV conversion sessions, prefer a native passthrough track (AC3/EAC3/AAC...)
-        // to keep read-loop throughput high and avoid TrueHD software decode bottlenecks.
+        // For DV content, prefer a lightweight audio codec (AC3/EAC3/AAC) over heavy ones
+        // (TrueHD/DTS-HD) to keep read-loop throughput high. TrueHD 8ch decode is a major
+        // bottleneck — it can halve video throughput on 4K DV content.
         var selectedAudioTrack = demuxer.audioTracks.first(where: {
             $0.streamIndex == demuxer.selectedAudioStream
         })
 
+        var dvAudioFallbackToPassthrough = false
         if demuxer.hasDolbyVision,
            let current = selectedAudioTrack,
-           codecNeedsClientDecode(current.codecName),
-           let nativeFallback = preferredNativeAudioTrack(preferredLanguage: current.language) {
+           codecIsHeavyDecode(current.codecName),
+           let lighterTrack = preferredLighterAudioTrack(than: current) {
             do {
-                try demuxer.selectAudioStream(index: nativeFallback.streamIndex)
-                selectedAudioTrack = nativeFallback
+                try demuxer.selectAudioStream(index: lighterTrack.streamIndex)
+                selectedAudioTrack = lighterTrack
                 audioDecoder?.close()
                 audioDecoder = nil
                 let reason = enableDVConversion ? "DV conversion mode" : "DV direct play mode"
-                print("[DirectPlay] \(reason): switched audio stream \(current.streamIndex) " +
-                      "(\(current.codecName) \(current.channels)ch) → \(nativeFallback.streamIndex) " +
-                      "(\(nativeFallback.codecName) \(nativeFallback.channels)ch) to preserve throughput")
+                // If the lighter track has a native format description, use passthrough
+                // (zero CPU) instead of FFmpeg decode. AC3/EAC3 are natively supported.
+                if demuxer.audioFormatDescription != nil {
+                    dvAudioFallbackToPassthrough = true
+                    print("[DirectPlay] \(reason): switched audio stream \(current.streamIndex) " +
+                          "(\(current.codecName) \(current.channels)ch) → \(lighterTrack.streamIndex) " +
+                          "(\(lighterTrack.codecName) \(lighterTrack.channels)ch) passthrough (native FD)")
+                } else {
+                    print("[DirectPlay] \(reason): switched audio stream \(current.streamIndex) " +
+                          "(\(current.codecName) \(current.channels)ch) → \(lighterTrack.streamIndex) " +
+                          "(\(lighterTrack.codecName) \(lighterTrack.channels)ch) to preserve throughput")
+                }
             } catch {
-                print("[DirectPlay] Failed to switch to native DV audio fallback: \(error)")
+                print("[DirectPlay] Failed to switch to lighter DV audio: \(error)")
             }
         }
 
-        if let selectedAudioTrack, codecNeedsClientDecode(selectedAudioTrack.codecName) {
+        if !dvAudioFallbackToPassthrough, let selectedAudioTrack, codecNeedsClientDecode(selectedAudioTrack.codecName) {
             do {
                 // TrueHD/DTS has no CoreAudio format id in demuxer path.
                 try demuxer.selectAudioStreamForClientDecode(index: selectedAudioTrack.streamIndex)
@@ -863,20 +875,30 @@ final class DirectPlayPipeline {
             var maxVideoWallGapMs: Double = 0
             var longVideoWallGaps = 0
             var lateVideoObservationCount = 0
+            // Timing breakdown accumulators (reset every 120 frames)
+            var timingReadGapMs: Double = 0     // time between prev enqueue and current frame start (demux + audio dispatch)
+            var timingConversionMs: Double = 0  // DV conversion
+            var timingSampleMs: Double = 0      // CMSampleBuffer creation
+            var timingSyncMs: Double = 0        // MainActor sync prep
+            var timingEnqueueMs: Double = 0     // renderer enqueue (incl isReady wait)
+            var timingTotalMs: Double = 0       // total per-frame
+            var timingFrameCount: Int = 0
+            var lastVideoEnqueueEnd: CFAbsoluteTime = 0
             var lateVideoDropCount = 0
             var lateVideoSoftDropCount = 0
             var consecutiveLateVideoFrames = 0
             var lateVideoResyncCount = 0
             var lastLateVideoResyncWall: CFAbsoluteTime = 0
-            // DV conversion pipeline runs at ~80% real-time initially. Aggressive drop/resync
-            // cascades make this worse by flushing the decode pipeline repeatedly. Give the
-            // conversion pipeline generous headroom to absorb initial throughput deficit.
-            let lateVideoDropThreshold: TimeInterval = requiresConversion ? 3.0 : 0.75
-            let forceLateResyncThreshold: TimeInterval = requiresConversion ? 8.0 : 2.0
-            let maxConsecutiveLateFramesBeforeResync = requiresConversion ? 120 : 24 // 5s at 24fps
-            let lateResyncCooldown: TimeInterval = requiresConversion ? 2.0 : 0.5
-            let softLateDropThreshold: TimeInterval = requiresConversion ? 3.0 : 1.10
-            let maxSoftLateDropsPerBurst = requiresConversion ? 24 : 8
+            // HTTP streaming pipelines need ramp-up time. Aggressive drop/resync cascades
+            // during startup flush the decode pipeline repeatedly, creating a death spiral
+            // that prevents the pipeline from reaching steady-state throughput.
+            // DV content needs extra headroom due to VT's DV decoder variability.
+            let lateVideoDropThreshold: TimeInterval = hasDV ? 3.0 : 1.5
+            let forceLateResyncThreshold: TimeInterval = hasDV ? 8.0 : 4.0
+            let maxConsecutiveLateFramesBeforeResync = hasDV ? 120 : 48 // 2s at 24fps
+            let lateResyncCooldown: TimeInterval = hasDV ? 2.0 : 1.0
+            let softLateDropThreshold: TimeInterval = hasDV ? 3.0 : 2.0
+            let maxSoftLateDropsPerBurst = hasDV ? 24 : 12
             var slowVideoPipelineCount = 0
 
             // Health report state (emits every 5s)
@@ -960,14 +982,15 @@ final class DirectPlayPipeline {
                     return max(0, maxVPTS - anchor)
                 }()
                 // Non-conversion streams commonly expose ~200ms reordered lead at startup.
-                // Requiring more can stall preroll on some DV direct-play files.
-                let requiredPrerollLeadSeconds = requiresConversion ? 5.0 : 0.20
+                // DV conversion adds negligible per-frame overhead (~0.6ms) so preroll
+                // requirements are the same as non-conversion DV direct play.
+                let requiredPrerollLeadSeconds = 0.20
                 let videoReady = videoLeadSeconds >= requiredPrerollLeadSeconds
                 let waitedMs: Double = {
                     guard let start = prerollWaitStartWall else { return 0 }
                     return (CFAbsoluteTimeGetCurrent() - start) * 1000
                 }()
-                let prerollTimeout: Double = requiresConversion ? 5000 : 1000
+                let prerollTimeout: Double = 1000
                 let timedOut = hasAudioPath && waitedMs >= prerollTimeout
 
                 if timedOut {
@@ -1171,10 +1194,11 @@ final class DirectPlayPipeline {
 
                         // If the render clock has run ahead of packet PTS, attempt bounded
                         // clock recovery; only drop in emergency stale-frame cases.
-                        // DV conversion pipelines need a 30s startup grace period — the DV
-                        // decoder warms up slowly and aggressive drop/resync cascades make
-                        // things worse by repeatedly flushing the decode pipeline.
-                        let startupGracePeriod: TimeInterval = requiresConversion ? 60.0 : 0.0
+                        // ALL HTTP-streamed content needs a startup grace period — the read
+                        // loop takes time to reach steady-state throughput. Aggressive
+                        // drop/resync cascades during ramp-up create a death spiral.
+                        // DV content gets longer grace due to VT decoder warmup.
+                        let startupGracePeriod: TimeInterval = hasDV ? 60.0 : 15.0
                         let elapsedSinceStart = CFAbsoluteTimeGetCurrent() - videoDiagStartWall
                         let inGracePeriod = elapsedSinceStart < startupGracePeriod
                         if !isFirstVideoFrame && !inGracePeriod {
@@ -1186,7 +1210,7 @@ final class DirectPlayPipeline {
                                 consecutiveLateVideoFrames += 1
 
                                 let nowWall = CFAbsoluteTimeGetCurrent()
-                                let keyframeResyncThreshold = requiresConversion ? 48 : 4
+                                let keyframeResyncThreshold = hasDV ? 48 : 4
                                 let wantsKeyframeResync = packet.isKeyframe && consecutiveLateVideoFrames >= keyframeResyncThreshold
                                 let wantsForcedResync = lateness > forceLateResyncThreshold ||
                                     consecutiveLateVideoFrames >= maxConsecutiveLateFramesBeforeResync
@@ -1362,7 +1386,7 @@ final class DirectPlayPipeline {
                                     guard let anchor = prerollAnchorPTSSeconds, let maxPTS = prerollMaxPTSSeconds else { return 0 }
                                     return max(0, maxPTS - anchor)
                                 }()
-                                let requiredPrerollLeadSeconds = requiresConversion ? 5.0 : 0.20
+                                let requiredPrerollLeadSeconds = requiresConversion ? 5.0 : hasDV ? 0.6 : 0.20
                                 let waitedMs: Double = {
                                     guard let start = prerollWaitStartWall else { return 0 }
                                     return (CFAbsoluteTimeGetCurrent() - start) * 1000
@@ -1383,6 +1407,33 @@ final class DirectPlayPipeline {
                         if totalPipelineMs > 120 {
                             slowVideoPipelineCount += 1
                             healthSlowFramesSinceReport += 1
+                        }
+
+                        // Timing breakdown accumulation
+                        if lastVideoEnqueueEnd > 0 {
+                            timingReadGapMs += (frameWallStart - lastVideoEnqueueEnd) * 1000
+                        }
+                        timingConversionMs += (conversionEnd - conversionStart) * 1000
+                        timingSampleMs += (sampleCreateEnd - sampleCreateStart) * 1000
+                        timingSyncMs += (syncPrepEnd - syncPrepStart) * 1000
+                        timingEnqueueMs += (enqueueEnd - enqueueStart) * 1000
+                        timingTotalMs += totalPipelineMs
+                        timingFrameCount += 1
+                        lastVideoEnqueueEnd = enqueueEnd
+
+                        if timingFrameCount == 120 {
+                            let n = Double(timingFrameCount)
+                            print("[DirectPlayTiming] \(timingFrameCount)f avg: " +
+                                  "readGap=\(String(format: "%.1f", timingReadGapMs/n))ms " +
+                                  "convert=\(String(format: "%.1f", timingConversionMs/n))ms " +
+                                  "sample=\(String(format: "%.1f", timingSampleMs/n))ms " +
+                                  "sync=\(String(format: "%.1f", timingSyncMs/n))ms " +
+                                  "enqueue=\(String(format: "%.1f", timingEnqueueMs/n))ms " +
+                                  "total=\(String(format: "%.1f", timingTotalMs/n))ms " +
+                                  "budget=\(String(format: "%.1f", 1000.0/24.0))ms")
+                            timingReadGapMs = 0; timingConversionMs = 0; timingSampleMs = 0
+                            timingSyncMs = 0; timingEnqueueMs = 0; timingTotalMs = 0
+                            timingFrameCount = 0
                         }
 
                         // Video cadence diagnostics (ground truth for jump/stutter analysis).
@@ -1758,6 +1809,44 @@ final class DirectPlayPipeline {
         }
 
         return languageScoped.max(by: { nativeTrackScore($0) < nativeTrackScore($1) })
+    }
+
+    /// Whether a codec requires heavy CPU-intensive FFmpeg decode (TrueHD, DTS-HD).
+    /// These bottleneck the read loop on 4K DV content.
+    private func codecIsHeavyDecode(_ codec: String) -> Bool {
+        let normalized = Self.normalizedCodecIdentifier(codec)
+        let heavy = ["truehd", "mlp", "dts", "dca", "dtshd"]
+        return heavy.contains(where: { normalized == $0 || normalized.hasPrefix($0) })
+    }
+
+    /// Find a lighter audio track for DV throughput. Prefers same language,
+    /// prioritizes EAC3 > AC3 > AAC by channel count.
+    private func preferredLighterAudioTrack(than current: FFmpegTrackInfo) -> FFmpegTrackInfo? {
+        let candidates = demuxer.audioTracks.filter { track in
+            track.streamIndex != current.streamIndex && !codecIsHeavyDecode(track.codecName)
+        }
+        guard !candidates.isEmpty else { return nil }
+
+        // Prefer same language
+        let languageScoped: [FFmpegTrackInfo]
+        if let lang = current.language {
+            let matches = candidates.filter { $0.language == lang }
+            languageScoped = matches.isEmpty ? candidates : matches
+        } else {
+            languageScoped = candidates
+        }
+
+        // Score: prefer surround > stereo, EAC3 > AC3 > AAC
+        return languageScoped.max(by: { lighterTrackScore($0) < lighterTrackScore($1) })
+    }
+
+    private func lighterTrackScore(_ track: FFmpegTrackInfo) -> Int {
+        let normalized = Self.normalizedCodecIdentifier(track.codecName)
+        var score = Int(track.channels) * 10  // More channels = better
+        if normalized.hasPrefix("eac3") || normalized.hasPrefix("ec3") { score += 5 }
+        else if normalized.hasPrefix("ac3") { score += 3 }
+        else if normalized.hasPrefix("aac") { score += 1 }
+        return score
     }
 
     private func codecIsLikelyNative(_ codec: String) -> Bool {

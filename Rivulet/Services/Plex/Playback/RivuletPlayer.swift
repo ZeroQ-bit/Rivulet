@@ -194,10 +194,15 @@ final class RivuletPlayer: ObservableObject {
         )
 
         switch route {
-        case .avPlayerDirect(let url, let headers), .localRemux(let url, let headers, _):
-            // Legacy: treat both AVPlayer-direct and local-remux URLs as direct play
+        case .avPlayerDirect(let url, let headers):
             print("[RivuletPlayer] load(route:) → DirectPlay: \(url.lastPathComponent) DV=\(isDolbyVision)")
             try await loadDirectPlay(url: url, headers: headers, startTime: startTime, isDolbyVision: isDolbyVision, enableDVConversion: enableDVConversion)
+
+        case .localRemux(let url, let headers, let analysis):
+            let dv = isDolbyVision || analysis.needsDVConversion
+            let conversion = enableDVConversion || analysis.needsDVConversion
+            print("[RivuletPlayer] load(route:) → DirectPlay: \(url.lastPathComponent) DV=\(dv) conversion=\(conversion)")
+            try await loadDirectPlay(url: url, headers: headers, startTime: startTime, isDolbyVision: dv, enableDVConversion: conversion)
 
         case .hls(let url, let headers):
             print("[RivuletPlayer] load(route:) → HLS: \(url.lastPathComponent)")
@@ -310,7 +315,6 @@ final class RivuletPlayer: ObservableObject {
         // preroll mechanism. The synchronizer's currentTime tracks what's being heard
         // at the AirPlay receiver, so video displayed at currentTime is in sync.
         // Confirmed by WWDC22 Apple guidance and empirical testing (drift < 50ms).
-        renderer.disableAirPlayVideoCompensation()
 
         print(
             "[RivuletPlayer] AudioPolicy reason=\(reason) " +
@@ -816,14 +820,14 @@ final class RivuletPlayer: ObservableObject {
         let ffmpegSubs = ffmpegSubtitleTracks
         guard let plexTrack = plexSubtitleTracks.first(where: { $0.id == plexTrackId }) else { return false }
 
-        let plexCodec = Self.normalizeSubCodec(plexTrack.codec)
+        let plexCodec = MediaTrack.normalizedSubtitleCodec(plexTrack.codec)
 
         // Count how many Plex subs with the same codec appear before the selected one.
         // This gives us the "Nth track of this codec" position.
         var sameCodecPosition = 0
         for plex in plexSubtitleTracks {
             if plex.id == plexTrackId { break }
-            if Self.normalizeSubCodec(plex.codec) == plexCodec {
+            if MediaTrack.normalizedSubtitleCodec(plex.codec) == plexCodec {
                 sameCodecPosition += 1
             }
         }
@@ -831,7 +835,7 @@ final class RivuletPlayer: ObservableObject {
         // Find the Nth FFmpeg sub with matching codec
         var matchCount = 0
         for ffmpeg in ffmpegSubs {
-            if Self.normalizeSubCodec(ffmpeg.codecName) == plexCodec {
+            if MediaTrack.normalizedSubtitleCodec(ffmpeg.codecName) == plexCodec {
                 if matchCount == sameCodecPosition {
                     print("[RivuletPlayer] Mapped Plex subtitle \(plexTrackId) → FFmpeg stream \(ffmpeg.streamIndex) (\(ffmpeg.codecName))")
                     pipeline.selectSubtitleStream(ffmpegStreamIndex: ffmpeg.streamIndex)
@@ -845,20 +849,6 @@ final class RivuletPlayer: ObservableObject {
         print("[RivuletPlayer] No FFmpeg match for Plex subtitle \(plexTrackId) " +
               "(\(plexTrack.codec ?? "unknown") \(plexTrack.language ?? "")) — falling back to Plex URL")
         return false
-    }
-
-    /// Normalize subtitle codec names between Plex and FFmpeg naming conventions.
-    private static func normalizeSubCodec(_ codec: String?) -> String {
-        guard let codec = codec?.lowercased() else { return "unknown" }
-        switch codec {
-        case "subrip", "srt": return "srt"
-        case "ass", "ssa": return "ass"
-        case "pgs", "hdmv_pgs_subtitle", "pgssub": return "pgs"
-        case "dvdsub", "dvd_subtitle": return "dvdsub"
-        case "mov_text", "tx3g": return "mov_text"
-        case "webvtt", "vtt": return "webvtt"
-        default: return codec
-        }
     }
 
     /// Disable embedded subtitle reading.

@@ -27,23 +27,10 @@ struct RemuxAnalysis: Sendable {
 /// Analyzes media metadata to determine remux requirements.
 struct RemuxContentAnalyzer {
 
-    /// Audio codecs AVPlayer can play natively in fMP4/HLS
-    private static let avPlayerNativeAudioCodecs: Set<String> = [
-        "aac", "ac3", "eac3", "ec-3",
-        "flac", "alac",
-        "mp3", "mp2",
-    ]
-
-    /// Containers AVPlayer can open directly
+    /// Containers AVPlayer can open directly. Audio codec sets live in `ContentRouter`
+    /// (single source of truth) — this analyzer delegates codec checks to it.
     private static let avPlayerNativeContainers: Set<String> = [
         "mp4", "mov", "m4v",
-    ]
-
-    /// Audio codecs that require transcoding (AVPlayer can't decode them)
-    private static let transcodeRequiredAudioCodecs: Set<String> = [
-        "dts", "dca",
-        "dts-hd", "dtshd",
-        "truehd", "mlp",
     ]
 
     /// Analyze content to determine the optimal playback path.
@@ -55,9 +42,9 @@ struct RemuxContentAnalyzer {
         // Check container compatibility
         let containerNative = avPlayerNativeContainers.contains(container)
 
-        // Check audio compatibility
-        let audioNative = isNativeAudioCodec(audioCodec)
-        let audioNeedsTranscode = isTranscodeRequired(audioCodec)
+        // Check audio compatibility (delegates to ContentRouter for the codec sets)
+        let audioNative = ContentRouter.isNativeAudioCodec(audioCodec)
+        let audioNeedsTranscode = ContentRouter.requiresTranscode(audioCodec: audioCodec)
 
         // Check DV profile
         let dvProfile = detectDVProfile(from: metadata)
@@ -104,24 +91,6 @@ struct RemuxContentAnalyzer {
             return audioStream.codec
         }
         return nil
-    }
-
-    private static func isNativeAudioCodec(_ codec: String) -> Bool {
-        let normalized = codec.lowercased()
-        return avPlayerNativeAudioCodecs.contains(normalized) ||
-               avPlayerNativeAudioCodecs.contains(where: { normalized.hasPrefix($0) })
-    }
-
-    private static func isTranscodeRequired(_ codec: String) -> Bool {
-        let normalized = codec.lowercased()
-            .replacingOccurrences(of: "-", with: "")
-            .replacingOccurrences(of: "_", with: "")
-        return transcodeRequiredAudioCodecs.contains(where: { target in
-            let normalizedTarget = target
-                .replacingOccurrences(of: "-", with: "")
-                .replacingOccurrences(of: "_", with: "")
-            return normalized == normalizedTarget || normalized.hasPrefix(normalizedTarget)
-        })
     }
 
     private static func detectDVProfile(from metadata: PlexMetadata) -> UInt8? {

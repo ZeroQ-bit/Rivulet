@@ -40,21 +40,9 @@ final class SampleBufferRenderer {
     private var engineConfigObserver: NSObjectProtocol?
     private var audioEngineVideoLatency: CMTime = .zero
 
-    // MARK: - AirPlay Video Compensation (Sample-Buffer Audio Path)
-
-    /// When non-zero, video display is delayed by this amount to compensate
-    /// for AirPlay audio transport latency. Video frames are held in a FIFO
-    /// queue and released "just in time" so they appear on screen when the
-    /// corresponding audio arrives at the HomePod.
-    nonisolated(unsafe) private var airPlayVideoDelay: CMTime = .zero
-
-    /// FIFO queue holding video frames for the AirPlay delay period.
-    private var videoDelayQueue: [CMSampleBuffer] = []
-
-    /// Whether the video delay queue is actively buffering frames.
-    nonisolated(unsafe) private(set) var isVideoDelayQueueActive = false
-
     /// Independent video clock used while the audio engine owns audio playback.
+    /// AVSampleBufferRenderSynchronizer handles AirPlay latency natively, so no
+    /// manual video delay queue is needed for the sample-buffer audio path.
     nonisolated(unsafe) private var videoTimebase: CMTimebase?
 
     // MARK: - Configuration
@@ -198,7 +186,6 @@ final class SampleBufferRenderer {
         audioEngine = nil
         pcmAudioFormat = nil
         audioEngineVideoLatency = .zero
-        airPlayVideoDelay = .zero
 
         if let engineConfigObserver {
             NotificationCenter.default.removeObserver(engineConfigObserver)
@@ -210,25 +197,6 @@ final class SampleBufferRenderer {
         useAudioEngine = false
         audioRenderer.flush()
         print("[Renderer] Audio engine mode disabled — reverted to sample-buffer audio")
-    }
-
-    // MARK: - AirPlay Video Delay (Legacy)
-
-    /// Reset any video compensation state. Called during audio policy changes.
-    /// Note: AirPlay A/V sync is handled automatically by AVSampleBufferRenderSynchronizer
-    /// via delaysRateChangeUntilHasSufficientMediaData — no explicit video delay needed.
-    func disableAirPlayVideoCompensation() {
-        guard airPlayVideoDelay > .zero || isVideoDelayQueueActive else { return }
-        guard !useAudioEngine else { return }
-
-        airPlayVideoDelay = .zero
-        isVideoDelayQueueActive = false
-
-        displayLayer.controlTimebase = renderSynchronizer.timebase
-        videoTimebase = nil
-        videoDelayQueue.removeAll()
-
-        print("[Renderer] AirPlay video compensation disabled")
     }
 
     private func configureAudioEngine(from sampleBuffer: CMSampleBuffer) -> Bool {
@@ -341,12 +309,9 @@ final class SampleBufferRenderer {
         return renderSynchronizer.currentTime()
     }
 
-    /// Media time currently visible on screen. Lags behind `currentTime`
-    /// by the AirPlay delay when the delay queue is active.
+    /// Media time currently visible on screen. Same as `currentTime` since
+    /// AirPlay latency is handled natively by AVSampleBufferRenderSynchronizer.
     nonisolated var displayTime: TimeInterval {
-        if isVideoDelayQueueActive && airPlayVideoDelay > .zero {
-            return max(0, currentTime - CMTimeGetSeconds(airPlayVideoDelay))
-        }
         return currentTime
     }
 
@@ -512,45 +477,21 @@ final class SampleBufferRenderer {
         let sampleTime = CMTimeGetSeconds(samplePTS)
 
         // Lookahead pacing: limit how far the read loop gets ahead of playback.
-        // When the delay queue is active, increase the lookahead by the delay
-        // so the queue can pre-fill (~2s of frames) without blocking the loop.
         if !bypassLookahead {
-            let effectiveLookahead = isVideoDelayQueueActive
-                ? maxVideoLookahead + CMTimeGetSeconds(airPlayVideoDelay)
-                : maxVideoLookahead
-
             while !Task.isCancelled {
                 let syncTime = currentTime
                 let ahead = sampleTime - syncTime
 
-                if ahead <= effectiveLookahead || syncTime < 0.1 {
+                if ahead <= maxVideoLookahead || syncTime < 0.1 {
                     break
                 }
 
-                let sleepTime = min(ahead - effectiveLookahead, 0.1)
+                let sleepTime = min(ahead - maxVideoLookahead, 0.1)
                 try? await Task.sleep(nanoseconds: UInt64(sleepTime * 1_000_000_000))
             }
         }
 
         guard !Task.isCancelled else { return }
-
-        // AirPlay video compensation: the display layer's controlTimebase is
-        // offset behind the synchronizer, so it manages all timing internally.
-        // Use an overflow queue to prevent blocking the read loop when the
-        // display layer's internal buffer is full.
-        if isVideoDelayQueueActive {
-            // Drain pending overflow frames first (FIFO)
-            while !videoDelayQueue.isEmpty && displayLayer.isReadyForMoreMediaData {
-                displayLayer.enqueue(videoDelayQueue.removeFirst())
-            }
-            // Enqueue current frame directly if possible, otherwise overflow
-            if videoDelayQueue.isEmpty && displayLayer.isReadyForMoreMediaData {
-                displayLayer.enqueue(sampleBuffer)
-            } else {
-                videoDelayQueue.append(sampleBuffer)
-            }
-            return
-        }
 
         if !displayLayer.isReadyForMoreMediaData {
             let stallStart = CFAbsoluteTimeGetCurrent()
@@ -1066,7 +1007,6 @@ final class SampleBufferRenderer {
 
     /// Flush both video and audio buffers (for seeking).
     func flush() {
-        videoDelayQueue.removeAll()
         displayLayer.flushAndRemoveImage()
 
         if useAudioEngine {
