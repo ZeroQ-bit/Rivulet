@@ -2,8 +2,7 @@
 //  MusicQueueCarousel.swift
 //  Rivulet
 //
-//  Horizontal queue carousel for the Now Playing screen.
-//  Current track centered (larger), previous left, upcoming right.
+//  Horizontal queue carousel for Apple Music tvOS-style Now Playing.
 //
 
 import SwiftUI
@@ -11,103 +10,67 @@ import SwiftUI
 struct MusicQueueCarousel: View {
     @ObservedObject var musicQueue: MusicQueue
 
-    private let cardSize: CGFloat = 120
-    private let currentCardSize: CGFloat = 160
-    private let spacing: CGFloat = 24
+    private let cardSize: CGFloat = 304
+    private let spacing: CGFloat = 34
+
+    private var items: [PlexMetadata] {
+        guard let current = musicQueue.currentTrack else { return [] }
+        return [current] + musicQueue.queue
+    }
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             LazyHStack(spacing: spacing) {
-                // History (previous tracks)
-                ForEach(Array(musicQueue.history.enumerated()), id: \.element.ratingKey) { index, track in
-                    carouselCard(track: track, isCurrent: false)
-                        .onSubmit {
-                            jumpToHistoryItem(at: index)
-                        }
-                }
-
-                // Current track (larger)
-                if let current = musicQueue.currentTrack {
-                    carouselCard(track: current, isCurrent: true)
-                }
-
-                // Queue (upcoming tracks)
-                ForEach(Array(musicQueue.queue.enumerated()), id: \.element.ratingKey) { index, track in
-                    carouselCard(track: track, isCurrent: false)
-                        .onSubmit {
-                            musicQueue.jumpToQueueItem(at: index)
-                        }
+                ForEach(Array(items.enumerated()), id: \.offset) { offset, track in
+                    carouselCard(track: track, isCurrent: offset == 0, queueIndex: offset - 1)
                 }
             }
-            .padding(.horizontal, 80)
+            .padding(.horizontal, 220)
+            .padding(.vertical, 12)
             .scrollTargetLayout()
         }
         .scrollTargetBehavior(.viewAligned)
-        .frame(height: currentCardSize + 60)
+        .frame(height: 410)
     }
 
-    // MARK: - Card
-
-    @ViewBuilder
-    private func carouselCard(track: PlexMetadata, isCurrent: Bool) -> some View {
-        let size = isCurrent ? currentCardSize : cardSize
-
+    private func carouselCard(track: PlexMetadata, isCurrent: Bool, queueIndex: Int) -> some View {
         Button {
-            // No-op for current, jump for others handled via onSubmit
+            if !isCurrent, queueIndex >= 0 {
+                musicQueue.jumpToQueueItem(at: queueIndex)
+            }
         } label: {
             VStack(spacing: 10) {
-                // Album art
-                ZStack {
-                    trackArtView(for: track)
-                        .frame(width: size, height: size)
-                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                .strokeBorder(
-                                    isCurrent ? .white.opacity(0.5) : .clear,
-                                    lineWidth: isCurrent ? 2 : 0
-                                )
-                        )
-                        .shadow(
-                            color: isCurrent ? .white.opacity(0.15) : .clear,
-                            radius: isCurrent ? 12 : 0
-                        )
+                trackArtView(for: track)
+                    .frame(width: cardSize, height: cardSize)
+                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .shadow(color: .black.opacity(0.25), radius: 12, y: 8)
 
-                    // Playback indicator on current track
-                    if isCurrent && musicQueue.playbackState == .playing {
-                        VStack {
-                            Spacer()
-                            HStack {
-                                Spacer()
-                                PlaybackIndicator(isPlaying: true, size: .small)
-                                    .padding(8)
-                                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 6))
-                            }
+                VStack(spacing: 4) {
+                    HStack(spacing: 8) {
+                        if isCurrent && musicQueue.playbackState == .playing {
+                            PlaybackIndicator(isPlaying: true, size: .small)
                         }
-                        .frame(width: size, height: size)
-                        .padding(6)
+
+                        Text(track.title ?? "Unknown")
+                            .font(.system(size: 20, weight: .medium))
+                            .lineLimit(1)
                     }
+                    .frame(width: cardSize)
+                    .multilineTextAlignment(.center)
+
+                    Text(track.grandparentTitle ?? track.parentTitle ?? "")
+                        .font(.system(size: 17))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .frame(width: cardSize)
+                        .multilineTextAlignment(.center)
                 }
-
-                // Title
-                Text(track.title ?? "Unknown")
-                    .font(.system(size: isCurrent ? 16 : 14, weight: .medium))
-                    .foregroundStyle(.white.opacity(isCurrent ? 0.9 : 0.7))
-                    .lineLimit(1)
-
-                // Artist
-                Text(track.grandparentTitle ?? track.parentTitle ?? "")
-                    .font(.system(size: isCurrent ? 14 : 12))
-                    .foregroundStyle(.white.opacity(0.5))
-                    .lineLimit(1)
             }
-            .frame(width: size + 20)
+            .opacity(isCurrent ? 1 : 0.96)
         }
-        .buttonStyle(.plain)
-        .opacity(isCurrent ? 1.0 : 0.7)
+        .buttonStyle(.card)
+        .disabled(isCurrent)
     }
-
-    // MARK: - Art
 
     private func trackArtView(for track: PlexMetadata) -> some View {
         Group {
@@ -115,7 +78,9 @@ struct MusicQueueCarousel: View {
                 CachedAsyncImage(url: url) { phase in
                     switch phase {
                     case .success(let image):
-                        image.resizable().aspectRatio(contentMode: .fill)
+                        image
+                            .resizable()
+                            .aspectRatio(contentMode: .fill)
                     default:
                         artPlaceholder
                     }
@@ -127,12 +92,18 @@ struct MusicQueueCarousel: View {
     }
 
     private var artPlaceholder: some View {
-        Rectangle()
-            .fill(Color(white: 0.15))
+        RoundedRectangle(cornerRadius: 12, style: .continuous)
+            .fill(
+                LinearGradient(
+                    colors: [Color.white.opacity(0.12), Color.white.opacity(0.05)],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+            )
             .overlay {
                 Image(systemName: "music.note")
-                    .font(.system(size: 32, weight: .ultraLight))
-                    .foregroundStyle(.white.opacity(0.3))
+                    .font(.system(size: 46, weight: .regular))
+                    .foregroundStyle(.secondary)
             }
     }
 
@@ -141,25 +112,5 @@ struct MusicQueueCarousel: View {
               let serverURL = PlexAuthManager.shared.selectedServerURL,
               let token = PlexAuthManager.shared.selectedServerToken else { return nil }
         return URL(string: "\(serverURL)\(thumb)?X-Plex-Token=\(token)")
-    }
-
-    // MARK: - Actions
-
-    private func jumpToHistoryItem(at index: Int) {
-        guard let current = musicQueue.currentTrack else { return }
-
-        // Put current track back at front of queue
-        var newQueue = [current] + musicQueue.queue
-
-        // Put tracks after this history item back into queue
-        let skipped = Array(musicQueue.history.suffix(from: index + 1))
-        newQueue = skipped + newQueue
-
-        let track = musicQueue.history[index]
-
-        // Update state
-        musicQueue.history = Array(musicQueue.history.prefix(index))
-        musicQueue.queue = newQueue
-        musicQueue.playNow(track: track)
     }
 }

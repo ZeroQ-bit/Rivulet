@@ -981,16 +981,28 @@ final class DirectPlayPipeline {
                     guard let anchor = prerollAnchorPTSSeconds, let maxVPTS = prerollMaxVideoPTSSeconds else { return 0 }
                     return max(0, maxVPTS - anchor)
                 }()
-                // Non-conversion streams commonly expose ~200ms reordered lead at startup.
-                // DV conversion adds negligible per-frame overhead (~0.6ms) so preroll
-                // requirements are the same as non-conversion DV direct play.
-                let requiredPrerollLeadSeconds = 0.20
+                // Required video lead before the clock starts. DV/HDR content from Plex
+                // takes several seconds for the HTTP read loop to warm up — without enough
+                // initial buffer the clock starts before the read loop can sustain realtime
+                // and the first ~10 s look choppy. Buffering more before playback turns the
+                // jank into a slightly longer "loading" period.
+                let requiredPrerollLeadSeconds: Double = {
+                    if requiresConversion { return 5.0 }
+                    if hasDV { return 1.5 }
+                    return 0.20
+                }()
                 let videoReady = videoLeadSeconds >= requiredPrerollLeadSeconds
                 let waitedMs: Double = {
                     guard let start = prerollWaitStartWall else { return 0 }
                     return (CFAbsoluteTimeGetCurrent() - start) * 1000
                 }()
-                let prerollTimeout: Double = 1000
+                // Generous timeout for DV/HDR so we actually wait for the lead instead of
+                // bailing out after 1 s with an underfilled buffer.
+                let prerollTimeout: Double = {
+                    if requiresConversion { return 8000 }
+                    if hasDV { return 5000 }
+                    return 1000
+                }()
                 let timedOut = hasAudioPath && waitedMs >= prerollTimeout
 
                 if timedOut {
@@ -1386,7 +1398,11 @@ final class DirectPlayPipeline {
                                     guard let anchor = prerollAnchorPTSSeconds, let maxPTS = prerollMaxPTSSeconds else { return 0 }
                                     return max(0, maxPTS - anchor)
                                 }()
-                                let requiredPrerollLeadSeconds = requiresConversion ? 5.0 : hasDV ? 0.6 : 0.20
+                                let requiredPrerollLeadSeconds: Double = {
+                                    if requiresConversion { return 5.0 }
+                                    if hasDV { return 1.5 }
+                                    return 0.20
+                                }()
                                 let waitedMs: Double = {
                                     guard let start = prerollWaitStartWall else { return 0 }
                                     return (CFAbsoluteTimeGetCurrent() - start) * 1000

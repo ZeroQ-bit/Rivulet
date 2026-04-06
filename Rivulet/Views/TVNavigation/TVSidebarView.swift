@@ -43,6 +43,11 @@ struct TVSidebarView: View {
         profileManager.selectedUser?.displayName ?? authManager.username ?? "Account"
     }
 
+    private var isMusicLibrarySelected: Bool {
+        guard case .library(let key) = selectedTab else { return false }
+        return dataStore.libraries.first(where: { $0.key == key })?.isMusicLibrary ?? false
+    }
+
     private var tabSelection: Binding<SidebarTab> {
         Binding(
             get: { selectedTab },
@@ -233,7 +238,7 @@ struct TVSidebarView: View {
             }
         }
         .tabViewStyle(.sidebarAdaptable)
-        .toolbarVisibility(nestedNavState.isNested ? .hidden : .automatic, for: .tabBar)
+        .toolbarVisibility((nestedNavState.isNested || isMusicLibrarySelected) ? .hidden : .automatic, for: .tabBar)
         .animation(.easeInOut(duration: 0.18), value: nestedNavState.isNested)
         .onChange(of: nestedNavState.isNested) { _, isNested in
             guard isNested else { return }

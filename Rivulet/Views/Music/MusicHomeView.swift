@@ -2,20 +2,23 @@
 //  MusicHomeView.swift
 //  Rivulet
 //
-//  Music library home matching Apple Music tvOS Library tab.
-//  Left sidebar for categories, right content area with album/artist grids.
-//  Uses the same MediaPosterCard and grid patterns as PlexLibraryView.
+//  Apple Music tvOS-inspired music library built from native tvOS controls.
 //
 
 import SwiftUI
 
-/// Category shown in the left sidebar of the music library
+private enum MusicSidebarFocusTarget: Hashable {
+    case category(MusicLibraryCategory)
+    case genre(String)
+}
+
 enum MusicLibraryCategory: String, Hashable, CaseIterable {
     case recentlyAdded
     case playlists
     case artists
     case albums
     case songs
+    case composers
 
     var title: String {
         switch self {
@@ -24,6 +27,7 @@ enum MusicLibraryCategory: String, Hashable, CaseIterable {
         case .artists: return "Artists"
         case .albums: return "Albums"
         case .songs: return "Songs"
+        case .composers: return "Composers"
         }
     }
 
@@ -34,7 +38,16 @@ enum MusicLibraryCategory: String, Hashable, CaseIterable {
         case .artists: return "music.mic"
         case .albums: return "square.stack"
         case .songs: return "music.note"
+        case .composers: return "music.quarternote.3"
         }
+    }
+
+    var showsHeader: Bool {
+        self != .recentlyAdded
+    }
+
+    var supportsPlaybackActions: Bool {
+        self != .playlists && self != .composers
     }
 }
 
@@ -43,13 +56,11 @@ struct MusicHomeView: View {
     let libraryTitle: String
 
     @Environment(\.nestedNavigationState) private var nestedNavState
-    @Environment(\.uiScale) private var scale
 
     @ObservedObject private var authManager = PlexAuthManager.shared
     @ObservedObject private var dataStore = PlexDataStore.shared
     @ObservedObject private var musicQueue = MusicQueue.shared
 
-    // Data
     @State private var recentlyAddedItems: [PlexMetadata] = []
     @State private var allArtists: [PlexMetadata] = []
     @State private var allAlbums: [PlexMetadata] = []
@@ -59,24 +70,34 @@ struct MusicHomeView: View {
     @State private var isLoading = false
     @State private var loadedCategories: Set<MusicLibraryCategory> = []
 
-    // Navigation
     @State private var selectedCategory: MusicLibraryCategory = .recentlyAdded
+    @State private var selectedGenre: String?
     @State private var selectedItem: PlexMetadata?
+    @State private var focusedArtworkItem: PlexMetadata?
+    @State private var albumSortAscending = true
+    @State private var songSortAscending = true
+    @State private var contentResetID = UUID()
+
+    @FocusState private var focusedSidebarTarget: MusicSidebarFocusTarget?
 
     private let networkManager = PlexNetworkManager.shared
-
-    // Grid columns — same as PlexLibraryView
-    private var columns: [GridItem] {
-        let minWidth = ScaledDimensions.gridMinWidth * scale
-        let maxWidth = ScaledDimensions.gridMaxWidth * scale
-        return [GridItem(.adaptive(minimum: minWidth, maximum: maxWidth), spacing: ScaledDimensions.gridSpacing)]
-    }
+    private let gridColumns = Array(repeating: GridItem(.fixed(200), spacing: 30, alignment: .top), count: 4)
 
     var body: some View {
         NavigationStack {
-            HStack(spacing: 0) {
-                sidebar
-                contentArea
+            ZStack {
+                backgroundView
+
+                HStack(spacing: 0) {
+                    sidebar
+                    contentArea
+                }
+                .frame(maxWidth: 1140, maxHeight: .infinity, alignment: .topLeading)
+                .padding(.leading, 54)
+                .padding(.trailing, 72)
+                .padding(.top, 72)
+                .padding(.bottom, 34)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             }
             .navigationDestination(item: $selectedItem) { item in
                 if item.type == "artist" {
@@ -94,384 +115,502 @@ struct MusicHomeView: View {
         .task {
             await loadRecentlyAdded()
             await loadGenres()
+            applyLandingState()
+        }
+        .onAppear {
+            applyLandingState()
         }
     }
 
-    // MARK: - Sidebar
+    private var backgroundView: some View {
+        ZStack {
+            LinearGradient(
+                colors: [
+                    Color(red: 0.29, green: 0.33, blue: 0.39),
+                    Color(red: 0.18, green: 0.21, blue: 0.26),
+                    Color(red: 0.09, green: 0.10, blue: 0.13)
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+
+            if let backgroundArtworkURL {
+                CachedAsyncImage(url: backgroundArtworkURL) { phase in
+                    switch phase {
+                    case .success(let image):
+                        image
+                            .resizable()
+                            .aspectRatio(contentMode: .fill)
+                    default:
+                        Color.clear
+                    }
+                }
+                .saturation(1.15)
+                .scaleEffect(1.45)
+                .blur(radius: 72)
+                .opacity(0.3)
+                .overlay {
+                    LinearGradient(
+                        colors: [Color.black.opacity(0.12), Color.black.opacity(0.42)],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                }
+                .mask {
+                    LinearGradient(
+                        colors: [
+                            Color.clear,
+                            Color.white.opacity(0.32),
+                            Color.white
+                        ],
+                        startPoint: .leading,
+                        endPoint: .trailing
+                    )
+                }
+                .ignoresSafeArea()
+            }
+
+            LinearGradient(
+                colors: [
+                    Color.white.opacity(0.05),
+                    Color.clear,
+                    Color.black.opacity(0.24)
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+
+            HStack(spacing: 0) {
+                LinearGradient(
+                    colors: [Color.black.opacity(0.26), Color.black.opacity(0.06), Color.clear],
+                    startPoint: .leading,
+                    endPoint: .trailing
+                )
+                .frame(width: 250)
+
+                Spacer(minLength: 0)
+            }
+        }
+        .ignoresSafeArea()
+    }
 
     private var sidebar: some View {
-        ScrollView(.vertical, showsIndicators: false) {
-            VStack(alignment: .leading, spacing: 8) {
-                // Categories
+        VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: 6) {
                 ForEach(MusicLibraryCategory.allCases, id: \.self) { category in
-                    Button {
-                        selectedCategory = category
-                        Task { await loadCategoryData(category) }
-                    } label: {
-                        Label(category.title, systemImage: category.icon)
-                            .font(.system(size: 29, weight: selectedCategory == category ? .semibold : .regular))
-                            .foregroundStyle(selectedCategory == category ? .white : .secondary)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.vertical, 10)
-                            .padding(.horizontal, 16)
-                            .background(
-                                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                    .fill(selectedCategory == category ? .white.opacity(0.1) : .clear)
-                            )
+                    MusicSidebarRow(
+                        title: category.title,
+                        isSelected: selectedCategory == category
+                        ,
+                        target: .category(category),
+                        focus: $focusedSidebarTarget
+                    ) {
+                        selectCategory(category)
                     }
-                    .buttonStyle(.plain)
                 }
+            }
+            .padding(.top, 4)
 
-                // Genres section
-                if !genres.isEmpty {
+            if !genres.isEmpty {
+                Divider()
+                    .overlay(Color.white.opacity(0.12))
+                    .padding(.top, 22)
+                    .padding(.bottom, 18)
+
+                VStack(alignment: .leading, spacing: 10) {
                     Text("Genres")
-                        .font(.system(size: 22, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.4))
-                        .padding(.top, 28)
-                        .padding(.bottom, 4)
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.45))
+                        .padding(.bottom, 2)
 
                     ForEach(genres, id: \.self) { genre in
-                        Button {
-                            // Genre filtering — future feature
-                        } label: {
-                            Text(genre)
-                                .font(.system(size: 29))
-                                .frame(maxWidth: .infinity, alignment: .leading)
+                        MusicSidebarRow(
+                            title: genre,
+                            isSelected: selectedGenre == genre
+                            ,
+                            target: .genre(genre),
+                            focus: $focusedSidebarTarget
+                        ) {
+                            withAnimation(.easeInOut(duration: 0.2)) {
+                                selectedGenre = selectedGenre == genre ? nil : genre
+                                contentResetID = UUID()
+                            }
                         }
                     }
                 }
             }
-            .padding(40)
-        }
-        .frame(width: 400)
-        .focusSection()
-    }
 
-    // MARK: - Content Area
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 18)
+        .frame(width: 212)
+        .background(
+            RoundedRectangle(cornerRadius: 26, style: .continuous)
+                .fill(Color.black.opacity(0.12))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 26, style: .continuous)
+                .stroke(Color.white.opacity(0.04), lineWidth: 1)
+        )
+        .frame(maxHeight: .infinity, alignment: .topLeading)
+        .defaultFocus($focusedSidebarTarget, .category(.recentlyAdded))
+    }
 
     private var contentArea: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // Header
-            contentHeader
-                .padding(.horizontal, ScaledDimensions.rowHorizontalPadding)
-                .padding(.top, 40)
-                .padding(.bottom, 20)
+            if selectedCategory.showsHeader {
+                contentHeader
+                    .padding(.horizontal, 28)
+                    .padding(.top, 6)
+                    .padding(.bottom, 26)
+            } else {
+                Spacer()
+                    .frame(height: 8)
+            }
 
-            // Grid content
-            switch selectedCategory {
-            case .recentlyAdded: albumGrid(items: recentlyAddedItems)
-            case .playlists:     albumGrid(items: playlists)
-            case .artists:       artistGrid
-            case .albums:        albumGrid(items: allAlbums)
-            case .songs:         songsList
+            Group {
+                switch selectedCategory {
+                case .recentlyAdded:
+                    albumGrid(items: displayedRecentlyAdded, loading: isLoading)
+                case .playlists:
+                    albumGrid(items: displayedPlaylists, loading: !loadedCategories.contains(.playlists))
+                case .artists:
+                    artistGrid
+                case .albums:
+                    albumGrid(items: displayedAlbums, loading: !loadedCategories.contains(.albums))
+                case .songs:
+                    songsList
+                case .composers:
+                    emptyState(
+                        title: "No composers",
+                        subtitle: "Composer browsing is not available for this library yet."
+                    )
+                }
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .focusSection()
+        .frame(width: 894)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     private var contentHeader: some View {
-        HStack(alignment: .center) {
-            VStack(alignment: .leading, spacing: 2) {
+        HStack(alignment: .center, spacing: 20) {
+            VStack(alignment: .leading, spacing: 4) {
                 Text(selectedCategory.title)
-                    .font(.system(size: 28, weight: .bold))
-                    .foregroundStyle(.white)
+                    .font(.system(size: 29, weight: .bold))
+                    .lineLimit(1)
 
-                Text(contentCountText)
-                    .font(.system(size: 16))
-                    .foregroundStyle(.white.opacity(0.5))
+                if !contentCountText.isEmpty {
+                    Text(contentCountText)
+                        .font(.system(size: 14))
+                        .foregroundStyle(.white.opacity(0.55))
+                }
             }
 
             Spacer()
 
-            if selectedCategory != .playlists {
-                HStack(spacing: 12) {
+            HStack(spacing: 12) {
+                if selectedCategory.supportsPlaybackActions {
                     Button {
                         Task { await playAll(shuffled: false) }
                     } label: {
                         Label("Play", systemImage: "play.fill")
-                            .font(.system(size: 17, weight: .semibold))
                     }
                     .buttonStyle(.borderedProminent)
-                    .tint(.white.opacity(0.15))
+                    .buttonBorderShape(.capsule)
+                    .tint(Color.white.opacity(0.16))
 
                     Button {
                         Task { await playAll(shuffled: true) }
                     } label: {
                         Label("Shuffle", systemImage: "shuffle")
-                            .font(.system(size: 17, weight: .semibold))
                     }
                     .buttonStyle(.borderedProminent)
-                    .tint(.white.opacity(0.15))
+                    .buttonBorderShape(.capsule)
+                    .tint(Color.white.opacity(0.13))
+                }
+
+                if selectedCategory == .albums || selectedCategory == .songs {
+                    Button {
+                        toggleSortDirection()
+                    } label: {
+                        Image(systemName: currentSortIcon)
+                    }
+                    .buttonStyle(.bordered)
+                    .buttonBorderShape(.circle)
+                    .tint(Color.white.opacity(0.14))
                 }
             }
         }
     }
 
-    // MARK: - Album / Recently Added Grid
-
-    private func albumGrid(items: [PlexMetadata]) -> some View {
+    private func albumGrid(items: [PlexMetadata], loading: Bool) -> some View {
         ScrollView(.vertical, showsIndicators: false) {
-            if items.isEmpty && isLoading {
+            if loading {
                 ProgressView()
-                    .frame(maxWidth: .infinity, minHeight: 300)
+                    .frame(maxWidth: .infinity, minHeight: 320)
             } else if items.isEmpty {
-                emptyState
+                emptyState(title: "No items", subtitle: selectedGenre == nil ? "" : "Try another genre.")
             } else {
-                LazyVGrid(columns: columns, spacing: ScaledDimensions.rowItemSpacing) {
-                    ForEach(Array(items.enumerated()), id: \.element.ratingKey) { _, item in
-                        Button {
+                LazyVGrid(columns: gridColumns, alignment: .leading, spacing: 30) {
+                    ForEach(items, id: \.ratingKey) { item in
+                        MusicPosterCard(item: item, style: .square, onFocusChanged: { isFocused in
+                            if isFocused {
+                                focusedArtworkItem = item
+                            } else if focusedArtworkItem?.ratingKey == item.ratingKey {
+                                focusedArtworkItem = nil
+                            }
+                        }) {
                             selectedItem = item
-                        } label: {
-                            musicAlbumCard(item: item)
                         }
-                        .buttonStyle(CardButtonStyle())
-                        .contextMenu {
-                            Button { musicQueue.playNow(track: item) } label: {
-                                Label("Play", systemImage: "play.fill")
-                            }
-                            Button {
-                                Task {
-                                    guard let serverURL = authManager.selectedServerURL,
-                                          let token = authManager.selectedServerToken,
-                                          let ratingKey = item.ratingKey else { return }
-                                    let tracks = try? await networkManager.getChildren(
-                                        serverURL: serverURL, authToken: token, ratingKey: ratingKey
-                                    )
-                                    if let tracks, !tracks.isEmpty {
-                                        var shuffled = tracks; shuffled.shuffle()
-                                        musicQueue.playAlbum(tracks: shuffled)
-                                    }
-                                }
-                            } label: {
-                                Label("Shuffle", systemImage: "shuffle")
-                            }
-                            Button {
-                                Task {
-                                    guard let serverURL = authManager.selectedServerURL,
-                                          let token = authManager.selectedServerToken,
-                                          let ratingKey = item.ratingKey else { return }
-                                    let tracks = try? await networkManager.getChildren(
-                                        serverURL: serverURL, authToken: token, ratingKey: ratingKey
-                                    )
-                                    if let tracks { musicQueue.addToEnd(tracks: tracks) }
-                                }
-                            } label: {
-                                Label("Play Next", systemImage: "text.line.first.and.arrowtriangle.forward")
-                            }
-                        }
+                        .musicItemContextMenu(item: item, style: item.type == "track" ? .track : .album)
                     }
                 }
-                .padding(.horizontal, ScaledDimensions.rowHorizontalPadding)
-                .padding(.vertical, ScaledDimensions.rowVerticalPadding)
+                .padding(.horizontal, 28)
+                .padding(.bottom, 54)
+                .padding(.top, 4)
             }
         }
+        .id(contentResetID)
+        .scrollClipDisabled()
     }
-
-    // MARK: - Artist Grid
 
     private var artistGrid: some View {
         ScrollView(.vertical, showsIndicators: false) {
-            if allArtists.isEmpty && !loadedCategories.contains(.artists) {
+            if !loadedCategories.contains(.artists) {
                 ProgressView()
-                    .frame(maxWidth: .infinity, minHeight: 300)
-            } else if allArtists.isEmpty {
-                emptyState
+                    .frame(maxWidth: .infinity, minHeight: 320)
+            } else if displayedArtists.isEmpty {
+                emptyState(title: "No artists", subtitle: selectedGenre == nil ? "" : "Try another genre.")
             } else {
-                LazyVGrid(columns: columns, spacing: ScaledDimensions.rowItemSpacing) {
-                    ForEach(Array(allArtists.enumerated()), id: \.element.ratingKey) { _, artist in
-                        Button {
-                            selectedItem = artist
-                        } label: {
-                            VStack(spacing: 10) {
-                                // Circular artist photo
-                                artistPhoto(for: artist)
-                                    .frame(width: ScaledDimensions.squarePosterSize * scale,
-                                           height: ScaledDimensions.squarePosterSize * scale)
-                                    .clipShape(Circle())
-                                    .hoverEffect(.highlight)
-                                    .shadow(color: .black.opacity(0.35), radius: 8, y: 6)
-
-                                Text(artist.title ?? "Unknown")
-                                    .font(.system(size: ScaledDimensions.posterTitleSize))
-                                    .foregroundStyle(.white)
-                                    .lineLimit(1)
+                LazyVGrid(columns: gridColumns, alignment: .leading, spacing: 30) {
+                    ForEach(displayedArtists, id: \.ratingKey) { artist in
+                        MusicPosterCard(item: artist, style: .circular, onFocusChanged: { isFocused in
+                            if isFocused {
+                                focusedArtworkItem = artist
+                            } else if focusedArtworkItem?.ratingKey == artist.ratingKey {
+                                focusedArtworkItem = nil
                             }
+                        }) {
+                            selectedItem = artist
                         }
-                        .buttonStyle(CardButtonStyle())
                     }
                 }
-                .padding(.horizontal, ScaledDimensions.rowHorizontalPadding)
-                .padding(.vertical, ScaledDimensions.rowVerticalPadding)
+                .padding(.horizontal, 28)
+                .padding(.bottom, 54)
+                .padding(.top, 4)
             }
         }
+        .id(contentResetID)
+        .scrollClipDisabled()
     }
-
-    private func artistPhoto(for artist: PlexMetadata) -> some View {
-        let url = artworkURL(for: artist)
-        return CachedAsyncImage(url: url) { phase in
-            switch phase {
-            case .success(let image):
-                image.resizable().aspectRatio(contentMode: .fill)
-            default:
-                Circle()
-                    .fill(.white.opacity(0.06))
-                    .overlay {
-                        Image(systemName: "person.fill")
-                            .font(.system(size: 40))
-                            .foregroundStyle(.white.opacity(0.2))
-                    }
-            }
-        }
-    }
-
-    // MARK: - Songs List
 
     private var songsList: some View {
-        ScrollView(.vertical, showsIndicators: false) {
-            if allTracks.isEmpty && !loadedCategories.contains(.songs) {
+        List {
+            if !loadedCategories.contains(.songs) {
                 ProgressView()
-                    .frame(maxWidth: .infinity, minHeight: 300)
-            } else if allTracks.isEmpty {
-                emptyState
+                    .frame(maxWidth: .infinity, minHeight: 320)
+                    .listRowBackground(Color.clear)
+            } else if displayedTracks.isEmpty {
+                emptyState(title: "No songs", subtitle: selectedGenre == nil ? "" : "Try another genre.")
+                    .listRowBackground(Color.clear)
             } else {
-                LazyVStack(spacing: 0) {
-                    ForEach(Array(allTracks.enumerated()), id: \.element.ratingKey) { index, track in
-                        let isCurrent = musicQueue.currentTrack?.ratingKey == track.ratingKey
-                        Button {
-                            musicQueue.playAlbum(tracks: allTracks, startingAt: index)
-                        } label: {
-                            HStack(spacing: 14) {
-                                if isCurrent {
-                                    PlaybackIndicator(isPlaying: musicQueue.playbackState == .playing, size: .small)
-                                        .frame(width: 28)
-                                } else {
-                                    Text("\(index + 1)")
-                                        .font(.system(size: 17).monospacedDigit())
-                                        .foregroundStyle(.secondary)
-                                        .frame(width: 28, alignment: .trailing)
-                                }
-
-                                Text(track.title ?? "Unknown")
-                                    .font(.system(size: 20))
-                                    .foregroundStyle(isCurrent ? .white : .primary)
-                                    .lineLimit(1)
-
-                                Spacer()
-
-                                Text(track.grandparentTitle ?? "")
-                                    .font(.system(size: 17))
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(1)
-
-                                if let duration = track.duration {
-                                    Text(formatDuration(duration))
-                                        .font(.system(size: 17).monospacedDigit())
-                                        .foregroundStyle(.secondary)
-                                        .frame(width: 55, alignment: .trailing)
-                                }
-                            }
-                            .padding(.vertical, 12)
-                        }
-                        .buttonStyle(.plain)
-                        .contextMenu {
-                            Button { musicQueue.addNext(track: track) } label: {
-                                Label("Play Next", systemImage: "text.line.first.and.arrowtriangle.forward")
-                            }
-                            Button { musicQueue.addToEnd(track: track) } label: {
-                                Label("Play After", systemImage: "text.line.last.and.arrowtriangle.forward")
-                            }
-                        }
-
-                        if index < allTracks.count - 1 {
-                            Divider()
-                                .padding(.leading, 42)
-                        }
-                    }
+                ForEach(Array(displayedTracks.enumerated()), id: \.offset) { index, track in
+                    songRow(track: track, index: index)
+                        .listRowBackground(Color.clear)
+                        .listRowInsets(EdgeInsets(top: 0, leading: 30, bottom: 0, trailing: 30))
                 }
-                .padding(.horizontal, ScaledDimensions.rowHorizontalPadding)
-                .padding(.vertical, ScaledDimensions.rowVerticalPadding)
+            }
+        }
+        .listStyle(.plain)
+        .id(contentResetID)
+    }
+
+    private func songRow(track: PlexMetadata, index: Int) -> some View {
+        let isCurrent = musicQueue.currentTrack?.ratingKey == track.ratingKey
+
+        return Button {
+            musicQueue.playAlbum(tracks: displayedTracks, startingAt: index)
+        } label: {
+            HStack(spacing: 16) {
+                if isCurrent {
+                    PlaybackIndicator(isPlaying: musicQueue.playbackState == .playing, size: .small)
+                        .frame(width: 24)
+                } else {
+                    Text("\(index + 1)")
+                        .font(.system(size: 16, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 24, alignment: .trailing)
+                }
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(track.title ?? "Unknown")
+                        .font(.system(size: 18, weight: .regular))
+                        .lineLimit(1)
+
+                    Text(track.grandparentTitle ?? track.parentTitle ?? "")
+                        .font(.system(size: 14))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+
+                Spacer(minLength: 16)
+
+                if let duration = track.duration {
+                    Text(formatDuration(duration))
+                        .font(.system(size: 15, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(.vertical, 12)
+        }
+        .buttonStyle(.plain)
+        .contextMenu {
+            Button {
+                musicQueue.addNext(track: track)
+            } label: {
+                Label("Play Next", systemImage: "text.line.first.and.arrowtriangle.forward")
+            }
+
+            Button {
+                musicQueue.addToEnd(track: track)
+            } label: {
+                Label("Play After", systemImage: "text.line.last.and.arrowtriangle.forward")
             }
         }
     }
 
-    // MARK: - Shared
-
-    private var emptyState: some View {
-        VStack(spacing: 12) {
+    private func emptyState(title: String, subtitle: String) -> some View {
+        VStack(spacing: 10) {
             Image(systemName: "music.note")
-                .font(.system(size: 44))
-                .foregroundStyle(.white.opacity(0.2))
-            Text("No items")
-                .font(.system(size: 20))
+                .font(.system(size: 40, weight: .light))
                 .foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity, minHeight: 300)
-    }
 
-    private var contentCountText: String {
-        switch selectedCategory {
-        case .recentlyAdded: return ""
-        case .playlists: return playlists.isEmpty ? "" : "\(playlists.count) playlists"
-        case .artists: return allArtists.isEmpty ? "" : "\(allArtists.count) artists"
-        case .albums: return allAlbums.isEmpty ? "" : "\(allAlbums.count) albums"
-        case .songs: return allTracks.isEmpty ? "" : "\(allTracks.count) songs"
-        }
-    }
+            Text(title)
+                .font(.system(size: 20, weight: .medium))
 
-    /// Album card with artwork + title + artist, all inside one hoverEffect
-    private func musicAlbumCard(item: PlexMetadata) -> some View {
-        let posterSize = ScaledDimensions.squarePosterSize * scale
-        return VStack(alignment: .leading, spacing: 8) {
-            CachedAsyncImage(url: artworkURL(for: item)) { phase in
-                switch phase {
-                case .success(let image):
-                    image.resizable().aspectRatio(contentMode: .fill)
-                case .empty:
-                    Rectangle().fill(Color(white: 0.15))
-                        .overlay { ProgressView().tint(.white.opacity(0.3)) }
-                case .failure:
-                    Rectangle().fill(Color(white: 0.15))
-                        .overlay {
-                            Image(systemName: "music.note")
-                                .font(.system(size: 40))
-                                .foregroundStyle(.white.opacity(0.2))
-                        }
-                @unknown default:
-                    Rectangle().fill(Color(white: 0.15))
-                }
+            if !subtitle.isEmpty {
+                Text(subtitle)
+                    .font(.system(size: 15))
+                    .foregroundStyle(.secondary)
             }
-            .frame(width: posterSize, height: posterSize)
-            .clipShape(RoundedRectangle(cornerRadius: ScaledDimensions.posterCornerRadius, style: .continuous))
-
-            Text(item.title ?? "Unknown")
-                .font(.system(size: ScaledDimensions.posterSubtitleSize, weight: .medium))
-                .foregroundStyle(.white)
-                .lineLimit(1)
-                .frame(width: posterSize, alignment: .leading)
-
-            Text(item.parentTitle ?? item.grandparentTitle ?? "Unknown Artist")
-                .font(.system(size: ScaledDimensions.posterSubtitleSize - 2))
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .frame(width: posterSize, alignment: .leading)
         }
-        .hoverEffect(.highlight)
+        .frame(maxWidth: .infinity, minHeight: 320)
     }
 
-    private func artworkURL(for item: PlexMetadata) -> URL? {
-        guard let thumb = item.thumb ?? item.parentThumb,
+    private var displayedRecentlyAdded: [PlexMetadata] {
+        filtered(items: recentlyAddedItems)
+    }
+
+    private var displayedPlaylists: [PlexMetadata] {
+        playlists.sorted { ($0.title ?? "") < ($1.title ?? "") }
+    }
+
+    private var displayedArtists: [PlexMetadata] {
+        filtered(items: allArtists)
+            .sorted { ($0.title ?? "") < ($1.title ?? "") }
+    }
+
+    private var displayedAlbums: [PlexMetadata] {
+        let items = filtered(items: allAlbums)
+        return items.sorted { lhs, rhs in
+            let left = lhs.title ?? ""
+            let right = rhs.title ?? ""
+            return albumSortAscending ? left.localizedCaseInsensitiveCompare(right) == .orderedAscending : left.localizedCaseInsensitiveCompare(right) == .orderedDescending
+        }
+    }
+
+    private var displayedTracks: [PlexMetadata] {
+        let items = filtered(items: allTracks)
+        return items.sorted { lhs, rhs in
+            let left = lhs.title ?? ""
+            let right = rhs.title ?? ""
+            return songSortAscending ? left.localizedCaseInsensitiveCompare(right) == .orderedAscending : left.localizedCaseInsensitiveCompare(right) == .orderedDescending
+        }
+    }
+
+    private func filtered(items: [PlexMetadata]) -> [PlexMetadata] {
+        guard let selectedGenre else { return items }
+        return items.filter { item in
+            (item.Genre ?? []).contains(where: { $0.tag == selectedGenre })
+        }
+    }
+
+    private var backgroundArtworkURL: URL? {
+        guard let item = focusedArtworkItem ?? currentArtworkItems.first,
+              let thumb = item.thumb ?? item.parentThumb,
               let serverURL = authManager.selectedServerURL,
               let token = authManager.selectedServerToken else { return nil }
         return URL(string: "\(serverURL)\(thumb)?X-Plex-Token=\(token)")
     }
 
-    private func formatDuration(_ ms: Int) -> String {
-        let s = ms / 1000
-        return "\(s / 60):\(String(format: "%02d", s % 60))"
+    private var currentArtworkItems: [PlexMetadata] {
+        switch selectedCategory {
+        case .recentlyAdded:
+            return displayedRecentlyAdded
+        case .playlists:
+            return displayedPlaylists
+        case .artists:
+            return displayedArtists
+        case .albums:
+            return displayedAlbums
+        case .songs, .composers:
+            return []
+        }
     }
 
-    // MARK: - Data Loading
+    private var contentCountText: String {
+        switch selectedCategory {
+        case .recentlyAdded:
+            return ""
+        case .playlists:
+            return displayedPlaylists.isEmpty ? "" : "\(displayedPlaylists.count) playlists"
+        case .artists:
+            return displayedArtists.isEmpty ? "" : "\(displayedArtists.count) artists"
+        case .albums:
+            return displayedAlbums.isEmpty ? "" : "\(displayedAlbums.count) albums"
+        case .songs:
+            return displayedTracks.isEmpty ? "" : "\(displayedTracks.count) songs"
+        case .composers:
+            return ""
+        }
+    }
+
+    private var currentSortIcon: String {
+        let ascending = selectedCategory == .albums ? albumSortAscending : songSortAscending
+        return ascending ? "arrow.up" : "arrow.down"
+    }
+
+    private func toggleSortDirection() {
+        if selectedCategory == .albums {
+            albumSortAscending.toggle()
+        } else if selectedCategory == .songs {
+            songSortAscending.toggle()
+        }
+    }
+
+    private func selectCategory(_ category: MusicLibraryCategory) {
+        selectedCategory = category
+        selectedGenre = nil
+        focusedArtworkItem = nil
+        contentResetID = UUID()
+        focusedSidebarTarget = .category(category)
+        Task { await loadCategoryData(category) }
+    }
+
+    private func applyLandingState() {
+        selectedCategory = .recentlyAdded
+        selectedGenre = nil
+        selectedItem = nil
+        focusedArtworkItem = nil
+        contentResetID = UUID()
+        focusedSidebarTarget = .category(.recentlyAdded)
+    }
+
+    private func formatDuration(_ ms: Int) -> String {
+        let totalSeconds = ms / 1000
+        return "\(totalSeconds / 60):\(String(format: "%02d", totalSeconds % 60))"
+    }
 
     private func loadRecentlyAdded() async {
         guard let serverURL = authManager.selectedServerURL,
@@ -479,7 +618,6 @@ struct MusicHomeView: View {
 
         isLoading = true
 
-        // Try hubs first for curated "Recently Added" content
         if let cached = dataStore.libraryHubs[libraryKey], !cached.isEmpty {
             let hubItems = cached.flatMap { $0.Metadata ?? [] }
             let albums = hubItems.filter { $0.type == "album" }
@@ -490,29 +628,34 @@ struct MusicHomeView: View {
 
         do {
             let hubs = try await networkManager.getLibraryHubs(
-                serverURL: serverURL, authToken: token, sectionId: libraryKey
+                serverURL: serverURL,
+                authToken: token,
+                sectionId: libraryKey
             )
             let hubItems = hubs.flatMap { $0.Metadata ?? [] }
             let albums = hubItems.filter { $0.type == "album" }
             recentlyAddedItems = albums.isEmpty ? hubItems : albums
 
-            // Fallback: if hubs returned nothing, load recent albums directly
             if recentlyAddedItems.isEmpty {
                 recentlyAddedItems = try await networkManager.getLibraryItems(
-                    serverURL: serverURL, authToken: token, sectionId: libraryKey,
-                    start: 0, size: 50, type: 9
+                    serverURL: serverURL,
+                    authToken: token,
+                    sectionId: libraryKey,
+                    start: 0,
+                    size: 50,
+                    type: 9
                 )
             }
         } catch {
             print("MusicHome: Failed to load recently added: \(error)")
         }
+
         isLoading = false
     }
 
     private func loadGenres() async {
         guard let serverURL = authManager.selectedServerURL,
               let token = authManager.selectedServerToken else { return }
-
         guard let url = URL(string: "\(serverURL)/library/sections/\(libraryKey)/genre?X-Plex-Token=\(token)") else { return }
 
         do {
@@ -521,6 +664,7 @@ struct MusicHomeView: View {
                 struct Entry: Codable { var title: String? }
                 var MediaContainer: Container
             }
+
             let data = try await networkManager.requestData(url, method: "GET", headers: ["X-Plex-Token": token])
             let response = try JSONDecoder().decode(GenreResponse.self, from: data)
             genres = (response.MediaContainer.Directory ?? []).compactMap(\.title).sorted()
@@ -536,25 +680,40 @@ struct MusicHomeView: View {
 
         switch category {
         case .recentlyAdded:
-            break // Already loaded via hubs
+            break
         case .playlists:
             playlists = (try? await networkManager.getPlaylists(serverURL: serverURL, authToken: token)) ?? []
         case .artists:
-            // type=8 for artists in Plex music libraries
             allArtists = (try? await networkManager.getLibraryItems(
-                serverURL: serverURL, authToken: token, sectionId: libraryKey, start: 0, size: 500, type: 8
+                serverURL: serverURL,
+                authToken: token,
+                sectionId: libraryKey,
+                start: 0,
+                size: 500,
+                type: 8
             )) ?? []
         case .albums:
-            // type=9 for albums in Plex music libraries
             allAlbums = (try? await networkManager.getLibraryItems(
-                serverURL: serverURL, authToken: token, sectionId: libraryKey, start: 0, size: 500, type: 9
+                serverURL: serverURL,
+                authToken: token,
+                sectionId: libraryKey,
+                start: 0,
+                size: 500,
+                type: 9
             )) ?? []
         case .songs:
-            // type=10 for tracks in Plex music libraries
             allTracks = (try? await networkManager.getLibraryItems(
-                serverURL: serverURL, authToken: token, sectionId: libraryKey, start: 0, size: 500, type: 10
+                serverURL: serverURL,
+                authToken: token,
+                sectionId: libraryKey,
+                start: 0,
+                size: 500,
+                type: 10
             )) ?? []
+        case .composers:
+            break
         }
+
         loadedCategories.insert(category)
     }
 
@@ -563,16 +722,75 @@ struct MusicHomeView: View {
               let token = authManager.selectedServerToken else { return }
 
         var tracks: [PlexMetadata]
-        if selectedCategory == .songs, !allTracks.isEmpty {
-            tracks = allTracks
+        if selectedCategory == .songs, !displayedTracks.isEmpty {
+            tracks = displayedTracks
         } else {
-            // type=10 for tracks
             tracks = (try? await networkManager.getLibraryItems(
-                serverURL: serverURL, authToken: token, sectionId: libraryKey, start: 0, size: 1000, type: 10
+                serverURL: serverURL,
+                authToken: token,
+                sectionId: libraryKey,
+                start: 0,
+                size: 1000,
+                type: 10
             )) ?? []
         }
 
         if shuffled { tracks.shuffle() }
-        if !tracks.isEmpty { musicQueue.playAlbum(tracks: tracks) }
+        if !tracks.isEmpty {
+            musicQueue.playAlbum(tracks: tracks)
+        }
+    }
+}
+
+private struct MusicSidebarRow: View {
+    let title: String
+    let isSelected: Bool
+    let target: MusicSidebarFocusTarget
+    let focus: FocusState<MusicSidebarFocusTarget?>.Binding
+    let action: () -> Void
+
+    private var isFocused: Bool {
+        focus.wrappedValue == target
+    }
+
+    private var highlightOpacity: Double {
+        if isFocused {
+            return 0.34
+        }
+        if isSelected {
+            return 0.18
+        }
+        return 0
+    }
+
+    private var foregroundOpacity: Double {
+        isFocused || isSelected ? 0.98 : 0.8
+    }
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 11) {
+                Circle()
+                    .fill(.white.opacity(isFocused || isSelected ? 0.95 : 0.42))
+                    .frame(width: isFocused || isSelected ? 7 : 5, height: isFocused || isSelected ? 7 : 5)
+                    .frame(width: 9, alignment: .center)
+
+                Text(title)
+                    .font(.system(size: 17, weight: .regular))
+                    .lineLimit(1)
+
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .foregroundStyle(.white.opacity(foregroundOpacity))
+            .background(
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(Color.white.opacity(highlightOpacity))
+            )
+        }
+        .buttonStyle(.plain)
+        .focused(focus, equals: target)
+        .animation(.easeInOut(duration: 0.16), value: isFocused)
     }
 }

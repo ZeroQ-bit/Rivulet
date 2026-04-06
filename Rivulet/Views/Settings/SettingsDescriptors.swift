@@ -132,7 +132,7 @@ enum SettingsDescriptorStore {
         "useApplePlayer": SettingDescriptor(
             icon: "play.rectangle",
             iconColor: .blue,
-            description: "Uses Apple's built-in AVPlayer for all video playback. This will cause more direct streams from the Plex server, but is the most stable option. When off, Rivulet uses its own custom player with FFmpeg for direct play of all containers."
+            description: "Uses Apple's built-in AVPlayer for all video playback. Will cause direct streams from the server, but provides that Apple-feel, and works well with HomePods."
         ),
         "avPlayerDV": SettingDescriptor(
             icon: "sparkles.tv",

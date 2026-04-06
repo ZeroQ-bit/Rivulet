@@ -108,7 +108,7 @@ struct MusicPlaylistView: View {
                             Button {
                                 musicQueue.addToEnd(track: track)
                             } label: {
-                                Label("Add to Queue", systemImage: "text.append")
+                                Label("Play After", systemImage: "text.line.last.and.arrowtriangle.forward")
                             }
                         }
 
@@ -163,28 +163,22 @@ struct MusicPlaylistView: View {
                 Button {
                     musicQueue.playAlbum(tracks: tracks)
                 } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: "play.fill")
-                        Text("Play")
-                    }
-                    .font(.system(size: 18, weight: .semibold))
-                    .frame(width: 110, height: 44)
+                    Label("Play", systemImage: "play.fill")
                 }
-                .buttonStyle(SelfFocusedActionButtonStyle(isPrimary: true))
+                .buttonStyle(.borderedProminent)
+                .buttonBorderShape(.capsule)
+                .tint(Color.white.opacity(0.18))
 
                 Button {
                     var shuffled = tracks
                     shuffled.shuffle()
                     musicQueue.playAlbum(tracks: shuffled)
                 } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: "shuffle")
-                        Text("Shuffle")
-                    }
-                    .font(.system(size: 18, weight: .semibold))
-                    .frame(width: 120, height: 44)
+                    Label("Shuffle", systemImage: "shuffle")
                 }
-                .buttonStyle(SelfFocusedActionButtonStyle(isPrimary: false))
+                .buttonStyle(.borderedProminent)
+                .buttonBorderShape(.capsule)
+                .tint(Color.white.opacity(0.14))
             }
         }
     }

@@ -1,5 +1,19 @@
 # Lessons Learned
 
+## 2026-04-06 - Reference UI Work Needs The Same Visual Language, Not Just Better State
+
+**Mistake**: Narrowed the diagnosis to focus/landing behavior after the user showed a broken music-library opening state, even though the whole screen still used the wrong visual language.
+**Pattern**: A screen can fail a product-reference match even after state bugs are fixed if the layout model, sidebar language, and frame proportions still come from a different UI family.
+**Rule**: When the user says a screen does not look like the reference, verify state bugs, but then match the page-level visual language too: panel width, content origin, navigation row treatment, and density.
+**Applied**: `Rivulet/Views/Music/MusicHomeView.swift`.
+
+## 2026-04-01 - Reference UI Mismatches Can Be Shell-Level, Not Component-Level
+
+**Mistake**: Treated the Apple Music mismatch as mostly a button/card styling problem even after the user said the screen still felt completely wrong.
+**Pattern**: For reference-driven UI work, a component pass can look "closer" in isolation while the overall screen still fails if outer app chrome, content origin, or background hierarchy are off.
+**Rule**: After a user correction on visual fidelity, compare the full-screen capture against the reference first. Fix shell chrome, page framing, and focus hierarchy before tuning individual components again.
+**Applied**: `Rivulet/Views/TVNavigation/TVSidebarView.swift`, `Rivulet/Views/Music/MusicHomeView.swift`, `Rivulet/Views/Music/Components/MusicPosterCard.swift`.
+
 ## 2026-03-19 - Stable Parallax Needs Split Ownership
 
 **Mistake**: Fixed the lateral card motion, but first kept too much on the moving card, then over-corrected by moving the full hero content to the stage layer, which broke metadata positioning.

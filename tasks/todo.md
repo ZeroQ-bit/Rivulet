@@ -1,5 +1,63 @@
 # Playback Reliability Worklog (2026-03-02)
 
+## Apple Music tvOS Home Reframe (2026-04-06)
+
+## Plan
+- [x] Re-evaluate the full home screen against the latest simulator screenshot and the Apple Music library reference.
+  - Treat the issue as a page-level mismatch instead of a pure focus bug.
+- [x] Rebuild the music-library landing composition.
+  - Constrain the page frame, restyle the sidebar to Apple Music's language, and bring the Recently Added shelf up into the correct landing position.
+- [x] Correct entry behavior and verify.
+  - Open the library on the intended sidebar/category state, reset content position, and run a tvOS build.
+
+## Review
+- The problem was not just focus. The home screen was still using the wrong page geometry: too edge-to-edge, the sidebar language was wrong, and the Recently Added shelf started too low to resemble Apple Music.
+- Reframed `MusicHomeView` into a fixed leading-stage layout with a distinct sidebar panel, tighter content width, and a shallower top offset so the opening screen reads like Apple Music's library instead of a generic full-bleed grid.
+- Reworked sidebar rows to match the reference more closely: no SF Symbol category icons, small dot markers, softer translucent selection, and a darker rail treatment.
+- Added an explicit landing-state reset so entering the music library returns to `Recently Added`, restores the sidebar as the entry surface, and rebuilds the content scroll position from the top.
+- Verification:
+  - `xcodebuild -project Rivulet.xcodeproj -scheme Rivulet -destination 'generic/platform=tvOS' build -quiet CODE_SIGNING_ALLOWED=NO`
+  - Result: build succeeded with pre-existing warnings outside the music UI files.
+
+## Apple Music tvOS Home Fidelity Correction (2026-04-01)
+
+## Plan
+- [x] Re-evaluate the home screen against the simulator screenshots and the Apple Music reference images.
+  - Identify shell-level mismatches instead of doing another spacing-only pass.
+- [x] Correct the music home frame and poster treatment.
+  - Hide the outer music tab chrome, tighten the sidebar rail, soften the selected-row treatment, and move the grid back to an artwork-first layout.
+- [x] Add the missing background hierarchy and verify.
+  - Let focused/leading artwork tint the home backdrop and confirm the tvOS target still builds.
+
+## Review
+- The remaining mismatch was structural, not just cosmetic: the music library was still inheriting outer tvOS tab chrome and the poster buttons were still reading like generic rounded tiles.
+- Hid the outer tab-bar chrome for music library tabs in `TVSidebarView`, so the extra top-left `Music` pill no longer competes with the actual library UI.
+- Retuned `MusicHomeView` into a narrower left rail with softer selection, reduced horizontal offsets, a higher content start, and a dynamic artwork-derived backdrop closer to Apple Music's library framing.
+- Reworked `MusicPosterCard` so focus only lifts the artwork instead of wrapping the entire poster/text block in a heavy card surface.
+- Verification:
+  - `xcodebuild -project Rivulet.xcodeproj -scheme Rivulet -destination 'generic/platform=tvOS' build -quiet CODE_SIGNING_ALLOWED=NO`
+  - Result: build succeeded with pre-existing warnings outside the music UI files.
+
+## Apple Music tvOS Music UI Pass (2026-04-01)
+
+## Plan
+- [x] Rebuild the library sidebar and content chrome around native tvOS controls.
+  - Replace the bespoke music sidebar/button treatments with a sidebar-style `List`, native bordered action buttons, and denser Apple Music-like spacing.
+- [x] Retune detail pages to the Apple Music tvOS hierarchy.
+  - Simplify artist and album detail typography, keep native action/context menus, and flatten track rows to text plus dividers.
+- [x] Rework Now Playing to the Apple Music tvOS composition.
+  - Use the reference-aligned centered metadata, bottom progress bar, queue carousel layout, and built-in buttons/context menus instead of custom control chrome.
+- [x] Verify with a tvOS build and record any environment blockers.
+
+## Review
+- Rebuilt the music library around native controls: the sidebar now uses `List`, playback actions use built-in bordered buttons, and the album/artist grids were tightened to Apple Music-like sizing and spacing.
+- Retuned the album, artist, and playlist detail pages to a simpler tvOS hierarchy with smaller type, native capsule/circle action buttons, and flattened track rows with only text and dividers.
+- Reworked Now Playing to match the references more closely: centered art and metadata by default, a same-size horizontal queue carousel when expanded, native control buttons, and a stronger art-derived backdrop treatment.
+- Kept the native `.contextMenu` flow throughout music actions, and normalized queue wording to `Play Next` / `Play After`.
+- Verification:
+  - `xcodebuild -project Rivulet.xcodeproj -scheme Rivulet -destination 'generic/platform=tvOS' build -quiet CODE_SIGNING_ALLOWED=NO`
+  - Result: build succeeded.
+
 ## Direct Play -> FFmpeg -> AVPlayer Robustness Pass (2026-03-27)
 
 ## Plan

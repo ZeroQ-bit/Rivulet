@@ -2,26 +2,26 @@
 //  MusicPosterCard.swift
 //  Rivulet
 //
-//  Square album/artist card with standard tvOS focus treatment.
-//  Artists use circular clip shape, albums use square.
+//  Artwork-first music poster card matching the Apple Music tvOS grid.
 //
 
 import SwiftUI
 
-/// Card style: square for albums, circular for artists
 enum MusicPosterCardStyle {
     case square
     case circular
 }
 
-/// Artwork card for albums and artists in music grids.
-/// Uses standard tvOS focus effects instead of custom glass styling.
 struct MusicPosterCard: View {
     let item: PlexMetadata
     var style: MusicPosterCardStyle = .square
+    var onFocusChanged: ((Bool) -> Void)? = nil
     let action: () -> Void
 
-    /// Artwork URL built from the item's thumb
+    @FocusState private var isFocused: Bool
+
+    private let artworkSize: CGFloat = 198
+
     private var artworkURL: URL? {
         guard let thumb = item.thumb ?? item.parentThumb,
               let serverURL = PlexAuthManager.shared.selectedServerURL,
@@ -29,55 +29,49 @@ struct MusicPosterCard: View {
         return URL(string: "\(serverURL)\(thumb)?X-Plex-Token=\(token)")
     }
 
-    /// Subtitle: artist name for albums, album count or year for artists
     private var subtitle: String? {
-        if item.type == "album" {
-            return item.parentTitle ?? item.grandparentTitle
-        } else if item.type == "artist" {
-            if let count = item.leafCount {
-                return "\(count) albums"
-            }
-            if let year = item.year { return String(year) }
-            return nil
-        } else {
-            return item.parentTitle ?? item.grandparentTitle
-        }
+        guard resolvedStyle == .square else { return nil }
+        return item.parentTitle ?? item.grandparentTitle
     }
 
-    /// Resolved card style — auto-detect from item type if not explicitly set
     private var resolvedStyle: MusicPosterCardStyle {
-        if item.type == "artist" { return .circular }
-        return style
+        item.type == "artist" ? .circular : style
     }
 
     var body: some View {
         Button(action: action) {
             VStack(spacing: 8) {
-                // Artwork
                 artworkView
-                    .frame(width: 180, height: 180)
+                    .frame(width: artworkSize, height: artworkSize)
+                    .scaleEffect(isFocused ? 1.055 : 1)
+                    .brightness(isFocused ? 0.02 : 0)
+                    .shadow(color: .black.opacity(isFocused ? 0.28 : 0.14), radius: isFocused ? 18 : 8, y: isFocused ? 12 : 5)
 
-                // Title
                 Text(item.title ?? "Unknown")
-                    .font(.system(size: 18, weight: .medium))
+                    .font(.system(size: 15, weight: .medium))
                     .foregroundStyle(.white)
                     .lineLimit(1)
-                    .frame(width: 180, alignment: resolvedStyle == .circular ? .center : .leading)
+                    .frame(width: artworkSize + 8)
+                    .multilineTextAlignment(.center)
 
-                // Subtitle
                 if let subtitle {
                     Text(subtitle)
-                        .font(.system(size: 15))
-                        .foregroundStyle(.white.opacity(0.5))
+                        .font(.system(size: 12.5))
+                        .foregroundStyle(.white.opacity(0.58))
                         .lineLimit(1)
-                        .frame(width: 180, alignment: resolvedStyle == .circular ? .center : .leading)
+                        .frame(width: artworkSize + 8)
+                        .multilineTextAlignment(.center)
                 }
             }
+            .padding(.top, 4)
         }
-        .buttonStyle(.card)
+        .buttonStyle(.plain)
+        .focused($isFocused)
+        .onChange(of: isFocused) { _, focused in
+            onFocusChanged?(focused)
+        }
+        .animation(.easeInOut(duration: 0.18), value: isFocused)
     }
-
-    // MARK: - Artwork
 
     @ViewBuilder
     private var artworkView: some View {
@@ -105,26 +99,30 @@ struct MusicPosterCard: View {
         Group {
             if resolvedStyle == .circular {
                 Circle()
-                    .fill(.white.opacity(0.06))
+                    .fill(.white.opacity(0.07))
                     .overlay {
                         Image(systemName: "person.fill")
-                            .font(.system(size: 40))
-                            .foregroundStyle(.white.opacity(0.2))
+                            .font(.system(size: 38, weight: .regular))
+                            .foregroundStyle(.white.opacity(0.25))
                     }
             } else {
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(.white.opacity(0.06))
+                    .fill(
+                        LinearGradient(
+                            colors: [Color.white.opacity(0.14), Color.white.opacity(0.08)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
                     .overlay {
                         Image(systemName: "music.note")
-                            .font(.system(size: 40))
-                            .foregroundStyle(.white.opacity(0.2))
+                            .font(.system(size: 38, weight: .regular))
+                            .foregroundStyle(.white.opacity(0.28))
                     }
             }
         }
     }
 }
-
-// MARK: - Conditional Modifier Helper
 
 private extension View {
     @ViewBuilder

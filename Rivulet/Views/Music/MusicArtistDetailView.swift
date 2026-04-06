@@ -2,14 +2,11 @@
 //  MusicArtistDetailView.swift
 //  Rivulet
 //
-//  Artist detail page showing discography as a grid.
-//  Pushed via NavigationStack from the Artists grid.
+//  Artist detail page tuned to the Apple Music tvOS hierarchy.
 //
 
 import SwiftUI
 
-/// Artist detail with header, Play All/Shuffle, and album grid.
-/// Pushed via NavigationStack — no fullScreenCover.
 struct MusicArtistDetailView: View {
     let artist: PlexMetadata
     let libraryKey: String
@@ -21,13 +18,10 @@ struct MusicArtistDetailView: View {
     @State private var isLoading = true
     @State private var isPlayingAll = false
     @State private var isShuffling = false
-
-    // Navigation
     @State private var selectedAlbum: PlexMetadata?
 
     private let networkManager = PlexNetworkManager.shared
-
-    // MARK: - Computed Properties
+    private let gridColumns = Array(repeating: GridItem(.fixed(188), spacing: 28, alignment: .top), count: 4)
 
     private var artistPhotoURL: URL? {
         guard let thumb = artist.thumb,
@@ -37,60 +31,42 @@ struct MusicArtistDetailView: View {
     }
 
     private var sortedAlbums: [PlexMetadata] {
-        albums.sorted { ($0.year ?? 0) > ($1.year ?? 0) }
+        albums.sorted { ($0.title ?? "") < ($1.title ?? "") }
     }
 
-    private let gridColumns = [
-        GridItem(.adaptive(minimum: 180, maximum: 220), spacing: 24)
-    ]
-
-    // MARK: - Body
-
     var body: some View {
-        ScrollView(.vertical, showsIndicators: false) {
-            VStack(alignment: .leading, spacing: 24) {
-                // Header
-                headerSection
-                    .padding(.horizontal, 80)
+        ZStack {
+            backgroundView
 
-                // Action buttons
-                actionRow
-                    .padding(.horizontal, 80)
+            ScrollView(.vertical, showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 34) {
+                    headerSection
+                    actionRow
 
-                // Discography grid
-                if isLoading {
-                    HStack {
-                        Spacer()
+                    if isLoading {
                         ProgressView()
-                            .scaleEffect(1.2)
-                        Spacer()
+                            .frame(maxWidth: .infinity, minHeight: 240)
+                    } else if sortedAlbums.isEmpty {
+                        emptyState
+                    } else {
+                        LazyVGrid(columns: gridColumns, alignment: .leading, spacing: 34) {
+                            ForEach(sortedAlbums, id: \.ratingKey) { album in
+                                MusicPosterCard(item: album, style: .square) {
+                                    selectedAlbum = album
+                                }
+                                .musicItemContextMenu(item: album, style: .album)
+                            }
+                        }
                     }
-                    .padding(.vertical, 60)
-                } else if albums.isEmpty {
-                    VStack(spacing: 16) {
-                        Image(systemName: "music.note")
-                            .font(.system(size: 48))
-                            .foregroundStyle(.white.opacity(0.3))
-                        Text("No albums found")
-                            .font(.system(size: 22))
-                            .foregroundStyle(.white.opacity(0.5))
+
+                    if let summary = artist.summary, !summary.isEmpty {
+                        aboutSection(summary)
                     }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 60)
-                } else {
-                    albumGrid
                 }
-
-                // About section
-                if let summary = artist.summary, !summary.isEmpty {
-                    aboutSection(summary)
-                        .padding(.horizontal, 80)
-                }
-
-                Spacer()
-                    .frame(height: musicQueue.isActive ? 120 : 60)
+                .padding(.horizontal, 72)
+                .padding(.top, 56)
+                .padding(.bottom, 64)
             }
-            .padding(.top, 40)
         }
         .navigationDestination(item: $selectedAlbum) { album in
             MusicAlbumDetailView(album: album)
@@ -100,124 +76,115 @@ struct MusicArtistDetailView: View {
         }
     }
 
-    // MARK: - Header
+    private var backgroundView: some View {
+        LinearGradient(
+            colors: [
+                Color(red: 0.17, green: 0.2, blue: 0.24),
+                Color(red: 0.1, green: 0.11, blue: 0.14),
+                Color.black
+            ],
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing
+        )
+        .overlay {
+            Rectangle()
+                .fill(.ultraThinMaterial)
+                .opacity(0.14)
+        }
+        .ignoresSafeArea()
+    }
 
     private var headerSection: some View {
-        HStack(spacing: 24) {
-            // Artist photo (circular)
-            CachedAsyncImage(url: artistPhotoURL) { phase in
-                switch phase {
-                case .success(let image):
-                    image
-                        .resizable()
-                        .aspectRatio(contentMode: .fill)
-                case .empty, .failure:
-                    Circle()
-                        .fill(.white.opacity(0.06))
-                        .overlay {
-                            Image(systemName: "person.fill")
-                                .font(.system(size: 40))
-                                .foregroundStyle(.white.opacity(0.2))
-                        }
-                @unknown default:
-                    EmptyView()
-                }
-            }
-            .frame(width: 120, height: 120)
-            .clipShape(Circle())
+        HStack(alignment: .center, spacing: 24) {
+            artistPortrait
 
-            VStack(alignment: .leading, spacing: 6) {
+            VStack(alignment: .leading, spacing: 4) {
                 Text(artist.title ?? "Unknown Artist")
-                    .font(.system(size: 42, weight: .bold))
-                    .foregroundStyle(.white)
+                    .font(.system(size: 31, weight: .bold))
                     .lineLimit(2)
 
                 if !albums.isEmpty {
                     Text("\(albums.count) albums")
-                        .font(.system(size: 20))
-                        .foregroundStyle(.white.opacity(0.5))
+                        .font(.system(size: 15))
+                        .foregroundStyle(.secondary)
                 }
             }
 
-            Spacer()
+            Spacer(minLength: 32)
         }
     }
 
-    // MARK: - Action Row
+    private var artistPortrait: some View {
+        CachedAsyncImage(url: artistPhotoURL) { phase in
+            switch phase {
+            case .success(let image):
+                image
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+            case .empty, .failure:
+                Circle()
+                    .fill(.regularMaterial)
+                    .overlay {
+                        Image(systemName: "person.fill")
+                            .font(.system(size: 32, weight: .regular))
+                            .foregroundStyle(.secondary)
+                    }
+            @unknown default:
+                EmptyView()
+            }
+        }
+        .frame(width: 112, height: 112)
+        .clipShape(Circle())
+    }
 
     private var actionRow: some View {
-        HStack(spacing: 14) {
-            // Play All
+        HStack(spacing: 12) {
             Button {
                 Task { await playAll(shuffled: false) }
             } label: {
-                HStack(spacing: 8) {
-                    if isPlayingAll {
-                        ProgressView()
-                            .scaleEffect(0.7)
-                    } else {
-                        Image(systemName: "play.fill")
-                    }
-                    Text("Play All")
-                }
-                .font(.system(size: 18, weight: .semibold))
-                .frame(width: 130, height: 44)
+                Label(isPlayingAll ? "Loading" : "Play", systemImage: "play.fill")
             }
-            .buttonStyle(SelfFocusedActionButtonStyle(isPrimary: true))
+            .buttonStyle(.borderedProminent)
+            .buttonBorderShape(.capsule)
+            .tint(Color.white.opacity(0.18))
             .disabled(isPlayingAll || isShuffling)
 
-            // Shuffle
             Button {
                 Task { await playAll(shuffled: true) }
             } label: {
-                HStack(spacing: 8) {
-                    if isShuffling {
-                        ProgressView()
-                            .scaleEffect(0.7)
-                    } else {
-                        Image(systemName: "shuffle")
-                    }
-                    Text("Shuffle")
-                }
-                .font(.system(size: 18, weight: .semibold))
-                .frame(width: 120, height: 44)
+                Label(isShuffling ? "Loading" : "Shuffle", systemImage: "shuffle")
             }
-            .buttonStyle(SelfFocusedActionButtonStyle(isPrimary: false))
+            .buttonStyle(.borderedProminent)
+            .buttonBorderShape(.capsule)
+            .tint(Color.white.opacity(0.14))
             .disabled(isPlayingAll || isShuffling)
         }
     }
 
-    // MARK: - Album Grid
+    private var emptyState: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "music.note")
+                .font(.system(size: 40, weight: .light))
+                .foregroundStyle(.secondary)
 
-    private var albumGrid: some View {
-        LazyVGrid(columns: gridColumns, spacing: 30) {
-            ForEach(sortedAlbums, id: \.ratingKey) { album in
-                MusicPosterCard(item: album, style: .square) {
-                    selectedAlbum = album
-                }
-                .musicItemContextMenu(item: album, style: .album)
-            }
+            Text("No albums found")
+                .font(.system(size: 20, weight: .medium))
         }
-        .padding(.horizontal, 80)
-        .focusSection()
+        .frame(maxWidth: .infinity, minHeight: 240)
     }
-
-    // MARK: - About
 
     private func aboutSection(_ summary: String) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 10) {
             Text("About")
-                .font(.system(size: 24, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.9))
+                .font(.system(size: 21, weight: .semibold))
 
             Text(summary)
-                .font(.system(size: 18))
-                .foregroundStyle(.white.opacity(0.6))
+                .font(.system(size: 17))
+                .foregroundStyle(.secondary)
                 .lineLimit(6)
         }
+        .padding(.top, 6)
     }
-
-    // MARK: - Data Loading
 
     private func loadAlbums() async {
         guard let serverURL = authManager.selectedServerURL,
@@ -229,13 +196,15 @@ struct MusicArtistDetailView: View {
 
         do {
             albums = try await networkManager.getChildren(
-                serverURL: serverURL, authToken: token, ratingKey: ratingKey
+                serverURL: serverURL,
+                authToken: token,
+                ratingKey: ratingKey
             )
-            isLoading = false
         } catch {
             print("MusicArtistDetailView: Failed to load albums: \(error.localizedDescription)")
-            isLoading = false
         }
+
+        isLoading = false
     }
 
     private func playAll(shuffled: Bool) async {
@@ -243,11 +212,22 @@ struct MusicArtistDetailView: View {
               let token = authManager.selectedServerToken,
               let ratingKey = artist.ratingKey else { return }
 
-        if shuffled { isShuffling = true } else { isPlayingAll = true }
+        if shuffled {
+            isShuffling = true
+        } else {
+            isPlayingAll = true
+        }
+
+        defer {
+            isPlayingAll = false
+            isShuffling = false
+        }
 
         do {
             var allTracks = try await networkManager.getAllLeaves(
-                serverURL: serverURL, authToken: token, ratingKey: ratingKey
+                serverURL: serverURL,
+                authToken: token,
+                ratingKey: ratingKey
             )
             if shuffled { allTracks.shuffle() }
             if !allTracks.isEmpty {
@@ -256,8 +236,5 @@ struct MusicArtistDetailView: View {
         } catch {
             print("MusicArtistDetailView: Failed to load tracks: \(error.localizedDescription)")
         }
-
-        isPlayingAll = false
-        isShuffling = false
     }
 }

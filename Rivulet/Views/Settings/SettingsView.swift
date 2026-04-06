@@ -642,6 +642,13 @@ struct SettingsView: View {
 
     private var playbackSettings: some View {
         Group {
+            SettingsToggleRow(
+                title: "Use Apple's Player",
+                subtitle: "",
+                isOn: $useApplePlayer,
+                onFocusChange: { if $0 { focusState.focusedSettingId = "useApplePlayer" } }
+            )
+
             SettingsRow(
                 title: "Audio Language",
                 subtitle: audioLanguage.description,
@@ -685,12 +692,6 @@ struct SettingsView: View {
                 onFocusChange: { if $0 { focusState.focusedSettingId = "autoplayCountdown" } }
             )
 
-            SettingsToggleRow(
-                title: "Use Apple's Player",
-                subtitle: "Uses AVPlayer for all video. More compatible, but fewer features.",
-                isOn: $useApplePlayer,
-                onFocusChange: { if $0 { focusState.focusedSettingId = "useApplePlayer" } }
-            )
 
         }
     }

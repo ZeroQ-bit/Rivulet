@@ -71,7 +71,7 @@ echo "Configuring FFmpeg for tvOS arm64..."
     --enable-muxer=mp4,ipod \
     --enable-parser=hevc,h264,aac,ac3,eac3,flac,opus,vorbis,h263 \
     --enable-protocol=file,http,https,tcp,tls,crypto \
-    --enable-decoder=srt,webvtt,ass,ssa,subrip,truehd,mlp,dca,flac,pcm_s16le,pcm_s24le \
+    --enable-decoder=srt,webvtt,ass,ssa,subrip,truehd,mlp,dca,flac,pcm_s16le,pcm_s24le,aac,aac_latm,ac3,eac3,mp3,alac \
     --enable-encoder=eac3 \
     \
     --disable-filters \

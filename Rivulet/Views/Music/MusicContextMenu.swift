@@ -3,22 +3,15 @@
 //  Rivulet
 //
 //  Native tvOS context menu modifier for music items.
-//  Replaces the old fullScreenCover-based custom context menu.
 //
 
 import SwiftUI
 
-// MARK: - Context Menu Styles
-
-/// Determines which context menu options to show
 enum MusicContextMenuStyle {
     case track
     case album
 }
 
-// MARK: - View Modifier
-
-/// Adds a native tvOS `.contextMenu` to a music item view.
 struct MusicItemContextMenuModifier: ViewModifier {
     let item: PlexMetadata
     let style: MusicContextMenuStyle
@@ -36,8 +29,6 @@ struct MusicItemContextMenuModifier: ViewModifier {
         }
     }
 
-    // MARK: - Track Menu
-
     @ViewBuilder
     private var trackMenu: some View {
         Button {
@@ -49,11 +40,9 @@ struct MusicItemContextMenuModifier: ViewModifier {
         Button {
             musicQueue.addToEnd(track: item)
         } label: {
-            Label("Add to Queue", systemImage: "text.append")
+            Label("Play After", systemImage: "text.line.last.and.arrowtriangle.forward")
         }
     }
-
-    // MARK: - Album Menu
 
     @ViewBuilder
     private var albumMenu: some View {
@@ -80,11 +69,9 @@ struct MusicItemContextMenuModifier: ViewModifier {
         Button {
             Task { await addAlbumToQueue(next: false) }
         } label: {
-            Label("Add to Queue", systemImage: "text.append")
+            Label("Play After", systemImage: "text.line.last.and.arrowtriangle.forward")
         }
     }
-
-    // MARK: - Album Actions
 
     private func playAlbum(shuffled: Bool) async {
         guard let serverURL = PlexAuthManager.shared.selectedServerURL,
@@ -93,7 +80,9 @@ struct MusicItemContextMenuModifier: ViewModifier {
 
         do {
             var tracks = try await PlexNetworkManager.shared.getChildren(
-                serverURL: serverURL, authToken: token, ratingKey: ratingKey
+                serverURL: serverURL,
+                authToken: token,
+                ratingKey: ratingKey
             )
             if shuffled { tracks.shuffle() }
             if !tracks.isEmpty {
@@ -111,7 +100,9 @@ struct MusicItemContextMenuModifier: ViewModifier {
 
         do {
             let tracks = try await PlexNetworkManager.shared.getChildren(
-                serverURL: serverURL, authToken: token, ratingKey: ratingKey
+                serverURL: serverURL,
+                authToken: token,
+                ratingKey: ratingKey
             )
             if next {
                 for track in tracks.reversed() {
@@ -126,10 +117,7 @@ struct MusicItemContextMenuModifier: ViewModifier {
     }
 }
 
-// MARK: - View Extension
-
 extension View {
-    /// Adds a native tvOS context menu for music items.
     func musicItemContextMenu(item: PlexMetadata, style: MusicContextMenuStyle) -> some View {
         modifier(MusicItemContextMenuModifier(item: item, style: style))
     }
