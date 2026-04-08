@@ -59,8 +59,17 @@ worktrees/
 # Claude Code scratch state (per-session worktrees, etc.)
 .claude/
 
-# Vendored FFmpeg source tree (cloned via git, not a submodule)
+# Vendored FFmpeg source tree (cloned via git, not a submodule).
+# NOTE: case-insensitive matching on macOS means `ffmpeg/` also matches
+# `Rivulet/Services/Plex/Playback/FFmpeg/`, which is our tracked Swift
+# integration directory. Re-include it explicitly so new Swift files
+# added there are not silently ignored.
 ffmpeg/
+!Rivulet/Services/Plex/Playback/FFmpeg/
+!Rivulet/Services/Plex/Playback/FFmpeg/**
 
 # Secrets (do not commit)
 Rivulet/Config/Secrets.swift
+
+# Internal developer docs — kept locally, not in the repo.
+Docs/
