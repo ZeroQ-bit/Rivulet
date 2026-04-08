@@ -101,6 +101,12 @@ struct WhatsNewView: View {
     // MARK: - Changelog Data
 
     static let changelogs: [(version: String, features: [String])] = [
+        ("1.0.0 (44)", [
+            "Built a completely custom video player using ffmpeg and internal tvOS tools. The end-goal is playback as smooth as Infuse. Its working well in all my tests, but please open any issues if you experience them",
+            "Re-styled many GUI elements to match Apple TV+ style and functionality",
+            "Apples built-in player (AVPlayer) can be used if desired. Toggle in settings.",
+            "Currently re-working the music library style to match the Apple Music app, and am working on functionality to match PlexAmp. Its a WIP now but wanted to get something out.",
+        ]),
         ("1.0.0 (40)", [
             "Fun depth effects on posters, because why not",
             "Redesigned season and episode navigation for TV shows",
