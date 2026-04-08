@@ -547,7 +547,7 @@ private final class UniversalPlaybackInputTarget: PlaybackInputTarget {
         case .seekRelative(let seconds):
             guard !vm.showInfoPanel, vm.postVideoState == .hidden else { return }
             if vm.isScrubbing {
-                vm.updateSwipeScrubPosition(by: seconds, source: source)
+                vm.updateSwipeScrubPosition(by: seconds)
             } else {
                 Task { await vm.seekRelative(by: seconds) }
             }
@@ -583,7 +583,7 @@ private final class UniversalPlaybackInputTarget: PlaybackInputTarget {
         case .scrubRelative(let seconds):
             guard !vm.showInfoPanel, vm.postVideoState == .hidden else { return }
             guard vm.playbackState == .paused else { return }
-            vm.updateSwipeScrubPosition(by: seconds, source: source)
+            vm.updateSwipeScrubPosition(by: seconds)
             vm.showControlsTemporarily()
 
         case .scrubCommit:
@@ -627,8 +627,11 @@ private final class UniversalPlaybackInputTarget: PlaybackInputTarget {
                 vm.cancelScrub()
                 onResetRemoteInput?()
             }
-            withAnimation(.easeOut(duration: 0.25)) {
-                vm.openInfoDeck()
+            if !vm.showInfoPanel {
+                vm.resetSettingsPanel()
+                withAnimation(.easeOut(duration: 0.3)) {
+                    vm.showInfoPanel = true
+                }
             }
 
         case .back:
@@ -646,13 +649,16 @@ private final class UniversalPlaybackInputTarget: PlaybackInputTarget {
                 )
                 vm.cancelScrub()
                 onResetRemoteInput?()
+            } else if vm.showInfoPanel {
+                withAnimation(.easeOut(duration: 0.3)) {
+                    vm.showInfoPanel = false
+                }
+            } else if vm.showControls {
+                withAnimation(.easeOut(duration: 0.25)) {
+                    vm.showControls = false
+                }
             } else {
-                let handled = withAnimation(.easeOut(duration: 0.25)) {
-                    vm.handleBackInOverlayStack()
-                }
-                if !handled {
-                    vm.shouldDismiss = true
-                }
+                vm.shouldDismiss = true
             }
         }
     }
@@ -668,13 +674,6 @@ struct UniversalPlayerView: View {
     @State private var hasStartedPlayback = false
     @State private var lastReportedTime: TimeInterval = 0
     @FocusState private var isSkipButtonFocused: Bool
-
-    private var skipButtonInteractionEnabled: Bool {
-        viewModel.showSkipButton &&
-        !viewModel.showInfoPanel &&
-        viewModel.overlayLayer != .infoDeck &&
-        viewModel.postVideoState == .hidden
-    }
 
     /// Initialize with metadata (creates viewModel internally)
     @MainActor
@@ -828,17 +827,6 @@ struct UniversalPlayerView: View {
         .onChange(of: viewModel.playbackState) { oldState, newState in
             // Immediately report state changes to Plex
             reportStateChange(from: oldState, to: newState)
-
-            let wasLoadingViewVisible = (oldState == .loading || oldState == .idle || viewModel.showPausedPoster)
-            let isLoadingViewVisible = (newState == .loading || newState == .idle || viewModel.showPausedPoster)
-            if wasLoadingViewVisible != isLoadingViewVisible {
-                print("[StartupTrace] view: loadingView \(wasLoadingViewVisible ? "VISIBLE" : "hidden") → \(isLoadingViewVisible ? "VISIBLE" : "hidden") (state \(oldState) → \(newState))")
-            }
-            let wasPlayerLayerVisible = oldState == .playing || oldState == .paused || oldState == .buffering || oldState == .ended
-            let isPlayerLayerVisibleNow = newState == .playing || newState == .paused || newState == .buffering || newState == .ended
-            if wasPlayerLayerVisible != isPlayerLayerVisibleNow {
-                print("[StartupTrace] view: playerLayer \(wasPlayerLayerVisible ? "VISIBLE" : "hidden") → \(isPlayerLayerVisibleNow ? "VISIBLE" : "hidden") (state \(oldState) → \(newState))")
-            }
         }
         // Manage focus scope when settings panel opens/closes
         .onChange(of: viewModel.showInfoPanel) { _, showPanel in
@@ -848,18 +836,13 @@ struct UniversalPlayerView: View {
                 viewModel.resetSettingsPanel()
             }
         }
-        .onChange(of: viewModel.overlayLayer) { _, layer in
-            if layer == .infoDeck || layer == .fullDetail {
-                isSkipButtonFocused = false
-            }
-        }
         // Auto-focus skip button when it appears
         .onChange(of: viewModel.showSkipButton) { _, showButton in
-            if showButton && skipButtonInteractionEnabled {
+            if showButton && !viewModel.showInfoPanel && viewModel.postVideoState == .hidden {
                 // Brief delay to ensure button is rendered
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                     // Re-check conditions before focusing (state may have changed)
-                    if skipButtonInteractionEnabled {
+                    if viewModel.showSkipButton && !viewModel.showInfoPanel && viewModel.postVideoState == .hidden {
                         isSkipButtonFocused = true
                     }
                 }
@@ -876,10 +859,10 @@ struct UniversalPlayerView: View {
         }
         // Auto-focus skip button when controls hide (if skip button is visible)
         .onChange(of: viewModel.showControls) { _, showControls in
-            if !showControls && skipButtonInteractionEnabled {
+            if !showControls && viewModel.showSkipButton && !viewModel.showInfoPanel && viewModel.postVideoState == .hidden {
                 // Controls just hid, skip button is visible - focus it
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                    if skipButtonInteractionEnabled && !viewModel.showControls {
+                    if viewModel.showSkipButton && !viewModel.showInfoPanel && viewModel.postVideoState == .hidden && !viewModel.showControls {
                         isSkipButtonFocused = true
                     }
                 }
@@ -942,7 +925,7 @@ struct UniversalPlayerView: View {
             }
 
             // Skip Button (intro/credits) - shows regardless of controls visibility, but not during post-video
-            if skipButtonInteractionEnabled {
+            if viewModel.showSkipButton && !viewModel.showInfoPanel && viewModel.postVideoState == .hidden {
                 skipButtonOverlay
                     .transition(.opacity.combined(with: .move(edge: .trailing)))
             }
@@ -966,27 +949,19 @@ struct UniversalPlayerView: View {
         }
         // Focusable when skip button is not focused, post-video is not showing, and not in error state
         // When in error state, let the dismiss button receive focus instead
-        .focusable(
-            !isSkipButtonFocused &&
-            viewModel.postVideoState == .hidden &&
-            !viewModel.playbackState.isFailed &&
-            viewModel.overlayLayer != .infoDeck
-        )
+        .focusable(!isSkipButtonFocused && viewModel.postVideoState == .hidden && !viewModel.playbackState.isFailed)
         .contentShape(Rectangle())
         .onTapGesture {
+            // Don't toggle controls if info panel is showing or in error state
+            guard !viewModel.showInfoPanel else { return }
             guard !viewModel.playbackState.isFailed else { return }
 
+            // Tap anywhere to show/hide controls
             withAnimation(.easeInOut(duration: 0.25)) {
-                switch viewModel.overlayLayer {
-                case .cleanPlayback:
-                    viewModel.showTransportLayerTemporarily()
-                case .transport:
-                    viewModel.setOverlayLayer(.cleanPlayback)
-                case .infoDeck:
-                    viewModel.setOverlayLayer(.transport)
+                if viewModel.showControls {
+                    viewModel.showControls = false
+                } else {
                     viewModel.showControlsTemporarily()
-                case .fullDetail:
-                    break
                 }
             }
         }
@@ -1001,7 +976,7 @@ struct UniversalPlayerView: View {
                     if viewModel.focusedRowIndex == 0 {
                         // At top row - close panel
                         withAnimation(.spring(response: 0.25, dampingFraction: 0.9)) {
-                            viewModel.setOverlayLayer(.infoDeck)
+                            viewModel.showInfoPanel = false
                         }
                     } else {
                         viewModel.navigateSettings(direction: direction)
@@ -1012,10 +987,6 @@ struct UniversalPlayerView: View {
                     break
                 }
             } else {
-                if viewModel.overlayLayer == .infoDeck {
-                    // Let focusable deck controls handle directional navigation.
-                    return
-                }
                 // Left/right are handled by GameController via RemoteHoldDetector
                 // for tap vs hold detection. Only handle up/down here.
                 handleMoveCommand(direction)
@@ -1025,34 +996,17 @@ struct UniversalPlayerView: View {
 
     // MARK: - Player Layer
 
-    /// True once playback has actually begun. The player layer is hidden until
-    /// then so the first decoded frame (which the renderer enqueues during
-    /// preroll while the synchronizer clock is held at rate=0) cannot peek out
-    /// from behind the loading view.
-    private var isPlayerLayerVisible: Bool {
-        switch viewModel.playbackState {
-        case .playing, .paused, .buffering, .ended:
-            return true
-        default:
-            return false
-        }
-    }
-
     @ViewBuilder
     private var playerLayer: some View {
         if let rp = viewModel.rivuletPlayer {
             SampleBufferDisplayView(player: rp)
                 .scaleEffect(viewModel.videoFrameState.scale, anchor: .topLeading)
                 .offset(viewModel.videoFrameState.offset)
-                .opacity(isPlayerLayerVisible ? 1 : 0)
-                .animation(.easeOut(duration: 0.2), value: isPlayerLayerVisible)
                 .animation(.spring(response: 0.5, dampingFraction: 0.85), value: viewModel.videoFrameState)
         } else if let player = viewModel.player, viewModel.streamURL != nil {
             AVPlayerLayerView(player: player)
                 .scaleEffect(viewModel.videoFrameState.scale, anchor: .topLeading)
                 .offset(viewModel.videoFrameState.offset)
-                .opacity(isPlayerLayerVisible ? 1 : 0)
-                .animation(.easeOut(duration: 0.2), value: isPlayerLayerVisible)
                 .animation(.spring(response: 0.5, dampingFraction: 0.85), value: viewModel.videoFrameState)
         }
     }
@@ -1408,20 +1362,12 @@ struct UniversalPlayerView: View {
                 viewModel.showControlsTemporarily()
                 return
             }
-            if viewModel.overlayLayer == .cleanPlayback {
-                viewModel.showTransportLayerTemporarily()
-                return
-            }
-            // Open info deck (cancels any active scrubbing)
+            // Show info panel (cancels any active scrubbing)
             if viewModel.isScrubbing {
                 inputCoordinator.handle(action: .scrubCancel, source: .swiftUICommand)
             }
             inputCoordinator.handle(action: .showInfo, source: .swiftUICommand)
         case .up:
-            if viewModel.overlayLayer == .cleanPlayback {
-                viewModel.showTransportLayerTemporarily()
-                return
-            }
             // If skip button is visible and controls are showing, focus skip button
             if viewModel.showSkipButton && viewModel.showControls && !isSkipButtonFocused {
                 isSkipButtonFocused = true
@@ -1438,7 +1384,8 @@ struct UniversalPlayerView: View {
 
     private func handleSelectCommand() {
         // Only handle skip if button is actually visible AND focused
-        if isSkipButtonFocused && skipButtonInteractionEnabled {
+        let skipButtonVisible = viewModel.showSkipButton && !viewModel.showInfoPanel && viewModel.postVideoState == .hidden
+        if isSkipButtonFocused && skipButtonVisible {
             // Skip button is focused - trigger skip
             Task { await viewModel.skipActiveMarker() }
             return

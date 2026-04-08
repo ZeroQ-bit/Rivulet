@@ -414,7 +414,7 @@ final class FMP4Demuxer {
 
         // Find hvcC box within sample entry
         let innerBoxes = parseBoxes(data: data, offset: configOffset, length: innerLength)
-        print("🎬 [Demuxer] Video codec: \(entryType), config boxes: \(innerBoxes.map { $0.type }.joined(separator: ", "))")
+        playerDebugLog("🎬 [Demuxer] Video codec: \(entryType), config boxes: \(innerBoxes.map { $0.type }.joined(separator: ", "))")
         guard let hvcC = innerBoxes.first(where: { $0.type == "hvcC" }) else {
             let error = DemuxerError.missingBox("hvcC in video sample entry (\(entryType))")
             SentrySDK.capture(error: error) { scope in
@@ -478,7 +478,7 @@ final class FMP4Demuxer {
             throw error
         }
 
-        print("🎬 [FMP4Demuxer] Created dvh1 format description: \(width)x\(height)")
+        playerDebugLog("🎬 [FMP4Demuxer] Created dvh1 format description: \(width)x\(height)")
         return desc
     }
 
@@ -524,7 +524,7 @@ final class FMP4Demuxer {
         let audioHeaderOffset = entryOffset + 8
         let channelCount = data.readUInt16BE(at: audioHeaderOffset + 16)
         let sampleRate = data.readUInt32BE(at: audioHeaderOffset + 24) >> 16
-        print("🎬 [Demuxer] Audio codec: \(entryType), channels=\(channelCount), sampleRate=\(sampleRate)")
+        playerDebugLog("🎬 [Demuxer] Audio codec: \(entryType), channels=\(channelCount), sampleRate=\(sampleRate)")
 
         let configOffset = entryOffset + 36
         let innerBoxes = parseBoxes(data: data, offset: configOffset, length: entryOffset + entrySize - configOffset)
@@ -725,7 +725,7 @@ final class FMP4Demuxer {
             }
 
             if effectiveChannels != UInt32(channelCount) {
-                print("🎬 [Demuxer] ⚠️ mp4a header said \(channelCount) channels, ASC says \(effectiveChannels) — using ASC value")
+                playerDebugLog("🎬 [Demuxer] ⚠️ mp4a header said \(channelCount) channels, ASC says \(effectiveChannels) — using ASC value")
             }
         }
 
@@ -762,7 +762,7 @@ final class FMP4Demuxer {
             if status == noErr, let desc = formatDescription {
                 return desc
             }
-            print("🎬 [Demuxer] ⚠️ AAC format description with ASC failed: \(status)")
+            playerDebugLog("🎬 [Demuxer] ⚠️ AAC format description with ASC failed: \(status)")
         }
 
         // Fallback without magic cookie
@@ -1101,7 +1101,7 @@ final class FMP4Demuxer {
             // Extract sample data
             let sampleEnd = currentOffset + Int(size)
             guard sampleEnd <= data.count else {
-                print("🎬 [FMP4Demuxer] Warning: sample extends beyond data bounds (\(sampleEnd) > \(data.count))")
+                playerDebugLog("🎬 [FMP4Demuxer] Warning: sample extends beyond data bounds (\(sampleEnd) > \(data.count))")
                 break
             }
             let sampleData = data.subdata(in: currentOffset ..< sampleEnd)

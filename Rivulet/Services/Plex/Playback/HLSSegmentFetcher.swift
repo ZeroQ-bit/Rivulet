@@ -113,10 +113,10 @@ final class HLSSegmentFetcher {
                 lastError = error
                 if attempt < maxRetries {
                     let delay = Double(3 * (attempt + 1))  // 3s, 6s, 9s
-                    print("🎬 [HLSFetcher] ⚠️ Init segment fetch failed (attempt \(attempt + 1)/\(maxRetries + 1)): \(error.localizedDescription). Retrying in \(Int(delay))s...")
+                    playerDebugLog("🎬 [HLSFetcher] ⚠️ Init segment fetch failed (attempt \(attempt + 1)/\(maxRetries + 1)): \(error.localizedDescription). Retrying in \(Int(delay))s...")
                     try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
                 } else {
-                    print("🎬 [HLSFetcher] ❌ Init segment fetch failed after \(maxRetries + 1) attempts: \(error.localizedDescription)")
+                    playerDebugLog("🎬 [HLSFetcher] ❌ Init segment fetch failed after \(maxRetries + 1) attempts: \(error.localizedDescription)")
                 }
             }
         }

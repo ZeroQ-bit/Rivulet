@@ -97,9 +97,9 @@ enum PlaybackAudioSessionConfigurator {
         } catch {
             do {
                 try session.setCategory(.playback, mode: mode, options: [.allowAirPlay])
-                print("🎵 \(owner): Audio category fallback set (.playback, mode: \(mode.rawValue), allowAirPlay)")
+                playerDebugLog("🎵 \(owner): Audio category fallback set (.playback, mode: \(mode.rawValue), allowAirPlay)")
             } catch {
-                print("🎵 \(owner): Could not set audio category: \(error.localizedDescription)")
+                playerDebugLog("🎵 \(owner): Could not set audio category: \(error.localizedDescription)")
             }
         }
 
@@ -110,23 +110,23 @@ enum PlaybackAudioSessionConfigurator {
             do {
                 try session.setPreferredSampleRate(48_000)
             } catch {
-                print("🎵 \(owner): Could not set preferred sample rate: \(error.localizedDescription)")
+                playerDebugLog("🎵 \(owner): Could not set preferred sample rate: \(error.localizedDescription)")
             }
             if #available(tvOS 15.0, iOS 15.0, *) {
                 do {
                     try session.setSupportsMultichannelContent(true)
                 } catch {
-                    print("🎵 \(owner): Could not enable multichannel content support: \(error.localizedDescription)")
+                    playerDebugLog("🎵 \(owner): Could not enable multichannel content support: \(error.localizedDescription)")
                 }
             }
             let routeType = session.currentRoute.outputs.first?.portType.rawValue ?? "unknown"
-            print("🎵 \(owner): Audio session active (route: \(routeType), policy: \(usingLongFormPolicy ? preferredPolicyName : "default"))")
+            playerDebugLog("🎵 \(owner): Audio session active (route: \(routeType), policy: \(usingLongFormPolicy ? preferredPolicyName : "default"))")
             Task { @MainActor in
                 AudioRouteDiagnostics.shared.start(owner: owner)
                 AudioRouteDiagnostics.shared.logCurrentRoute(owner: owner, reason: "activate_playback_session")
             }
         } catch {
-            print("🎵 \(owner): Failed to activate audio session: \(error.localizedDescription)")
+            playerDebugLog("🎵 \(owner): Failed to activate audio session: \(error.localizedDescription)")
         }
     }
 
@@ -254,7 +254,7 @@ enum PlaybackAudioSessionConfigurator {
             outputPortNames: outputNames
         )
 
-        print(
+        playerDebugLog(
             "🎵 [RouteSnapshot] owner=\(owner) reason=\(reason) " +
             "airPlay=\(snapshot.isAirPlay) maxOutCh=\(snapshot.maximumOutputChannels) " +
             "sampleRate=\(String(format: "%.0f", snapshot.sampleRate)) " +

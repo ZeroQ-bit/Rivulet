@@ -77,7 +77,7 @@ actor PlexProgressReporter {
                 headers: ["X-Plex-Token": server.token]
             )
         } catch {
-            print("📊 PlexProgress: Failed to report progress: \(error)")
+            playerDebugLog("📊 PlexProgress: Failed to report progress: \(error)")
         }
     }
 
@@ -98,7 +98,7 @@ actor PlexProgressReporter {
                 headers: ["X-Plex-Token": server.token]
             )
         } catch {
-            print("📊 PlexProgress: Failed to mark as watched: \(error)")
+            playerDebugLog("📊 PlexProgress: Failed to mark as watched: \(error)")
         }
     }
 
@@ -119,7 +119,7 @@ actor PlexProgressReporter {
                 headers: ["X-Plex-Token": server.token]
             )
         } catch {
-            print("📊 PlexProgress: Failed to mark as unwatched: \(error)")
+            playerDebugLog("📊 PlexProgress: Failed to mark as unwatched: \(error)")
         }
     }
 

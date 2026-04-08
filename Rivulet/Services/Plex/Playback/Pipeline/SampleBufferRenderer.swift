@@ -180,7 +180,7 @@ final class SampleBufferRenderer {
         }
 
         useAudioEngine = true
-        print("[Renderer] Audio engine mode enabled — video uses independent timebase")
+        playerDebugLog("[Renderer] Audio engine mode enabled — video uses independent timebase")
     }
 
     func disableAudioEngine() {
@@ -202,13 +202,13 @@ final class SampleBufferRenderer {
         videoTimebase = nil
         useAudioEngine = false
         audioRenderer.flush()
-        print("[Renderer] Audio engine mode disabled — reverted to sample-buffer audio")
+        playerDebugLog("[Renderer] Audio engine mode disabled — reverted to sample-buffer audio")
     }
 
     private func configureAudioEngine(from sampleBuffer: CMSampleBuffer) -> Bool {
         guard let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer),
               let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(formatDescription) else {
-            print("[Renderer] AudioEngine: cannot read format from sample buffer")
+            playerDebugLog("[Renderer] AudioEngine: cannot read format from sample buffer")
             return false
         }
 
@@ -222,7 +222,7 @@ final class SampleBufferRenderer {
             channels: AVAudioChannelCount(stream.mChannelsPerFrame),
             interleaved: true
         ) else {
-            print("[Renderer] AudioEngine: failed to create AVAudioFormat")
+            playerDebugLog("[Renderer] AudioEngine: failed to create AVAudioFormat")
             return false
         }
 
@@ -235,7 +235,7 @@ final class SampleBufferRenderer {
         do {
             try engine.start()
         } catch {
-            print("[Renderer] AudioEngine: failed to start — \(error.localizedDescription)")
+            playerDebugLog("[Renderer] AudioEngine: failed to start — \(error.localizedDescription)")
             return false
         }
 
@@ -257,7 +257,7 @@ final class SampleBufferRenderer {
         applyAudioEngineLatencyDelta(previousLatency: previousLatency, reason: "engine_started")
 
         let formatName = isFloat ? "float32" : "s16"
-        print(
+        playerDebugLog(
             "[Renderer] AudioEngine started: \(Int(stream.mSampleRate))Hz " +
             "\(stream.mChannelsPerFrame)ch \(formatName) -> output \(engine.outputNode.outputFormat(forBus: 0))"
         )
@@ -271,7 +271,7 @@ final class SampleBufferRenderer {
     }
 
     private func handleEngineConfigChange() {
-        print("[Renderer] AudioEngine config changed — restarting")
+        playerDebugLog("[Renderer] AudioEngine config changed — restarting")
         guard let engine = audioEngine, let playerNode = audioPlayerNode else { return }
 
         let previousLatency = audioEngineVideoLatency
@@ -283,9 +283,9 @@ final class SampleBufferRenderer {
             if let timebase = videoTimebase, CMTimebaseGetRate(timebase) > 0 {
                 playerNode.play()
             }
-            print("[Renderer] AudioEngine restarted after config change (playing=\(playerNode.isPlaying))")
+            playerDebugLog("[Renderer] AudioEngine restarted after config change (playing=\(playerNode.isPlaying))")
         } catch {
-            print("[Renderer] AudioEngine restart failed: \(error.localizedDescription)")
+            playerDebugLog("[Renderer] AudioEngine restart failed: \(error.localizedDescription)")
         }
 
         onAudioOutputConfigurationChanged?()
@@ -330,11 +330,11 @@ final class SampleBufferRenderer {
             let pullReq = audioPullRequesting
             audioPullLock.unlock()
             let syncTime = CMTimeGetSeconds(renderSynchronizer.currentTime())
-            print("[Renderer] setRate(\(rate)) syncTime=\(String(format: "%.3f", syncTime))s " +
+            playerDebugLog("[Renderer] setRate(\(rate)) syncTime=\(String(format: "%.3f", syncTime))s " +
                   "pullBuffer=\(pullBuf) pullDur=\(String(format: "%.3f", pullDur))s pullRequesting=\(pullReq) " +
                   "audioStatus=\(audioRenderer.status.rawValue)")
         } else {
-            print("[Renderer] setRate(\(rate))")
+            playerDebugLog("[Renderer] setRate(\(rate))")
         }
 
         // Update separate video timebase (audio engine only — AirPlay compensation
@@ -356,7 +356,7 @@ final class SampleBufferRenderer {
 
     /// Set playback rate and time simultaneously.
     func setRate(_ rate: Float, time: CMTime) {
-        print("[Renderer] setRate(\(rate), time=\(String(format: "%.3f", CMTimeGetSeconds(time)))s)")
+        playerDebugLog("[Renderer] setRate(\(rate), time=\(String(format: "%.3f", CMTimeGetSeconds(time)))s)")
 
         if useAudioEngine {
             // Audio engine: update video timebase first (host clock, no source dependency)
@@ -380,7 +380,7 @@ final class SampleBufferRenderer {
         let session = AVAudioSession.sharedInstance()
         let outputLatency = session.outputLatency
         let delaysSufficientData = renderSynchronizer.delaysRateChangeUntilHasSufficientMediaData
-        print(
+        playerDebugLog(
             "[Renderer] setRate(\(rate), time=\(String(format: "%.3f", CMTimeGetSeconds(time)))s, " +
             "hostTime=\(String(format: "%.3f", CMTimeGetSeconds(hostTime)))s) " +
             "outputLatency=\(String(format: "%.3f", outputLatency))s " +
@@ -389,7 +389,7 @@ final class SampleBufferRenderer {
             "pullDelivered=\(audioPullDeliveredCountSnapshot())"
         )
         if rate > 0 {
-            print("[StartupTrace] renderer clock starts (rate=\(rate)) — audio/video begins NOW")
+            playerDebugLog("[StartupTrace] renderer clock starts (rate=\(rate)) — audio/video begins NOW")
         }
         if useAudioEngine {
             setRate(rate, time: time)
@@ -422,7 +422,7 @@ final class SampleBufferRenderer {
             preferredTimescale: 90_000
         )
 
-        print(
+        playerDebugLog(
             "[Renderer] AudioEngine latency: reason=\(reason) " +
             "sessionOutput=\(String(format: "%.3f", sessionOutputLatency))s " +
             "ioBuffer=\(String(format: "%.3f", ioBufferLatency))s " +
@@ -440,7 +440,7 @@ final class SampleBufferRenderer {
         let clampedTime = rebasedTime < .zero ? .zero : rebasedTime
         CMTimebaseSetTime(timebase, time: clampedTime)
 
-        print(
+        playerDebugLog(
             "[Renderer] AudioEngine timebase rebase: reason=\(reason) " +
             "previousLatency=\(String(format: "%.3f", CMTimeGetSeconds(previousLatency)))s " +
             "newLatency=\(String(format: "%.3f", CMTimeGetSeconds(audioEngineVideoLatency)))s " +
@@ -523,7 +523,7 @@ final class SampleBufferRenderer {
             while !displayLayer.isReadyForMoreMediaData && !Task.isCancelled {
                 let elapsed = CFAbsoluteTimeGetCurrent() - stallStart
                 if elapsed > maxWait {
-                    print("[Renderer] Video enqueue timeout after \(String(format: "%.0f", elapsed * 1000))ms — dropping frame (layer error: \(displayLayer.error?.localizedDescription ?? "none"))")
+                    playerDebugLog("[Renderer] Video enqueue timeout after \(String(format: "%.0f", elapsed * 1000))ms — dropping frame (layer error: \(displayLayer.error?.localizedDescription ?? "none"))")
                     jitterStats.recordEnqueueStall(duration: elapsed)
                     return
                 }
@@ -533,7 +533,7 @@ final class SampleBufferRenderer {
             let stallDuration = CFAbsoluteTimeGetCurrent() - stallStart
             if stallDuration > 0.2 {
                 let nowSyncTime = currentTime
-                print(String(
+                playerDebugLog(String(
                     format: "[Renderer] Enqueue wait %.0fms: samplePTS=%.3f syncAtEntry=%.3f syncAtExit=%.3f aheadAtEntry=%.3f aheadAtExit=%.3f rate=%.2f status=%d error=%@",
                     stallDuration * 1000,
                     stallPTS, stallSyncTime, nowSyncTime,
@@ -550,7 +550,7 @@ final class SampleBufferRenderer {
         guard !Task.isCancelled else { return }
 
         if let error = displayLayer.error {
-            print("[Renderer] Display layer error before enqueue: \(error)")
+            playerDebugLog("[Renderer] Display layer error before enqueue: \(error)")
         }
 
         displayLayer.enqueue(sampleBuffer)
@@ -576,7 +576,7 @@ final class SampleBufferRenderer {
         if lastAudioRendererStatus != currentStatus {
             lastAudioRendererStatus = currentStatus
             let errorDescription = audioRenderer.error?.localizedDescription ?? "none"
-            print("[Renderer] Audio renderer status changed: \(audioRendererStatusDescription(currentStatus)) (error=\(errorDescription))")
+            playerDebugLog("[Renderer] Audio renderer status changed: \(audioRendererStatusDescription(currentStatus)) (error=\(errorDescription))")
         }
 
         if currentStatus == .failed {
@@ -589,9 +589,9 @@ final class SampleBufferRenderer {
             let syncTime = CMTimeGetSeconds(renderSynchronizer.currentTime())
             let ready = audioRenderer.isReadyForMoreMediaData
             let status = audioRenderer.status.rawValue
-            print("[Renderer] Audio enqueue attempt: ready=\(ready), syncRate=\(syncRate), syncTime=\(String(format: "%.3f", syncTime))s, status=\(status)")
+            playerDebugLog("[Renderer] Audio enqueue attempt: ready=\(ready), syncRate=\(syncRate), syncTime=\(String(format: "%.3f", syncTime))s, status=\(status)")
             let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-            print("[Renderer] Audio sample PTS=\(CMTimeGetSeconds(pts))s, size=\(CMSampleBufferGetTotalSampleSize(sampleBuffer))B")
+            playerDebugLog("[Renderer] Audio sample PTS=\(CMTimeGetSeconds(pts))s, size=\(CMSampleBufferGetTotalSampleSize(sampleBuffer))B")
             logAudioSampleFormat(sampleBuffer)
             AudioRouteDiagnostics.shared.logCurrentRoute(owner: "SampleBufferRenderer", reason: "first_audio_sample")
         }
@@ -613,7 +613,7 @@ final class SampleBufferRenderer {
                         let syncRate = renderSynchronizer.rate
                         let syncTime = CMTimeGetSeconds(renderSynchronizer.currentTime())
                         let pts = CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
-                        print(
+                        playerDebugLog(
                             "[Renderer] Dropping audio sample after \(String(format: "%.0f", elapsed * 1000))ms backpressure " +
                             "(drops=\(audioBackpressureDropCount), streak=\(audioNotReadyStreak), " +
                             "status=\(audioRenderer.status.rawValue), error=\(audioRenderer.error?.localizedDescription ?? "none"), " +
@@ -634,7 +634,7 @@ final class SampleBufferRenderer {
         }
 
         if let error = audioRenderer.error {
-            print("[Renderer] Audio renderer error before enqueue: \(error)")
+            playerDebugLog("[Renderer] Audio renderer error before enqueue: \(error)")
             return
         }
 
@@ -650,7 +650,7 @@ final class SampleBufferRenderer {
             let syncTime = CMTimeGetSeconds(renderSynchronizer.currentTime())
             let pts = CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
             let audioAhead = pts - syncTime
-            print("[Renderer] AudioDiag: enqueued=\(audioEnqueueCount) drops=\(audioBackpressureDropCount) " +
+            playerDebugLog("[Renderer] AudioDiag: enqueued=\(audioEnqueueCount) drops=\(audioBackpressureDropCount) " +
                   "syncRate=\(syncRate) syncTime=\(String(format: "%.3f", syncTime))s " +
                   "audioPTS=\(String(format: "%.3f", pts))s ahead=\(String(format: "%.3f", audioAhead))s " +
                   "ready=\(audioRenderer.isReadyForMoreMediaData) status=\(audioRenderer.status.rawValue) " +
@@ -703,7 +703,7 @@ final class SampleBufferRenderer {
             hasLoggedFirstAudioSample = true
             let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
             let outputFormat = audioEngine?.outputNode.outputFormat(forBus: 0)
-            print(
+            playerDebugLog(
                 "[Renderer] AudioEngine first sample: PTS=\(String(format: "%.3f", CMTimeGetSeconds(pts)))s " +
                 "inputFormat=\(format) frames=\(frameCount) " +
                 "outputRate=\(outputFormat.map { String(Int($0.sampleRate)) } ?? "?")"
@@ -717,7 +717,7 @@ final class SampleBufferRenderer {
             lastAudioDiagWallTime = now
             let timebaseTime = videoTimebase.map { CMTimeGetSeconds(CMTimebaseGetTime($0)) } ?? 0
             let pts = CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
-            print(
+            playerDebugLog(
                 "[Renderer] AudioEngineDiag: enqueued=\(audioEnqueueCount) " +
                 "tbTime=\(String(format: "%.3f", timebaseTime))s " +
                 "audioPTS=\(String(format: "%.3f", pts))s " +
@@ -764,7 +764,7 @@ final class SampleBufferRenderer {
             let syncRate = renderSynchronizer.rate
             let syncTime = CMTimeGetSeconds(renderSynchronizer.currentTime())
             let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-            print("[Renderer] Pull-mode audio first sample: syncRate=\(syncRate), " +
+            playerDebugLog("[Renderer] Pull-mode audio first sample: syncRate=\(syncRate), " +
                   "syncTime=\(String(format: "%.3f", syncTime))s, " +
                   "PTS=\(String(format: "%.3f", CMTimeGetSeconds(pts)))s")
             logAudioSampleFormat(sampleBuffer)
@@ -799,7 +799,7 @@ final class SampleBufferRenderer {
             let syncTime = CMTimeGetSeconds(renderSynchronizer.currentTime())
             let pts = CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
             let audioAhead = pts - syncTime
-            print("[Renderer] AudioPullDiag: buffered=\(bufferCount) enqueued=\(audioEnqueueCount) " +
+            playerDebugLog("[Renderer] AudioPullDiag: buffered=\(bufferCount) enqueued=\(audioEnqueueCount) " +
                   "bufferedDur=\(String(format: "%.3f", bufferedDuration))s " +
                   "requesting=\(audioPullRequesting) " +
                   "reliableStart=\(hasReliableAudioStartBuffer) " +
@@ -824,7 +824,7 @@ final class SampleBufferRenderer {
             audioPullWaitingLogCount += 1
             let waitLogCount = audioPullWaitingLogCount
             if waitLogCount <= 4 || waitLogCount % 60 == 0 {
-                print(
+                playerDebugLog(
                     "[Renderer] Audio pull waiting for cushion: " +
                     "buffered=\(bufferCount) bufferedDur=\(String(format: "%.3f", bufferedDuration))s " +
                     "need=\(String(format: "%.3f", restartThreshold))s " +
@@ -858,7 +858,7 @@ final class SampleBufferRenderer {
         audioPullShouldLogCurrentRequest = shouldLogRequest
 
         if shouldLogRequest {
-            print(
+            playerDebugLog(
                 "[Renderer] Audio pull start: buffered=\(buffered) " +
                 "bufferedDur=\(String(format: "%.3f", bufferedDuration))s " +
                 "status=\(audioRenderer.status.rawValue) ready=\(audioRenderer.isReadyForMoreMediaData) " +
@@ -878,7 +878,7 @@ final class SampleBufferRenderer {
                 audioPullLock.unlock()
                 let elapsed = CFAbsoluteTimeGetCurrent() - audioPullRequestStartWall
                 if audioPullDrainCount > 0 && audioPullShouldLogCurrentRequest {
-                    print(
+                    playerDebugLog(
                         "[Renderer] Audio pull drained: delivered=\(audioPullDrainCount) " +
                         "elapsed=\(String(format: "%.0f", elapsed * 1000))ms " +
                         "status=\(audioRenderer.status.rawValue)"
@@ -915,7 +915,7 @@ final class SampleBufferRenderer {
             if audioPullShouldLogCurrentRequest && drainCount == 1 {
                 let pts = CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sample))
                 let syncTime = CMTimeGetSeconds(renderSynchronizer.currentTime())
-                print("[Renderer] Audio pull deliver #\(deliveredCount): pts=\(String(format: "%.3f", pts))s " +
+                playerDebugLog("[Renderer] Audio pull deliver #\(deliveredCount): pts=\(String(format: "%.3f", pts))s " +
                       "ahead=\(String(format: "%.3f", pts - syncTime))s remaining=\(remaining) " +
                       "remainingDur=\(String(format: "%.3f", remainingDuration))s " +
                       "reliableStart=\(hasReliableAudioStartBuffer) status=\(audioRenderer.status.rawValue)")
@@ -927,7 +927,7 @@ final class SampleBufferRenderer {
         let bufferedDuration = audioPullBufferedDuration
         audioPullLock.unlock()
         if audioPullShouldLogCurrentRequest {
-            print(
+            playerDebugLog(
                 "[Renderer] Audio pull paused: buffered=\(buffered) " +
                 "bufferedDur=\(String(format: "%.3f", bufferedDuration))s " +
                 "ready=\(audioRenderer.isReadyForMoreMediaData) " +
@@ -1011,7 +1011,7 @@ final class SampleBufferRenderer {
 
         audioPullDrainCount = 0
         audioPullShouldLogCurrentRequest = false
-        print(
+        playerDebugLog(
             "[Renderer] Audio pull paused for transport: buffered=\(buffered) " +
             "bufferedDur=\(String(format: "%.3f", bufferedDuration))s"
         )
@@ -1034,7 +1034,7 @@ final class SampleBufferRenderer {
 
         guard !isRequesting, buffered > 0 else { return }
 
-        print(
+        playerDebugLog(
             "[Renderer] Audio pull resume for transport: buffered=\(buffered) " +
             "bufferedDur=\(String(format: "%.3f", bufferedDuration))s"
         )
@@ -1121,7 +1121,7 @@ final class SampleBufferRenderer {
         let now = CFAbsoluteTimeGetCurrent()
         if now - lastAudioRecoveryWallTime > 0.25 {
             lastAudioRecoveryWallTime = now
-            print("[Renderer] Audio renderer failed during \(reason); flushing to recover (error=\(errorDescription))")
+            playerDebugLog("[Renderer] Audio renderer failed during \(reason); flushing to recover (error=\(errorDescription))")
         }
         audioRenderer.flush()
         return true
@@ -1130,7 +1130,7 @@ final class SampleBufferRenderer {
     private nonisolated func logAudioSampleFormat(_ sampleBuffer: CMSampleBuffer) {
         guard let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer),
               let streamBasicDescription = CMAudioFormatDescriptionGetStreamBasicDescription(formatDescription) else {
-            print("[Renderer] Audio format: unavailable")
+            playerDebugLog("[Renderer] Audio format: unavailable")
             return
         }
 
@@ -1150,7 +1150,7 @@ final class SampleBufferRenderer {
         let isPacked = (asbd.mFormatFlags & kAudioFormatFlagIsPacked) != 0
         let formatType = isFloat ? "float" : (isSigned ? "sint" : "uint")
 
-        print(
+        playerDebugLog(
             "[Renderer] Audio format details: codec=\(codec) sampleRate=\(Int(asbd.mSampleRate)) " +
             "channels=\(asbd.mChannelsPerFrame) bitsPerChannel=\(asbd.mBitsPerChannel) " +
             "type=\(formatType) packed=\(isPacked) flags=\(asbd.mFormatFlags) " +
@@ -1208,11 +1208,11 @@ final class SampleBufferRenderer {
                 if rate == 0 {
                     // Auto-flush during pause (typically from NowPlaying session re-activation).
                     // Skip destructive reset — the pull mode will recover naturally on resume.
-                    print("[Renderer] Audio renderer auto-flushed during pause at \(String(format: "%.3f", flushTimeSeconds))s — skipping reset")
+                    playerDebugLog("[Renderer] Audio renderer auto-flushed during pause at \(String(format: "%.3f", flushTimeSeconds))s — skipping reset")
                     return
                 }
 
-                print("[Renderer] Audio renderer auto-flushed at \(String(format: "%.3f", flushTimeSeconds))s " +
+                playerDebugLog("[Renderer] Audio renderer auto-flushed at \(String(format: "%.3f", flushTimeSeconds))s " +
                       "(syncTime=\(String(format: "%.3f", syncTime))s, " +
                       "enqueued=\(self.audioEnqueueCount), drops=\(self.audioBackpressureDropCount))")
 
@@ -1230,7 +1230,7 @@ final class SampleBufferRenderer {
                 guard let self else { return }
                 guard !self.useAudioEngine else { return }
                 let syncTime = CMTimeGetSeconds(self.renderSynchronizer.currentTime())
-                print("[Renderer] Audio output configuration changed (syncTime=\(String(format: "%.3f", syncTime))s)")
+                playerDebugLog("[Renderer] Audio output configuration changed (syncTime=\(String(format: "%.3f", syncTime))s)")
 
                 AudioRouteDiagnostics.shared.logCurrentRoute(
                     owner: "SampleBufferRenderer",

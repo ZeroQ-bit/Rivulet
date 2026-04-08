@@ -139,7 +139,7 @@ struct ContentRouter {
         if context.isLiveTV {
             reasoning.append("live_tv_requires_hls")
             let hls = buildHLSRoute(context: context)
-            print("[ContentRouter] \(container) | audio=\(audioCodec) → HLS (live TV)")
+            playerDebugLog("[ContentRouter] \(container) | audio=\(audioCodec) → HLS (live TV)")
             return PlaybackPlan(
                 policy: context.playbackPolicy,
                 primary: hls,
@@ -152,7 +152,7 @@ struct ContentRouter {
         if context.forceHLS {
             reasoning.append("force_hls_requested")
             let hls = buildHLSRoute(context: context)
-            print("[ContentRouter] \(container) | audio=\(audioCodec) → HLS (forced)")
+            playerDebugLog("[ContentRouter] \(container) | audio=\(audioCodec) → HLS (forced)")
             return PlaybackPlan(
                 policy: context.playbackPolicy,
                 primary: hls,
@@ -169,7 +169,7 @@ struct ContentRouter {
         if !FFmpegDemuxer.isAvailable {
             if !analysis.needsRemux, let direct = buildAVPlayerDirectRoute(context: context) {
                 reasoning.append("ffmpeg_unavailable_but_native_container")
-                print("[ContentRouter] \(container) | audio=\(audioCodec) → AVPlayerDirect (FFmpeg unavailable, native container)")
+                playerDebugLog("[ContentRouter] \(container) | audio=\(audioCodec) → AVPlayerDirect (FFmpeg unavailable, native container)")
                 return PlaybackPlan(
                     policy: context.playbackPolicy,
                     primary: direct,
@@ -178,7 +178,7 @@ struct ContentRouter {
                 )
             }
             reasoning.append("ffmpeg_unavailable")
-            print("[ContentRouter] \(container) | audio=\(audioCodec) → HLS (FFmpeg unavailable)")
+            playerDebugLog("[ContentRouter] \(container) | audio=\(audioCodec) → HLS (FFmpeg unavailable)")
             return PlaybackPlan(
                 policy: context.playbackPolicy,
                 primary: hlsFallback,
@@ -190,7 +190,7 @@ struct ContentRouter {
         // Path 1: AVPlayer direct — native container + native audio + no DV P7
         if !analysis.needsRemux, let direct = buildAVPlayerDirectRoute(context: context) {
             reasoning.append(contentsOf: analysis.reasoning)
-            print("[ContentRouter] \(container) | audio=\(audioCodec) → AVPlayerDirect")
+            playerDebugLog("[ContentRouter] \(container) | audio=\(audioCodec) → AVPlayerDirect")
             return PlaybackPlan(
                 policy: context.playbackPolicy,
                 primary: direct,
@@ -210,7 +210,7 @@ struct ContentRouter {
                     reasoning.append("local_remux_user_enabled")
                 }
                 let reason = analysis.needsDVConversion ? "DV P7 conversion" : "local remux enabled"
-                print("[ContentRouter] \(container) | audio=\(audioCodec) → LocalRemux (\(reason))")
+                playerDebugLog("[ContentRouter] \(container) | audio=\(audioCodec) → LocalRemux (\(reason))")
                 return PlaybackPlan(
                     policy: context.playbackPolicy,
                     primary: remuxRoute,
@@ -224,7 +224,7 @@ struct ContentRouter {
         if analysis.needsRemux {
             reasoning.append(contentsOf: analysis.reasoning)
             reasoning.append("plex_server_remux")
-            print("[ContentRouter] \(container) | audio=\(audioCodec) → HLS (server remux)")
+            playerDebugLog("[ContentRouter] \(container) | audio=\(audioCodec) → HLS (server remux)")
             return PlaybackPlan(
                 policy: context.playbackPolicy,
                 primary: hlsFallback,
@@ -235,7 +235,7 @@ struct ContentRouter {
 
         // Path 4: Plex HLS fallback
         reasoning.append("fallback_to_hls")
-        print("[ContentRouter] \(container) | audio=\(audioCodec) → HLS (fallback)")
+        playerDebugLog("[ContentRouter] \(container) | audio=\(audioCodec) → HLS (fallback)")
         return PlaybackPlan(
             policy: context.playbackPolicy,
             primary: hlsFallback,

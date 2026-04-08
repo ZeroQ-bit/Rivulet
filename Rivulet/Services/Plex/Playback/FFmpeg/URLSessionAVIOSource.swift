@@ -265,7 +265,7 @@ final class URLSessionAVIOSource: NSObject, @unchecked Sendable {
         let gen = pipelineGeneration
         condition.unlock()
 
-        print(String(
+        playerDebugLog(String(
             format: "[URLSessionAVIO] Head segment truncated — retrying start=%lld len=%lld attempt=%d",
             newStart, newLen, replacement.retryCount
         ))
@@ -482,7 +482,7 @@ final class URLSessionAVIOSource: NSObject, @unchecked Sendable {
         let deliveryRatePerSec = Double(deliveriesDelta) / elapsed
         let avgChunkBytes = deliveriesDelta > 0 ? deliveredDelta / Int64(deliveriesDelta) : 0
 
-        print(String(
+        playerDebugLog(String(
             format: "[URLSessionAVIODiag] delivered=%.1fMbps consumed=%.1fMbps queueMB=%.2f segInFlight=%d reads=%d avgWait=%.2fms blockRatio=%.0f%% deliveries/s=%.0f avgChunk=%lldB minChunk=%dB maxChunk=%dB segStarts=%d segRetries=%d seeks=%d",
             deliveredMbps, consumedMbps, queueMB, segments.count, totalReadCalls,
             avgWaitMs, blockingRatio * 100,
@@ -561,7 +561,7 @@ final class URLSessionAVIOSource: NSObject, @unchecked Sendable {
             condition.unlock()
         }
 
-        print(String(
+        playerDebugLog(String(
             format: "[URLSessionAVIOSeek] from=%lld to=%lld Δ=%+.2fMB restarting",
             currentPos, newOffset, Double(delta) / (1024 * 1024)
         ))
@@ -653,7 +653,7 @@ extension URLSessionAVIOSource: URLSessionDataDelegate {
         segment.isComplete = true
         if let error, (error as NSError).code != NSURLErrorCancelled {
             segment.fetchError = error
-            print("[URLSessionAVIO] Segment id=\(segment.id) error: \(error.localizedDescription)")
+            playerDebugLog("[URLSessionAVIO] Segment id=\(segment.id) error: \(error.localizedDescription)")
         }
         condition.broadcast()
         condition.unlock()

@@ -232,7 +232,7 @@ final class FFmpegDemuxer: @unchecked Sendable {
             localAVIOContext = avio
             ctx.pointee.pb = avio
             ctx.pointee.flags |= AVFMT_FLAG_CUSTOM_IO
-            print("[FFmpegDemuxer] Using URLSession-backed AVIO for \(url.absoluteString)")
+            playerDebugLog("[FFmpegDemuxer] Using URLSession-backed AVIO for \(url.absoluteString)")
         } else {
             if let headers = headers, !headers.isEmpty {
                 let headerString = headers.map { "\($0.key): \($0.value)" }.joined(separator: "\r\n")
@@ -587,7 +587,7 @@ final class FFmpegDemuxer: @unchecked Sendable {
         }
 
         cues.sort { $0.start < $1.start }
-        print("[FFmpegDemuxer] Extracted \(cues.count) subtitle cues from stream \(streamIndex)")
+        playerDebugLog("[FFmpegDemuxer] Extracted \(cues.count) subtitle cues from stream \(streamIndex)")
         return cues
     }
 
@@ -701,7 +701,7 @@ final class FFmpegDemuxer: @unchecked Sendable {
                 )
                 synthesizedAudioDurationCount += 1
                 if synthesizedAudioDurationCount <= 5 || synthesizedAudioDurationCount % 100 == 0 {
-                    print(
+                    playerDebugLog(
                         "[FFmpegDemuxer] Synthesized audio packet duration (count=\(synthesizedAudioDurationCount)) " +
                         "codec=\(fourCCString(asbd.mFormatID)) fpp=\(framesPerPacket) rate=\(Int(sampleRate))"
                     )
@@ -731,7 +731,7 @@ final class FFmpegDemuxer: @unchecked Sendable {
             presentationTimeStamp = CMTime(seconds: synthesizedPTSSeconds, preferredTimescale: 90_000)
             invalidAudioTimestampCount += 1
             if invalidAudioTimestampCount <= 5 || invalidAudioTimestampCount % 100 == 0 {
-                print(
+                playerDebugLog(
                     "[FFmpegDemuxer] Audio packet missing valid PTS/DTS " +
                     "(count=\(invalidAudioTimestampCount), synthesized=\(String(format: "%.3f", synthesizedPTSSeconds)))"
                 )
@@ -754,7 +754,7 @@ final class FFmpegDemuxer: @unchecked Sendable {
         if ptsSeconds.isFinite, let lastPTS = lastAudioPacketPTSSeconds, ptsSeconds + 0.001 < lastPTS {
             nonMonotonicAudioTimestampCount += 1
             if nonMonotonicAudioTimestampCount <= 5 || nonMonotonicAudioTimestampCount % 100 == 0 {
-                print(
+                playerDebugLog(
                     "[FFmpegDemuxer] Non-monotonic audio PTS (count=\(nonMonotonicAudioTimestampCount)) " +
                     "current=\(String(format: "%.3f", ptsSeconds)) last=\(String(format: "%.3f", lastPTS))"
                 )
@@ -935,7 +935,7 @@ final class FFmpegDemuxer: @unchecked Sendable {
                 discardedCount += 1
             }
         }
-        print("[FFmpegDemuxer] \(loggingPrefix): kept video=\(keptVideo) audio=\(keptAudio) subtitle=\(keptSubtitle) other=\(keptOther), discarding \(discardedCount) streams")
+        playerDebugLog("[FFmpegDemuxer] \(loggingPrefix): kept video=\(keptVideo) audio=\(keptAudio) subtitle=\(keptSubtitle) other=\(keptOther), discarding \(discardedCount) streams")
     }
 
     // MARK: - Private: Format Description Creation
@@ -1029,7 +1029,7 @@ final class FFmpegDemuxer: @unchecked Sendable {
 
             // Strip EL parameter sets (layer_id != 0)
             guard layerId == 0 else {
-                print("[FFmpegDemuxer] Stripped EL parameter set: type=\(nalType) layer=\(layerId) size=\(naluData.count)B")
+                playerDebugLog("[FFmpegDemuxer] Stripped EL parameter set: type=\(nalType) layer=\(layerId) size=\(naluData.count)B")
                 return nil
             }
 
@@ -1038,18 +1038,18 @@ final class FFmpegDemuxer: @unchecked Sendable {
                 var modified = Data(naluData)
                 modified[modified.startIndex + 2] = modified[modified.startIndex + 2] & 0xFC
                 modified[modified.startIndex + 3] = modified[modified.startIndex + 3] & 0x0F
-                print("[FFmpegDemuxer] Fixed VPS: max_layers_minus1 → 0")
+                playerDebugLog("[FFmpegDemuxer] Fixed VPS: max_layers_minus1 → 0")
                 return modified
             }
             return Data(naluData)
         }
 
         guard !cleanedSets.isEmpty else {
-            print("[FFmpegDemuxer] No parameter sets after cleaning — aborting rebuild")
+            playerDebugLog("[FFmpegDemuxer] No parameter sets after cleaning — aborting rebuild")
             return
         }
 
-        print("[FFmpegDemuxer] Parameter sets: \(paramSets.count) original → \(cleanedSets.count) cleaned")
+        playerDebugLog("[FFmpegDemuxer] Parameter sets: \(paramSets.count) original → \(cleanedSets.count) cleaned")
 
         // Step 2: Build a clean HEVC format description from the parameter sets.
         // CMVideoFormatDescriptionCreateFromHEVCParameterSets builds a proper hvcC internally.
@@ -1084,7 +1084,7 @@ final class FFmpegDemuxer: @unchecked Sendable {
         }
 
         guard status1 == noErr, let cleanFD = tempDesc else {
-            print("[FFmpegDemuxer] CMVideoFormatDescriptionCreateFromHEVCParameterSets failed: \(status1)")
+            playerDebugLog("[FFmpegDemuxer] CMVideoFormatDescriptionCreateFromHEVCParameterSets failed: \(status1)")
             return
         }
 
@@ -1093,7 +1093,7 @@ final class FFmpegDemuxer: @unchecked Sendable {
         // codec tag is sufficient to activate VideoToolbox's DV decoder. No dvcC/dvvC
         // needed. Keep ALL extensions from the clean FD intact.
         guard var cleanExts = CMFormatDescriptionGetExtensions(cleanFD) as? [CFString: Any] else {
-            print("[FFmpegDemuxer] Failed to extract clean extensions")
+            playerDebugLog("[FFmpegDemuxer] Failed to extract clean extensions")
             return
         }
 
@@ -1104,9 +1104,9 @@ final class FFmpegDemuxer: @unchecked Sendable {
             if let range = verbatimData.range(of: Data(hvc1)) {
                 verbatimData.replaceSubrange(range, with: dvh1)
                 cleanExts["VerbatimISOSampleEntry" as CFString] = verbatimData
-                print("[FFmpegDemuxer] Patched VerbatimISOSampleEntry: hvc1 → dvh1")
+                playerDebugLog("[FFmpegDemuxer] Patched VerbatimISOSampleEntry: hvc1 → dvh1")
             } else {
-                print("[FFmpegDemuxer] ⚠️ VerbatimISOSampleEntry has no hvc1 FourCC to patch")
+                playerDebugLog("[FFmpegDemuxer] ⚠️ VerbatimISOSampleEntry has no hvc1 FourCC to patch")
             }
         }
 
@@ -1131,14 +1131,14 @@ final class FFmpegDemuxer: @unchecked Sendable {
             let fourCC = CMFormatDescriptionGetMediaSubType(result)
             let fourCCStr = String(format: "%c%c%c%c",
                 (fourCC >> 24) & 0xFF, (fourCC >> 16) & 0xFF, (fourCC >> 8) & 0xFF, fourCC & 0xFF)
-            print("[FFmpegDemuxer] Rebuilt FD: codec=\(fourCCStr) (VerbatimISOSampleEntry patched)")
+            playerDebugLog("[FFmpegDemuxer] Rebuilt FD: codec=\(fourCCStr) (VerbatimISOSampleEntry patched)")
             if let dvProfile {
-                print("[FFmpegDemuxer] DV format: dvh1 P\(dvProfile) bl_compat=\(blCompatId)")
+                playerDebugLog("[FFmpegDemuxer] DV format: dvh1 P\(dvProfile) bl_compat=\(blCompatId)")
             } else {
-                print("[FFmpegDemuxer] Format: hvc1 (clean single-layer VPS, BT.2020 PQ)")
+                playerDebugLog("[FFmpegDemuxer] Format: hvc1 (clean single-layer VPS, BT.2020 PQ)")
             }
         } else {
-            print("[FFmpegDemuxer] Failed to create format description: \(status2)")
+            playerDebugLog("[FFmpegDemuxer] Failed to create format description: \(status2)")
         }
     }
 
@@ -1206,7 +1206,7 @@ final class FFmpegDemuxer: @unchecked Sendable {
                     ffmpegProfile: Int(codecpar.pointee.profile)
                 )
                 if normalizedCookie != cookie {
-                    print("[FFmpegDemuxer] Normalized AAC magic cookie (raw=\(cookie.count)B normalized=\(normalizedCookie.count)B)")
+                    playerDebugLog("[FFmpegDemuxer] Normalized AAC magic cookie (raw=\(cookie.count)B normalized=\(normalizedCookie.count)B)")
                 }
                 cookie = normalizedCookie
             }
@@ -1220,7 +1220,7 @@ final class FFmpegDemuxer: @unchecked Sendable {
                 asbd.mFramesPerPacket = UInt32(parsedConfig.framesPerPacket)
                 if !hasLoggedAACConfig {
                     hasLoggedAACConfig = true
-                    print(
+                    playerDebugLog(
                         "[FFmpegDemuxer] AAC config: aot=\(parsedConfig.audioObjectType) coreRate=\(Int(parsedConfig.coreSampleRate)) " +
                         "outputRate=\(Int(parsedConfig.outputSampleRate)) channels=\(parsedConfig.channelCount) " +
                         "framesPerPacket=\(parsedConfig.framesPerPacket) cookie=\(cookie.count)B profile=\(codecpar.pointee.profile)"
@@ -1258,7 +1258,7 @@ final class FFmpegDemuxer: @unchecked Sendable {
                     )
                 }
                 if status == noErr, let result = desc {
-                    print("[FFmpegDemuxer] Synthesized AAC magic cookie (profile=\(codecpar.pointee.profile), sr=\(codecpar.pointee.sample_rate), ch=\(codecpar.pointee.ch_layout.nb_channels))")
+                    playerDebugLog("[FFmpegDemuxer] Synthesized AAC magic cookie (profile=\(codecpar.pointee.profile), sr=\(codecpar.pointee.sample_rate), ch=\(codecpar.pointee.ch_layout.nb_channels))")
                     return result
                 }
             }
@@ -1479,7 +1479,7 @@ final class FFmpegDemuxer: @unchecked Sendable {
 
         if !hasLoggedADTSStripping {
             hasLoggedADTSStripping = true
-            print("[FFmpegDemuxer] Detected ADTS-wrapped AAC packets; stripping ADTS header (\(adtsHeaderLength) bytes)")
+            playerDebugLog("[FFmpegDemuxer] Detected ADTS-wrapped AAC packets; stripping ADTS header (\(adtsHeaderLength) bytes)")
         }
 
         return data.subdata(in: adtsHeaderLength..<data.count)
@@ -1536,7 +1536,7 @@ final class FFmpegDemuxer: @unchecked Sendable {
         hasDolbyVision = true
 
         let compatText = blCompat.map(String.init) ?? "unknown"
-        print(
+        playerDebugLog(
             "[FFmpegDemuxer] Dolby Vision config (\(source)): " +
             "profile=\(profile) level=\(level) bl_compat=\(compatText) size=\(configData.count)B"
         )

@@ -174,16 +174,17 @@ struct ContinueWatchingCard: View, Equatable {
     }
 }
 
-// MARK: - Title Logo (async TMDB fetch)
+// MARK: - Title Logo (Plex clearLogo fetch)
 
-/// Fetches and displays the TMDB title logo, falling back to styled text.
-/// For episodes, resolves the show's TMDB ID via grandparentGuid, fetching
-/// show metadata if needed (Continue Watching items often lack parent metadata).
+/// Fetches and displays the Plex `clearLogo`, falling back to styled text.
+/// For episodes, resolves the show's clearLogo by fetching the grandparent
+/// show's metadata (Continue Watching hub items don't carry an Image array).
 private struct ContinueWatchingTitleLogo: View {
     let item: PlexMetadata
 
-    @State private var logoResult: TMDBLogoResult?
+    @State private var loadedLogo: UIImage?
     @State private var hasFetched = false
+    @State private var revealOpacity: Double = 0
     @Environment(\.uiScale) private var scale
 
     private var displayTitle: String {
@@ -201,8 +202,8 @@ private struct ContinueWatchingTitleLogo: View {
     private var maxHeight: CGFloat { ScaledDimensions.continueWatchingHeight * scale * 0.45 }
 
     /// Compute logo size from target area + aspect ratio, clamped to card bounds
-    private var logoSize: CGSize {
-        let ratio = logoResult?.aspectRatio ?? 2.0
+    private func logoSize(for image: UIImage) -> CGSize {
+        let ratio = image.size.height > 0 ? image.size.width / image.size.height : 2.0
         let rawW = sqrt(targetArea * ratio)
         let rawH = sqrt(targetArea / ratio)
         let w = min(rawW, maxWidth)
@@ -211,22 +212,20 @@ private struct ContinueWatchingTitleLogo: View {
     }
 
     var body: some View {
-        Group {
-            if let url = logoResult?.url {
-                CachedAsyncImage(url: url) { phase in
-                    switch phase {
-                    case .success(let image):
-                        image
-                            .resizable()
-                            .aspectRatio(contentMode: .fit)
-                            .frame(maxWidth: logoSize.width, maxHeight: logoSize.height)
-                            .shadow(color: .black.opacity(0.6), radius: 4, y: 2)
-                    default:
-                        textFallback
-                    }
-                }
-            } else {
-                textFallback
+        ZStack {
+            textFallback
+                .opacity(loadedLogo == nil ? 1 : 0)
+
+            if let loadedLogo {
+                Image(uiImage: loadedLogo)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(
+                        maxWidth: logoSize(for: loadedLogo).width,
+                        maxHeight: logoSize(for: loadedLogo).height
+                    )
+                    .shadow(color: .black.opacity(0.6), radius: 4, y: 2)
+                    .opacity(revealOpacity)
             }
         }
         .task {
@@ -244,56 +243,58 @@ private struct ContinueWatchingTitleLogo: View {
             .shadow(color: .black.opacity(0.5), radius: 4, y: 2)
     }
 
+    @MainActor
     private func fetchLogo() async {
-        let tmdbId = await resolveTmdbId()
-        guard let tmdbId else { return }
+        guard let logoURL = await resolveClearLogoURL() else { return }
 
-        let mediaType: TMDBMediaType = (item.type == "episode" || item.type == "show") ? .tv : .movie
-        let result = await TMDBClient.shared.fetchLogo(tmdbId: tmdbId, type: mediaType)
-        await MainActor.run {
-            logoResult = result
+        let image = await ImageCacheManager.shared.image(for: logoURL)
+        guard let image else { return }
+
+        loadedLogo = image
+        withAnimation(.easeInOut(duration: 0.22)) {
+            revealOpacity = 1
         }
     }
 
-    /// Resolve the TMDB ID, fetching full metadata when hub items lack Guid array
-    private func resolveTmdbId() async -> Int? {
-        // Try inline IDs first (rarely available on hub items)
-        if item.type == "episode" {
-            if let id = item.showTmdbId { return id }
-        } else {
-            if let id = item.tmdbId { return id }
-        }
-
-        // Hub items typically lack Guid array — fetch full metadata from Plex
+    /// Resolve the clearLogo URL for this item's show (or the item itself for
+    /// movies). For episodes/shows, fetches grandparent/show metadata since
+    /// hub items don't carry the `Image` array.
+    @MainActor
+    private func resolveClearLogoURL() async -> URL? {
         guard let serverURL = PlexAuthManager.shared.selectedServerURL,
               let token = PlexAuthManager.shared.selectedServerToken else {
             return nil
         }
 
-        // For episodes, fetch the show's metadata; for movies/shows, fetch the item itself
-        let ratingKey: String?
-        let mediaType: TMDBMediaType
+        // Determine which rating key owns the clearLogo we want.
+        let sourceRatingKey: String?
         if item.type == "episode" {
-            ratingKey = item.grandparentRatingKey
-            mediaType = .tv
+            sourceRatingKey = item.grandparentRatingKey
         } else {
-            ratingKey = item.ratingKey
-            mediaType = item.tmdbMediaType
+            sourceRatingKey = item.ratingKey
         }
 
-        guard let ratingKey else { return nil }
+        guard let ratingKey = sourceRatingKey else { return nil }
 
-        do {
-            let metadata = try await PlexNetworkManager.shared.getMetadata(
-                serverURL: serverURL,
-                authToken: token,
-                ratingKey: ratingKey
-            )
-            if let tmdbId = metadata.tmdbId { return tmdbId }
-            if let tvdbId = metadata.tvdbId {
-                return await TMDBClient.shared.findTmdbId(tvdbId: tvdbId, type: mediaType)
+        // Prefer the cached full-metadata copy if present.
+        let sourceMetadata: PlexMetadata
+        if let cached = PlexDataStore.shared.getCachedFullMetadata(for: ratingKey) {
+            sourceMetadata = cached
+        } else {
+            do {
+                let fetched = try await PlexNetworkManager.shared.getFullMetadata(
+                    serverURL: serverURL,
+                    authToken: token,
+                    ratingKey: ratingKey
+                )
+                PlexDataStore.shared.cacheFullMetadata(fetched, for: ratingKey)
+                sourceMetadata = fetched
+            } catch {
+                return nil
             }
-        } catch {}
-        return nil
+        }
+
+        guard let path = sourceMetadata.clearLogoPath else { return nil }
+        return URL(string: "\(serverURL)\(path)?X-Plex-Token=\(token)")
     }
 }

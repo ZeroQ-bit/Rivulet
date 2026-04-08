@@ -83,7 +83,7 @@ final class FFmpegAudioEncoder: @unchecked Sendable {
         self.bytesPerInputFrame = Self.frameSize * channels * (bitsPerSample / 8)
 
         guard let codec = avcodec_find_encoder(AV_CODEC_ID_EAC3) else {
-            print("[AudioEncoder] EAC3 encoder not found in FFmpeg build")
+            playerDebugLog("[AudioEncoder] EAC3 encoder not found in FFmpeg build")
             throw FFmpegError.unsupportedCodec("eac3")
         }
 
@@ -104,7 +104,7 @@ final class FFmpegAudioEncoder: @unchecked Sendable {
         let ret = avcodec_open2(ctx, codec, nil)
         guard ret >= 0 else {
             avcodec_free_context(&mutableCtx)
-            print("[AudioEncoder] avcodec_open2 failed: \(ret)")
+            playerDebugLog("[AudioEncoder] avcodec_open2 failed: \(ret)")
             throw FFmpegError.openFailed(averror: ret)
         }
 
@@ -123,7 +123,7 @@ final class FFmpegAudioEncoder: @unchecked Sendable {
         guard allocRet >= 0 else {
             av_frame_free(&inputFrame)
             avcodec_free_context(&mutableCtx)
-            print("[AudioEncoder] av_frame_get_buffer failed: \(allocRet)")
+            playerDebugLog("[AudioEncoder] av_frame_get_buffer failed: \(allocRet)")
             throw FFmpegError.allocationFailed
         }
 
@@ -134,13 +134,13 @@ final class FFmpegAudioEncoder: @unchecked Sendable {
         // Verify encoder's frame size matches our assumption
         let encoderFrameSize = Int(ctx.pointee.frame_size)
         if encoderFrameSize > 0 && encoderFrameSize != Self.frameSize {
-            print("[AudioEncoder] WARNING: encoder frame_size=\(encoderFrameSize) != expected \(Self.frameSize)")
+            playerDebugLog("[AudioEncoder] WARNING: encoder frame_size=\(encoderFrameSize) != expected \(Self.frameSize)")
         }
 
         // Set up swresample: interleaved F32 -> planar float (encoder input format)
         try setupSwresample()
 
-        print("[AudioEncoder] Opened EAC3 encoder: \(channels)ch \(sampleRate)Hz " +
+        playerDebugLog("[AudioEncoder] Opened EAC3 encoder: \(channels)ch \(sampleRate)Hz " +
               "bitrate=\(ctx.pointee.bit_rate/1000)kbps " +
               "frame_size=\(encoderFrameSize) initial_padding=\(ctx.pointee.initial_padding)")
     }
@@ -156,7 +156,7 @@ final class FFmpegAudioEncoder: @unchecked Sendable {
         guard isOpen else { return [] }
 
         if encodedFrameCount == 0 {
-            print("[AudioEncoder] Input frame #1: pts=\(String(format: "%.3f", CMTimeGetSeconds(frame.pts)))s " +
+            playerDebugLog("[AudioEncoder] Input frame #1: pts=\(String(format: "%.3f", CMTimeGetSeconds(frame.pts)))s " +
                   "samples=\(frame.sampleCount) rate=\(frame.sampleRate)Hz ch=\(frame.channels) bits=\(frame.bitsPerSample)")
         }
 
@@ -187,7 +187,7 @@ final class FFmpegAudioEncoder: @unchecked Sendable {
         var output: [EncodedAudioFrame] = []
 
         if inputBufferSampleCount > 0 {
-            print("[AudioEncoder] Flush requested: bufferedSamples=\(inputBufferSampleCount) " +
+            playerDebugLog("[AudioEncoder] Flush requested: bufferedSamples=\(inputBufferSampleCount) " +
                   "bufferedBytes=\(inputBuffer.count) nextPTS=\(nextPTS.isValid ? String(format: "%.3f", CMTimeGetSeconds(nextPTS)) : "invalid")")
         }
 
@@ -298,7 +298,7 @@ final class FFmpegAudioEncoder: @unchecked Sendable {
 
         if encodedFrameCount > 0 {
             let avgPacketBytes = totalPacketBytes / max(encodedFrameCount, 1)
-            print("[AudioEncoder] Summary: frames=\(encodedFrameCount) packetBytes[min=\(minPacketBytes),avg=\(avgPacketBytes),max=\(maxPacketBytes)]")
+            playerDebugLog("[AudioEncoder] Summary: frames=\(encodedFrameCount) packetBytes[min=\(minPacketBytes),avg=\(avgPacketBytes),max=\(maxPacketBytes)]")
         }
 
         inputBuffer = Data()
@@ -326,7 +326,7 @@ final class FFmpegAudioEncoder: @unchecked Sendable {
         }
 
         cachedFormatDescription = nil
-        print("[AudioEncoder] Closed")
+        playerDebugLog("[AudioEncoder] Closed")
     }
 
     // MARK: - Private: Encode One Frame
@@ -368,7 +368,7 @@ final class FFmpegAudioEncoder: @unchecked Sendable {
         }
 
         guard convertedSamples > 0 else {
-            print("[AudioEncoder] swr_convert failed: \(convertedSamples)")
+            playerDebugLog("[AudioEncoder] swr_convert failed: \(convertedSamples)")
             return nil
         }
 
@@ -378,7 +378,7 @@ final class FFmpegAudioEncoder: @unchecked Sendable {
         // Send frame to encoder
         var ret = avcodec_send_frame(ctx, frame)
         guard ret >= 0 else {
-            print("[AudioEncoder] avcodec_send_frame error: \(ret)")
+            playerDebugLog("[AudioEncoder] avcodec_send_frame error: \(ret)")
             return nil
         }
 
@@ -390,7 +390,7 @@ final class FFmpegAudioEncoder: @unchecked Sendable {
         ret = avcodec_receive_packet(ctx, pkt)
         if ret == kAudioEncoderEAGAIN || ret == kAudioEncoderEOF { return nil }
         guard ret >= 0 else {
-            print("[AudioEncoder] avcodec_receive_packet error: \(ret)")
+            playerDebugLog("[AudioEncoder] avcodec_receive_packet error: \(ret)")
             return nil
         }
 
@@ -402,7 +402,7 @@ final class FFmpegAudioEncoder: @unchecked Sendable {
         maxPacketBytes = max(maxPacketBytes, data.count)
         let packetPTSDelta = lastEncodedPTS.isValid ? CMTimeGetSeconds(CMTimeSubtract(pts, lastEncodedPTS)) : -1
         if encodedFrameCount <= 6 || encodedFrameCount % 120 == 0 {
-            print("[AudioEncoder] Encoded packet #\(encodedFrameCount): pts=\(String(format: "%.3f", CMTimeGetSeconds(pts)))s " +
+            playerDebugLog("[AudioEncoder] Encoded packet #\(encodedFrameCount): pts=\(String(format: "%.3f", CMTimeGetSeconds(pts)))s " +
                   "delta=\(packetPTSDelta >= 0 ? String(format: "%.4f", packetPTSDelta) : "n/a")s " +
                   "bytes=\(data.count) queuedInputSamples=\(inputBufferSampleCount) " +
                   "ffPts=\(pkt.pointee.pts) ffDur=\(pkt.pointee.duration)")
@@ -453,7 +453,7 @@ final class FFmpegAudioEncoder: @unchecked Sendable {
         guard ret >= 0 else {
             swr_free(&swrContext)
             swrContext = nil
-            print("[AudioEncoder] swr_init failed: \(ret)")
+            playerDebugLog("[AudioEncoder] swr_init failed: \(ret)")
             throw FFmpegError.openFailed(averror: ret)
         }
     }
@@ -497,7 +497,7 @@ final class FFmpegAudioEncoder: @unchecked Sendable {
         }
 
         cachedFormatDescription = fd
-        print("[AudioEncoder] Created EAC3 format description: \(channels)ch \(sampleRate)Hz" +
+        playerDebugLog("[AudioEncoder] Created EAC3 format description: \(channels)ch \(sampleRate)Hz" +
               (extradataSize > 0 ? " cookie=\(extradataSize)B" : ""))
         return fd
     }

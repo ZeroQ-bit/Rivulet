@@ -2,125 +2,58 @@ import XCTest
 @testable import Rivulet
 
 final class HeroBackdropSessionTests: XCTestCase {
-    func testSelectionKeepsPlexBackdropWhenUpgradeNotNeeded() {
+    func testSeedInitializerCarriesBackdropThumbnailAndLogo() {
         let plexURL = URL(string: "https://example.com/plex.jpg")
-        let tmdbURL = URL(string: "https://example.com/tmdb.jpg")
         let thumbURL = URL(string: "https://example.com/thumb.jpg")
+        let logoURL = URL(string: "https://example.com/logo.png")
         let request = HeroBackdropRequest(
             cacheKey: "movie:1",
             plexBackdropURL: plexURL,
             plexThumbnailURL: thumbURL,
-            tmdbId: 1,
-            tvdbId: nil,
-            mediaType: .movie,
-            preferredBackdropSize: "original"
+            plexLogoURL: logoURL
         )
 
-        let resolution = HeroBackdropSelection.compose(
-            request: request,
-            tmdbBackdropURL: tmdbURL,
-            logoURL: nil,
-            needsUpgrade: false
-        )
+        let session = HeroBackdropSession(seed: request)
 
-        XCTAssertEqual(resolution.displayedBackdropURL, plexURL)
-        XCTAssertNil(resolution.pendingUpgradeURL)
-        XCTAssertEqual(resolution.thumbnailURL, thumbURL)
+        XCTAssertEqual(session.displayedBackdropURL, plexURL)
+        XCTAssertEqual(session.thumbnailURL, thumbURL)
+        XCTAssertEqual(session.logoURL, logoURL)
     }
 
-    func testSelectionDoesNotStagePendingUpgradeWhenTMDBBackdropExists() {
-        let plexURL = URL(string: "https://example.com/plex.jpg")
-        let tmdbURL = URL(string: "https://example.com/tmdb.jpg")
+    func testSeedInitializerFallsBackToThumbnailWhenNoBackdrop() {
+        let thumbURL = URL(string: "https://example.com/thumb.jpg")
         let request = HeroBackdropRequest(
             cacheKey: "show:1",
-            plexBackdropURL: plexURL,
-            plexThumbnailURL: nil,
-            tmdbId: 7,
-            tvdbId: nil,
-            mediaType: .tv,
-            preferredBackdropSize: "original"
+            plexBackdropURL: nil,
+            plexThumbnailURL: thumbURL,
+            plexLogoURL: nil
         )
 
-        let resolution = HeroBackdropSelection.compose(
-            request: request,
-            tmdbBackdropURL: tmdbURL,
-            logoURL: nil,
-            needsUpgrade: true
-        )
+        let session = HeroBackdropSession(seed: request)
 
-        XCTAssertEqual(resolution.displayedBackdropURL, plexURL)
-        XCTAssertNil(resolution.pendingUpgradeURL)
-        XCTAssertFalse(resolution.canUpgradeAfterSettle)
+        XCTAssertEqual(session.displayedBackdropURL, thumbURL)
+        XCTAssertEqual(session.thumbnailURL, thumbURL)
+        XCTAssertNil(session.logoURL)
     }
 
-    func testSessionBlocksPendingUpgradeWhileMotionLocked() {
+    func testStageAppliesResolutionFields() {
         let plexURL = URL(string: "https://example.com/plex.jpg")
-        let tmdbURL = URL(string: "https://example.com/tmdb.jpg")
-        let request = HeroBackdropRequest(
-            cacheKey: "movie:2",
-            plexBackdropURL: plexURL,
-            plexThumbnailURL: nil,
-            tmdbId: 8,
-            tvdbId: nil,
-            mediaType: .movie,
-            preferredBackdropSize: "original"
-        )
+        let logoURL = URL(string: "https://example.com/logo.png")
+        let thumbURL = URL(string: "https://example.com/thumb.jpg")
 
-        var session = HeroBackdropSession(seed: request)
+        var session = HeroBackdropSession()
         session.stage(
             HeroBackdropResolution(
                 displayedBackdropURL: plexURL,
-                pendingUpgradeURL: tmdbURL,
-                logoURL: nil,
-                thumbnailURL: nil
+                pendingUpgradeURL: nil,
+                logoURL: logoURL,
+                thumbnailURL: thumbURL
             )
         )
-        session.setMotionLocked(true)
 
-        XCTAssertFalse(
-            session.applyPendingUpgradeIfReady(
-                now: Date().addingTimeInterval(1),
-                minimumStableDuration: 0.15
-            )
-        )
         XCTAssertEqual(session.displayedBackdropURL, plexURL)
-        XCTAssertEqual(session.pendingUpgradeURL, tmdbURL)
-    }
-
-    func testSessionAppliesPendingUpgradeAfterStableDelay() {
-        let plexURL = URL(string: "https://example.com/plex.jpg")
-        let tmdbURL = URL(string: "https://example.com/tmdb.jpg")
-        let request = HeroBackdropRequest(
-            cacheKey: "movie:3",
-            plexBackdropURL: plexURL,
-            plexThumbnailURL: nil,
-            tmdbId: 9,
-            tvdbId: nil,
-            mediaType: .movie,
-            preferredBackdropSize: "original"
-        )
-
-        var session = HeroBackdropSession(seed: request)
-        session.stage(
-            HeroBackdropResolution(
-                displayedBackdropURL: plexURL,
-                pendingUpgradeURL: tmdbURL,
-                logoURL: nil,
-                thumbnailURL: nil
-            )
-        )
-
-        let unlockTime = Date()
-        session.setMotionLocked(false, now: unlockTime)
-
-        XCTAssertTrue(
-            session.applyPendingUpgradeIfReady(
-                now: unlockTime.addingTimeInterval(0.2),
-                minimumStableDuration: 0.15
-            )
-        )
-        XCTAssertEqual(session.displayedBackdropURL, tmdbURL)
-        XCTAssertNil(session.pendingUpgradeURL)
+        XCTAssertEqual(session.logoURL, logoURL)
+        XCTAssertEqual(session.thumbnailURL, thumbURL)
     }
 
     func testLoadGateInvalidatesOlderGeneration() {

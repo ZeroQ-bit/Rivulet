@@ -97,6 +97,7 @@ struct PlexDetailView: View {
     @State private var kenBurnsOffset: CGFloat = 0
     @State private var retainedLogoURL: URL?
     @State private var hasDisplayedHeroLogoImage = false
+    @State private var parentShowLogoPath: String?
 
     // Navigation state for episode parent navigation
     @State private var navigateToSeason: PlexMetadata?
@@ -472,6 +473,7 @@ struct PlexDetailView: View {
             isSummaryExpanded = false
             scrollProgress = 0
             belowFoldTitleOpacity = 0
+            parentShowLogoPath = nil
             syncHeroBackdrop()
 
             // Index for Siri search
@@ -496,7 +498,7 @@ struct PlexDetailView: View {
             // Load full metadata for cast/crew and trailer
             await loadFullMetadata()
 
-            // Refresh hero art/logo with the best TMDB/TVDB data now that metadata is loaded.
+            // Refresh hero art/logo with the full Plex metadata now that it's loaded.
             await refreshHeroBackdropAssets()
 
             // Load collection and recommendations for movies
@@ -575,6 +577,7 @@ struct PlexDetailView: View {
         .onChange(of: currentItem.ratingKey) { _, _ in
             retainedLogoURL = nil
             hasDisplayedHeroLogoImage = false
+            parentShowLogoPath = nil
         }
         .onChange(of: showExpandedChrome) { _, isVisible in
             guard isVisible, isExpandedPreviewFlow else { return }
@@ -796,7 +799,7 @@ struct PlexDetailView: View {
                 // Text content — fixed height so buttons/peek distance
                 // stays constant regardless of description length, logo vs title, etc.
                 VStack(alignment: .leading, spacing: 14) {
-                    // TMDB logo or title — fixed height so content below is always
+                    // Plex clearLogo or title — fixed height so content below is always
                     // at the same position regardless of logo aspect ratio
                     Group {
                         if let logoURL = effectiveHeroLogoURL {
@@ -1801,66 +1804,33 @@ struct PlexDetailView: View {
         }
     }
 
-    private func syncHeroBackdrop(tmdbIdOverride: Int? = nil, tvdbIdOverride: Int? = nil) {
-        let request = currentHeroBackdropRequest(
-            tmdbIdOverride: tmdbIdOverride,
-            tvdbIdOverride: tvdbIdOverride
-        )
+    private func syncHeroBackdrop() {
+        let request = currentHeroBackdropRequest()
         heroBackdrop.load(request: request, motionLocked: heroBackdropMotionLocked)
     }
 
+    /// Re-syncs the hero backdrop after full metadata has loaded. For episodes
+    /// and seasons, also fetches the parent show's metadata so its `clearLogo`
+    /// can be folded into the request.
     private func refreshHeroBackdropAssets() async {
-        switch currentItem.type {
-        case "show":
-            if let tmdbId = fullMetadata?.tmdbId ?? currentItem.tmdbId {
-                syncHeroBackdrop(tmdbIdOverride: tmdbId)
-            } else if let tvdbId = fullMetadata?.tvdbId ?? currentItem.tvdbId {
-                syncHeroBackdrop(tvdbIdOverride: tvdbId)
-            } else {
-                syncHeroBackdrop()
-            }
-        case "movie":
-            if let tmdbId = fullMetadata?.tmdbId ?? currentItem.tmdbId {
-                syncHeroBackdrop(tmdbIdOverride: tmdbId)
-            } else if let tvdbId = fullMetadata?.tvdbId ?? currentItem.tvdbId {
-                syncHeroBackdrop(tvdbIdOverride: tvdbId)
-            } else {
-                syncHeroBackdrop()
-            }
-        case "episode", "season":
-            if let tmdbId = await resolveRelatedShowTmdbId() {
-                syncHeroBackdrop(tmdbIdOverride: tmdbId)
-            } else {
-                syncHeroBackdrop()
-            }
-        default:
-            syncHeroBackdrop()
+        if currentItem.type == "episode" || currentItem.type == "season" {
+            await loadParentShowLogoPath()
         }
+        syncHeroBackdrop()
     }
 
-    private func currentHeroBackdropRequest(
-        tmdbIdOverride: Int? = nil,
-        tvdbIdOverride: Int? = nil
-    ) -> HeroBackdropRequest? {
+    private func currentHeroBackdropRequest() -> HeroBackdropRequest? {
         guard let serverURL = authManager.selectedServerURL,
               let token = authManager.selectedServerToken else { return nil }
 
-        let mediaTypeOverride: TMDBMediaType?
-        switch currentItem.type {
-        case "movie":
-            mediaTypeOverride = .movie
-        case "show", "season", "episode":
-            mediaTypeOverride = .tv
-        default:
-            mediaTypeOverride = nil
-        }
-
-        return currentItem.heroBackdropRequest(
+        // Prefer full metadata (carries the Image array) but fall back to the
+        // hub item so we still get backdrop/thumb while the network call is in
+        // flight.
+        let source = fullMetadata ?? currentItem
+        return source.heroBackdropRequest(
             serverURL: serverURL,
             authToken: token,
-            tmdbIdOverride: tmdbIdOverride,
-            tvdbIdOverride: tvdbIdOverride,
-            mediaTypeOverride: mediaTypeOverride
+            logoPathOverride: parentShowLogoPath
         )
     }
 
@@ -1871,7 +1841,8 @@ struct PlexDetailView: View {
         let backdropSource = (metadata.type == "episode" && selectedEpisode != nil) ? currentItem : metadata
         let baseRequest = backdropSource.heroBackdropRequest(
             serverURL: serverURL,
-            authToken: token
+            authToken: token,
+            logoPathOverride: parentShowLogoPath
         )
 
         let thumbPath = metadata.thumb ?? metadata.bestThumb
@@ -1881,47 +1852,35 @@ struct PlexDetailView: View {
             cacheKey: metadata.ratingKey ?? baseRequest.cacheKey,
             plexBackdropURL: baseRequest.plexBackdropURL,
             plexThumbnailURL: thumbURL,
-            tmdbId: baseRequest.tmdbId,
-            tvdbId: baseRequest.tvdbId,
-            mediaType: baseRequest.mediaType,
-            preferredBackdropSize: baseRequest.preferredBackdropSize
+            plexLogoURL: baseRequest.plexLogoURL
         )
     }
 
-    /// Resolve the TMDB ID for the related show of an episode or season.
-    /// Tries the local show guid first, then fetches the show's metadata,
-    /// and falls back to TVDB→TMDB conversion for legacy Plex agents.
-    private func resolveRelatedShowTmdbId() async -> Int? {
-        if let id = fullMetadata?.parentShowTmdbId ?? currentItem.parentShowTmdbId {
-            return id
-        }
-
+    /// Fetches the parent show's full metadata (using the cached copy when
+    /// fresh) and extracts its clearLogo path for use on episode/season views.
+    private func loadParentShowLogoPath() async {
         guard let serverURL = authManager.selectedServerURL,
               let token = authManager.selectedServerToken,
               let showRatingKey = relatedShowRatingKey else {
-            return nil
+            return
+        }
+
+        if let cached = PlexDataStore.shared.getCachedFullMetadata(for: showRatingKey),
+           PlexDataStore.shared.isFullMetadataFresh(for: showRatingKey) {
+            parentShowLogoPath = cached.clearLogoPath
+            return
         }
 
         do {
-            let showMetadata = try await networkManager.getMetadata(
+            let showMetadata = try await networkManager.getFullMetadata(
                 serverURL: serverURL,
                 authToken: token,
                 ratingKey: showRatingKey
             )
-            // Direct TMDB ID from guid or Guid array
-            if let tmdbId = showMetadata.tmdbId {
-                return tmdbId
-            }
-
-            // Legacy agent: convert TVDB ID → TMDB ID
-            if let tvdbId = showMetadata.tvdbId {
-                return await TMDBClient.shared.findTmdbId(tvdbId: tvdbId, type: .tv)
-            }
-
-            return nil
+            PlexDataStore.shared.cacheFullMetadata(showMetadata, for: showRatingKey)
+            parentShowLogoPath = showMetadata.clearLogoPath
         } catch {
-            print("🎨 [Logo] Failed to fetch show metadata: \(error)")
-            return nil
+            print("🎨 [Logo] Failed to fetch parent show metadata: \(error)")
         }
     }
 

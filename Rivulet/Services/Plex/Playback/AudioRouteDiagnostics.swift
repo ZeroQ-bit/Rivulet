@@ -66,7 +66,7 @@ final class AudioRouteDiagnostics {
         let inputs = routeSummary(for: session.currentRoute.inputs)
         let isAirPlay = session.currentRoute.outputs.contains(where: { $0.portType == .airPlay })
 
-        print(
+        playerDebugLog(
             "🎵 [AudioRoute] owner=\(owner) reason=\(reason) " +
             "outputs=[\(outputs)] inputs=[\(inputs)] " +
             "sampleRate=\(String(format: "%.0f", session.sampleRate))Hz " +
@@ -85,7 +85,7 @@ final class AudioRouteDiagnostics {
             ?? "unknown"
 
         if let previousRoute = notification.userInfo?[AVAudioSessionRouteChangePreviousRouteKey] as? AVAudioSessionRouteDescription {
-            print("🎵 [AudioRoute] previousOutputs=[\(routeSummary(for: previousRoute.outputs))]")
+            playerDebugLog("🎵 [AudioRoute] previousOutputs=[\(routeSummary(for: previousRoute.outputs))]")
         }
 
         logCurrentRoute(owner: "AudioRouteDiagnostics", reason: "route_change:\(reason)")

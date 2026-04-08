@@ -6,7 +6,22 @@
 //
 
 import SwiftUI
+import os.log
 
+// Temporary diagnostic logger for intermittent sidebar focus loss.
+// Filter in Console.app with: subsystem:com.rivulet.app category:SidebarFocus
+private let sidebarFocusLog = Logger(subsystem: "com.rivulet.app", category: "SidebarFocus")
+
+private func headingDescription(_ heading: UIFocusHeading) -> String {
+    var parts: [String] = []
+    if heading.contains(.up) { parts.append("up") }
+    if heading.contains(.down) { parts.append("down") }
+    if heading.contains(.left) { parts.append("left") }
+    if heading.contains(.right) { parts.append("right") }
+    if heading.contains(.next) { parts.append("next") }
+    if heading.contains(.previous) { parts.append("previous") }
+    return parts.isEmpty ? "none" : parts.joined(separator: "|")
+}
 
 // MARK: - TVSidebarView
 
@@ -447,6 +462,7 @@ struct TVSidebarView: View {
             else { continue }
 
             if focusSystem.focusedItem == nil {
+                sidebarFocusLog.warning("[Watchdog] focusedItem == nil — calling resetFocus(in: contentNamespace). tab=\(String(describing: self.selectedTab)) nested=\(self.nestedNavState.isNested)")
                 resetFocus(in: contentNamespace)
             }
         }
@@ -496,8 +512,14 @@ struct TVSidebarView: View {
         let block: @convention(block) (AnyObject, UIFocusUpdateContext) -> Bool = { obj, context in
             guard let selfView = obj as? UICollectionView else { return true }
 
+            let heading = headingDescription(context.focusHeading)
+            let width = selfView.frame.width
+            let nextDesc = context.nextFocusedView.map { String(describing: type(of: $0)) } ?? "nil"
+            let prevDesc = context.previouslyFocusedView.map { String(describing: type(of: $0)) } ?? "nil"
+
             // Only apply to sidebar-width collection views (not content area lists)
-            guard selfView.frame.width > 0 && selfView.frame.width < 500 else {
+            guard width > 0 && width < 500 else {
+                sidebarFocusLog.debug("[Swizzle] pass-through (wide cv) heading=\(heading, privacy: .public) width=\(width) prev=\(prevDesc, privacy: .public) next=\(nextDesc, privacy: .public)")
                 return originalFunc(obj, selector, context)
             }
 
@@ -505,10 +527,12 @@ struct TVSidebarView: View {
             if context.focusHeading == .down {
                 if let nextView = context.nextFocusedView,
                    !nextView.isDescendant(of: selfView) {
+                    sidebarFocusLog.warning("[Swizzle] BLOCK down-escape from sidebar cv (width=\(width)) next=\(nextDesc, privacy: .public)")
                     return false
                 }
             }
 
+            sidebarFocusLog.debug("[Swizzle] allow heading=\(heading, privacy: .public) width=\(width) prev=\(prevDesc, privacy: .public) next=\(nextDesc, privacy: .public)")
             return originalFunc(obj, selector, context)
         }
 

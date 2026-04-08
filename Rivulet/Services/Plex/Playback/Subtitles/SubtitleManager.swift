@@ -53,11 +53,11 @@ final class SubtitleManager: ObservableObject {
 
             currentTrack = track
             if diagnosticsEnabled {
-                print("🎬 [Subtitles] Loaded \(track.cues.count) cues (\(detectedFormat)) from \(url.lastPathComponent)")
+                playerDebugLog("🎬 [Subtitles] Loaded \(track.cues.count) cues (\(detectedFormat)) from \(url.lastPathComponent)")
             }
         } catch {
             self.error = error
-            print("🎬 [Subtitles] ❌ Failed to load: \(error.localizedDescription)")
+            playerDebugLog("🎬 [Subtitles] ❌ Failed to load: \(error.localizedDescription)")
         }
 
         isLoading = false
@@ -70,7 +70,7 @@ final class SubtitleManager: ObservableObject {
         currentCues = []
 
         guard let parser = format.parser else {
-            print("🎬 [Subtitles] ❌ No parser for format")
+            playerDebugLog("🎬 [Subtitles] ❌ No parser for format")
             return
         }
 
@@ -78,11 +78,11 @@ final class SubtitleManager: ObservableObject {
             let track = try parser.parse(content)
             currentTrack = track
             if diagnosticsEnabled {
-                print("🎬 [Subtitles] Loaded \(track.cues.count) cues (\(format)) from content")
+                playerDebugLog("🎬 [Subtitles] Loaded \(track.cues.count) cues (\(format)) from content")
             }
         } catch {
             self.error = error
-            print("🎬 [Subtitles] ❌ Parse error: \(error.localizedDescription)")
+            playerDebugLog("🎬 [Subtitles] ❌ Parse error: \(error.localizedDescription)")
         }
     }
 
@@ -145,14 +145,14 @@ final class SubtitleManager: ObservableObject {
         // Empty rects = PGS "clear screen" — previous cue closed above, nothing more to add
         guard !cue.rects.isEmpty else {
             if diagnosticsEnabled {
-                print("🎬 [Subtitles] Bitmap clear at \(String(format: "%.3f", cue.startTime))")
+                playerDebugLog("🎬 [Subtitles] Bitmap clear at \(String(format: "%.3f", cue.startTime))")
             }
             return
         }
 
         accumulatedBitmapCues.append(cue)
         if diagnosticsEnabled {
-            print("🎬 [Subtitles] Bitmap cue \(cue.id): \(cue.rects.count) rect(s) " +
+            playerDebugLog("🎬 [Subtitles] Bitmap cue \(cue.id): \(cue.rects.count) rect(s) " +
                   "start=\(String(format: "%.3f", cue.startTime)) end=\(String(format: "%.3f", cue.endTime))")
         }
     }
@@ -255,7 +255,7 @@ final class SubtitleManager: ObservableObject {
 
         if !added.isEmpty {
             // for cue in added {
-            //     print(
+            //     playerDebugLog(
             //         "🎬 [Subtitles] SHOW t=\(String(format: "%.3f", time))s " +
             //         "cue=\(cue.id) start=\(String(format: "%.3f", cue.startTime)) " +
             //         "end=\(String(format: "%.3f", cue.endTime)) text=\"\(cue.logPreview)\""
@@ -265,7 +265,7 @@ final class SubtitleManager: ObservableObject {
 
         if !removed.isEmpty {
             // for cue in removed {
-            //     print(
+            //     playerDebugLog(
             //         "🎬 [Subtitles] HIDE t=\(String(format: "%.3f", time))s " +
             //         "cue=\(cue.id) start=\(String(format: "%.3f", cue.startTime)) " +
             //         "end=\(String(format: "%.3f", cue.endTime))"

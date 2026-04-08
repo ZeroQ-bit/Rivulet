@@ -209,7 +209,7 @@ final class LibdoviWrapper {
             try convert(rpu: rpu, mode: .toProfile81)
             return try writeNAL(rpu: rpu)
         } catch {
-            print("🎬 [Libdovi] Conversion failed: \(error.localizedDescription)")
+            playerDebugLog("🎬 [Libdovi] Conversion failed: \(error.localizedDescription)")
             return nil
         }
     }

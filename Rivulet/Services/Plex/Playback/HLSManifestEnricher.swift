@@ -88,9 +88,9 @@ final class HLSManifestEnricher: NSObject, AVAssetResourceLoaderDelegate, @unche
             }
 
             let patched = patchMasterPlaylist(manifest)
-            print("[HLSEnricher] Patched master playlist:")
+            playerDebugLog("[HLSEnricher] Patched master playlist:")
             for line in patched.components(separatedBy: "\n") where !line.isEmpty {
-                print("[HLSEnricher]   \(line)")
+                playerDebugLog("[HLSEnricher]   \(line)")
             }
 
             let patchedData = patched.data(using: .utf8)!
@@ -103,7 +103,7 @@ final class HLSManifestEnricher: NSObject, AVAssetResourceLoaderDelegate, @unche
             loadingRequest.contentInformationRequest?.isByteRangeAccessSupported = false
             loadingRequest.finishLoading()
         } catch {
-            print("[HLSEnricher] Failed to fetch master playlist: \(error)")
+            playerDebugLog("[HLSEnricher] Failed to fetch master playlist: \(error)")
             loadingRequest.finishLoading(with: error)
         }
     }

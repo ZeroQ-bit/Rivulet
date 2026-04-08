@@ -351,9 +351,9 @@ final class NowPlayingService: ObservableObject {
     private func dispatchInputAction(_ action: PlaybackInputAction) {
         switch action {
         case .seekAbsolute(let time):
-            print("🎵 NowPlaying: remote seek absolute → \(String(format: "%.3f", time))s")
+            playerDebugLog("🎵 NowPlaying: remote seek absolute → \(String(format: "%.3f", time))s")
         case .seekRelative(let seconds):
-            print("🎵 NowPlaying: remote seek relative → \(String(format: "%.3f", seconds))s")
+            playerDebugLog("🎵 NowPlaying: remote seek relative → \(String(format: "%.3f", seconds))s")
         case .play, .pause, .playPause:
             break
         default:
@@ -507,7 +507,7 @@ final class NowPlayingService: ObservableObject {
     /// Also updates elapsed time to "anchor" the position when rate changes.
     private func updatePlaybackRateAndState(isPlaying: Bool) {
         guard var nowPlayingInfo = firstAvailableNowPlayingInfo() else {
-            print("🎵 NowPlaying: Cannot update rate/state - no info set")
+            playerDebugLog("🎵 NowPlaying: Cannot update rate/state - no info set")
             return
         }
 
@@ -575,7 +575,7 @@ final class NowPlayingService: ObservableObject {
 
             } catch {
                 if !Task.isCancelled {
-                    print("🎵 NowPlaying: Artwork load failed - \(error.localizedDescription)")
+                    playerDebugLog("🎵 NowPlaying: Artwork load failed - \(error.localizedDescription)")
                 }
             }
         }

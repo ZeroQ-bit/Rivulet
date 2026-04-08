@@ -323,7 +323,7 @@ final class DirectPlayPipeline {
             previousMaxVideoLookahead = renderer.maxVideoLookahead
         }
 
-        print("[DirectPlay] Loading: \(url.lastPathComponent) (DV=\(isDolbyVision), conversion=\(enableDVConversion))")
+        playerDebugLog("[DirectPlay] Loading: \(url.lastPathComponent) (DV=\(isDolbyVision), conversion=\(enableDVConversion))")
 
         // Open the container with FFmpeg
         try demuxer.open(url: url, headers: headers, forceDolbyVision: isDolbyVision)
@@ -337,7 +337,7 @@ final class DirectPlayPipeline {
             .first(where: { $0.streamIndex == demuxer.selectedAudioStream })
             .map { "\($0.codecName) \($0.channelLayout ?? "\($0.channels)ch")" } ?? "none"
 
-        print("[DirectPlay] Opened: duration=\(String(format: "%.1f", duration))s, " +
+        playerDebugLog("[DirectPlay] Opened: duration=\(String(format: "%.1f", duration))s, " +
               "video=\(demuxer.videoTracks.first?.codecName ?? "none") " +
               "\(demuxer.videoTracks.first.map { "\($0.width)x\($0.height)" } ?? ""), " +
               "audio=\(selectedAudioDesc) (selected=\(demuxer.selectedAudioStream)), " +
@@ -361,14 +361,14 @@ final class DirectPlayPipeline {
         // so the consumer always blocks on the display layer first; this is
         // primarily a safety net.
         renderer.maxVideoLookahead = 10.0
-        print("[DirectPlay] Renderer lookahead set to \(String(format: "%.1f", renderer.maxVideoLookahead))s")
+        playerDebugLog("[DirectPlay] Renderer lookahead set to \(String(format: "%.1f", renderer.maxVideoLookahead))s")
 
         // Set up DV format description and conversion
         if demuxer.hasDolbyVision && enableDVConversion {
             // P7→P8.1 conversion: strip EL, convert RPUs, tag as dvh1
             requiresProfileConversion = true
             profileConverter = DoviProfileConverter()
-            print("[DirectPlay] DV profile conversion enabled (P7/P8.6 → P8.1)")
+            playerDebugLog("[DirectPlay] DV profile conversion enabled (P7/P8.6 → P8.1)")
             demuxer.rebuildFormatDescriptionForConversion(dvProfile: 8, blCompatId: 1)
         } else if demuxer.hasDolbyVision {
             // P8 native DV: tag as dvh1 so VideoToolbox activates DV decoder.
@@ -377,7 +377,7 @@ final class DirectPlayPipeline {
             let profile = demuxer.dvProfile ?? 8
             let blCompat = demuxer.dvBLCompatID ?? 1
             demuxer.rebuildFormatDescriptionForConversion(dvProfile: profile, blCompatId: blCompat)
-            print("[DirectPlay] DV P\(profile) direct: tagged as dvh1 (no conversion)")
+            playerDebugLog("[DirectPlay] DV P\(profile) direct: tagged as dvh1 (no conversion)")
         }
 
         // Set up audio path.
@@ -403,16 +403,16 @@ final class DirectPlayPipeline {
                 // (zero CPU) instead of FFmpeg decode. AC3/EAC3 are natively supported.
                 if demuxer.audioFormatDescription != nil {
                     dvAudioFallbackToPassthrough = true
-                    print("[DirectPlay] \(reason): switched audio stream \(current.streamIndex) " +
+                    playerDebugLog("[DirectPlay] \(reason): switched audio stream \(current.streamIndex) " +
                           "(\(current.codecName) \(current.channels)ch) → \(lighterTrack.streamIndex) " +
                           "(\(lighterTrack.codecName) \(lighterTrack.channels)ch) passthrough (native FD)")
                 } else {
-                    print("[DirectPlay] \(reason): switched audio stream \(current.streamIndex) " +
+                    playerDebugLog("[DirectPlay] \(reason): switched audio stream \(current.streamIndex) " +
                           "(\(current.codecName) \(current.channels)ch) → \(lighterTrack.streamIndex) " +
                           "(\(lighterTrack.codecName) \(lighterTrack.channels)ch) to preserve throughput")
                 }
             } catch {
-                print("[DirectPlay] Failed to switch to lighter DV audio: \(error)")
+                playerDebugLog("[DirectPlay] Failed to switch to lighter DV audio: \(error)")
             }
         }
 
@@ -421,7 +421,7 @@ final class DirectPlayPipeline {
                 // TrueHD/DTS has no CoreAudio format id in demuxer path.
                 try demuxer.selectAudioStreamForClientDecode(index: selectedAudioTrack.streamIndex)
             } catch {
-                print("[DirectPlay] Failed to select client-decode stream \(selectedAudioTrack.streamIndex): \(error)")
+                playerDebugLog("[DirectPlay] Failed to select client-decode stream \(selectedAudioTrack.streamIndex): \(error)")
             }
 
             if let codecpar = demuxer.codecParameters(forStream: selectedAudioTrack.streamIndex) {
@@ -444,12 +444,12 @@ final class DirectPlayPipeline {
                                 bitsPerSample: 32  // F32 from decoder
                             )
                             audioEncoder = encoder
-                            print("[DirectPlay] EAC3 re-encoder enabled for " +
+                            playerDebugLog("[DirectPlay] EAC3 re-encoder enabled for " +
                                   "\(selectedAudioTrack.codecName) \(selectedAudioTrack.channels)ch " +
                                   "-> EAC3 surround")
                         } catch {
                             // Encoder failed — fall back to stereo S16
-                            print("[DirectPlay] EAC3 encoder init failed: \(error) — falling back to stereo PCM")
+                            playerDebugLog("[DirectPlay] EAC3 encoder init failed: \(error) — falling back to stereo PCM")
                             audioEncoder = nil
                             decoder.useSignedInt16Output = useSignedInt16Audio
                             decoder.forceDownmixToStereo = forceDownmixToStereo
@@ -461,14 +461,14 @@ final class DirectPlayPipeline {
                         decoder.targetOutputSampleRate = targetOutputSampleRate
                     }
                     audioDecoder = decoder
-                    print("[DirectPlay] Client-side audio decoding enabled for " +
+                    playerDebugLog("[DirectPlay] Client-side audio decoding enabled for " +
                           "\(selectedAudioTrack.codecName) \(selectedAudioTrack.channels)ch" +
                           (audioEncoder != nil ? " (EAC3 re-encode)" : "") +
                           (useSignedInt16Audio && audioEncoder == nil ? " (S16 output)" : "") +
                           (forceDownmixToStereo && audioEncoder == nil ? " (stereo downmix)" : "") +
                           (targetOutputSampleRate > 0 && audioEncoder == nil ? " (resample->\(targetOutputSampleRate)Hz)" : ""))
                 } catch {
-                    print("[DirectPlay] Failed to init audio decoder for " +
+                    playerDebugLog("[DirectPlay] Failed to init audio decoder for " +
                           "\(selectedAudioTrack.codecName): \(error) — falling back to passthrough")
                     audioDecoder = nil
                     audioEncoder = nil
@@ -476,7 +476,7 @@ final class DirectPlayPipeline {
             }
         } else if let selectedAudioTrack,
                   let clientDecodeTrack = demuxer.audioTracks.first(where: { codecNeedsClientDecode($0.codecName) }) {
-            print("[DirectPlay] Keeping native audio stream \(selectedAudioTrack.streamIndex) " +
+            playerDebugLog("[DirectPlay] Keeping native audio stream \(selectedAudioTrack.streamIndex) " +
                   "(\(selectedAudioTrack.codecName) \(selectedAudioTrack.channels)ch); " +
                   "not auto-switching to software-decoded \(clientDecodeTrack.codecName)")
         }
@@ -495,7 +495,7 @@ final class DirectPlayPipeline {
         let startupCodec = selectedAudioTrack?.codecName ?? "unknown"
         let startupChannels = selectedAudioTrack.map { Int($0.channels) } ?? 0
         let startupDecodePath = audioDecoder != nil ? "client_decode" : "passthrough"
-        print(
+        playerDebugLog(
             "[DirectPlayAudioStartup] codec=\(startupCodec) decodePath=\(startupDecodePath) " +
             "streamChannels=\(startupChannels) routeAirPlay=\(routeSnapshot.isAirPlay) " +
             "maxOutCh=\(routeSnapshot.maximumOutputChannels) " +
@@ -514,12 +514,12 @@ final class DirectPlayPipeline {
         if let startTime = startTime, startTime > 0 {
             try demuxer.seek(to: startTime)
             needsInitialSync = true
-            print("[DirectPlay] Seeking to start time: \(String(format: "%.1f", startTime))s")
+            playerDebugLog("[DirectPlay] Seeking to start time: \(String(format: "%.1f", startTime))s")
         }
 
         state = .ready
         onStateChange?(.ready)
-        print("[DirectPlay] Ready")
+        playerDebugLog("[DirectPlay] Ready")
 
         // Log session info
         let breadcrumb = Breadcrumb(level: .info, category: "direct_play")
@@ -547,7 +547,7 @@ final class DirectPlayPipeline {
 
     func start(rate: Float = 1.0) {
         guard state == .ready || state == .paused else {
-            print("[DirectPlay] start() ignored — state is \(state)")
+            playerDebugLog("[DirectPlay] start() ignored — state is \(state)")
             return
         }
 
@@ -562,7 +562,7 @@ final class DirectPlayPipeline {
             renderer.resumeAudio()
             renderer.setRate(rate)
             onStateChange?(.running)
-            print("[DirectPlay] resume (rate=\(rate))")
+            playerDebugLog("[DirectPlay] resume (rate=\(rate))")
         } else {
             // Fresh start: sync to first video frame's PTS. Defer the .running
             // emission until preroll actually completes so the player UI keeps
@@ -570,8 +570,8 @@ final class DirectPlayPipeline {
             // of revealing the first frame several seconds before audio begins.
             needsInitialSync = true
             deferRunningStateChange = true
-            print("[DirectPlay] start(rate=\(rate))")
-            print("[StartupTrace] start(): deferring .running emission until preroll completes")
+            playerDebugLog("[DirectPlay] start(rate=\(rate))")
+            playerDebugLog("[StartupTrace] start(): deferring .running emission until preroll completes")
             startReadLoop()
         }
     }
@@ -583,14 +583,14 @@ final class DirectPlayPipeline {
         renderer.setRate(0)
         state = .paused
         onStateChange?(.paused)
-        print("[DirectPlay] paused")
-        print("[PlaybackHealth] EVENT=pause")
+        playerDebugLog("[DirectPlay] paused")
+        playerDebugLog("[PlaybackHealth] EVENT=pause")
     }
 
     func resume() {
         guard !isPlaying, state == .paused else { return }
         isPlaying = true
-        print("[PlaybackHealth] EVENT=resume")
+        playerDebugLog("[PlaybackHealth] EVENT=resume")
         state = .running
         onStateChange?(.running)
         // resume() emits .running synchronously above; clear any leftover
@@ -601,11 +601,11 @@ final class DirectPlayPipeline {
         if readTask == nil {
             // Read loop exited after a paused seek (only a preview frame was shown).
             // Restart it with preroll so buffers refill before the clock starts.
-            print("[DirectPlay] resume: read loop was dead, restarting with preroll")
+            playerDebugLog("[DirectPlay] resume: read loop was dead, restarting with preroll")
             needsRateRestoreAfterSeek = true
             startReadLoop()
         } else {
-            print("[DirectPlay] resume (rate=\(playbackRate))")
+            playerDebugLog("[DirectPlay] resume (rate=\(playbackRate))")
             renderer.resumeAudio()
             renderer.setRate(playbackRate)
         }
@@ -691,16 +691,16 @@ final class DirectPlayPipeline {
                     do {
                         subtitleDecoder = try FFmpegSubtitleDecoder(codecpar: codecpar)
                         bitmapCueCounter = 0
-                        print("[DirectPlay] Bitmap subtitle decoder opened for stream \(ffmpegStreamIndex) (\(codec))")
+                        playerDebugLog("[DirectPlay] Bitmap subtitle decoder opened for stream \(ffmpegStreamIndex) (\(codec))")
                     } catch {
-                        print("[DirectPlay] Failed to open bitmap subtitle decoder: \(error)")
+                        playerDebugLog("[DirectPlay] Failed to open bitmap subtitle decoder: \(error)")
                     }
                 }
             }
         }
 
         demuxer.selectSubtitleStream(index: ffmpegStreamIndex)
-        print("[DirectPlay] Subtitle stream selected: FFmpeg index \(ffmpegStreamIndex)")
+        playerDebugLog("[DirectPlay] Subtitle stream selected: FFmpeg index \(ffmpegStreamIndex)")
     }
 
     /// Disable subtitle stream reading.
@@ -720,22 +720,22 @@ final class DirectPlayPipeline {
 
         // Drop noisy duplicate seek requests that arrive back-to-back with nearly identical targets.
         if !force, now - lastSeekWallTime < 0.2 && deltaFromLastRequest < 0.25 {
-            print("[DirectPlay] seek deduped: Δ=\(String(format: "%.0f", deltaFromLastRequest * 1000))ms from last request")
+            playerDebugLog("[DirectPlay] seek deduped: Δ=\(String(format: "%.0f", deltaFromLastRequest * 1000))ms from last request")
             return
         }
         // Ignore tiny seeks near current position to avoid unnecessary read-loop churn.
         if !force, deltaFromCurrent < 0.20 {
-            print("[DirectPlay] seek ignored: Δ=\(String(format: "%.0f", deltaFromCurrent * 1000))ms from current (too small)")
+            playerDebugLog("[DirectPlay] seek ignored: Δ=\(String(format: "%.0f", deltaFromCurrent * 1000))ms from current (too small)")
             return
         }
 
         lastSeekWallTime = now
         lastRequestedSeekTime = time
-        print(
+        playerDebugLog(
             "[DirectPlay] seek request: from=\(String(format: "%.3f", currentTime))s " +
             "to=\(String(format: "%.3f", time))s playing=\(isPlaying)"
         )
-        print("[PlaybackHealth] EVENT=seek from=\(String(format: "%.1f", currentTime))s to=\(String(format: "%.1f", time))s")
+        playerDebugLog("[PlaybackHealth] EVENT=seek from=\(String(format: "%.1f", currentTime))s to=\(String(format: "%.1f", time))s")
 
         state = .seeking
         renderer.jitterStats.reset()
@@ -785,11 +785,11 @@ final class DirectPlayPipeline {
 
         let now = CFAbsoluteTimeGetCurrent()
         if isAudioRecoveryInProgress {
-            print("[DirectPlay] recoverAudio skipped (\(reason)) — recovery already in progress")
+            playerDebugLog("[DirectPlay] recoverAudio skipped (\(reason)) — recovery already in progress")
             return
         }
         if now - lastAudioRecoveryWallTime < 0.2 {
-            print("[DirectPlay] recoverAudio debounced (\(reason))")
+            playerDebugLog("[DirectPlay] recoverAudio debounced (\(reason))")
             return
         }
 
@@ -805,7 +805,7 @@ final class DirectPlayPipeline {
         )
         let wasPlaying = isPlaying
 
-        print(
+        playerDebugLog(
             "[DirectPlay] recoverAudio reason=\(reason) target=\(String(format: "%.3f", targetTime))s " +
             "flush=\(String(format: "%.3f", flushSeconds))s sync=\(String(format: "%.3f", syncTime))s " +
             "wasPlaying=\(wasPlaying)"
@@ -821,7 +821,7 @@ final class DirectPlayPipeline {
             throw FFmpegError.invalidStream
         }
 
-        print("[DirectPlay] Switching audio to stream \(streamIndex) (\(track.codecName) \(track.channels)ch)")
+        playerDebugLog("[DirectPlay] Switching audio to stream \(streamIndex) (\(track.codecName) \(track.channels)ch)")
 
         // Pause the sync clock so it doesn't advance while the read loop is stopped.
         // Without this, the clock drifts ahead during the restart gap, causing a
@@ -850,7 +850,7 @@ final class DirectPlayPipeline {
         _ = audioEncoder?.flush()
 
         if codecNeedsClientDecode(track.codecName) {
-            print("[DirectPlay] Audio switch: \(track.codecName) -> client decode path")
+            playerDebugLog("[DirectPlay] Audio switch: \(track.codecName) -> client decode path")
             try demuxer.selectAudioStreamForClientDecode(index: streamIndex)
             guard let codecpar = demuxer.codecParameters(forStream: streamIndex) else {
                 throw FFmpegError.noCodecParameters
@@ -875,9 +875,9 @@ final class DirectPlayPipeline {
                         sampleRate: Int(track.sampleRate),
                         bitsPerSample: 32
                     )
-                    print("[DirectPlay] EAC3 re-encoder enabled for \(track.codecName) \(track.channels)ch")
+                    playerDebugLog("[DirectPlay] EAC3 re-encoder enabled for \(track.codecName) \(track.channels)ch")
                 } catch {
-                    print("[DirectPlay] EAC3 encoder init failed on track switch: \(error)")
+                    playerDebugLog("[DirectPlay] EAC3 encoder init failed on track switch: \(error)")
                     decoder.useSignedInt16Output = useSignedInt16Audio
                     decoder.forceDownmixToStereo = forceDownmixToStereo
                     decoder.targetOutputSampleRate = targetOutputSampleRate
@@ -894,7 +894,7 @@ final class DirectPlayPipeline {
                 renderer.disableAudioEngine()
             }
         } else {
-            print("[DirectPlay] Audio switch: \(track.codecName) -> passthrough path")
+            playerDebugLog("[DirectPlay] Audio switch: \(track.codecName) -> passthrough path")
             audioEncoder?.close()
             audioEncoder = nil
             audioDecoder?.close()
@@ -907,7 +907,7 @@ final class DirectPlayPipeline {
         // partially drained during the restart gap, so we must rebuild video
         // lead before resuming the clock. Without preroll, the clock runs ahead
         // of the empty buffer and every frame arrives "late".
-        print("[DirectPlay] Audio switch complete, restarting read loop")
+        playerDebugLog("[DirectPlay] Audio switch complete, restarting read loop")
         needsRateRestoreAfterSeek = isPlaying
         startReadLoop()
     }
@@ -932,7 +932,7 @@ final class DirectPlayPipeline {
         let audioEncoder = self.audioEncoder
 
         guard let videoFD = demuxer.videoFormatDescription else {
-            print("[DirectPlay] No video format description — cannot start read loop")
+            playerDebugLog("[DirectPlay] No video format description — cannot start read loop")
             onError?(FFmpegError.noCodecParameters)
             return
         }
@@ -954,7 +954,7 @@ final class DirectPlayPipeline {
             // cannot run multiple seconds ahead of video on slow-start bursts.
             let gate = AudioBufferGate(limit: 24)
             audioGate = gate
-            print("[DirectPlay] Audio enqueue queue enabled (limit=\(gate.limit))")
+            playerDebugLog("[DirectPlay] Audio enqueue queue enabled (limit=\(gate.limit))")
 
             let (stream, continuation) = AsyncStream<CMSampleBuffer>.makeStream(
                 bufferingPolicy: .unbounded
@@ -989,7 +989,7 @@ final class DirectPlayPipeline {
                     if now - lastLogWall >= 2.0 {
                         let elapsed = now - lastLogWall
                         let rate = Double(iterationsSinceLastLog) / elapsed
-                        print("[AudioTaskThroughput] iter=\(iterationsSinceLastLog) " +
+                        playerDebugLog("[AudioTaskThroughput] iter=\(iterationsSinceLastLog) " +
                               "elapsed=\(String(format: "%.2f", elapsed))s " +
                               "rate=\(String(format: "%.1f", rate))/s " +
                               "direct=\(pullDirectHits) fallback=\(fallbackHits)")
@@ -1012,7 +1012,7 @@ final class DirectPlayPipeline {
             )
             audioDecodeStream = stream
             audioDecodeContinuation = continuation
-            print("[DirectPlay] Audio decode queue enabled (limit=\(gate.limit))")
+            playerDebugLog("[DirectPlay] Audio decode queue enabled (limit=\(gate.limit))")
         }
 
         // Video processing decoupling. Mirror of the audio gate/stream pattern,
@@ -1030,7 +1030,7 @@ final class DirectPlayPipeline {
         let (vStream, vContinuation) = AsyncStream<VideoTaskPayload>.makeStream(
             bufferingPolicy: .unbounded
         )
-        print("[DirectPlay] Video processing queue enabled (limit=\(videoGateLocal.limit))")
+        playerDebugLog("[DirectPlay] Video processing queue enabled (limit=\(videoGateLocal.limit))")
 
         let localAudioEnqueueTask = audioEnqueueTask
         let localAudioContinuation = audioContinuation
@@ -1041,7 +1041,7 @@ final class DirectPlayPipeline {
         let localVideoGate = videoGateLocal
         let localVideoContinuation = vContinuation
 
-        print("[DirectPlay] Starting read loop (audioFD=\(audioFD != nil), hasDV=\(hasDV), conversion=\(requiresConversion))")
+        playerDebugLog("[DirectPlay] Starting read loop (audioFD=\(audioFD != nil), hasDV=\(hasDV), conversion=\(requiresConversion))")
 
         let capturedLookahead = renderer.maxVideoLookahead
         let capturedContainer = streamURL?.pathExtension ?? "?"
@@ -1168,7 +1168,7 @@ final class DirectPlayPipeline {
                                 lastLateVideoResyncWall = nowWall
 
                                 if lateVideoResyncCount <= 10 || lateVideoResyncCount % 60 == 0 {
-                                    print("[DirectPlayDiag] Late-video resync #\(lateVideoResyncCount): " +
+                                    playerDebugLog("[DirectPlayDiag] Late-video resync #\(lateVideoResyncCount): " +
                                           "rate=\(String(format: "%.2f", resyncRate)) " +
                                           "pts=\(String(format: "%.3f", ptsSeconds))s " +
                                           "sync=\(String(format: "%.3f", syncTime))s " +
@@ -1190,7 +1190,7 @@ final class DirectPlayPipeline {
                                 lateVideoSoftDropCount += 1
                                 healthDropsSinceReport += 1
                                 if lateVideoSoftDropCount <= 10 || lateVideoSoftDropCount % 120 == 0 {
-                                    print("[DirectPlayDiag] Soft drop late video #\(lateVideoSoftDropCount): " +
+                                    playerDebugLog("[DirectPlayDiag] Soft drop late video #\(lateVideoSoftDropCount): " +
                                           "pts=\(String(format: "%.3f", ptsSeconds))s " +
                                           "sync=\(String(format: "%.3f", syncTime))s " +
                                           "lateness=\(String(format: "%.0f", lateness * 1000))ms " +
@@ -1198,7 +1198,7 @@ final class DirectPlayPipeline {
                                 }
                                 droppedThisIteration = true
                             } else if lateVideoObservationCount <= 10 || lateVideoObservationCount % 120 == 0 {
-                                print("[DirectPlayDiag] Late video frame #\(lateVideoObservationCount): " +
+                                playerDebugLog("[DirectPlayDiag] Late video frame #\(lateVideoObservationCount): " +
                                       "pts=\(String(format: "%.3f", ptsSeconds))s " +
                                       "sync=\(String(format: "%.3f", syncTime))s " +
                                       "lateness=\(String(format: "%.0f", lateness * 1000))ms " +
@@ -1211,7 +1211,7 @@ final class DirectPlayPipeline {
                             lateVideoDropCount += 1
                             healthDropsSinceReport += 1
                             if lateVideoDropCount <= 10 || lateVideoDropCount % 60 == 0 {
-                                print("[DirectPlayDiag] Emergency drop #\(lateVideoDropCount): " +
+                                playerDebugLog("[DirectPlayDiag] Emergency drop #\(lateVideoDropCount): " +
                                       "pts=\(String(format: "%.3f", ptsSeconds))s " +
                                       "sync=\(String(format: "%.3f", syncTime))s " +
                                       "lateness=\(String(format: "%.0f", lateness * 1000))ms")
@@ -1220,7 +1220,7 @@ final class DirectPlayPipeline {
                         }
                     } else if consecutiveLateVideoFrames > 0 {
                         if consecutiveLateVideoFrames >= 8 {
-                            print("[DirectPlayDiag] Late-video burst recovered after \(consecutiveLateVideoFrames) frames")
+                            playerDebugLog("[DirectPlayDiag] Late-video burst recovered after \(consecutiveLateVideoFrames) frames")
                         }
                         consecutiveLateVideoFrames = 0
                     }
@@ -1243,11 +1243,11 @@ final class DirectPlayPipeline {
                     if converter.framesConverted == 48 {
                         if !converter.canSustainRealTime() {
                             conversionDisabled = true
-                            print("[DirectPlay] DV conversion too slow " +
+                            playerDebugLog("[DirectPlay] DV conversion too slow " +
                                   "(avg=\(String(format: "%.1f", converter.averageConversionTimeMs))ms/frame, " +
                                   "budget=41.7ms), switching to HDR10 passthrough")
                         } else {
-                            print("[DirectPlay] DV conversion sustaining realtime " +
+                            playerDebugLog("[DirectPlay] DV conversion sustaining realtime " +
                                   "(avg=\(String(format: "%.1f", converter.averageConversionTimeMs))ms/frame)")
                         }
                     }
@@ -1273,7 +1273,7 @@ final class DirectPlayPipeline {
                         formatDescription: effectiveVideoFD
                     )
                 } catch {
-                    print("[DirectPlay] Failed to create video sample buffer for frame \(videoPacketIndex): \(error)")
+                    playerDebugLog("[DirectPlay] Failed to create video sample buffer for frame \(videoPacketIndex): \(error)")
                     videoGateLocal.completeOne()
                     taskFirstFrame = false
                     taskFramesProcessed += 1
@@ -1305,7 +1305,7 @@ final class DirectPlayPipeline {
                 let mainActorHopMs = (syncPrepEnd - syncPrepStart) * 1000
 
                 if displayErrorReport != nil {
-                    print("[DirectPlay] Display layer error after frame \(videoPacketIndex): \(displayErrorReport ?? "unknown")")
+                    playerDebugLog("[DirectPlay] Display layer error after frame \(videoPacketIndex): \(displayErrorReport ?? "unknown")")
                     healthDisplayErrorsSinceReport += 1
                 }
 
@@ -1317,7 +1317,7 @@ final class DirectPlayPipeline {
                 let enqueueOnlyMs = (enqueueEnd - enqueueStart) * 1000
                 let enqueueMs = (enqueueEnd - syncPrepStart) * 1000
                 if enqueueMs > 100 {
-                    print("[VideoTask] enqueue stall=\(String(format: "%.0f", enqueueMs))ms mainActorHop=\(String(format: "%.0f", mainActorHopMs))ms enqueueVideo=\(String(format: "%.0f", enqueueOnlyMs))ms frame=\(videoPacketIndex) pts=\(String(format: "%.3f", ptsSeconds))s")
+                    playerDebugLog("[VideoTask] enqueue stall=\(String(format: "%.0f", enqueueMs))ms mainActorHop=\(String(format: "%.0f", mainActorHopMs))ms enqueueVideo=\(String(format: "%.0f", enqueueOnlyMs))ms frame=\(videoPacketIndex) pts=\(String(format: "%.3f", ptsSeconds))s")
                 }
 
                 // After the first frame is enqueued post-preroll, the pipeline
@@ -1345,7 +1345,7 @@ final class DirectPlayPipeline {
 
                 if timingFrameCount == 120 {
                     let n = Double(timingFrameCount)
-                    print("[DirectPlayTiming] \(timingFrameCount)f avg: " +
+                    playerDebugLog("[DirectPlayTiming] \(timingFrameCount)f avg: " +
                           "readGap=\(String(format: "%.1f", timingReadGapMs/n))ms " +
                           "convert=\(String(format: "%.1f", timingConversionMs/n))ms " +
                           "sample=\(String(format: "%.1f", timingSampleMs/n))ms " +
@@ -1390,7 +1390,7 @@ final class DirectPlayPipeline {
                     let audioDecodeQueueMaxDepth = audioDecodeSnapshot?.maxPending ?? -1
                     let audioDecodeQueueDrops = audioDecodeSnapshot?.dropped ?? -1
 
-                    print(
+                    playerDebugLog(
                         "[DirectPlayDiag] v=\(videoPacketIndex) " +
                         "pts=\(String(format: "%.3f", ptsSeconds))s sync=\(String(format: "%.3f", syncTime))s " +
                         "sync-pts=\(String(format: "%.0f", syncMinusPTS))ms " +
@@ -1457,7 +1457,7 @@ final class DirectPlayPipeline {
                     }
 
                     if let result = healthResult {
-                        print(result.line)
+                        playerDebugLog(result.line)
                         healthLastPullDeliveries = result.totalPullDel
                     }
 
@@ -1477,7 +1477,7 @@ final class DirectPlayPipeline {
 
             // Loop exit summary
             let summary = videoGateLocal.snapshot()
-            print("[DirectPlay] Video task exiting: processed=\(taskFramesProcessed) " +
+            playerDebugLog("[DirectPlay] Video task exiting: processed=\(taskFramesProcessed) " +
                   "maxVideoQ=\(summary.maxPending) videoDrops=\(summary.dropped) " +
                   "videoKfDrops=\(summary.keyframesDropped) " +
                   "lateObs=\(lateVideoObservationCount) lateDrops=\(lateVideoDropCount) " +
@@ -1488,8 +1488,8 @@ final class DirectPlayPipeline {
         let localVideoEnqueueTask = videoEnqueueTask
 
         readTask = Task.detached { [weak self] in
-            print("[DirectPlay] Read loop started on background thread")
-            print("[PlaybackHealth] CONFIG hasDV=\(hasDV) conversion=\(requiresConversion) " +
+            playerDebugLog("[DirectPlay] Read loop started on background thread")
+            playerDebugLog("[PlaybackHealth] CONFIG hasDV=\(hasDV) conversion=\(requiresConversion) " +
                   "lookahead=\(String(format: "%.1f", capturedLookahead))s " +
                   "audioDecoder=\(audioDecoder != nil) container=\(capturedContainer)")
 
@@ -1551,7 +1551,7 @@ final class DirectPlayPipeline {
 
                 guard let decision else { return }
 
-                print(
+                playerDebugLog(
                     "[DirectPlay] \(decision.label): setting rate=0.0 " +
                     "time=\(String(format: "%.3f", ptsSeconds))s " +
                     "(preroll=\(decision.shouldPreroll), source=\(source))"
@@ -1613,7 +1613,7 @@ final class DirectPlayPipeline {
                 let timedOut = hasAudioPath && waitedMs >= prerollTimeout
 
                 if timedOut {
-                    print("[DirectPlay] Preroll timeout after \(String(format: "%.0f", waitedMs))ms " +
+                    playerDebugLog("[DirectPlay] Preroll timeout after \(String(format: "%.0f", waitedMs))ms " +
                           "(audioReady=\(audioReady) reliableStart=\(audioReliableStart) videoReady=\(videoReady) " +
                           "lead=\(String(format: "%.0f", prerollLeadSeconds * 1000))ms " +
                           "need=\(String(format: "%.0f", requiredPrerollLeadSeconds * 1000))ms)")
@@ -1654,14 +1654,14 @@ final class DirectPlayPipeline {
                 prerollAnchorTime = nil
                 prerollMaxPTSSeconds = nil
                 prerollMaxVideoPTSSeconds = nil
-                print(
+                playerDebugLog(
                     "[DirectPlay] Preroll complete: starting clock from anchor=\(String(format: "%.3f", anchorTime))s " +
                     "packet=\(String(format: "%.3f", packetTime))s rate=\(String(format: "%.2f", playbackRate)) " +
                     "reason=\(reason) wait=\(String(format: "%.0f", waitedMs))ms " +
                     "lead=\(String(format: "%.0f", prerollLeadSeconds * 1000))ms " +
                     "hostLead=\(String(format: "%.0f", hostLead * 1000))ms"
                 )
-                print("[PlaybackHealth] EVENT=preroll_complete elapsed=\(String(format: "%.0f", waitedMs))ms")
+                playerDebugLog("[PlaybackHealth] EVENT=preroll_complete elapsed=\(String(format: "%.0f", waitedMs))ms")
 
                 // Emit any .running state change that fresh start() deferred until
                 // playback was actually visible. This dismisses the player loading
@@ -1670,10 +1670,10 @@ final class DirectPlayPipeline {
                     guard let self else { return }
                     if self.deferRunningStateChange {
                         self.deferRunningStateChange = false
-                        print("[StartupTrace] deferred .running emitted (preroll done, audio+video flowing)")
+                        playerDebugLog("[StartupTrace] deferred .running emitted (preroll done, audio+video flowing)")
                         self.onStateChange?(.running)
                     } else {
-                        print("[StartupTrace] preroll done but no deferred .running (flag already cleared)")
+                        playerDebugLog("[StartupTrace] preroll done but no deferred .running (flag already cleared)")
                     }
                 }
 
@@ -1713,7 +1713,7 @@ final class DirectPlayPipeline {
                     await MainActor.run {
                         renderer.setRate(0, time: samplePTS)
                     }
-                    print(
+                    playerDebugLog(
                         "[DirectPlay] Preroll anchor adjusted for early audio sample: " +
                         "old=\(String(format: "%.3f", previousAnchor))s " +
                         "new=\(String(format: "%.3f", samplePTSSeconds))s " +
@@ -1738,7 +1738,7 @@ final class DirectPlayPipeline {
                     if !reservation.accepted {
                         let dropped = reservation.dropped
                         if dropped <= 10 || dropped % 120 == 0 {
-                            print("[DirectPlayDiag] Dropping queued audio sample #\(dropped) " +
+                            playerDebugLog("[DirectPlayDiag] Dropping queued audio sample #\(dropped) " +
                                   "(audioQ=\(reservation.depth), limit=\(localAudioGate.limit))")
                         }
                         return
@@ -1756,7 +1756,7 @@ final class DirectPlayPipeline {
                let localAudioDecodeStream,
                let localAudioDecodeGate {
                 if audioEncoder != nil {
-                    print("[DirectPlayDiag] Audio transcode path active: decoder->EAC3 encoder " +
+                    playerDebugLog("[DirectPlayDiag] Audio transcode path active: decoder->EAC3 encoder " +
                           "encoderRate=\(activeAudioSampleRate)Hz encoderChannels=\(activeAudioChannels) " +
                           "routeTargetRate=\(activeTargetOutputSampleRate > 0 ? "\(activeTargetOutputSampleRate)" : "native")")
                 }
@@ -1868,7 +1868,7 @@ final class DirectPlayPipeline {
                         let totalReads = throughputVideoReadsSincePeriod + throughputAudioReadsSincePeriod
                         let avgReadMs = totalReads > 0 ? throughputAvReadTotalMs / Double(totalReads) : 0
                         let mbps = (Double(throughputBytesSincePeriod) * 8 / 1_000_000) / elapsed
-                        print("[ReadLoopThroughput] elapsed=\(String(format: "%.2f", elapsed))s " +
+                        playerDebugLog("[ReadLoopThroughput] elapsed=\(String(format: "%.2f", elapsed))s " +
                               "video=\(throughputVideoReadsSincePeriod) audio=\(throughputAudioReadsSincePeriod) " +
                               "videoRate=\(String(format: "%.1f", Double(throughputVideoReadsSincePeriod) / elapsed))/s " +
                               "audioRate=\(String(format: "%.1f", Double(throughputAudioReadsSincePeriod) / elapsed))/s " +
@@ -1891,9 +1891,9 @@ final class DirectPlayPipeline {
                         videoPacketCount += 1
                         let ptsSeconds = packet.ptsSeconds
                         if videoPacketCount == 1 {
-                            print("[DirectPlay] First video packet: pts=\(ptsSeconds)s size=\(packet.data.count)B keyframe=\(packet.isKeyframe) tb=\(packet.timebase.timescale)")
+                            playerDebugLog("[DirectPlay] First video packet: pts=\(ptsSeconds)s size=\(packet.data.count)B keyframe=\(packet.isKeyframe) tb=\(packet.timebase.timescale)")
                         } else if videoPacketCount % 500 == 0 {
-                            print("[DirectPlay] Progress: \(videoPacketCount) video / \(audioPacketCount) audio packets, pts=\(String(format: "%.1f", ptsSeconds))s")
+                            playerDebugLog("[DirectPlay] Progress: \(videoPacketCount) video / \(audioPacketCount) audio packets, pts=\(String(format: "%.1f", ptsSeconds))s")
                         }
 
                         // bufferedTime tracks the demuxer's read position. Batch
@@ -1932,11 +1932,11 @@ final class DirectPlayPipeline {
                                 if converter.framesConverted == 48 {
                                     if !converter.canSustainRealTime() {
                                         conversionDisabled = true
-                                        print("[DirectPlay] DV conversion too slow " +
+                                        playerDebugLog("[DirectPlay] DV conversion too slow " +
                                               "(avg=\(String(format: "%.1f", converter.averageConversionTimeMs))ms/frame, " +
                                               "budget=41.7ms), switching to HDR10 passthrough")
                                     } else {
-                                        print("[DirectPlay] DV conversion sustaining realtime " +
+                                        playerDebugLog("[DirectPlay] DV conversion sustaining realtime " +
                                               "(avg=\(String(format: "%.1f", converter.averageConversionTimeMs))ms/frame)")
                                     }
                                 }
@@ -2000,7 +2000,7 @@ final class DirectPlayPipeline {
                                     guard let start = prerollWaitStartWall else { return 0 }
                                     return (CFAbsoluteTimeGetCurrent() - start) * 1000
                                 }()
-                                print(
+                                playerDebugLog(
                                     "[DirectPlayDiag] Waiting for preroll start: frame=\(videoPacketCount) " +
                                     "pts=\(String(format: "%.3f", ptsSeconds))s audioQ=\(localAudioGate?.snapshot().pending ?? -1) " +
                                     "audioPrimed=\(audioPrimed) audioReady=\(audioReady) reliableStart=\(audioReliableStart) " +
@@ -2056,7 +2056,7 @@ final class DirectPlayPipeline {
                                 await MainActor.run { [weak self] in
                                     guard let self else { return }
                                     if let layerError = renderer.displayLayerError {
-                                        print("[DirectPlay] Display layer error after paused-seek frame \(videoPacketCount): \(layerError)")
+                                        playerDebugLog("[DirectPlay] Display layer error after paused-seek frame \(videoPacketCount): \(layerError)")
                                     }
                                     self.state = .paused
                                     self.onStateChange?(.paused)
@@ -2091,7 +2091,7 @@ final class DirectPlayPipeline {
                                 }
                                 if !reservation.accepted {
                                     localVideoGate.recordKeyframeDrop()
-                                    print("[VideoGate] keyframe DROPPED at depth=\(localVideoGate.snapshot().pending) frame=\(videoPacketCount)")
+                                    playerDebugLog("[VideoGate] keyframe DROPPED at depth=\(localVideoGate.snapshot().pending) frame=\(videoPacketCount)")
                                     isFirstVideoFrame = false
                                     continue
                                 }
@@ -2117,7 +2117,7 @@ final class DirectPlayPipeline {
                             let dtsSeconds = CMTimeGetSeconds(packet.cmDTS)
                             let durationLog = durationSeconds.isFinite ? String(format: "%.4f", durationSeconds) : "invalid"
                             let dtsLog = dtsSeconds.isFinite ? String(format: "%.3f", dtsSeconds) : "invalid"
-                            print(
+                            playerDebugLog(
                                 "[DirectPlay] First audio packet: pts=\(String(format: "%.3f", packet.ptsSeconds))s " +
                                 "dts=\(dtsLog)s dur=\(durationLog)s size=\(packet.data.count)B tb=\(packet.timebase.timescale)" +
                                 " decode=\(audioDecoder != nil ? "client" : "passthrough")"
@@ -2130,7 +2130,7 @@ final class DirectPlayPipeline {
                                 if !reservation.accepted {
                                     let dropped = reservation.dropped
                                     if dropped <= 10 || dropped % 120 == 0 {
-                                        print("[DirectPlayDiag] Dropping queued compressed audio packet #\(dropped) " +
+                                        playerDebugLog("[DirectPlayDiag] Dropping queued compressed audio packet #\(dropped) " +
                                               "(audioDecQ=\(reservation.depth), limit=\(localAudioDecodeGate.limit))")
                                     }
                                     continue
@@ -2149,7 +2149,7 @@ final class DirectPlayPipeline {
                             // Passthrough: native codec (AAC, AC3, EAC3, etc.)
                             guard let audioFD else {
                                 if audioPacketCount == 1 {
-                                    print("[DirectPlay] Skipping audio — no format description")
+                                    playerDebugLog("[DirectPlay] Skipping audio — no format description")
                                 }
                                 continue
                             }
@@ -2159,10 +2159,10 @@ final class DirectPlayPipeline {
                                 let subTypeStr = String(format: "%c%c%c%c",
                                     (mediaSubType >> 24) & 0xFF, (mediaSubType >> 16) & 0xFF,
                                     (mediaSubType >> 8) & 0xFF, mediaSubType & 0xFF)
-                                print("[DirectPlay] Audio passthrough FD: mediaType=\(mediaType) subType=\(subTypeStr)(\(mediaSubType))")
+                                playerDebugLog("[DirectPlay] Audio passthrough FD: mediaType=\(mediaType) subType=\(subTypeStr)(\(mediaSubType))")
                                 if let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(audioFD) {
                                     let a = asbd.pointee
-                                    print("[DirectPlay] Audio passthrough ASBD: rate=\(Int(a.mSampleRate)) ch=\(a.mChannelsPerFrame) " +
+                                    playerDebugLog("[DirectPlay] Audio passthrough ASBD: rate=\(Int(a.mSampleRate)) ch=\(a.mChannelsPerFrame) " +
                                           "bitsPerCh=\(a.mBitsPerChannel) framesPerPkt=\(a.mFramesPerPacket) " +
                                           "bytesPerFrame=\(a.mBytesPerFrame) bytesPerPkt=\(a.mBytesPerPacket) " +
                                           "formatID=\(a.mFormatID) formatFlags=\(a.mFormatFlags)")
@@ -2224,8 +2224,8 @@ final class DirectPlayPipeline {
             let summaryAudioDrops = summaryAudio?.dropped ?? -1
             let summaryMaxAudioDecQ = summaryAudioDec?.maxPending ?? -1
             let summaryAudioDecDrops = summaryAudioDec?.dropped ?? -1
-            print("[DirectPlay] Read loop exiting: reason=\(exitReason) video=\(videoPacketCount) audio=\(audioPacketCount)")
-            print("[DirectPlayDiag] Read summary: " +
+            playerDebugLog("[DirectPlay] Read loop exiting: reason=\(exitReason) video=\(videoPacketCount) audio=\(audioPacketCount)")
+            playerDebugLog("[DirectPlayDiag] Read summary: " +
                   "maxAudioQ=\(summaryMaxAudioQ) audioQDrops=\(summaryAudioDrops) " +
                   "maxAudioDecQ=\(summaryMaxAudioDecQ) audioDecDrops=\(summaryAudioDecDrops) " +
                   "maxVideoQ=\(summaryVideo.maxPending) videoDrops=\(summaryVideo.dropped) " +
@@ -2252,7 +2252,7 @@ final class DirectPlayPipeline {
             // Handle exit reason
             switch exitReason {
             case .eos:
-                print("[DirectPlay] End of stream (video=\(videoPacketCount) audio=\(audioPacketCount) packets)")
+                playerDebugLog("[DirectPlay] End of stream (video=\(videoPacketCount) audio=\(audioPacketCount) packets)")
                 if !Task.isCancelled {
                     await MainActor.run { [weak self] in
                         guard let self else { return }
@@ -2263,7 +2263,7 @@ final class DirectPlayPipeline {
                 }
             case .error(let error):
                 if !Task.isCancelled {
-                    print("[DirectPlay] Read error: \(error)")
+                    playerDebugLog("[DirectPlay] Read error: \(error)")
                     SentrySDK.capture(error: error) { scope in
                         scope.setTag(value: "direct_play", key: "component")
                         scope.setTag(value: "read_loop", key: "error_type")

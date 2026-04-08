@@ -260,7 +260,7 @@ actor FFmpegRemuxSession {
         // Initialize DV converter if needed
         if needsDVConversion {
             doviConverter = DoviProfileConverter()
-            print("[Remux] DV P7→P8.1 conversion enabled")
+            playerDebugLog("[Remux] DV P7→P8.1 conversion enabled")
         }
 
         // Get duration
@@ -293,7 +293,7 @@ actor FFmpegRemuxSession {
         )
 
         let openMs = Int(Date().timeIntervalSince(openStart) * 1000)
-        print("[Remux] open: \(openMs)ms — \(videoCodecName) \(videoWidth)x\(videoHeight), audio=\(audioCodecName), " +
+        playerDebugLog("[Remux] open: \(openMs)ms — \(videoCodecName) \(videoWidth)x\(videoHeight), audio=\(audioCodecName), " +
               "duration=\(String(format: "%.1f", duration))s, segments=\(segments.count), " +
               "DV=\(hasDolbyVision ? "P\(dvProfile ?? 0)" : "no"), " +
               "audioTranscode=\(needsAudioTranscode), dvConversion=\(needsDVConversion)")
@@ -330,8 +330,8 @@ actor FFmpegRemuxSession {
         let tagStr = String(format: "%c%c%c%c",
                             codecTag & 0xFF, (codecTag >> 8) & 0xFF,
                             (codecTag >> 16) & 0xFF, (codecTag >> 24) & 0xFF)
-        print("[Remux] Init segment: \(initData.count) bytes (raw \(rawData.count) bytes)")
-        print("[Remux] Init boxes: [\(initBoxes)] moov=[\(moovChildren)] codecTag=\(tagStr)")
+        playerDebugLog("[Remux] Init segment: \(initData.count) bytes (raw \(rawData.count) bytes)")
+        playerDebugLog("[Remux] Init boxes: [\(initBoxes)] moov=[\(moovChildren)] codecTag=\(tagStr)")
         return initData
     }
 
@@ -360,7 +360,7 @@ actor FFmpegRemuxSession {
             // Reopen the connection and retry once.
             guard !isCancelled && !Task.isCancelled else { throw RemuxError.cancelled }
 
-            print("[Remux] Segment \(index) failed (\(error)), reconnecting...")
+            playerDebugLog("[Remux] Segment \(index) failed (\(error)), reconnecting...")
             try reopenFormatContext()
             interruptFlag.pointee = 0
             return try performSegmentGeneration(index: index)
@@ -406,12 +406,12 @@ actor FFmpegRemuxSession {
                     AVSEEK_FLAG_BACKWARD
                 )
                 if globalSeekRet < 0, index > 0 {
-                    print("[Remux] Seek failed for segment \(index): stream=\(streamSeekRet), global=\(globalSeekRet)")
+                    playerDebugLog("[Remux] Seek failed for segment \(index): stream=\(streamSeekRet), global=\(globalSeekRet)")
                 }
             }
             avformat_flush(ctx)
             let seekMs = Int(Date().timeIntervalSince(seekStart) * 1000)
-            print("[Remux] Segment \(index) seek: \(seekMs)ms")
+            playerDebugLog("[Remux] Segment \(index) seek: \(seekMs)ms")
         }
 
         // Read packets for this segment and write to fMP4 fragment.
@@ -437,7 +437,7 @@ actor FFmpegRemuxSession {
         let elapsedMs = Int(Date().timeIntervalSince(generationStart) * 1000)
         let seqLabel = isSequential ? " (seq)" : (isFirstSegmentFromStart ? " (first)" : "")
         let boxes = topLevelBoxes(in: segmentData).joined(separator: "+")
-        print("[Remux] Segment \(index)\(seqLabel): \(segmentData.count) bytes [\(boxes)], " +
+        playerDebugLog("[Remux] Segment \(index)\(seqLabel): \(segmentData.count) bytes [\(boxes)], " +
               "actualDur=\(String(format: "%.3f", lastSegmentActualDuration!))s, elapsed=\(elapsedMs)ms")
 
         // Log moof structure for first 3 segments generated to verify tfdt/duration
@@ -534,7 +534,7 @@ actor FFmpegRemuxSession {
         }
 
         self.formatContext = openCtx
-        print("[Remux] Reconnected to source after stale connection")
+        playerDebugLog("[Remux] Reconnected to source after stale connection")
     }
 
     // MARK: - Audio Stream Selection
@@ -568,7 +568,7 @@ actor FFmpegRemuxSession {
         // Invalidate cached init segment since codec may have changed
         cachedInitSegment = nil
 
-        print("[Remux] Selected audio stream \(index): \(audioCodecName)")
+        playerDebugLog("[Remux] Selected audio stream \(index): \(audioCodecName)")
     }
 
     // MARK: - Private: DV Detection
@@ -595,7 +595,7 @@ actor FFmpegRemuxSession {
 
             hasDolbyVision = true
             dvProfile = profile
-            print("[Remux] Dolby Vision detected: profile=\(profile), bl_compat_id=\(blCompatId)")
+            playerDebugLog("[Remux] Dolby Vision detected: profile=\(profile), bl_compat_id=\(blCompatId)")
         }
     }
 
@@ -640,7 +640,7 @@ actor FFmpegRemuxSession {
         )
         self.audioEncoder = encoder
 
-        print("[Remux] Audio transcoder: \(audioCodecName) → EAC3 (\(srcChannels)ch → \(outChannels)ch)")
+        playerDebugLog("[Remux] Audio transcoder: \(audioCodecName) → EAC3 (\(srcChannels)ch → \(outChannels)ch)")
     }
 
     /// Transcode an audio packet: decode to PCM, re-encode to EAC3.
@@ -731,7 +731,7 @@ actor FFmpegRemuxSession {
         }
 
         segments = result
-        print("[Remux] Built \(segments.count) estimated segments (\(String(format: "%.1f", targetSegmentDuration))s each)")
+        playerDebugLog("[Remux] Built \(segments.count) estimated segments (\(String(format: "%.1f", targetSegmentDuration))s each)")
     }
 
     /// Scan the first ~60 seconds of packets to find the keyframe interval,
@@ -811,7 +811,7 @@ actor FFmpegRemuxSession {
         segments = result
 
         let scanMs = Int(Date().timeIntervalSince(scanStart) * 1000)
-        print("[Remux] Built \(segments.count) segments from keyframe scan: " +
+        playerDebugLog("[Remux] Built \(segments.count) segments from keyframe scan: " +
               "avgGOP=\(String(format: "%.2f", avgInterval))s, " +
               "segDur=\(String(format: "%.2f", segmentInterval))s, " +
               "scan=\(scanMs)ms (\(keyframePTS.count) keyframes found)")
@@ -1327,7 +1327,7 @@ actor FFmpegRemuxSession {
 
                     let writeRet = av_write_frame(outCtx, packet)
                     if writeRet < 0 {
-                        print("[Remux] Warning: video write failed for segment \(segmentIndex): \(writeRet)")
+                        playerDebugLog("[Remux] Warning: video write failed for segment \(segmentIndex): \(writeRet)")
                     }
                     if videoPacketCount == 0 {
                         firstWrittenVideoDTS = packet.pointee.dts
@@ -1390,7 +1390,7 @@ actor FFmpegRemuxSession {
 
                             let writeRet = av_write_frame(outCtx, fp)
                             if writeRet < 0 {
-                                print("[Remux] Warning: transcoded audio write failed for segment \(segmentIndex): \(writeRet)")
+                                playerDebugLog("[Remux] Warning: transcoded audio write failed for segment \(segmentIndex): \(writeRet)")
                             }
                             if !audioPacketWritten {
                                 firstWrittenAudioDTS = fp.pointee.dts
@@ -1416,7 +1416,7 @@ actor FFmpegRemuxSession {
 
                         let writeRet = av_write_frame(outCtx, packet)
                         if writeRet < 0 {
-                            print("[Remux] Warning: audio write failed for segment \(segmentIndex): \(writeRet)")
+                            playerDebugLog("[Remux] Warning: audio write failed for segment \(segmentIndex): \(writeRet)")
                         }
                         if !audioPacketWritten {
                             firstWrittenAudioDTS = packet.pointee.dts
@@ -1467,7 +1467,7 @@ actor FFmpegRemuxSession {
                         pp.pointee.duration = 1536  // Standard EAC3 frame size
                         let primerWriteRet = av_write_frame(outCtx, pp)
                         if primerWriteRet < 0 {
-                            print("[Remux] Warning: audio primer write failed for segment \(segmentIndex): \(primerWriteRet)")
+                            playerDebugLog("[Remux] Warning: audio primer write failed for segment \(segmentIndex): \(primerWriteRet)")
                         }
                         if !audioPacketWritten {
                             firstWrittenAudioDTS = pp.pointee.dts
@@ -1795,7 +1795,7 @@ actor FFmpegRemuxSession {
         }
 
         let trackLabel = trackIdx == 0 ? "video" : "audio"
-        print("[Remux] Seg\(segmentIndex) \(trackLabel): tfdt=\(baseDecodeTime) samples=\(sampleCount) firstDur=\(firstSampleDur) trackId=\(trackId)")
+        playerDebugLog("[Remux] Seg\(segmentIndex) \(trackLabel): tfdt=\(baseDecodeTime) samples=\(sampleCount) firstDur=\(firstSampleDur) trackId=\(trackId)")
     }
 
     // MARK: - Private: EAC3 Output Configuration
@@ -1867,7 +1867,7 @@ actor FFmpegRemuxSession {
             offset += boxSize
         }
 
-        print("[Remux] [\(label)] boxes: \(boxes.joined(separator: " | "))")
+        playerDebugLog("[Remux] [\(label)] boxes: \(boxes.joined(separator: " | "))")
     }
 
     // MARK: - Private: Helpers

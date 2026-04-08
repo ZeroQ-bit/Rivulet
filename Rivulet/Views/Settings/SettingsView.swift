@@ -256,7 +256,6 @@ final class SettingsFocusState {
 struct SettingsView: View {
     // Navigation
     @State private var navigationStack: [SettingsPage] = [.root]
-    @State private var isForward = true
 
     // Page transition animation state (driven outside FocusContainedView's
     // UIHostingController because .transition() / .id() don't fire on rootView
@@ -404,28 +403,26 @@ struct SettingsView: View {
                     .frame(width: geo.size.width * 0.55)
 
                     // Right settings list (focus-contained to block left escape to sidebar)
+                    //
+                    // NOTE: .transition()/.id() do not work *inside* the
+                    // FocusContainedView because UIHostingController rebuilds
+                    // its rootView tree on each update rather than diffing —
+                    // so identity changes never register as insert/remove and
+                    // no transition fires. Instead, we animate .offset/.opacity
+                    // on the representable from the outside via @State, and do
+                    // the content swap mid-animation in navigate()/goBack().
                     FocusContainedView(
                         blockLeftEscape: currentPage != .root,
                         onLeftBlocked: { goBack() }
                     ) {
-                        ZStack {
-                            List {
-                                pageContent(for: currentPage)
-                            }
-                            .listStyle(.grouped)
-                            .scrollClipDisabled()
-                            .id(currentPage)
-                            .transition(.asymmetric(
-                                insertion: .opacity.combined(with: .offset(x: isForward ? 120 : -120)),
-                                removal: .opacity.combined(with: .offset(x: isForward ? -60 : 60))
-                            ))
+                        List {
+                            pageContent(for: currentPage)
                         }
-                        // Implicit animation scoped inside FocusContainedView's
-                        // UIHostingController — withAnimation transactions from
-                        // the parent don't reliably propagate across the
-                        // UIViewControllerRepresentable boundary for transitions.
-                        .animation(.easeOut(duration: 0.45), value: currentPage)
+                        .listStyle(.grouped)
+                        .scrollClipDisabled()
                     }
+                    .offset(x: pageOffsetX)
+                    .opacity(pageOpacity)
                     .frame(width: geo.size.width * 0.45)
                 }
             }
@@ -917,8 +914,7 @@ struct SettingsView: View {
     private func navigate(to page: SettingsPage) {
         focusState.focusedSettingId = nil
         focusState.focusedSubtext = nil
-        isForward = true
-        withAnimation(.easeOut(duration: 0.45)) {
+        animatePageSwap(forward: true) {
             navigationStack.append(page)
         }
     }
@@ -927,8 +923,7 @@ struct SettingsView: View {
         guard navigationStack.count > 1 else { return }
         focusState.focusedSettingId = nil
         focusState.focusedSubtext = nil
-        isForward = false
-        withAnimation(.easeOut(duration: 0.45)) {
+        animatePageSwap(forward: false) {
             navigationStack.removeLast()
         }
     }
@@ -936,10 +931,40 @@ struct SettingsView: View {
     private func navigateBackTo(_ page: SettingsPage) {
         focusState.focusedSettingId = nil
         focusState.focusedSubtext = nil
-        isForward = false
-        withAnimation(.easeOut(duration: 0.45)) {
+        animatePageSwap(forward: false) {
             if let index = navigationStack.lastIndex(of: page) {
                 navigationStack.removeSubrange((index + 1)...)
+            }
+        }
+    }
+
+    /// Crossfade + subtle slide between settings pages. The content swaps
+    /// while invisible, with a small (~18pt) directional drift so the
+    /// motion reads as a gentle slide rather than a hard jump. Driven by
+    /// SwiftUI animatable modifiers on the FocusContainedView wrapper
+    /// because UIHostingController swallows .transition()/.id() inside.
+    private func animatePageSwap(forward: Bool, swap: @escaping () -> Void) {
+        let fadeOutDuration: Double = 0.12
+        let fadeInDuration: Double = 0.20
+        let slideDistance: CGFloat = 18
+        let outOffset: CGFloat = forward ? -slideDistance : slideDistance
+        let inFromOffset: CGFloat = forward ? slideDistance : -slideDistance
+
+        // Phase 1: fade current page out with a small drift.
+        withAnimation(.easeOut(duration: fadeOutDuration)) {
+            pageOffsetX = outOffset
+            pageOpacity = 0
+        }
+
+        // Phase 2: swap content while invisible, start slightly offset on
+        // the incoming side, then fade/drift into place.
+        DispatchQueue.main.asyncAfter(deadline: .now() + fadeOutDuration) {
+            swap()
+            pageOffsetX = inFromOffset
+            pageOpacity = 0
+            withAnimation(.easeOut(duration: fadeInDuration)) {
+                pageOffsetX = 0
+                pageOpacity = 1
             }
         }
     }

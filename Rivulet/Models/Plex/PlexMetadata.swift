@@ -26,6 +26,15 @@ struct PlexCrewMember: Codable, Identifiable, Sendable {
     var thumb: String?
 }
 
+/// Plex image entry (clearLogo, coverPoster, background, snapshot, etc.)
+/// Returned on metadata items as an `Image` array. The `url` field is a
+/// server-relative path that still needs `X-Plex-Token` to fetch.
+struct PlexImage: Codable, Hashable, Sendable {
+    var alt: String?
+    var type: String?   // e.g. "clearLogo", "coverPoster", "background", "snapshot"
+    var url: String?
+}
+
 /// Generic tag model (genres, collections, etc.)
 struct PlexTag: Codable, Identifiable, Hashable, Sendable {
     var id: String { idString ?? tag ?? UUID().uuidString }
@@ -158,6 +167,7 @@ struct PlexMetadata: Codable, Identifiable, Hashable, Sendable {
     var thumb: String?
     var art: String?
     var banner: String?
+    var Image: [PlexImage]?  // clearLogo, coverPoster, background, etc.
     var Genre: [PlexTag]?
     var Guid: [PlexGuid]?  // External IDs (tmdb://, tvdb://, imdb://)
     var Collection: [PlexTag]?
@@ -402,35 +412,10 @@ extension PlexMetadata {
         }
     }
 
-    /// Best-effort extraction of TVDB ID from the guid (for legacy Plex agents)
-    var tvdbId: Int? {
-        if let guid, let id = PlexMetadata.extractExternalId(from: guid, prefixes: ["thetvdb://", "tvdb://"]) {
-            return id
-        }
-        if let guids = Guid {
-            for g in guids {
-                if let gid = g.id, let id = PlexMetadata.extractExternalId(from: gid, prefixes: ["tvdb://"]) {
-                    return id
-                }
-            }
-        }
-        return nil
-    }
-
-    /// TVDB ID for the related show when the item is a season or episode.
-    var parentShowTvdbId: Int? {
-        let showGuid: String?
-        switch type {
-        case "episode":
-            showGuid = grandparentGuid
-        case "season":
-            showGuid = parentGuid
-        default:
-            showGuid = nil
-        }
-
-        guard let showGuid else { return nil }
-        return PlexMetadata.extractExternalId(from: showGuid, prefixes: ["thetvdb://", "tvdb://"])
+    /// Relative path of the clearLogo image from the Plex `Image` array, if present.
+    /// Returns a server-relative path that still needs the server URL + X-Plex-Token to fetch.
+    var clearLogoPath: String? {
+        Image?.first(where: { $0.type == "clearLogo" })?.url
     }
 
     /// Preferred show/series title for hero branding.

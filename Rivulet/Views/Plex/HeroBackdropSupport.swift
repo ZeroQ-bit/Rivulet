@@ -2,8 +2,9 @@
 //  HeroBackdropSupport.swift
 //  Rivulet
 //
-//  Shared hero/backdrop resolution, deferred-upgrade coordination, and
-//  full-size crossfade rendering for preview/detail/loading surfaces.
+//  Shared hero/backdrop resolution and full-size crossfade rendering for
+//  preview/detail/loading surfaces. Artwork URLs come from Plex metadata —
+//  no external lookups.
 //
 
 import SwiftUI
@@ -14,10 +15,7 @@ struct HeroBackdropRequest: Hashable {
     let cacheKey: String
     let plexBackdropURL: URL?
     let plexThumbnailURL: URL?
-    let tmdbId: Int?
-    let tvdbId: Int?
-    let mediaType: TMDBMediaType?
-    let preferredBackdropSize: String
+    let plexLogoURL: URL?
 }
 
 struct HeroBackdropResolution: Equatable {
@@ -44,6 +42,7 @@ struct HeroBackdropSession: Equatable {
     init(seed request: HeroBackdropRequest) {
         displayedBackdropURL = request.plexBackdropURL ?? request.plexThumbnailURL
         thumbnailURL = request.plexThumbnailURL
+        logoURL = request.plexLogoURL
     }
 
     var canUpgradeAfterSettle: Bool {
@@ -101,57 +100,15 @@ struct HeroBackdropLoadGate {
     }
 }
 
-enum HeroBackdropSelection {
-    nonisolated static func compose(
-        request: HeroBackdropRequest,
-        tmdbBackdropURL: URL?,
-        logoURL: URL?,
-        needsUpgrade: Bool
-    ) -> HeroBackdropResolution {
-        let displayedBackdropURL = request.plexBackdropURL ?? request.plexThumbnailURL ?? tmdbBackdropURL
-
-        return HeroBackdropResolution(
-            displayedBackdropURL: displayedBackdropURL,
-            pendingUpgradeURL: nil,
-            logoURL: logoURL,
-            thumbnailURL: request.plexThumbnailURL
-        )
-    }
-}
-
 actor HeroBackdropResolver {
     static let shared = HeroBackdropResolver()
 
     func resolveAssets(for request: HeroBackdropRequest) async -> HeroBackdropResolution {
-        async let tmdbIdentityTask = resolvedTMDBIdentity(for: request)
-
-        let tmdbIdentity = await tmdbIdentityTask
-
-        var logoURL: URL?
-        var tmdbBackdropURL: URL?
-
-        if let tmdbIdentity {
-            async let logoTask = TMDBClient.shared.fetchLogoURL(tmdbId: tmdbIdentity.id, type: tmdbIdentity.type)
-            async let backdropTask = TMDBClient.shared.fetchBackdropURL(
-                tmdbId: tmdbIdentity.id,
-                type: tmdbIdentity.type,
-                size: request.preferredBackdropSize
-            )
-
-            let (resolvedLogoURL, resolvedBackdropURL) = await (logoTask, backdropTask)
-            logoURL = resolvedLogoURL
-            tmdbBackdropURL = resolvedBackdropURL
-
-            if let resolvedBackdropURL {
-                _ = await ImageCacheManager.shared.imageFullSize(for: resolvedBackdropURL)
-            }
-        }
-
-        return HeroBackdropSelection.compose(
-            request: request,
-            tmdbBackdropURL: tmdbBackdropURL,
-            logoURL: logoURL,
-            needsUpgrade: false
+        HeroBackdropResolution(
+            displayedBackdropURL: request.plexBackdropURL ?? request.plexThumbnailURL,
+            pendingUpgradeURL: nil,
+            logoURL: request.plexLogoURL,
+            thumbnailURL: request.plexThumbnailURL
         )
     }
 
@@ -167,21 +124,6 @@ actor HeroBackdropResolver {
             : nil
 
         return await (backdropTask, thumbnailTask)
-    }
-
-    private func resolvedTMDBIdentity(for request: HeroBackdropRequest) async -> (id: Int, type: TMDBMediaType)? {
-        guard let mediaType = request.mediaType else { return nil }
-
-        if let tmdbId = request.tmdbId {
-            return (tmdbId, mediaType)
-        }
-
-        guard let tvdbId = request.tvdbId,
-              let tmdbId = await TMDBClient.shared.findTmdbId(tvdbId: tvdbId, type: mediaType) else {
-            return nil
-        }
-
-        return (tmdbId, mediaType)
     }
 }
 
@@ -349,16 +291,19 @@ struct HeroBackdropImage<Placeholder: View>: View {
 }
 
 extension PlexMetadata {
+    /// Builds a `HeroBackdropRequest` from this item's Plex artwork.
+    ///
+    /// For episodes/seasons, the clearLogo isn't carried on the item itself —
+    /// callers that want the show's logo should pass `logoPathOverride` after
+    /// fetching the parent show's metadata.
     func heroBackdropRequest(
         serverURL: String,
         authToken: String,
-        tmdbIdOverride: Int? = nil,
-        tvdbIdOverride: Int? = nil,
-        mediaTypeOverride: TMDBMediaType? = nil,
-        preferredBackdropSize: String = "original"
+        logoPathOverride: String? = nil
     ) -> HeroBackdropRequest {
         let backdropPath = bestArt
         let thumbnailPath = thumb ?? bestThumb
+        let logoPath = logoPathOverride ?? clearLogoPath
 
         let plexBackdropURL = backdropPath.flatMap {
             URL(string: "\(serverURL)\($0)?X-Plex-Token=\(authToken)")
@@ -366,47 +311,15 @@ extension PlexMetadata {
         let plexThumbnailURL = thumbnailPath.flatMap {
             URL(string: "\(serverURL)\($0)?X-Plex-Token=\(authToken)")
         }
-
-        let mediaType: TMDBMediaType?
-        if let mediaTypeOverride {
-            mediaType = mediaTypeOverride
-        } else {
-            switch type {
-            case "movie":
-                mediaType = .movie
-            case "show", "season", "episode":
-                mediaType = .tv
-            default:
-                mediaType = nil
-            }
-        }
-
-        let resolvedTMDBId: Int?
-        if let tmdbIdOverride {
-            resolvedTMDBId = tmdbIdOverride
-        } else if type == "episode" || type == "season" {
-            resolvedTMDBId = parentShowTmdbId
-        } else {
-            resolvedTMDBId = tmdbId
-        }
-
-        let resolvedTVDBId: Int?
-        if let tvdbIdOverride {
-            resolvedTVDBId = tvdbIdOverride
-        } else if type == "episode" || type == "season" {
-            resolvedTVDBId = parentShowTvdbId
-        } else {
-            resolvedTVDBId = tvdbId
+        let plexLogoURL = logoPath.flatMap {
+            URL(string: "\(serverURL)\($0)?X-Plex-Token=\(authToken)")
         }
 
         return HeroBackdropRequest(
             cacheKey: ratingKey ?? "\(type ?? "item"):\(title ?? "unknown")",
             plexBackdropURL: plexBackdropURL,
             plexThumbnailURL: plexThumbnailURL,
-            tmdbId: resolvedTMDBId,
-            tvdbId: resolvedTVDBId,
-            mediaType: mediaType,
-            preferredBackdropSize: preferredBackdropSize
+            plexLogoURL: plexLogoURL
         )
     }
 }

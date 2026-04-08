@@ -170,7 +170,7 @@ final class FFmpegAudioDecoder: @unchecked Sendable {
 
         guard let codec else {
             let name = String(cString: avcodec_get_name(codecId))
-            print("[AudioDecoder] No decoder found for codec: \(name)")
+            playerDebugLog("[AudioDecoder] No decoder found for codec: \(name)")
             throw FFmpegError.unsupportedCodec(name)
         }
 
@@ -188,7 +188,7 @@ final class FFmpegAudioDecoder: @unchecked Sendable {
 
         // Log if there's a codec_id mismatch (indicates wrong stream was selected)
         if ctx.pointee.codec_id != codec.pointee.id {
-            print("[AudioDecoder] ⚠️ codec_id mismatch: context=\(ctx.pointee.codec_id.rawValue) " +
+            playerDebugLog("[AudioDecoder] ⚠️ codec_id mismatch: context=\(ctx.pointee.codec_id.rawValue) " +
                   "decoder=\(codec.pointee.id.rawValue) — ensure correct stream is selected")
         }
 
@@ -210,7 +210,7 @@ final class FFmpegAudioDecoder: @unchecked Sendable {
         let decoderName = String(cString: codec.pointee.name)
         let channels = codecpar.pointee.ch_layout.nb_channels
         let sampleRate = codecpar.pointee.sample_rate
-        print("[AudioDecoder] Opened \(decoderName) decoder: \(channels)ch \(sampleRate)Hz (\(lookupMethod))")
+        playerDebugLog("[AudioDecoder] Opened \(decoderName) decoder: \(channels)ch \(sampleRate)Hz (\(lookupMethod))")
     }
 
     deinit { close() }
@@ -239,7 +239,7 @@ final class FFmpegAudioDecoder: @unchecked Sendable {
 
         var ret = avcodec_send_packet(ctx, pkt)
         guard ret >= 0 || ret == kAudioDecoderEAGAIN else {
-            print("[AudioDecoder] send_packet error: \(ret)")
+            playerDebugLog("[AudioDecoder] send_packet error: \(ret)")
             return []
         }
 
@@ -253,7 +253,7 @@ final class FFmpegAudioDecoder: @unchecked Sendable {
                 break
             }
             guard ret >= 0 else {
-                print("[AudioDecoder] receive_frame error: \(ret)")
+                playerDebugLog("[AudioDecoder] receive_frame error: \(ret)")
                 break
             }
 
@@ -307,7 +307,7 @@ final class FFmpegAudioDecoder: @unchecked Sendable {
                 emittedBatchCount += 1
                 if emittedBatchCount <= 4 {
                     let batchDurationMs = (Double(batchSampleCount) / Double(max(batchSampleRate, 1))) * 1000
-                    print(
+                    playerDebugLog(
                         "[AudioDecoder] Emitting PCM batch #\(emittedBatchCount): " +
                         "samples=\(batchSampleCount) rate=\(batchSampleRate)Hz " +
                         "duration=\(String(format: "%.1f", batchDurationMs))ms ch=\(batchChannels)"
@@ -347,7 +347,7 @@ final class FFmpegAudioDecoder: @unchecked Sendable {
         nonMonotonicTimestampCount = 0
         hasLoggedBatchConfig = false
         emittedBatchCount = 0
-        print("[AudioDecoder] Timestamp tracking reset (\(reason))")
+        playerDebugLog("[AudioDecoder] Timestamp tracking reset (\(reason))")
     }
 
     // MARK: - CMSampleBuffer Creation
@@ -377,7 +377,7 @@ final class FFmpegAudioDecoder: @unchecked Sendable {
                         maxVal = max(maxVal, samples[i])
                     }
                     let first4 = (0..<min(4, samples.count)).map { "\(samples[$0])" }.joined(separator: ", ")
-                    print("[AudioDecoder] PCM validate #\(sampleBufferCount): " +
+                    playerDebugLog("[AudioDecoder] PCM validate #\(sampleBufferCount): " +
                           "samples=\(frame.sampleCount) ch=\(frame.channels) fmt=s16 " +
                           "dataSize=\(frame.data.count) expected=\(expectedSize) " +
                           "range=[\(minVal),\(maxVal)] first4=[\(first4)]")
@@ -397,7 +397,7 @@ final class FFmpegAudioDecoder: @unchecked Sendable {
                         }
                     }
                     let first4 = (0..<min(4, floats.count)).map { String(format: "%.6f", floats[$0]) }.joined(separator: ", ")
-                    print("[AudioDecoder] PCM validate #\(sampleBufferCount): " +
+                    playerDebugLog("[AudioDecoder] PCM validate #\(sampleBufferCount): " +
                           "samples=\(frame.sampleCount) ch=\(frame.channels) fmt=f32 " +
                           "dataSize=\(frame.data.count) expected=\(expectedSize) " +
                           "range=[\(String(format: "%.4f", minVal)),\(String(format: "%.4f", maxVal))] " +
@@ -471,7 +471,7 @@ final class FFmpegAudioDecoder: @unchecked Sendable {
             codecContext = nil
         }
 
-        print("[AudioDecoder] Closed")
+        playerDebugLog("[AudioDecoder] Closed")
     }
 
     // MARK: - Private: Format Description Cache
@@ -550,7 +550,7 @@ final class FFmpegAudioDecoder: @unchecked Sendable {
         cachedFDIsS16 = useSignedInt16Output
 
         let formatName = useSignedInt16Output ? "s16" : "float32"
-        print("[AudioDecoder] Created format description: \(channels)ch \(sampleRate)Hz " +
+        playerDebugLog("[AudioDecoder] Created format description: \(channels)ch \(sampleRate)Hz " +
               "\(formatName) layout=\(outputChannelLayoutTag) flags=\(asbd.mFormatFlags)")
 
         return fd
@@ -613,7 +613,7 @@ final class FFmpegAudioDecoder: @unchecked Sendable {
         }
 
         guard let swrCtx = swrContext else {
-            print("[AudioDecoder] No swresample context available")
+            playerDebugLog("[AudioDecoder] No swresample context available")
             return nil
         }
 
@@ -642,7 +642,7 @@ final class FFmpegAudioDecoder: @unchecked Sendable {
         }
 
         guard convertedSamples > 0 else {
-            print("[AudioDecoder] swr_convert returned \(convertedSamples)")
+            playerDebugLog("[AudioDecoder] swr_convert returned \(convertedSamples)")
             return nil
         }
 
@@ -721,7 +721,7 @@ final class FFmpegAudioDecoder: @unchecked Sendable {
             invalidTimestampCount += 1
             if invalidTimestampCount <= 5 || invalidTimestampCount % 100 == 0 {
                 let ptsSeconds = CMTimeGetSeconds(pts)
-                print(
+                playerDebugLog(
                     "[AudioDecoder] Invalid decoded PTS fallback (count=\(invalidTimestampCount), " +
                     "resolved=\(String(format: "%.3f", ptsSeconds)))"
                 )
@@ -745,7 +745,7 @@ final class FFmpegAudioDecoder: @unchecked Sendable {
             if currentSeconds.isFinite, lastSeconds.isFinite, currentSeconds + 0.001 < lastSeconds {
                 nonMonotonicTimestampCount += 1
                 if nonMonotonicTimestampCount <= 5 || nonMonotonicTimestampCount % 100 == 0 {
-                    print(
+                    playerDebugLog(
                         "[AudioDecoder] Non-monotonic decoded PTS (count=\(nonMonotonicTimestampCount)) " +
                         "current=\(String(format: "%.3f", currentSeconds)) last=\(String(format: "%.3f", lastSeconds))"
                     )
@@ -818,7 +818,7 @@ final class FFmpegAudioDecoder: @unchecked Sendable {
         case 7:  return kAudioChannelLayoutTag_MPEG_6_1_A        // L R C LFE Ls Rs Cs
         case 8:  return kAudioChannelLayoutTag_MPEG_7_1_A        // L R C LFE Ls Rs Lc Rc
         default:
-            print("[AudioDecoder] No standard layout for \(channels) channels")
+            playerDebugLog("[AudioDecoder] No standard layout for \(channels) channels")
             return kAudioChannelLayoutTag_Unknown
         }
     }
@@ -840,7 +840,7 @@ final class FFmpegAudioDecoder: @unchecked Sendable {
 
         swrContext = swr_alloc()
         guard swrContext != nil else {
-            print("[AudioDecoder] Failed to allocate SwrContext")
+            playerDebugLog("[AudioDecoder] Failed to allocate SwrContext")
             return
         }
 
@@ -864,7 +864,7 @@ final class FFmpegAudioDecoder: @unchecked Sendable {
         guard ret >= 0 else {
             swr_free(&swrContext)
             swrContext = nil
-            print("[AudioDecoder] swr_init failed: \(ret)")
+            playerDebugLog("[AudioDecoder] swr_init failed: \(ret)")
             return
         }
 
@@ -878,7 +878,7 @@ final class FFmpegAudioDecoder: @unchecked Sendable {
 
         let downmixLabel = needsDownmix ? " (downmixed from \(inputChannels)ch)" : ""
         let resampleLabel = (outRate != inputRate) ? " (resampled from \(inputRate)Hz)" : ""
-        print("[AudioDecoder] SwrContext initialized: \(outChannels)ch \(outRate)Hz \(outputBitsPerSample)-bit layout=\(outputChannelLayoutTag)\(downmixLabel)\(resampleLabel)")
+        playerDebugLog("[AudioDecoder] SwrContext initialized: \(outChannels)ch \(outRate)Hz \(outputBitsPerSample)-bit layout=\(outputChannelLayoutTag)\(downmixLabel)\(resampleLabel)")
     }
 
     private func minimumBatchSamples(for sampleRate: Int) -> Int {
@@ -908,7 +908,7 @@ final class FFmpegAudioDecoder: @unchecked Sendable {
             batchReason = "default"
         }
 
-        print(
+        playerDebugLog(
             "[AudioDecoder] Batch config: minSamples=\(minBatchSamples) " +
             "duration=\(String(format: "%.1f", durationMs))ms reason=\(batchReason) " +
             "targetRate=\(targetOutputSampleRate > 0 ? "\(targetOutputSampleRate)" : "native") " +

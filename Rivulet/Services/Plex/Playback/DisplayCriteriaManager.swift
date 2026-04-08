@@ -56,7 +56,7 @@ final class DisplayCriteriaManager {
             let criteria = try await asset.load(.preferredDisplayCriteria)
             setDisplayCriteria(criteria)
         } catch {
-            print("🖥️ DisplayCriteria: Failed to load display criteria: \(error.localizedDescription)")
+            playerDebugLog("🖥️ DisplayCriteria: Failed to load display criteria: \(error.localizedDescription)")
             // Continue without display criteria - playback will still work, just without mode switching
         }
     }
@@ -68,7 +68,7 @@ final class DisplayCriteriaManager {
             let criteria = try await asset.load(.preferredDisplayCriteria)
             setDisplayCriteria(criteria)
         } catch {
-            print("🖥️ DisplayCriteria: Failed to load criteria from asset: \(error.localizedDescription)")
+            playerDebugLog("🖥️ DisplayCriteria: Failed to load criteria from asset: \(error.localizedDescription)")
         }
     }
 
@@ -141,7 +141,7 @@ final class DisplayCriteriaManager {
         )
 
         guard status == noErr, let formatDesc = formatDescription else {
-            print("🖥️ DisplayCriteria: Failed to create format description (status: \(status))")
+            playerDebugLog("🖥️ DisplayCriteria: Failed to create format description (status: \(status))")
             return
         }
 
@@ -156,7 +156,7 @@ final class DisplayCriteriaManager {
         guard hasSetCriteria else { return }
 
         guard let displayManager = getDisplayManager() else {
-            print("🖥️ DisplayCriteria: No display manager available for reset")
+            playerDebugLog("🖥️ DisplayCriteria: No display manager available for reset")
             return
         }
 
@@ -176,7 +176,7 @@ final class DisplayCriteriaManager {
     ///   - forceHDR10Fallback: If true, treat Dolby Vision content as HDR10 instead
     func configureForContent(videoStream: PlexStream?, forceHDR10Fallback: Bool = false) {
         guard let stream = videoStream, stream.isVideo else {
-            print("🖥️ DisplayCriteria: No video stream metadata available")
+            playerDebugLog("🖥️ DisplayCriteria: No video stream metadata available")
             return
         }
 
@@ -198,7 +198,7 @@ final class DisplayCriteriaManager {
             // Use HDR10 if the base layer is compatible, otherwise SDR.
             isDV = false
             isHDR = hasHDR10Base || stream.isHDR
-            print("🖥️ DisplayCriteria: DV fallback active - using \(isHDR ? "HDR10" : "SDR") (BL CompatID: \(blCompatID ?? -1))")
+            playerDebugLog("🖥️ DisplayCriteria: DV fallback active - using \(isHDR ? "HDR10" : "SDR") (BL CompatID: \(blCompatID ?? -1))")
         } else {
             isDV = stream.isDolbyVision
             isHDR = stream.isHDR && !isDV
@@ -206,7 +206,7 @@ final class DisplayCriteriaManager {
 
         // Log what we're configuring
         let dynamicRange = isDV ? "Dolby Vision" : isHLG ? "HLG" : isHDR ? "HDR10" : "SDR"
-        print("🖥️ DisplayCriteria: Configuring for \(dynamicRange) @ \(frameRate)fps (\(width)x\(height))")
+        playerDebugLog("🖥️ DisplayCriteria: Configuring for \(dynamicRange) @ \(frameRate)fps (\(width)x\(height))")
 
         configureWithFormatDescription(
             frameRate: frameRate,
@@ -239,7 +239,7 @@ final class DisplayCriteriaManager {
     /// Set display criteria on the display manager
     private func setDisplayCriteria(_ criteria: AVDisplayCriteria) {
         guard let displayManager = getDisplayManager() else {
-            print("🖥️ DisplayCriteria: No display manager available")
+            playerDebugLog("🖥️ DisplayCriteria: No display manager available")
             return
         }
 
@@ -249,8 +249,8 @@ final class DisplayCriteriaManager {
         // Log the display manager state
         if displayManager.isDisplayCriteriaMatchingEnabled {
         } else {
-            print("🖥️ DisplayCriteria: ⚠️ Display criteria matching is DISABLED in system settings")
-            print("🖥️ DisplayCriteria: User should enable 'Match Content' in Settings > Video and Audio")
+            playerDebugLog("🖥️ DisplayCriteria: ⚠️ Display criteria matching is DISABLED in system settings")
+            playerDebugLog("🖥️ DisplayCriteria: User should enable 'Match Content' in Settings > Video and Audio")
         }
     }
 
@@ -259,14 +259,14 @@ final class DisplayCriteriaManager {
         // On tvOS, get the key window's display manager
         guard let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
               let window = scene.windows.first else {
-            print("🖥️ DisplayCriteria: Could not find window")
+            playerDebugLog("🖥️ DisplayCriteria: Could not find window")
             return nil
         }
 
         #if targetEnvironment(simulator)
         // avDisplayManager category may not load on the simulator (no real display hardware)
         guard window.responds(to: Selector(("avDisplayManager"))) else {
-            print("🖥️ DisplayCriteria: avDisplayManager not available on simulator")
+            playerDebugLog("🖥️ DisplayCriteria: avDisplayManager not available on simulator")
             return nil
         }
         #endif

@@ -97,7 +97,7 @@ final class LocalRemuxServer {
                     self?.isRunning = true
                 }
             case .failed(let error):
-                print("[Remux] Listener failed: \(error)")
+                playerDebugLog("[Remux] Listener failed: \(error)")
                 self?.isRunning = false
             case .cancelled:
                 self?.isRunning = false
@@ -125,7 +125,7 @@ final class LocalRemuxServer {
         }
 
         let url = URL(string: "http://127.0.0.1:\(port)/master.m3u8")!
-        print("[Remux] Started on port \(port)")
+        playerDebugLog("[Remux] Started on port \(port)")
         return url
     }
 
@@ -153,7 +153,7 @@ final class LocalRemuxServer {
 
         initSegment = nil
         isRunning = false
-        print("[Remux] Stopped")
+        playerDebugLog("[Remux] Stopped")
     }
 
     // MARK: - Connection Handling
@@ -214,7 +214,7 @@ final class LocalRemuxServer {
 
     private func routeRequest(path: String, on connection: NWConnection) {
         let pathOnly = path.components(separatedBy: "?").first ?? path
-        print("[Remux] Request: \(pathOnly)")
+        playerDebugLog("[Remux] Request: \(pathOnly)")
 
         if pathOnly == "/master.m3u8" {
             serveMasterPlaylist(on: connection)
@@ -348,7 +348,7 @@ final class LocalRemuxServer {
                 self.initSegment = data
                 self.sendResponse(on: connection, contentType: "video/mp4", body: data)
             } catch {
-                print("[Remux] Init segment generation failed: \(error)")
+                playerDebugLog("[Remux] Init segment generation failed: \(error)")
                 self.sendError(on: connection, status: 500, message: "Init segment generation failed")
             }
         }
@@ -369,7 +369,7 @@ final class LocalRemuxServer {
         cacheLock.lock()
         if let cached = segmentCache[index] {
             cacheLock.unlock()
-            print("[Remux] Segment \(index) cache hit (\(cached.count) bytes)")
+            playerDebugLog("[Remux] Segment \(index) cache hit (\(cached.count) bytes)")
             sendResponse(on: connection, contentType: "video/mp4", body: cached)
             startReadAhead(from: index + 1)
             return
@@ -379,7 +379,7 @@ final class LocalRemuxServer {
         // On seek, cancel read-ahead so we don't wait behind stale pre-generation.
         // For sequential access, let read-ahead continue — it may be nearly done.
         if isSeek {
-            print("[Remux] Seek detected: segment \(index), cancelling read-ahead")
+            playerDebugLog("[Remux] Seek detected: segment \(index), cancelling read-ahead")
             // Signal FFmpeg's interrupt callback to abort any in-progress av_read_frame()
             // immediately. This bypasses actor serialization — the stale generation exits
             // within one I/O poll cycle (~10-50ms) instead of running to completion (~4s).
@@ -412,12 +412,12 @@ final class LocalRemuxServer {
                 self.inFlightSegments.remove(index)
                 self.cacheSegment(index: index, data: data)
                 let elapsedMs = Int(Date().timeIntervalSince(generationStart) * 1000)
-                print("[Remux] Segment \(index) generated (\(data.count) bytes, elapsed=\(elapsedMs)ms)")
+                playerDebugLog("[Remux] Segment \(index) generated (\(data.count) bytes, elapsed=\(elapsedMs)ms)")
                 self.sendResponse(on: connection, contentType: "video/mp4", body: data)
                 self.startReadAhead(from: index + 1)
             } catch {
                 self.inFlightSegments.remove(index)
-                print("[Remux] Segment \(index) generation failed: \(error)")
+                playerDebugLog("[Remux] Segment \(index) generation failed: \(error)")
                 self.sendError(on: connection, status: 500, message: "Segment generation failed")
             }
         }
@@ -434,7 +434,7 @@ final class LocalRemuxServer {
             if let cached = segmentCache[index] {
                 cacheLock.unlock()
                 let waitedMs = Int(Date().timeIntervalSince(waitStart) * 1000)
-                print("[Remux] Segment \(index) served from read-ahead cache (wait=\(waitedMs)ms)")
+                playerDebugLog("[Remux] Segment \(index) served from read-ahead cache (wait=\(waitedMs)ms)")
                 sendResponse(on: connection, contentType: "video/mp4", body: cached)
                 startReadAhead(from: index + 1)
                 return
@@ -448,7 +448,7 @@ final class LocalRemuxServer {
 
             // If AVPlayer seeked away, stop waiting — this segment is stale
             if lastRequestedIndex > index {
-                print("[Remux] Segment \(index) wait abandoned — AVPlayer moved to \(lastRequestedIndex)")
+                playerDebugLog("[Remux] Segment \(index) wait abandoned — AVPlayer moved to \(lastRequestedIndex)")
                 connection.cancel()
                 removeConnection(connection)
                 return
@@ -457,7 +457,7 @@ final class LocalRemuxServer {
 
         // If AVPlayer seeked away, don't bother generating
         if lastRequestedIndex > index {
-            print("[Remux] Segment \(index) fallback skipped — AVPlayer moved to \(lastRequestedIndex)")
+            playerDebugLog("[Remux] Segment \(index) fallback skipped — AVPlayer moved to \(lastRequestedIndex)")
             connection.cancel()
             removeConnection(connection)
             return
@@ -474,12 +474,12 @@ final class LocalRemuxServer {
             inFlightSegments.remove(index)
             cacheSegment(index: index, data: data)
             let elapsedMs = Int(Date().timeIntervalSince(generationStart) * 1000)
-            print("[Remux] Segment \(index) generated after wait fallback (\(data.count) bytes, elapsed=\(elapsedMs)ms)")
+            playerDebugLog("[Remux] Segment \(index) generated after wait fallback (\(data.count) bytes, elapsed=\(elapsedMs)ms)")
             sendResponse(on: connection, contentType: "video/mp4", body: data)
             startReadAhead(from: index + 1)
         } catch {
             inFlightSegments.remove(index)
-            print("[Remux] Segment \(index) generation failed: \(error)")
+            playerDebugLog("[Remux] Segment \(index) generation failed: \(error)")
             sendError(on: connection, status: 500, message: "Segment generation failed")
         }
     }
@@ -522,11 +522,11 @@ final class LocalRemuxServer {
                     }
                     self.inFlightSegments.remove(i)
                     self.cacheSegment(index: i, data: data)
-                    print("[Remux] Read-ahead segment \(i) cached (\(data.count) bytes)")
+                    playerDebugLog("[Remux] Read-ahead segment \(i) cached (\(data.count) bytes)")
                 } catch {
                     self.inFlightSegments.remove(i)
                     if !Task.isCancelled {
-                        print("[Remux] Read-ahead segment \(i) failed: \(error)")
+                        playerDebugLog("[Remux] Read-ahead segment \(i) failed: \(error)")
                     }
                 }
             }
@@ -585,7 +585,7 @@ final class LocalRemuxServer {
                     // AVPlayer frequently cancels duplicate/in-flight segment requests.
                     // Treat broken pipe/reset as expected client aborts.
                 } else {
-                    print("[Remux] Send error: \(error)")
+                    playerDebugLog("[Remux] Send error: \(error)")
                 }
             }
             connection.cancel()
@@ -607,7 +607,7 @@ final class LocalRemuxServer {
         connection.send(content: response.data(using: .utf8)!, contentContext: .defaultMessage,
                         isComplete: false, completion: .contentProcessed { error in
             if let error = error {
-                print("[Remux] Chunked header send error: \(error)")
+                playerDebugLog("[Remux] Chunked header send error: \(error)")
             }
         })
     }
@@ -631,7 +631,7 @@ final class LocalRemuxServer {
                    code == .EPIPE || code == .ECONNRESET {
                     // Expected — AVPlayer may have moved on
                 } else {
-                    print("[Remux] Chunked body send error: \(error)")
+                    playerDebugLog("[Remux] Chunked body send error: \(error)")
                 }
             }
             connection.cancel()

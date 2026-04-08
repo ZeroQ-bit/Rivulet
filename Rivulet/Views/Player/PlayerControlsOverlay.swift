@@ -33,7 +33,7 @@ struct PlayerControlsOverlay: View {
     // MARK: - Transport Bar (Bottom)
 
     private var transportBar: some View {
-        VStack(spacing: 14) {
+        VStack(spacing: 16) {
             // Title (shows briefly at top of transport area, hidden when paused poster is showing)
             if !hideTitle {
                 HStack {
@@ -63,35 +63,18 @@ struct PlayerControlsOverlay: View {
                 .padding(.horizontal, 80)
             }
 
-            HStack(alignment: .top, spacing: 18) {
-                transportPlayPauseButton
-
-                VStack(spacing: 12) {
-                    HStack {
-                        Spacer()
-                        transportTopRightButtons
-                    }
-
-                    // Progress bar with scrubbing support
-                    TransportProgressBar(
-                        currentTime: viewModel.currentTime,
-                        duration: viewModel.duration,
-                        isScrubbing: viewModel.isScrubbing,
-                        scrubTime: viewModel.scrubTime,
-                        scrubStepLabel: viewModel.scrubStepLabel,
-                        scrubThumbnail: viewModel.scrubThumbnail,
-                        scrubFeedbackIcon: viewModel.scrubFeedbackIconName,
-                        markers: viewModel.metadata.allMarkers
-                    )
-
-                    if viewModel.overlayLayer == .infoDeck {
-                        transportDetailTabs
-                        transportDetailContent
-                    }
-                }
-            }
+            // Progress bar with scrubbing support
+            TransportProgressBar(
+                currentTime: viewModel.currentTime,
+                duration: viewModel.duration,
+                isScrubbing: viewModel.isScrubbing,
+                scrubTime: viewModel.scrubTime,
+                scrubStepLabel: viewModel.scrubStepLabel,
+                scrubThumbnail: viewModel.scrubThumbnail,
+                markers: viewModel.metadata.allMarkers
+            )
             .padding(.horizontal, 80)
-            .padding(.bottom, 44)
+            .padding(.bottom, 50)
         }
         .padding(.vertical, 30)
         .background(
@@ -102,248 +85,6 @@ struct PlayerControlsOverlay: View {
             )
             .ignoresSafeArea()
         )
-    }
-
-    private var transportPlayPauseButton: some View {
-        Button {
-            viewModel.togglePlayPause()
-        } label: {
-            Image(systemName: viewModel.isPlaying ? "pause.fill" : "play.fill")
-                .font(.system(size: 28, weight: .semibold))
-                .foregroundStyle(.white)
-                .frame(width: 74, height: 74)
-                .background(
-                    Circle()
-                        .fill(.white.opacity(0.16))
-                        .overlay(
-                            Circle()
-                                .strokeBorder(.white.opacity(0.22), lineWidth: 1)
-                        )
-                )
-        }
-        .buttonStyle(.plain)
-    }
-
-    private var transportTopRightButtons: some View {
-        HStack(spacing: 10) {
-            transportIconButton(systemImage: "captions.bubble", accessibilityLabel: "Subtitles") {
-                openSettingsPanel(focusedColumn: 0)
-            }
-            transportIconButton(systemImage: "speaker.wave.2", accessibilityLabel: "Audio") {
-                openSettingsPanel(focusedColumn: 1)
-            }
-            transportIconButton(systemImage: "info.circle", accessibilityLabel: "Playback Info") {
-                openSettingsPanel(focusedColumn: 0)
-            }
-        }
-    }
-
-    private func transportIconButton(
-        systemImage: String,
-        accessibilityLabel: String,
-        action: @escaping () -> Void
-    ) -> some View {
-        Button(action: action) {
-            Image(systemName: systemImage)
-                .font(.system(size: 19, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.95))
-                .frame(width: 46, height: 46)
-                .background(
-                    Circle()
-                        .fill(.black.opacity(0.45))
-                        .overlay(
-                            Circle()
-                                .strokeBorder(.white.opacity(0.22), lineWidth: 1)
-                        )
-                )
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel(accessibilityLabel)
-    }
-
-    private var transportDetailTabs: some View {
-        HStack(spacing: 10) {
-            transportDetailTab(title: "Info", panel: .info, systemImage: "info.circle")
-            transportDetailTab(
-                title: "Chapters",
-                panel: .chapters,
-                systemImage: "list.bullet.rectangle.portrait"
-            )
-            Spacer()
-        }
-    }
-
-    private func transportDetailTab(
-        title: String,
-        panel: TransportDetailPanel,
-        systemImage: String
-    ) -> some View {
-        let isSelected = viewModel.transportDetailPanel == panel
-        return Button {
-            viewModel.activateTransportDetailPanel(panel)
-        } label: {
-            HStack(spacing: 8) {
-                Image(systemName: systemImage)
-                Text(title)
-            }
-            .font(.system(size: 15, weight: .semibold))
-            .foregroundStyle(isSelected ? .black : .white.opacity(0.9))
-            .padding(.horizontal, 14)
-            .padding(.vertical, 8)
-            .background(
-                Capsule()
-                    .fill(isSelected ? .white : .white.opacity(0.14))
-            )
-        }
-        .buttonStyle(.plain)
-    }
-
-    @ViewBuilder
-    private var transportDetailContent: some View {
-        switch viewModel.transportDetailPanel {
-        case .info:
-            transportInfoContent
-        case .chapters:
-            transportChaptersContent
-        }
-    }
-
-    private var transportInfoContent: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            if let summary = viewModel.metadata.summary, !summary.isEmpty {
-                Text(summary)
-                    .font(.system(size: 17))
-                    .foregroundStyle(.white.opacity(0.9))
-                    .lineLimit(2)
-            } else {
-                Text(viewModel.title)
-                    .font(.system(size: 17, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.9))
-                    .lineLimit(1)
-            }
-
-            HStack(spacing: 14) {
-                if let year = viewModel.metadata.year {
-                    InfoBadge(icon: "calendar", text: "\(year)")
-                }
-                if let rating = viewModel.metadata.contentRating {
-                    InfoBadge(icon: "checkmark.shield", text: rating)
-                }
-                if viewModel.duration > 0 {
-                    InfoBadge(icon: "clock", text: formatDuration(viewModel.duration))
-                }
-                if let genre = viewModel.metadata.Genre?.first?.tag, !genre.isEmpty {
-                    InfoBadge(icon: "film", text: genre)
-                }
-                Spacer()
-            }
-        }
-    }
-
-    private var transportChaptersContent: some View {
-        Group {
-            if viewModel.chapters.isEmpty {
-                HStack(spacing: 10) {
-                    Image(systemName: "list.bullet.rectangle")
-                        .foregroundStyle(.white.opacity(0.7))
-                    Text("No chapters available for this item")
-                        .font(.system(size: 16))
-                        .foregroundStyle(.white.opacity(0.7))
-                    Spacer()
-                }
-                .padding(.vertical, 6)
-            } else {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 12) {
-                        ForEach(Array(viewModel.chapters.enumerated()), id: \.offset) { _, chapter in
-                            chapterCard(chapter)
-                        }
-                    }
-                    .padding(.vertical, 2)
-                }
-            }
-        }
-    }
-
-    private func chapterCard(_ chapter: PlexChapter) -> some View {
-        let isCurrent = isCurrentChapter(chapter)
-        return Button {
-            viewModel.seekToChapter(chapter)
-        } label: {
-            VStack(alignment: .leading, spacing: 6) {
-                if let thumbnail = viewModel.chapterThumbnail(for: chapter) {
-                    Image(uiImage: thumbnail)
-                        .resizable()
-                        .interpolation(.medium)
-                        .aspectRatio(contentMode: .fill)
-                        .frame(width: 170, height: 96)
-                        .clipped()
-                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                }
-                Text(chapterTitle(chapter))
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .lineLimit(1)
-                Text(formatTime(chapterStartSeconds(chapter)))
-                    .font(.caption)
-                    .monospacedDigit()
-                    .foregroundStyle(.white.opacity(0.7))
-            }
-            .frame(width: 180, alignment: .leading)
-            .padding(8)
-            .background(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(isCurrent ? .white.opacity(0.2) : .white.opacity(0.09))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .strokeBorder(
-                                isCurrent ? .white.opacity(0.65) : .white.opacity(0.15),
-                                lineWidth: isCurrent ? 2 : 1
-                            )
-                    )
-            )
-        }
-        .buttonStyle(.plain)
-    }
-
-    private func chapterTitle(_ chapter: PlexChapter) -> String {
-        if let tag = chapter.tag, !tag.isEmpty {
-            return tag
-        }
-        if let index = chapter.index {
-            return "Chapter \(index)"
-        }
-        return "Chapter"
-    }
-
-    private func chapterStartSeconds(_ chapter: PlexChapter) -> TimeInterval {
-        TimeInterval(chapter.startTimeOffset ?? 0) / 1000.0
-    }
-
-    private func isCurrentChapter(_ chapter: PlexChapter) -> Bool {
-        guard let current = viewModel.currentChapter else { return false }
-        if let chapterId = chapter.id, let currentId = current.id {
-            return chapterId == currentId
-        }
-        return chapter.startTimeOffset == current.startTimeOffset
-    }
-
-    private func formatTime(_ seconds: TimeInterval) -> String {
-        guard seconds.isFinite && seconds >= 0 else { return "0:00" }
-        let totalSeconds = Int(seconds)
-        let hours = totalSeconds / 3600
-        let minutes = (totalSeconds % 3600) / 60
-        let secs = totalSeconds % 60
-        if hours > 0 {
-            return String(format: "%d:%02d:%02d", hours, minutes, secs)
-        }
-        return String(format: "%d:%02d", minutes, secs)
-    }
-
-    private func openSettingsPanel(focusedColumn: Int) {
-        withAnimation(.easeOut(duration: 0.3)) {
-            viewModel.openFullDetail(focusedColumn: focusedColumn)
-        }
     }
 
     // MARK: - Playback Settings Panel (Horizontal Bar at Top)
@@ -761,7 +502,6 @@ private struct TransportProgressBar: View {
     var scrubTime: TimeInterval = 0
     var scrubStepLabel: String?  // YouTube-style step indicator (e.g. "▶▶ 30s")
     var scrubThumbnail: UIImage?
-    var scrubFeedbackIcon: String?
     var markers: [PlexMarker] = []
 
     private var displayTime: TimeInterval {
@@ -867,12 +607,6 @@ private struct TransportProgressBar: View {
                 if isScrubbing {
                     // Scrub time and speed indicator
                     HStack(spacing: 16) {
-                        if let scrubFeedbackIcon {
-                            Image(systemName: scrubFeedbackIcon)
-                                .font(.system(size: 17, weight: .semibold))
-                                .foregroundStyle(.white.opacity(0.92))
-                        }
-
                         Text(formatTime(scrubTime))
                             .font(.body)
                             .fontWeight(.semibold)

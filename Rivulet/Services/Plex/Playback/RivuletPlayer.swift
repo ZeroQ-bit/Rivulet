@@ -162,7 +162,7 @@ final class RivuletPlayer: ObservableObject {
     /// Load a URL for playback. This is the simple PlayerProtocol entry point.
     /// For routed playback (direct play vs HLS), use `load(route:...)` instead.
     func load(url: URL, headers: [String: String]?, startTime: TimeInterval?) async throws {
-        print("[RivuletPlayer] load(url:) → HLS path: \(url.lastPathComponent)")
+        playerDebugLog("[RivuletPlayer] load(url:) → HLS path: \(url.lastPathComponent)")
         hasStartedPlayback = false
         resetAirPlayRouteOverrides()
         try await loadHLS(url: url, headers: headers, startTime: startTime)
@@ -171,7 +171,7 @@ final class RivuletPlayer: ObservableObject {
     /// Load an HLS URL with optional DV profile conversion.
     /// Used when the ViewModel knows the content needs RPU conversion (P7/P8.6).
     func loadHLSWithConversion(url: URL, headers: [String: String]?, startTime: TimeInterval?, requiresProfileConversion: Bool) async throws {
-        print("[RivuletPlayer] loadHLS: \(url.lastPathComponent) profileConversion=\(requiresProfileConversion)")
+        playerDebugLog("[RivuletPlayer] loadHLS: \(url.lastPathComponent) profileConversion=\(requiresProfileConversion)")
         hasStartedPlayback = false
         playbackStateSubject.send(.loading)
         resetAirPlayRouteOverrides()
@@ -203,17 +203,17 @@ final class RivuletPlayer: ObservableObject {
 
         switch route {
         case .avPlayerDirect(let url, let headers):
-            print("[RivuletPlayer] load(route:) → DirectPlay: \(url.lastPathComponent) DV=\(isDolbyVision)")
+            playerDebugLog("[RivuletPlayer] load(route:) → DirectPlay: \(url.lastPathComponent) DV=\(isDolbyVision)")
             try await loadDirectPlay(url: url, headers: headers, startTime: startTime, isDolbyVision: isDolbyVision, enableDVConversion: enableDVConversion)
 
         case .localRemux(let url, let headers, let analysis):
             let dv = isDolbyVision || analysis.needsDVConversion
             let conversion = enableDVConversion || analysis.needsDVConversion
-            print("[RivuletPlayer] load(route:) → DirectPlay: \(url.lastPathComponent) DV=\(dv) conversion=\(conversion)")
+            playerDebugLog("[RivuletPlayer] load(route:) → DirectPlay: \(url.lastPathComponent) DV=\(dv) conversion=\(conversion)")
             try await loadDirectPlay(url: url, headers: headers, startTime: startTime, isDolbyVision: dv, enableDVConversion: conversion)
 
         case .hls(let url, let headers):
-            print("[RivuletPlayer] load(route:) → HLS: \(url.lastPathComponent)")
+            playerDebugLog("[RivuletPlayer] load(route:) → HLS: \(url.lastPathComponent)")
             try await loadHLS(url: url, headers: headers, startTime: startTime, requiresProfileConversion: enableDVConversion)
         }
     }
@@ -324,7 +324,7 @@ final class RivuletPlayer: ObservableObject {
         // at the AirPlay receiver, so video displayed at currentTime is in sync.
         // Confirmed by WWDC22 Apple guidance and empirical testing (drift < 50ms).
 
-        print(
+        playerDebugLog(
             "[RivuletPlayer] AudioPolicy reason=\(reason) " +
             "profile=\(policy.profile.rawValue) airPlay=\(snapshot.isAirPlay) " +
             "decision=\(policyReason) " +
@@ -348,11 +348,11 @@ final class RivuletPlayer: ObservableObject {
 
         let now = CFAbsoluteTimeGetCurrent()
         if isAudioRecoveryInFlight {
-            print("[RivuletPlayer] Skipping audio recovery (\(reason)) — already in flight")
+            playerDebugLog("[RivuletPlayer] Skipping audio recovery (\(reason)) — already in flight")
             return
         }
         if now - lastAudioRecoveryRequestWallTime < 0.2 {
-            print("[RivuletPlayer] Debouncing audio recovery (\(reason))")
+            playerDebugLog("[RivuletPlayer] Debouncing audio recovery (\(reason))")
             return
         }
         lastAudioRecoveryRequestWallTime = now
@@ -369,7 +369,7 @@ final class RivuletPlayer: ObservableObject {
                 break
             }
         } catch {
-            print("[RivuletPlayer] Audio recovery failed (\(reason)): \(error.localizedDescription)")
+            playerDebugLog("[RivuletPlayer] Audio recovery failed (\(reason)): \(error.localizedDescription)")
             handlePipelineError(error)
         }
     }
@@ -463,7 +463,7 @@ final class RivuletPlayer: ObservableObject {
         case .rendererFailure: triggerLabel = "renderer_failure"
         }
 
-        print(
+        playerDebugLog(
             "[RivuletPlayer] AirPlay instability detected (trigger=\(triggerLabel), " +
             "autoFlush=\(autoFlushCount), outputRecoveries=\(outputRecoveryCount), rendererFailures=\(rendererFailureCount))"
         )
@@ -504,7 +504,7 @@ final class RivuletPlayer: ObservableObject {
         isPlaying = false
         playbackStateSubject.send(.buffering)
 
-        print(
+        playerDebugLog(
             "[RivuletPlayer] Attempting AirPlay stability fallback " +
             "(trigger=\(triggerLabel), resume=\(String(format: "%.3f", resumeTime))s)"
         )
@@ -522,7 +522,7 @@ final class RivuletPlayer: ObservableObject {
             }
         } catch {
             airPlayStabilityFallbackToStereo = false
-            print("[RivuletPlayer] AirPlay stability fallback failed: \(error.localizedDescription)")
+            playerDebugLog("[RivuletPlayer] AirPlay stability fallback failed: \(error.localizedDescription)")
             handlePipelineError(error)
         }
     }
@@ -566,7 +566,7 @@ final class RivuletPlayer: ObservableObject {
 
         try await pipeline.load(url: url, headers: headers, startTime: startTime, isDolbyVision: isDolbyVision, enableDVConversion: enableDVConversion)
 
-        print(
+        playerDebugLog(
             "[RivuletPlayer] DirectPlay startup route: airPlay=\(routeSnapshot.isAirPlay) " +
             "maxOutCh=\(routeSnapshot.maximumOutputChannels) sampleRate=\(String(format: "%.0f", routeSnapshot.sampleRate))"
         )
@@ -622,7 +622,7 @@ final class RivuletPlayer: ObservableObject {
 
         try await pipeline.load(url: url, headers: headers, startTime: startTime, requiresProfileConversion: requiresProfileConversion)
 
-        print(
+        playerDebugLog(
             "[RivuletPlayer] HLS startup route: airPlay=\(routeSnapshot.isAirPlay) " +
             "maxOutCh=\(routeSnapshot.maximumOutputChannels) sampleRate=\(String(format: "%.0f", routeSnapshot.sampleRate))"
         )
@@ -644,11 +644,11 @@ final class RivuletPlayer: ObservableObject {
 
     func play() {
         guard !isPlaying else {
-            print("[RivuletPlayer] play() called but already playing — ignoring")
+            playerDebugLog("[RivuletPlayer] play() called but already playing — ignoring")
             return
         }
         isPlaying = true
-        print("[RivuletPlayer] play() → \(activePipeline)")
+        playerDebugLog("[RivuletPlayer] play() → \(activePipeline)")
 
         switch activePipeline {
         case .directPlay:
@@ -692,7 +692,7 @@ final class RivuletPlayer: ObservableObject {
         case .hls: "hls"
         case .none: "none"
         }
-        print("[RivuletPlayer] stop() pipeline=\(pipelineName)")
+        playerDebugLog("[RivuletPlayer] stop() pipeline=\(pipelineName)")
         isPlaying = false
         hasStartedPlayback = false
         timeObserverTask?.cancel()
@@ -730,7 +730,7 @@ final class RivuletPlayer: ObservableObject {
                 break
             }
         } catch {
-            print("[RivuletPlayer] Seek error: \(error)")
+            playerDebugLog("[RivuletPlayer] Seek error: \(error)")
         }
 
         // Ensure UI exits buffering even if pipeline doesn't emit an immediate post-seek state.
@@ -767,18 +767,18 @@ final class RivuletPlayer: ObservableObject {
 
             guard let plexIndex = plexAudioTracks.firstIndex(where: { $0.id == plexTrackId }),
                   plexIndex < ffmpegAudio.count else {
-                print("[RivuletPlayer] Cannot map Plex audio track \(plexTrackId) to FFmpeg index " +
+                playerDebugLog("[RivuletPlayer] Cannot map Plex audio track \(plexTrackId) to FFmpeg index " +
                       "(plex tracks=\(plexAudioTracks.count), ffmpeg tracks=\(ffmpegAudio.count))")
                 return
             }
 
             let ffmpegStreamIndex = ffmpegAudio[plexIndex].streamIndex
-            print("[RivuletPlayer] Mapped Plex audio \(plexTrackId) → FFmpeg stream \(ffmpegStreamIndex)")
+            playerDebugLog("[RivuletPlayer] Mapped Plex audio \(plexTrackId) → FFmpeg stream \(ffmpegStreamIndex)")
             Task {
                 do {
                     try await pipeline.selectAudioTrack(streamIndex: ffmpegStreamIndex)
                 } catch {
-                    print("[RivuletPlayer] ❌ Audio track switch failed: \(error)")
+                    playerDebugLog("[RivuletPlayer] ❌ Audio track switch failed: \(error)")
                 }
             }
         }
@@ -849,7 +849,7 @@ final class RivuletPlayer: ObservableObject {
         for ffmpeg in ffmpegSubs {
             if MediaTrack.normalizedSubtitleCodec(ffmpeg.codecName) == plexCodec {
                 if matchCount == sameCodecPosition {
-                    print("[RivuletPlayer] Mapped Plex subtitle \(plexTrackId) → FFmpeg stream \(ffmpeg.streamIndex) (\(ffmpeg.codecName))")
+                    playerDebugLog("[RivuletPlayer] Mapped Plex subtitle \(plexTrackId) → FFmpeg stream \(ffmpeg.streamIndex) (\(ffmpeg.codecName))")
                     pipeline.selectSubtitleStream(ffmpegStreamIndex: ffmpeg.streamIndex)
                     return true
                 }
@@ -858,7 +858,7 @@ final class RivuletPlayer: ObservableObject {
         }
 
         // No match — likely an external/sidecar subtitle not in the container
-        print("[RivuletPlayer] No FFmpeg match for Plex subtitle \(plexTrackId) " +
+        playerDebugLog("[RivuletPlayer] No FFmpeg match for Plex subtitle \(plexTrackId) " +
               "(\(plexTrack.codec ?? "unknown") \(plexTrack.language ?? "")) — falling back to Plex URL")
         return false
     }
@@ -937,7 +937,7 @@ final class RivuletPlayer: ObservableObject {
             if isPlaying && hasStartedPlayback {
                 playbackStateSubject.send(.buffering)
             } else {
-                print("[StartupTrace] handlePipelineStateChange: ignoring stale .loading (isPlaying=\(isPlaying), hasStartedPlayback=\(hasStartedPlayback))")
+                playerDebugLog("[StartupTrace] handlePipelineStateChange: ignoring stale .loading (isPlaying=\(isPlaying), hasStartedPlayback=\(hasStartedPlayback))")
             }
         case .ready:
             // Suppress during initial load — play() will transition to .playing.
@@ -1088,7 +1088,7 @@ final class RivuletPlayer: ObservableObject {
             session.invalidateAndCancel()
             let elapsed = max(delegate.lastByte - delegate.firstByte, 0.001)
             let mbps = Double(delegate.bytes) * 8 / 1_000_000 / elapsed
-            print(String(format: "[URLSessionProbe/default] bytes=%.2fMB elapsed=%.2fs rate=%.1fMbps",
+            playerDebugLog(String(format: "[URLSessionProbe/default] bytes=%.2fMB elapsed=%.2fs rate=%.1fMbps",
                          Double(delegate.bytes) / 1_000_000, elapsed, mbps))
         }
 
@@ -1110,7 +1110,7 @@ final class RivuletPlayer: ObservableObject {
             session.invalidateAndCancel()
             let elapsed = max(delegate.lastByte - delegate.firstByte, 0.001)
             let mbps = Double(delegate.bytes) * 8 / 1_000_000 / elapsed
-            print(String(format: "[URLSessionProbe/ephemeral-avs] bytes=%.2fMB elapsed=%.2fs rate=%.1fMbps",
+            playerDebugLog(String(format: "[URLSessionProbe/ephemeral-avs] bytes=%.2fMB elapsed=%.2fs rate=%.1fMbps",
                          Double(delegate.bytes) / 1_000_000, elapsed, mbps))
         }
     }

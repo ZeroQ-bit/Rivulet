@@ -55,7 +55,7 @@ final class FFmpegSubtitleDecoder: @unchecked Sendable {
 
         guard let codec = avcodec_find_decoder(codecId) else {
             let name = String(cString: avcodec_get_name(codecId))
-            print("[SubtitleDecoder] No decoder found for codec: \(name)")
+            playerDebugLog("[SubtitleDecoder] No decoder found for codec: \(name)")
             throw FFmpegError.unsupportedCodec(name)
         }
 
@@ -81,7 +81,7 @@ final class FFmpegSubtitleDecoder: @unchecked Sendable {
         self.isOpen = true
 
         let decoderName = String(cString: codec.pointee.name)
-        print("[SubtitleDecoder] Opened \(decoderName) decoder")
+        playerDebugLog("[SubtitleDecoder] Opened \(decoderName) decoder")
     }
 
     deinit { close() }
@@ -197,7 +197,7 @@ final class FFmpegSubtitleDecoder: @unchecked Sendable {
             codecContext = nil
         }
 
-        print("[SubtitleDecoder] Closed")
+        playerDebugLog("[SubtitleDecoder] Closed")
     }
 }
 

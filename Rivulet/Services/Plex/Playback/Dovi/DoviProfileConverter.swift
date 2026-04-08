@@ -127,18 +127,18 @@ final class DoviProfileConverter {
         // Log timing periodically
         if framesConverted == 1 {
             let strippedNote = detectedProfile == 7 ? " (with EL strip)" : ""
-            print("[DoviConverter] First frame conversion\(strippedNote): \(String(format: "%.1f", elapsed * 1000))ms (in=\(data.count)B out=\(convertedSample.count)B)")
+            playerDebugLog("[DoviConverter] First frame conversion\(strippedNote): \(String(format: "%.1f", elapsed * 1000))ms (in=\(data.count)B out=\(convertedSample.count)B)")
             // Dump NAL structure of first frame for diagnostics
             let nalDump = nalParser.describeDetailed(data)
-            print("[DoviConverter] Input NALs: \(nalDump)")
+            playerDebugLog("[DoviConverter] Input NALs: \(nalDump)")
             if convertedSample.count != data.count {
                 let outDump = nalParser.describeDetailed(convertedSample)
-                print("[DoviConverter] Output NALs: \(outDump)")
+                playerDebugLog("[DoviConverter] Output NALs: \(outDump)")
             }
         } else if framesConverted == timingWindowSize {
-            print("[DoviConverter] Conversion avg after \(timingWindowSize) frames: \(String(format: "%.1f", averageConversionTimeMs))ms/frame (budget=41.7ms at 23.976fps)")
+            playerDebugLog("[DoviConverter] Conversion avg after \(timingWindowSize) frames: \(String(format: "%.1f", averageConversionTimeMs))ms/frame (budget=41.7ms at 23.976fps)")
         } else if framesConverted % 240 == 0 {
-            print("[DoviConverter] Conversion avg: \(String(format: "%.1f", averageConversionTimeMs))ms/frame (\(framesConverted) frames)")
+            playerDebugLog("[DoviConverter] Conversion avg: \(String(format: "%.1f", averageConversionTimeMs))ms/frame (\(framesConverted) frames)")
         }
 
         return convertedSample
@@ -166,7 +166,7 @@ final class DoviProfileConverter {
             let info = libdovi.getInfo(rpu: rpu)
             detectedProfile = info.profile
             let elTypeLog = info.elType ?? "unknown"
-            print(
+            playerDebugLog(
                 "[DoviConverter] Detected RPU profile=\(info.profile) " +
                 "elType=\(elTypeLog) fel=\(info.isFEL)"
             )
@@ -179,7 +179,7 @@ final class DoviProfileConverter {
 
                 // Warn about FEL quality limitation
                 if info.isFEL {
-                    print("🎬 [DoviConverter] ⚠️ FEL content detected - enhancement layer data will be discarded, some quality loss expected")
+                    playerDebugLog("🎬 [DoviConverter] ⚠️ FEL content detected - enhancement layer data will be discarded, some quality loss expected")
                 }
 
             case 8:
@@ -196,7 +196,7 @@ final class DoviProfileConverter {
             }
 
         } catch {
-            print("🎬 [DoviConverter] Failed to detect profile: \(error.localizedDescription)")
+            playerDebugLog("🎬 [DoviConverter] Failed to detect profile: \(error.localizedDescription)")
             // Assume conversion needed if detection fails but converter was enabled
             needsConversion = true
         }
@@ -217,7 +217,7 @@ final class DoviProfileConverter {
         } catch {
             // Log but don't spam - only log occasionally
             if conversionFailures < 5 || conversionFailures % 100 == 0 {
-                print("🎬 [DoviConverter] Conversion failed (failure #\(conversionFailures + 1)): \(error.localizedDescription)")
+                playerDebugLog("🎬 [DoviConverter] Conversion failed (failure #\(conversionFailures + 1)): \(error.localizedDescription)")
             }
             return nil
         }

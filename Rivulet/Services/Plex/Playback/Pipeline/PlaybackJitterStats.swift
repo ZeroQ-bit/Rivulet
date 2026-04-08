@@ -107,7 +107,7 @@ struct PlaybackJitterStats {
 
         if expectedFrameDuration > 0 && gap > expectedFrameDuration * 24.0 {
             droppedFrameGaps += 1
-            print(
+            playerDebugLog(
                 "📊 [Jitter] ⚠️ Large PTS gap: \(String(format: "%.0f", gap * 1000))ms " +
                 "at frame \(totalVideoFrames) (expected ~\(String(format: "%.0f", expectedFrameDuration * 1000))ms)"
             )
@@ -136,7 +136,7 @@ struct PlaybackJitterStats {
             maxStallDuration = duration
         }
         if duration > 0.1 {
-            print("📊 [Jitter] ⏱️ Enqueue stall: \(String(format: "%.0f", duration * 1000))ms (frame \(totalVideoFrames))")
+            playerDebugLog("📊 [Jitter] ⏱️ Enqueue stall: \(String(format: "%.0f", duration * 1000))ms (frame \(totalVideoFrames))")
         }
     }
 
@@ -188,7 +188,7 @@ struct PlaybackJitterStats {
             if consecutiveDriftCount >= 3 {
                 syncDriftAlerts += 1
                 let direction = currentDirection < 0 ? "slow" : "fast"
-                print(
+                playerDebugLog(
                     "📊 [Jitter] ⚠️ Sustained sync drift (\(direction)): \(String(format: "%.1f", driftRate * 100))% " +
                     "(wall: \(String(format: "%.0f", wallDelta * 1000))ms, sync: \(String(format: "%.0f", syncDelta * 1000))ms)"
                 )
@@ -234,7 +234,7 @@ struct PlaybackJitterStats {
         let hasIssues = droppedFrameGaps > 0 || bufferUnderruns > 0 || videoEnqueueStalls > 0 || syncDriftAlerts > 0
         let icon = hasIssues ? "⚠️" : "✅"
 
-        print(
+        playerDebugLog(
             "📊 [Jitter] \(icon) \(totalVideoFrames) frames | \(String(format: "%.1f", fps))fps | " +
             "gaps: avg=\(String(format: "%.1f", avgGap * 1000))ms σ=\(String(format: "%.2f", stdDev * 1000))ms max=\(String(format: "%.1f", maxPTSGap * 1000))ms | " +
             "drops: \(droppedFrameGaps) | underruns: \(bufferUnderruns) (\(String(format: "%.1f", totalUnderrunDuration * 1000))ms) | " +

@@ -224,11 +224,11 @@ final class HLSPipeline {
         let deltaFromLastRequest = lastRequestedSeekTime >= 0 ? abs(time - lastRequestedSeekTime) : .infinity
 
         if !force, now - lastSeekWallTime < 0.2 && deltaFromLastRequest < 0.25 {
-            print("[HLSPipeline] seek deduped: Δ=\(String(format: "%.0f", deltaFromLastRequest * 1000))ms from last request")
+            playerDebugLog("[HLSPipeline] seek deduped: Δ=\(String(format: "%.0f", deltaFromLastRequest * 1000))ms from last request")
             return
         }
         if !force, deltaFromCurrent < 0.20 {
-            print("[HLSPipeline] seek ignored: Δ=\(String(format: "%.0f", deltaFromCurrent * 1000))ms from current (too small)")
+            playerDebugLog("[HLSPipeline] seek ignored: Δ=\(String(format: "%.0f", deltaFromCurrent * 1000))ms from current (too small)")
             return
         }
 
@@ -274,17 +274,17 @@ final class HLSPipeline {
     func recoverAudio(afterFlushTime flushTime: CMTime, reason: String) async {
         guard state != .idle, state != .loading else { return }
         guard !isSeeking else {
-            print("[HLSPipeline] recoverAudio skipped (\(reason)) — seek already in progress")
+            playerDebugLog("[HLSPipeline] recoverAudio skipped (\(reason)) — seek already in progress")
             return
         }
 
         let now = CFAbsoluteTimeGetCurrent()
         if isAudioRecoveryInProgress {
-            print("[HLSPipeline] recoverAudio skipped (\(reason)) — recovery already in progress")
+            playerDebugLog("[HLSPipeline] recoverAudio skipped (\(reason)) — recovery already in progress")
             return
         }
         if now - lastAudioRecoveryWallTime < 0.2 {
-            print("[HLSPipeline] recoverAudio debounced (\(reason))")
+            playerDebugLog("[HLSPipeline] recoverAudio debounced (\(reason))")
             return
         }
 
@@ -300,7 +300,7 @@ final class HLSPipeline {
         )
         let wasPlaying = isPlaying
 
-        print(
+        playerDebugLog(
             "[HLSPipeline] recoverAudio reason=\(reason) target=\(String(format: "%.3f", targetTime))s " +
             "flush=\(String(format: "%.3f", flushSeconds))s sync=\(String(format: "%.3f", syncTime))s " +
             "wasPlaying=\(wasPlaying)"
@@ -454,20 +454,20 @@ final class HLSPipeline {
                                 await renderer.enqueueAudio(sampleBuffer)
                             }
                         } catch {
-                            print("[HLSPipeline] Failed to create sample buffer: \(error)")
+                            playerDebugLog("[HLSPipeline] Failed to create sample buffer: \(error)")
                         }
                     }
 
                     // Log renderer errors
                     if let layerError = renderer.displayLayerError {
-                        print("[HLSPipeline] Display layer error: \(layerError)")
+                        playerDebugLog("[HLSPipeline] Display layer error: \(layerError)")
                         SentrySDK.capture(error: layerError) { scope in
                             scope.setTag(value: "hls_pipeline", key: "component")
                             scope.setTag(value: "display_layer", key: "error_type")
                         }
                     }
                     if let audioError = renderer.audioRendererError {
-                        print("[HLSPipeline] Audio renderer error: \(audioError)")
+                        playerDebugLog("[HLSPipeline] Audio renderer error: \(audioError)")
                         SentrySDK.capture(error: audioError) { scope in
                             scope.setTag(value: "hls_pipeline", key: "component")
                             scope.setTag(value: "audio_renderer", key: "error_type")
@@ -485,7 +485,7 @@ final class HLSPipeline {
 
                 } catch {
                     if !Task.isCancelled {
-                        print("[HLSPipeline] Segment \(segIndex) parse error: \(error)")
+                        playerDebugLog("[HLSPipeline] Segment \(segIndex) parse error: \(error)")
                         SentrySDK.capture(error: error) { scope in
                             scope.setTag(value: "hls_pipeline", key: "component")
                             scope.setTag(value: "segment_demux", key: "error_type")
