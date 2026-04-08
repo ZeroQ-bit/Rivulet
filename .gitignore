@@ -73,3 +73,9 @@ Rivulet/Config/Secrets.swift
 
 # Internal developer docs — kept locally, not in the repo.
 Docs/
+
+# Playwright MCP session scratch (browser snapshots, traces, etc.)
+.playwright-mcp/
+
+# Rolling worklog + lessons — kept locally, not in the repo.
+tasks/

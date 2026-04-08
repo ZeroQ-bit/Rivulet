@@ -136,16 +136,7 @@ class PlayerContainerViewController: UIViewController {
                 vm.cancelScrub()
                 return
             }
-            if vm.showInfoPanel {
-                withAnimation(.easeOut(duration: 0.3)) {
-                    vm.showInfoPanel = false
-                }
-                return
-            }
-            if vm.showControls {
-                withAnimation(.easeOut(duration: 0.25)) {
-                    vm.showControls = false
-                }
+            if vm.handleBackInOverlayStack() {
                 return
             }
         }
@@ -257,14 +248,7 @@ class PlayerContainerViewController: UIViewController {
                 dismissPlayer()
             } else if vm.isScrubbing {
                 vm.cancelScrub()
-            } else if vm.showInfoPanel {
-                withAnimation(.easeOut(duration: 0.3)) {
-                    vm.showInfoPanel = false
-                }
-            } else if vm.showControls {
-                withAnimation(.easeOut(duration: 0.25)) {
-                    vm.showControls = false
-                }
+            } else if vm.handleBackInOverlayStack() {
             } else {
                 dismissPlayer()
             }
@@ -444,4 +428,3 @@ class PlayerContainerViewController: UIViewController {
         DispatchQueue.main.asyncAfter(deadline: .now() + InputConfig.blockDismissTimeout, execute: workItem)
     }
 }
-

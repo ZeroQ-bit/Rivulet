@@ -53,18 +53,20 @@ final class SampleBufferRenderer {
     /// Maximum seconds to wait for audio renderer backpressure before dropping.
     var audioBackpressureMaxWait: TimeInterval = 0.5
 
-    /// Use pull-mode audio delivery.
-    var useAudioPullMode = false
+    /// Use pull-mode audio delivery. Marked nonisolated so the audio enqueue
+    /// task can read it without hopping to MainActor (the value is only set
+    /// once during pipeline configuration before any reads happen).
+    nonisolated(unsafe) var useAudioPullMode = false
 
     /// Minimum queued audio duration before starting pull-mode delivery after a reset.
     /// Helps AirPlay routes build a meaningful initial renderer cushion instead of
     /// draining one PCM buffer at a time.
-    var minimumAudioPullStartBuffer: TimeInterval = 0
+    nonisolated(unsafe) var minimumAudioPullStartBuffer: TimeInterval = 0
 
     /// Minimum queued audio duration required to restart pull-mode delivery after
     /// an active request drained completely. Keeps buffered routes from oscillating
     /// between one-sample requests and empty playback once startup completes.
-    var minimumAudioPullResumeBuffer: TimeInterval = 0
+    nonisolated(unsafe) var minimumAudioPullResumeBuffer: TimeInterval = 0
 
     // MARK: - Pull-Mode Audio State
 
@@ -99,12 +101,16 @@ final class SampleBufferRenderer {
 
     // MARK: - Audio State
 
-    private var hasLoggedFirstAudioSample = false
+    // hasLoggedFirstAudioSample, audioEnqueueCount, lastAudioDiagWallTime are
+    // marked nonisolated(unsafe) so the audio enqueue task can update them
+    // without hopping to MainActor. They're either one-shot flags or
+    // diagnostic counters where the occasional race is harmless.
+    private nonisolated(unsafe) var hasLoggedFirstAudioSample = false
     private var lastAudioRendererStatus: AVQueuedSampleBufferRenderingStatus?
     private var audioBackpressureDropCount = 0
-    private var audioEnqueueCount = 0
+    private nonisolated(unsafe) var audioEnqueueCount = 0
     private var lastAudioRecoveryWallTime: CFAbsoluteTime = 0
-    private var lastAudioDiagWallTime: CFAbsoluteTime = 0
+    private nonisolated(unsafe) var lastAudioDiagWallTime: CFAbsoluteTime = 0
     private var audioNotReadyStreak = 0
     private var isMuted = false
 
@@ -382,6 +388,9 @@ final class SampleBufferRenderer {
             "audioStatus=\(audioRenderer.status.rawValue) " +
             "pullDelivered=\(audioPullDeliveredCountSnapshot())"
         )
+        if rate > 0 {
+            print("[StartupTrace] renderer clock starts (rate=\(rate)) — audio/video begins NOW")
+        }
         if useAudioEngine {
             setRate(rate, time: time)
         } else {
@@ -494,13 +503,27 @@ final class SampleBufferRenderer {
         guard !Task.isCancelled else { return }
 
         if !displayLayer.isReadyForMoreMediaData {
+            // During preroll, the display layer cannot drain (rate=0). Once it's
+            // full there is nowhere for new frames to go. The read loop is
+            // single-threaded, so blocking here would also stall audio packet
+            // reads — that's why we previously had a 120 ms wait that ate ~1 s
+            // of audio per preroll. Drop the frame immediately instead and keep
+            // reading audio. The video will skip by the dropped frames at the
+            // start of playback, but audio stays in sync.
+            if bypassLookahead {
+                jitterStats.recordEnqueueStall(duration: 0)
+                return
+            }
+
             let stallStart = CFAbsoluteTimeGetCurrent()
-            let maxWait: TimeInterval = bypassLookahead ? 0.12 : 2.0
+            let maxWait: TimeInterval = 2.0
+            let stallPTS = sampleTime
+            let stallSyncTime = currentTime
 
             while !displayLayer.isReadyForMoreMediaData && !Task.isCancelled {
                 let elapsed = CFAbsoluteTimeGetCurrent() - stallStart
                 if elapsed > maxWait {
-                    print("[Renderer] Video enqueue timeout after \(String(format: "%.0f", elapsed * 1000))ms — dropping frame (preroll=\(bypassLookahead), layer error: \(displayLayer.error?.localizedDescription ?? "none"))")
+                    print("[Renderer] Video enqueue timeout after \(String(format: "%.0f", elapsed * 1000))ms — dropping frame (layer error: \(displayLayer.error?.localizedDescription ?? "none"))")
                     jitterStats.recordEnqueueStall(duration: elapsed)
                     return
                 }
@@ -508,6 +531,19 @@ final class SampleBufferRenderer {
             }
 
             let stallDuration = CFAbsoluteTimeGetCurrent() - stallStart
+            if stallDuration > 0.2 {
+                let nowSyncTime = currentTime
+                print(String(
+                    format: "[Renderer] Enqueue wait %.0fms: samplePTS=%.3f syncAtEntry=%.3f syncAtExit=%.3f aheadAtEntry=%.3f aheadAtExit=%.3f rate=%.2f status=%d error=%@",
+                    stallDuration * 1000,
+                    stallPTS, stallSyncTime, nowSyncTime,
+                    stallPTS - stallSyncTime,
+                    stallPTS - nowSyncTime,
+                    Double(renderSynchronizer.rate),
+                    displayLayer.status.rawValue,
+                    displayLayer.error?.localizedDescription ?? "none"
+                ))
+            }
             jitterStats.recordEnqueueStall(duration: stallDuration)
         }
 
@@ -710,7 +746,19 @@ final class SampleBufferRenderer {
 
     // MARK: - Pull-Mode Audio
 
-    private func enqueueAudioPullMode(_ sampleBuffer: CMSampleBuffer) {
+    /// Public entry point for the audio enqueue task to bypass the @MainActor
+    /// hop entirely when in pull mode. The pull-mode path only touches lock-
+    /// protected and nonisolated(unsafe) state, so calling it from a detached
+    /// task is safe and avoids competing with the video pipeline for MainActor.
+    /// Returns true if the buffer was handled here, false if the caller should
+    /// fall back to the @MainActor `enqueueAudio` path.
+    nonisolated func enqueueAudioPullDirect(_ sampleBuffer: CMSampleBuffer) -> Bool {
+        guard useAudioPullMode else { return false }
+        enqueueAudioPullMode(sampleBuffer)
+        return true
+    }
+
+    private nonisolated func enqueueAudioPullMode(_ sampleBuffer: CMSampleBuffer) {
         if !hasLoggedFirstAudioSample {
             hasLoggedFirstAudioSample = true
             let syncRate = renderSynchronizer.rate
@@ -786,7 +834,7 @@ final class SampleBufferRenderer {
         }
     }
 
-    private func startAudioPullMode() {
+    private nonisolated func startAudioPullMode() {
         audioPullLock.lock()
         guard !audioPullPaused else {
             audioPullLock.unlock()
@@ -1079,7 +1127,7 @@ final class SampleBufferRenderer {
         return true
     }
 
-    private func logAudioSampleFormat(_ sampleBuffer: CMSampleBuffer) {
+    private nonisolated func logAudioSampleFormat(_ sampleBuffer: CMSampleBuffer) {
         guard let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer),
               let streamBasicDescription = CMAudioFormatDescriptionGetStreamBasicDescription(formatDescription) else {
             print("[Renderer] Audio format: unavailable")
@@ -1110,7 +1158,7 @@ final class SampleBufferRenderer {
         )
     }
 
-    private func fourCCString(_ fourCC: UInt32) -> String {
+    private nonisolated func fourCCString(_ fourCC: UInt32) -> String {
         let n = Int(fourCC.bigEndian)
         let scalars = [
             UnicodeScalar((n >> 24) & 255),

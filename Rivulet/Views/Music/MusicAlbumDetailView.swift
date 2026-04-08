@@ -16,6 +16,12 @@ struct MusicAlbumDetailView: View {
     @State private var tracks: [PlexMetadata] = []
     @State private var isLoading = true
 
+    @FocusState private var initialFocus: AlbumDetailFocus?
+
+    private enum AlbumDetailFocus: Hashable {
+        case play
+    }
+
     private let networkManager = PlexNetworkManager.shared
 
     private var artworkURL: URL? {
@@ -44,18 +50,22 @@ struct MusicAlbumDetailView: View {
         ZStack {
             backgroundView
 
-            HStack(alignment: .top, spacing: 48) {
+            HStack(alignment: .top, spacing: 72) {
                 artwork
-                    .padding(.top, 72)
-
                 rightColumn
-                    .padding(.top, 72)
             }
-            .padding(.horizontal, 72)
-            .padding(.bottom, 42)
+            .padding(.leading, 80)
+            .padding(.trailing, 80)
+            .padding(.top, 100)
+            .padding(.bottom, 60)
         }
         .task {
             await loadTracks()
+        }
+        .onAppear {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                initialFocus = .play
+            }
         }
     }
 
@@ -77,6 +87,8 @@ struct MusicAlbumDetailView: View {
         .ignoresSafeArea()
     }
 
+    // MARK: - Artwork
+
     private var artwork: some View {
         CachedAsyncImage(url: artworkURL) { phase in
             switch phase {
@@ -85,71 +97,79 @@ struct MusicAlbumDetailView: View {
                     .resizable()
                     .aspectRatio(contentMode: .fill)
             default:
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(
-                        LinearGradient(
-                            colors: [Color.white.opacity(0.12), Color.white.opacity(0.05)],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
+                ZStack {
+                    LinearGradient(
+                        colors: [Color.white.opacity(0.14), Color.white.opacity(0.06)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
                     )
-                    .overlay {
-                        Image(systemName: "music.note")
-                            .font(.system(size: 48, weight: .regular))
-                            .foregroundStyle(.secondary)
-                    }
+                    Image(systemName: "music.note")
+                        .font(.system(size: 96, weight: .regular))
+                        .foregroundStyle(.white.opacity(0.28))
+                }
             }
         }
-        .frame(width: 320, height: 320)
-        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .shadow(color: .black.opacity(0.25), radius: 14, y: 8)
+        .aspectRatio(1, contentMode: .fit)
+        .frame(maxWidth: 660, maxHeight: 660)
+        .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
+        .shadow(color: .black.opacity(0.55), radius: 28, x: 0, y: 18)
     }
+
+    // MARK: - Right column
 
     private var rightColumn: some View {
         VStack(alignment: .leading, spacing: 0) {
             Text(album.title ?? "Unknown Album")
-                .font(.system(size: 31, weight: .bold))
+                .font(.system(size: 56, weight: .bold))
+                .foregroundStyle(.white)
                 .lineLimit(2)
+                .minimumScaleFactor(0.7)
 
             Text(artistName)
-                .font(.system(size: 21, weight: .regular))
-                .foregroundStyle(Color.white.opacity(0.82))
-                .padding(.top, 4)
+                .font(.system(size: 32, weight: .semibold))
+                .foregroundStyle(.white)
+                .padding(.top, 10)
+                .lineLimit(1)
 
             if !metadataLine.isEmpty {
                 Text(metadataLine)
-                    .font(.system(size: 17))
-                    .foregroundStyle(.secondary)
-                    .padding(.top, 4)
+                    .font(.system(size: 22, weight: .regular))
+                    .foregroundStyle(.white.opacity(0.55))
+                    .padding(.top, 6)
+                    .lineLimit(1)
             }
 
             actionRow
-                .padding(.top, 22)
+                .padding(.top, 32)
 
             if isLoading {
                 ProgressView()
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                    .frame(maxWidth: .infinity, minHeight: 320, alignment: .center)
             } else {
                 trackList
-                    .padding(.top, 24)
+                    .padding(.top, 28)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
+    // MARK: - Action row
+
     private var actionRow: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 16) {
             Button {
                 if !tracks.isEmpty {
                     musicQueue.playAlbum(tracks: tracks, startingAt: 0)
                 }
             } label: {
                 Label("Play", systemImage: "play.fill")
+                    .font(.system(size: 22, weight: .semibold))
             }
             .buttonStyle(.borderedProminent)
             .buttonBorderShape(.capsule)
             .tint(Color.white.opacity(0.18))
             .disabled(tracks.isEmpty)
+            .focused($initialFocus, equals: .play)
 
             Button {
                 guard !tracks.isEmpty else { return }
@@ -158,14 +178,18 @@ struct MusicAlbumDetailView: View {
                 musicQueue.playAlbum(tracks: shuffled, startingAt: 0)
             } label: {
                 Label("Shuffle", systemImage: "shuffle")
+                    .font(.system(size: 22, weight: .semibold))
             }
             .buttonStyle(.borderedProminent)
             .buttonBorderShape(.capsule)
             .tint(Color.white.opacity(0.14))
             .disabled(tracks.isEmpty)
 
+            Spacer(minLength: 16)
+
             Button { } label: {
                 Image(systemName: "ellipsis")
+                    .font(.system(size: 22, weight: .semibold))
             }
             .buttonStyle(.bordered)
             .buttonBorderShape(.circle)
@@ -207,64 +231,25 @@ struct MusicAlbumDetailView: View {
         }
     }
 
+    // MARK: - Track list
+
     private var trackList: some View {
-        List {
-            ForEach(Array(tracks.enumerated()), id: \.offset) { index, track in
-                trackRow(track: track, index: index)
-                    .listRowBackground(Color.clear)
-                    .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
-            }
-        }
-        .listStyle(.plain)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-
-    private func trackRow(track: PlexMetadata, index: Int) -> some View {
-        let isCurrent = musicQueue.currentTrack?.ratingKey == track.ratingKey
-
-        return Button {
-            musicQueue.playAlbum(tracks: tracks, startingAt: index)
-        } label: {
-            HStack(spacing: 16) {
-                if isCurrent {
-                    Circle()
-                        .fill(.white)
-                        .frame(width: 7, height: 7)
-                        .frame(width: 20, alignment: .leading)
-                } else {
-                    Text("\(track.index ?? (index + 1))")
-                        .font(.system(size: 16, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 20, alignment: .trailing)
-                }
-
-                Text(track.title ?? "Track \(index + 1)")
-                    .font(.system(size: 19, weight: .regular))
-                    .lineLimit(1)
-
-                Spacer(minLength: 12)
-
-                if let duration = track.duration {
-                    Text(formatDuration(duration))
-                        .font(.system(size: 16, design: .monospaced))
-                        .foregroundStyle(.secondary)
+        ScrollView(.vertical, showsIndicators: false) {
+            LazyVStack(alignment: .leading, spacing: 0) {
+                ForEach(Array(tracks.enumerated()), id: \.offset) { index, track in
+                    MusicAlbumTrackRow(
+                        track: track,
+                        displayNumber: track.index ?? (index + 1),
+                        isCurrent: musicQueue.currentTrack?.ratingKey == track.ratingKey,
+                        isFavorite: (track.userRating ?? 0) > 0,
+                        durationText: track.duration.map(formatDuration),
+                        onSelect: { musicQueue.playAlbum(tracks: tracks, startingAt: index) },
+                        onPlayNext: { musicQueue.addNext(track: track) },
+                        onPlayAfter: { musicQueue.addToEnd(track: track) }
+                    )
                 }
             }
-            .padding(.vertical, 12)
-        }
-        .buttonStyle(.plain)
-        .contextMenu {
-            Button {
-                musicQueue.addNext(track: track)
-            } label: {
-                Label("Play Next", systemImage: "text.line.first.and.arrowtriangle.forward")
-            }
-
-            Button {
-                musicQueue.addToEnd(track: track)
-            } label: {
-                Label("Play After", systemImage: "text.line.last.and.arrowtriangle.forward")
-            }
+            .padding(.bottom, 60)
         }
     }
 
@@ -292,5 +277,87 @@ struct MusicAlbumDetailView: View {
     private func formatDuration(_ ms: Int) -> String {
         let totalSeconds = ms / 1000
         return "\(totalSeconds / 60):\(String(format: "%02d", totalSeconds % 60))"
+    }
+}
+
+// MARK: - MusicAlbumTrackRow
+
+/// Track row for the album detail view.
+/// - Star (favorite) is rendered as an overlay so it doesn't push the track number column.
+/// - Custom focus tint avoids the oversized native white focus highlight; we drive it from
+///   `@FocusState` and apply a subtle white background only when the row is focused.
+private struct MusicAlbumTrackRow: View {
+    let track: PlexMetadata
+    let displayNumber: Int
+    let isCurrent: Bool
+    let isFavorite: Bool
+    let durationText: String?
+    let onSelect: () -> Void
+    let onPlayNext: () -> Void
+    let onPlayAfter: () -> Void
+
+    @FocusState private var isFocused: Bool
+
+    var body: some View {
+        Button(action: onSelect) {
+            HStack(spacing: 18) {
+                // Now-playing dot OR track number — fixed slot, never shifts.
+                // Star (favorite) is overlaid to the left of this slot so it never
+                // pushes the number/title columns.
+                Group {
+                    if isCurrent {
+                        Circle()
+                            .fill(.white)
+                            .frame(width: 10, height: 10)
+                    } else {
+                        Text("\(displayNumber)")
+                            .font(.system(size: 22))
+                            .foregroundStyle(.white.opacity(0.55))
+                    }
+                }
+                .frame(width: 36, alignment: .trailing)
+                .overlay(alignment: .leading) {
+                    if isFavorite {
+                        Image(systemName: "star.fill")
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.9))
+                            .offset(x: -22)
+                    }
+                }
+
+                Text(track.title ?? "Unknown")
+                    .font(.system(size: 26, weight: .bold))
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+
+                Spacer(minLength: 16)
+
+                if let durationText {
+                    Text(durationText)
+                        .font(.system(size: 22))
+                        .foregroundStyle(.white.opacity(0.55))
+                }
+            }
+            .padding(.vertical, 22)
+            .padding(.horizontal, 22)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+            .background {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(Color.white.opacity(isFocused ? 0.10 : 0))
+            }
+        }
+        .buttonStyle(CardButtonStyle())
+        .hoverEffectDisabled()
+        .focused($isFocused)
+        .animation(.easeOut(duration: 0.15), value: isFocused)
+        .contextMenu {
+            Button(action: onPlayNext) {
+                Label("Play Next", systemImage: "text.line.first.and.arrowtriangle.forward")
+            }
+            Button(action: onPlayAfter) {
+                Label("Play After", systemImage: "text.line.last.and.arrowtriangle.forward")
+            }
+        }
     }
 }

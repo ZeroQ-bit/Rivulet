@@ -98,6 +98,11 @@ final class RivuletPlayer: ObservableObject {
     private(set) var duration: TimeInterval = 0
     private(set) var bufferedTime: TimeInterval = 0
     var playbackRate: Float = 1.0
+    /// True once the pipeline has actually transitioned to .running for the
+    /// first time. Used to distinguish initial-load .loading events (which
+    /// arrive on a delayed @MainActor task and must NOT be turned into
+    /// .buffering) from real mid-playback buffer underruns.
+    private var hasStartedPlayback = false
 
     // MARK: - Track Info
 
@@ -158,6 +163,7 @@ final class RivuletPlayer: ObservableObject {
     /// For routed playback (direct play vs HLS), use `load(route:...)` instead.
     func load(url: URL, headers: [String: String]?, startTime: TimeInterval?) async throws {
         print("[RivuletPlayer] load(url:) → HLS path: \(url.lastPathComponent)")
+        hasStartedPlayback = false
         resetAirPlayRouteOverrides()
         try await loadHLS(url: url, headers: headers, startTime: startTime)
     }
@@ -166,6 +172,7 @@ final class RivuletPlayer: ObservableObject {
     /// Used when the ViewModel knows the content needs RPU conversion (P7/P8.6).
     func loadHLSWithConversion(url: URL, headers: [String: String]?, startTime: TimeInterval?, requiresProfileConversion: Bool) async throws {
         print("[RivuletPlayer] loadHLS: \(url.lastPathComponent) profileConversion=\(requiresProfileConversion)")
+        hasStartedPlayback = false
         playbackStateSubject.send(.loading)
         resetAirPlayRouteOverrides()
         PlaybackAudioSessionConfigurator.activatePlaybackSession(
@@ -184,6 +191,7 @@ final class RivuletPlayer: ObservableObject {
     ///   - isDolbyVision: Whether Plex metadata confirms DV content (forces dvh1 tagging)
     ///   - enableDVConversion: Enable DV P7/P8.6 → P8.1 conversion
     func load(route: PlaybackRoute, startTime: TimeInterval?, isDolbyVision: Bool = false, enableDVConversion: Bool = false) async throws {
+        hasStartedPlayback = false
         playbackStateSubject.send(.loading)
         resetAirPlayRouteOverrides()
 
@@ -644,14 +652,17 @@ final class RivuletPlayer: ObservableObject {
 
         switch activePipeline {
         case .directPlay:
+            // DirectPlay defers its .running state change until preroll completes,
+            // which routes to .playing via handlePipelineStateChange. Don't emit
+            // .playing here — that would dismiss the loading view before audio
+            // and video are actually flowing.
             directPlayPipeline?.start(rate: playbackRate)
         case .hls:
             hlsPipeline?.start(rate: playbackRate)
+            playbackStateSubject.send(.playing)
         case .none:
-            break
+            playbackStateSubject.send(.playing)
         }
-
-        playbackStateSubject.send(.playing)
     }
 
     func pause() {
@@ -683,6 +694,7 @@ final class RivuletPlayer: ObservableObject {
         }
         print("[RivuletPlayer] stop() pipeline=\(pipelineName)")
         isPlaying = false
+        hasStartedPlayback = false
         timeObserverTask?.cancel()
         timeObserverTask = nil
 
@@ -915,16 +927,24 @@ final class RivuletPlayer: ObservableObject {
         case .idle:
             playbackStateSubject.send(.idle)
         case .loading:
-            // Only show buffering if we're already playing (mid-stream buffer underrun).
-            // During initial load, RivuletPlayer.load() already set .loading.
-            if isPlaying {
+            // Only treat .loading as a mid-stream buffer underrun once playback
+            // has actually started at least once. Pipeline.load() emits .loading
+            // synchronously during the initial open, but the @MainActor delivery
+            // is deferred — by the time it runs, isPlaying may already be true
+            // (because rp.play() ran), so a stale initial-load event would
+            // otherwise look like a buffer underrun and dismiss the loading
+            // view before preroll completes.
+            if isPlaying && hasStartedPlayback {
                 playbackStateSubject.send(.buffering)
+            } else {
+                print("[StartupTrace] handlePipelineStateChange: ignoring stale .loading (isPlaying=\(isPlaying), hasStartedPlayback=\(hasStartedPlayback))")
             }
         case .ready:
             // Suppress during initial load — play() will transition to .playing.
             break
         case .running:
             if isPlaying {
+                hasStartedPlayback = true
                 playbackStateSubject.send(.playing)
             }
         case .paused:
@@ -1020,6 +1040,78 @@ final class RivuletPlayer: ObservableObject {
                     }
                 }
             }
+        }
+    }
+
+    /// Fetches up to ~8 MB of the direct-play URL with a bare
+    /// URLSession.dataTask delegate and prints the wire-level throughput.
+    /// Use this to compare plain URLSession against our AVIO source — if the
+    /// numbers match, the cap is not in our code.
+    fileprivate static func runURLSessionProbe(url: URL, headers: [String: String]?) async {
+        final class ProbeDelegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+            var bytes: Int64 = 0
+            var firstByte: CFAbsoluteTime = 0
+            var lastByte: CFAbsoluteTime = 0
+            var done = DispatchSemaphore(value: 0)
+            let stopAfter: Int64
+            init(stopAfter: Int64) { self.stopAfter = stopAfter }
+            func urlSession(_ s: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+                if firstByte == 0 { firstByte = CFAbsoluteTimeGetCurrent() }
+                bytes += Int64(data.count)
+                lastByte = CFAbsoluteTimeGetCurrent()
+                if bytes >= stopAfter { dataTask.cancel() }
+            }
+            func urlSession(_ s: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+                done.signal()
+            }
+        }
+
+        let stopAfter: Int64 = 8 * 1024 * 1024
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.addValue("bytes=0-\(stopAfter - 1)", forHTTPHeaderField: "Range")
+        if let headers {
+            for (k, v) in headers { request.addValue(v, forHTTPHeaderField: k) }
+        }
+
+        // Probe A: default config
+        do {
+            let cfg = URLSessionConfiguration.default
+            cfg.urlCache = nil
+            cfg.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+            let delegate = ProbeDelegate(stopAfter: stopAfter)
+            let q = OperationQueue(); q.maxConcurrentOperationCount = 1
+            let session = URLSession(configuration: cfg, delegate: delegate, delegateQueue: q)
+            let task = session.dataTask(with: request)
+            task.resume()
+            _ = delegate.done.wait(timeout: .now() + 30)
+            session.invalidateAndCancel()
+            let elapsed = max(delegate.lastByte - delegate.firstByte, 0.001)
+            let mbps = Double(delegate.bytes) * 8 / 1_000_000 / elapsed
+            print(String(format: "[URLSessionProbe/default] bytes=%.2fMB elapsed=%.2fs rate=%.1fMbps",
+                         Double(delegate.bytes) / 1_000_000, elapsed, mbps))
+        }
+
+        // Probe B: ephemeral + .avStreaming (same config our AVIO uses)
+        do {
+            let cfg = URLSessionConfiguration.ephemeral
+            cfg.urlCache = nil
+            cfg.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+            cfg.networkServiceType = .avStreaming
+            cfg.waitsForConnectivity = false
+            cfg.allowsConstrainedNetworkAccess = true
+            cfg.allowsExpensiveNetworkAccess = true
+            let delegate = ProbeDelegate(stopAfter: stopAfter)
+            let q = OperationQueue(); q.maxConcurrentOperationCount = 1
+            let session = URLSession(configuration: cfg, delegate: delegate, delegateQueue: q)
+            let task = session.dataTask(with: request)
+            task.resume()
+            _ = delegate.done.wait(timeout: .now() + 30)
+            session.invalidateAndCancel()
+            let elapsed = max(delegate.lastByte - delegate.firstByte, 0.001)
+            let mbps = Double(delegate.bytes) * 8 / 1_000_000 / elapsed
+            print(String(format: "[URLSessionProbe/ephemeral-avs] bytes=%.2fMB elapsed=%.2fs rate=%.1fMbps",
+                         Double(delegate.bytes) / 1_000_000, elapsed, mbps))
         }
     }
 }

@@ -2,15 +2,11 @@
 //  MusicHomeView.swift
 //  Rivulet
 //
-//  Apple Music tvOS-inspired music library built from native tvOS controls.
+//  Apple Music tvOS-inspired music library home.
 //
 
 import SwiftUI
-
-private enum MusicSidebarFocusTarget: Hashable {
-    case category(MusicLibraryCategory)
-    case genre(String)
-}
+import UIKit
 
 enum MusicLibraryCategory: String, Hashable, CaseIterable {
     case recentlyAdded
@@ -18,7 +14,6 @@ enum MusicLibraryCategory: String, Hashable, CaseIterable {
     case artists
     case albums
     case songs
-    case composers
 
     var title: String {
         switch self {
@@ -27,18 +22,6 @@ enum MusicLibraryCategory: String, Hashable, CaseIterable {
         case .artists: return "Artists"
         case .albums: return "Albums"
         case .songs: return "Songs"
-        case .composers: return "Composers"
-        }
-    }
-
-    var icon: String {
-        switch self {
-        case .recentlyAdded: return "clock"
-        case .playlists: return "music.note.list"
-        case .artists: return "music.mic"
-        case .albums: return "square.stack"
-        case .songs: return "music.note"
-        case .composers: return "music.quarternote.3"
         }
     }
 
@@ -47,7 +30,7 @@ enum MusicLibraryCategory: String, Hashable, CaseIterable {
     }
 
     var supportsPlaybackActions: Bool {
-        self != .playlists && self != .composers
+        self != .playlists
     }
 }
 
@@ -62,6 +45,8 @@ struct MusicHomeView: View {
     @ObservedObject private var musicQueue = MusicQueue.shared
 
     @State private var recentlyAddedItems: [PlexMetadata] = []
+    @State private var recentlyAddedTotal: Int?
+    @State private var isLoadingMoreRecentlyAdded = false
     @State private var allArtists: [PlexMetadata] = []
     @State private var allAlbums: [PlexMetadata] = []
     @State private var allTracks: [PlexMetadata] = []
@@ -70,205 +55,120 @@ struct MusicHomeView: View {
     @State private var isLoading = false
     @State private var loadedCategories: Set<MusicLibraryCategory> = []
 
+    private let recentlyAddedPageSize = 60
+
     @State private var selectedCategory: MusicLibraryCategory = .recentlyAdded
     @State private var selectedGenre: String?
     @State private var selectedItem: PlexMetadata?
-    @State private var focusedArtworkItem: PlexMetadata?
     @State private var albumSortAscending = true
     @State private var songSortAscending = true
-    @State private var contentResetID = UUID()
-
-    @FocusState private var focusedSidebarTarget: MusicSidebarFocusTarget?
 
     private let networkManager = PlexNetworkManager.shared
-    private let gridColumns = Array(repeating: GridItem(.fixed(200), spacing: 30, alignment: .top), count: 4)
+
+    // Layout constants — matches the approved wireframe
+    private let sidebarWidth: CGFloat = 380
+    private let sidebarLeadingPad: CGFloat = 60
+    private let sidebarTrailingInset: CGFloat = 36
+    private let contentLeadingPad: CGFloat = 24
+    private let contentTrailingPad: CGFloat = 80
+    private let contentTopPad: CGFloat = 80
+    private let gridColumnSpacing: CGFloat = 48
+    private let gridRowSpacing: CGFloat = 60
+
+    private var gridColumns: [GridItem] {
+        Array(repeating: GridItem(.flexible(), spacing: gridColumnSpacing, alignment: .top), count: 4)
+    }
 
     var body: some View {
-        NavigationStack {
-            ZStack {
-                backgroundView
-
-                HStack(spacing: 0) {
+        MusicFocusContainedView(blockLeftEscape: true, onLeftBlocked: {}) {
+            NavigationStack {
+                HStack(alignment: .top, spacing: 0) {
                     sidebar
-                    contentArea
+                    content
                 }
-                .frame(maxWidth: 1140, maxHeight: .infinity, alignment: .topLeading)
-                .padding(.leading, 54)
-                .padding(.trailing, 72)
-                .padding(.top, 72)
-                .padding(.bottom, 34)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            }
-            .navigationDestination(item: $selectedItem) { item in
-                if item.type == "artist" {
-                    MusicArtistDetailView(artist: item, libraryKey: libraryKey)
-                } else if item.type == "playlist" {
-                    MusicPlaylistView(playlist: item)
-                } else {
-                    MusicAlbumDetailView(album: item)
+                .navigationDestination(item: $selectedItem) { item in
+                    if item.type == "artist" {
+                        MusicArtistDetailView(artist: item, libraryKey: libraryKey)
+                    } else if item.type == "playlist" {
+                        MusicPlaylistView(playlist: item)
+                    } else {
+                        MusicAlbumDetailView(album: item)
+                    }
                 }
             }
         }
         .onChange(of: selectedItem) { _, newValue in
             nestedNavState.isNested = newValue != nil
         }
-        .task {
+        .task(id: libraryKey) {
             await loadRecentlyAdded()
             await loadGenres()
-            applyLandingState()
-        }
-        .onAppear {
-            applyLandingState()
         }
     }
 
-    private var backgroundView: some View {
-        ZStack {
-            LinearGradient(
-                colors: [
-                    Color(red: 0.29, green: 0.33, blue: 0.39),
-                    Color(red: 0.18, green: 0.21, blue: 0.26),
-                    Color(red: 0.09, green: 0.10, blue: 0.13)
-                ],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-
-            if let backgroundArtworkURL {
-                CachedAsyncImage(url: backgroundArtworkURL) { phase in
-                    switch phase {
-                    case .success(let image):
-                        image
-                            .resizable()
-                            .aspectRatio(contentMode: .fill)
-                    default:
-                        Color.clear
-                    }
-                }
-                .saturation(1.15)
-                .scaleEffect(1.45)
-                .blur(radius: 72)
-                .opacity(0.3)
-                .overlay {
-                    LinearGradient(
-                        colors: [Color.black.opacity(0.12), Color.black.opacity(0.42)],
-                        startPoint: .top,
-                        endPoint: .bottom
-                    )
-                }
-                .mask {
-                    LinearGradient(
-                        colors: [
-                            Color.clear,
-                            Color.white.opacity(0.32),
-                            Color.white
-                        ],
-                        startPoint: .leading,
-                        endPoint: .trailing
-                    )
-                }
-                .ignoresSafeArea()
-            }
-
-            LinearGradient(
-                colors: [
-                    Color.white.opacity(0.05),
-                    Color.clear,
-                    Color.black.opacity(0.24)
-                ],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-
-            HStack(spacing: 0) {
-                LinearGradient(
-                    colors: [Color.black.opacity(0.26), Color.black.opacity(0.06), Color.clear],
-                    startPoint: .leading,
-                    endPoint: .trailing
-                )
-                .frame(width: 250)
-
-                Spacer(minLength: 0)
-            }
-        }
-        .ignoresSafeArea()
-    }
+    // MARK: - Sidebar
 
     private var sidebar: some View {
-        VStack(alignment: .leading, spacing: 0) {
+        ScrollView(.vertical, showsIndicators: false) {
             VStack(alignment: .leading, spacing: 6) {
                 ForEach(MusicLibraryCategory.allCases, id: \.self) { category in
-                    MusicSidebarRow(
+                    sidebarRow(
                         title: category.title,
-                        isSelected: selectedCategory == category
-                        ,
-                        target: .category(category),
-                        focus: $focusedSidebarTarget
+                        isSelected: selectedCategory == category && selectedGenre == nil
                     ) {
                         selectCategory(category)
                     }
                 }
-            }
-            .padding(.top, 4)
 
-            if !genres.isEmpty {
-                Divider()
-                    .overlay(Color.white.opacity(0.12))
-                    .padding(.top, 22)
-                    .padding(.bottom, 18)
+                if !genres.isEmpty {
+                    Rectangle()
+                        .fill(Color.white.opacity(0.12))
+                        .frame(height: 1)
+                        .padding(.leading, 28)
+                        .padding(.trailing, 56)
+                        .padding(.top, 28)
+                        .padding(.bottom, 18)
 
-                VStack(alignment: .leading, spacing: 10) {
                     Text("Genres")
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.45))
-                        .padding(.bottom, 2)
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.42))
+                        .padding(.horizontal, 28)
+                        .padding(.bottom, 10)
 
                     ForEach(genres, id: \.self) { genre in
-                        MusicSidebarRow(
+                        sidebarRow(
                             title: genre,
                             isSelected: selectedGenre == genre
-                            ,
-                            target: .genre(genre),
-                            focus: $focusedSidebarTarget
                         ) {
-                            withAnimation(.easeInOut(duration: 0.2)) {
-                                selectedGenre = selectedGenre == genre ? nil : genre
-                                contentResetID = UUID()
-                            }
+                            selectGenre(genre)
                         }
                     }
                 }
             }
-
-            Spacer(minLength: 0)
+            .padding(.top, contentTopPad)
+            .padding(.leading, sidebarLeadingPad)
+            .padding(.trailing, sidebarTrailingInset)
+            .padding(.bottom, 80)
         }
-        .padding(.horizontal, 18)
-        .padding(.vertical, 18)
-        .frame(width: 212)
-        .background(
-            RoundedRectangle(cornerRadius: 26, style: .continuous)
-                .fill(Color.black.opacity(0.12))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 26, style: .continuous)
-                .stroke(Color.white.opacity(0.04), lineWidth: 1)
-        )
-        .frame(maxHeight: .infinity, alignment: .topLeading)
-        .defaultFocus($focusedSidebarTarget, .category(.recentlyAdded))
+        .frame(width: sidebarWidth)
+        .focusSection()
     }
 
-    private var contentArea: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            if selectedCategory.showsHeader {
-                contentHeader
-                    .padding(.horizontal, 28)
-                    .padding(.top, 6)
-                    .padding(.bottom, 26)
-            } else {
-                Spacer()
-                    .frame(height: 8)
-            }
+    private func sidebarRow(title: String, isSelected: Bool, action: @escaping () -> Void) -> some View {
+        MusicSidebarRow(title: title, isSelected: isSelected, action: action)
+    }
 
+    // MARK: - Content
+
+    private var content: some View {
+        ZStack(alignment: .top) {
+            // Scroll view fills the entire content area edge-to-edge so its
+            // clipping bounds (after .scrollClipDisabled) extend to the screen
+            // edges, letting focused cards in the leftmost/rightmost columns
+            // grow without being clipped. The header floats on top with an
+            // opaque background and masks any scroll content that overflows
+            // upward into the header band.
             Group {
                 switch selectedCategory {
                 case .recentlyAdded:
@@ -281,35 +181,55 @@ struct MusicHomeView: View {
                     albumGrid(items: displayedAlbums, loading: !loadedCategories.contains(.albums))
                 case .songs:
                     songsList
-                case .composers:
-                    emptyState(
-                        title: "No composers",
-                        subtitle: "Composer browsing is not available for this library yet."
-                    )
                 }
             }
+            // Reserve top space so the first row of grid items isn't under the
+            // floating header at rest position.
+            .padding(.top, selectedCategory.showsHeader ? (contentTopPad + 88) : contentTopPad)
+            .padding(.leading, contentLeadingPad)
+            .padding(.trailing, contentTrailingPad)
+
+            if selectedCategory.showsHeader {
+                contentHeader
+                    .padding(.leading, contentLeadingPad)
+                    .padding(.trailing, contentTrailingPad)
+                    .padding(.top, contentTopPad)
+                    .padding(.bottom, 24)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(
+                        LinearGradient(
+                            colors: [
+                                Color.black.opacity(0.98),
+                                Color.black.opacity(0.92),
+                                Color.black.opacity(0.0)
+                            ],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                    )
+            }
         }
-        .frame(width: 894)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .focusSection()
     }
 
     private var contentHeader: some View {
-        HStack(alignment: .center, spacing: 20) {
+        HStack(alignment: .center, spacing: 24) {
             VStack(alignment: .leading, spacing: 4) {
-                Text(selectedCategory.title)
-                    .font(.system(size: 29, weight: .bold))
+                Text(headerTitle)
+                    .font(.system(size: 28, weight: .bold))
                     .lineLimit(1)
 
                 if !contentCountText.isEmpty {
                     Text(contentCountText)
-                        .font(.system(size: 14))
-                        .foregroundStyle(.white.opacity(0.55))
+                        .font(.system(size: 16))
+                        .foregroundStyle(.white.opacity(0.56))
                 }
             }
 
-            Spacer()
+            Spacer(minLength: 24)
 
-            HStack(spacing: 12) {
+            HStack(spacing: 14) {
                 if selectedCategory.supportsPlaybackActions {
                     Button {
                         Task { await playAll(shuffled: false) }
@@ -344,34 +264,45 @@ struct MusicHomeView: View {
         }
     }
 
+    private var headerTitle: String {
+        if let selectedGenre {
+            return selectedGenre
+        }
+        return selectedCategory.title
+    }
+
+    // MARK: - Grids
+
     private func albumGrid(items: [PlexMetadata], loading: Bool) -> some View {
         ScrollView(.vertical, showsIndicators: false) {
             if loading {
                 ProgressView()
                     .frame(maxWidth: .infinity, minHeight: 320)
             } else if items.isEmpty {
-                emptyState(title: "No items", subtitle: selectedGenre == nil ? "" : "Try another genre.")
+                emptyState(
+                    title: "No items",
+                    subtitle: selectedGenre == nil ? "" : "Try another genre."
+                )
             } else {
-                LazyVGrid(columns: gridColumns, alignment: .leading, spacing: 30) {
-                    ForEach(items, id: \.ratingKey) { item in
-                        MusicPosterCard(item: item, style: .square, onFocusChanged: { isFocused in
-                            if isFocused {
-                                focusedArtworkItem = item
-                            } else if focusedArtworkItem?.ratingKey == item.ratingKey {
-                                focusedArtworkItem = nil
+                LazyVGrid(columns: gridColumns, alignment: .leading, spacing: gridRowSpacing) {
+                    ForEach(Array(items.enumerated()), id: \.element.ratingKey) { index, item in
+                        albumCard(item: item)
+                            .musicItemContextMenu(item: item, style: item.type == "track" ? .track : .album)
+                            .onAppear {
+                                // Paginate Recently Added as the user scrolls.
+                                guard selectedCategory == .recentlyAdded else { return }
+                                if index >= items.count - 12 {
+                                    Task { await loadMoreRecentlyAddedIfNeeded() }
+                                }
                             }
-                        }) {
-                            selectedItem = item
-                        }
-                        .musicItemContextMenu(item: item, style: item.type == "track" ? .track : .album)
                     }
                 }
-                .padding(.horizontal, 28)
-                .padding(.bottom, 54)
-                .padding(.top, 4)
+                .padding(.bottom, 100)
             }
         }
-        .id(contentResetID)
+        .contentMargins(.top, 40, for: .scrollContent)
+        .contentMargins(.leading, 32, for: .scrollContent)
+        .contentMargins(.trailing, 32, for: .scrollContent)
         .scrollClipDisabled()
     }
 
@@ -381,50 +312,86 @@ struct MusicHomeView: View {
                 ProgressView()
                     .frame(maxWidth: .infinity, minHeight: 320)
             } else if displayedArtists.isEmpty {
-                emptyState(title: "No artists", subtitle: selectedGenre == nil ? "" : "Try another genre.")
+                emptyState(
+                    title: "No artists",
+                    subtitle: selectedGenre == nil ? "" : "Try another genre."
+                )
             } else {
-                LazyVGrid(columns: gridColumns, alignment: .leading, spacing: 30) {
+                LazyVGrid(columns: gridColumns, alignment: .leading, spacing: gridRowSpacing) {
                     ForEach(displayedArtists, id: \.ratingKey) { artist in
-                        MusicPosterCard(item: artist, style: .circular, onFocusChanged: { isFocused in
-                            if isFocused {
-                                focusedArtworkItem = artist
-                            } else if focusedArtworkItem?.ratingKey == artist.ratingKey {
-                                focusedArtworkItem = nil
-                            }
-                        }) {
-                            selectedItem = artist
-                        }
+                        artistCard(item: artist)
                     }
                 }
-                .padding(.horizontal, 28)
-                .padding(.bottom, 54)
-                .padding(.top, 4)
+                .padding(.bottom, 100)
             }
         }
-        .id(contentResetID)
+        .contentMargins(.top, 40, for: .scrollContent)
+        .contentMargins(.leading, 32, for: .scrollContent)
+        .contentMargins(.trailing, 32, for: .scrollContent)
         .scrollClipDisabled()
     }
 
     private var songsList: some View {
-        List {
+        ScrollView(.vertical, showsIndicators: false) {
             if !loadedCategories.contains(.songs) {
                 ProgressView()
                     .frame(maxWidth: .infinity, minHeight: 320)
-                    .listRowBackground(Color.clear)
             } else if displayedTracks.isEmpty {
-                emptyState(title: "No songs", subtitle: selectedGenre == nil ? "" : "Try another genre.")
-                    .listRowBackground(Color.clear)
+                emptyState(
+                    title: "No songs",
+                    subtitle: selectedGenre == nil ? "" : "Try another genre."
+                )
             } else {
-                ForEach(Array(displayedTracks.enumerated()), id: \.offset) { index, track in
-                    songRow(track: track, index: index)
-                        .listRowBackground(Color.clear)
-                        .listRowInsets(EdgeInsets(top: 0, leading: 30, bottom: 0, trailing: 30))
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    ForEach(Array(displayedTracks.enumerated()), id: \.offset) { index, track in
+                        songRow(track: track, index: index)
+                    }
                 }
+                .padding(.top, 6)
+                .padding(.bottom, 80)
             }
         }
-        .listStyle(.plain)
-        .id(contentResetID)
+        .scrollClipDisabled()
     }
+
+    // MARK: - Cards
+
+    @ViewBuilder
+    private func albumCard(item: PlexMetadata) -> some View {
+        MusicGridCard(
+            item: item,
+            shape: .square,
+            artworkURL: artworkURL(for: item),
+            subtitle: albumSubtitle(for: item)
+        ) {
+            selectedItem = item
+        }
+    }
+
+    @ViewBuilder
+    private func artistCard(item: PlexMetadata) -> some View {
+        MusicGridCard(
+            item: item,
+            shape: .circle,
+            artworkURL: artworkURL(for: item),
+            subtitle: nil
+        ) {
+            selectedItem = item
+        }
+    }
+
+    private func artworkURL(for item: PlexMetadata) -> URL? {
+        guard let thumb = item.thumb ?? item.parentThumb,
+              let serverURL = authManager.selectedServerURL,
+              let token = authManager.selectedServerToken else { return nil }
+        return URL(string: "\(serverURL)\(thumb)?X-Plex-Token=\(token)")
+    }
+
+    private func albumSubtitle(for item: PlexMetadata) -> String {
+        item.parentTitle ?? item.grandparentTitle ?? ""
+    }
+
+    // MARK: - Songs
 
     private func songRow(track: PlexMetadata, index: Int) -> some View {
         let isCurrent = musicQueue.currentTrack?.ratingKey == track.ratingKey
@@ -432,25 +399,26 @@ struct MusicHomeView: View {
         return Button {
             musicQueue.playAlbum(tracks: displayedTracks, startingAt: index)
         } label: {
-            HStack(spacing: 16) {
+            HStack(spacing: 18) {
                 if isCurrent {
                     PlaybackIndicator(isPlaying: musicQueue.playbackState == .playing, size: .small)
-                        .frame(width: 24)
+                        .frame(width: 28)
                 } else {
                     Text("\(index + 1)")
-                        .font(.system(size: 16, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 24, alignment: .trailing)
+                        .font(.system(size: 18, design: .monospaced))
+                        .foregroundStyle(.white.opacity(0.5))
+                        .frame(width: 28, alignment: .trailing)
                 }
 
-                VStack(alignment: .leading, spacing: 2) {
+                VStack(alignment: .leading, spacing: 4) {
                     Text(track.title ?? "Unknown")
-                        .font(.system(size: 18, weight: .regular))
+                        .font(.system(size: 22, weight: .regular))
+                        .foregroundStyle(.white)
                         .lineLimit(1)
 
                     Text(track.grandparentTitle ?? track.parentTitle ?? "")
-                        .font(.system(size: 14))
-                        .foregroundStyle(.secondary)
+                        .font(.system(size: 16))
+                        .foregroundStyle(.white.opacity(0.5))
                         .lineLimit(1)
                 }
 
@@ -458,11 +426,14 @@ struct MusicHomeView: View {
 
                 if let duration = track.duration {
                     Text(formatDuration(duration))
-                        .font(.system(size: 15, design: .monospaced))
-                        .foregroundStyle(.secondary)
+                        .font(.system(size: 16, design: .monospaced))
+                        .foregroundStyle(.white.opacity(0.5))
                 }
             }
-            .padding(.vertical, 12)
+            .padding(.vertical, 16)
+            .padding(.horizontal, 20)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .hoverEffect(.highlight)
         }
         .buttonStyle(.plain)
         .contextMenu {
@@ -481,22 +452,25 @@ struct MusicHomeView: View {
     }
 
     private func emptyState(title: String, subtitle: String) -> some View {
-        VStack(spacing: 10) {
+        VStack(spacing: 12) {
             Image(systemName: "music.note")
-                .font(.system(size: 40, weight: .light))
-                .foregroundStyle(.secondary)
+                .font(.system(size: 44, weight: .light))
+                .foregroundStyle(.white.opacity(0.5))
 
             Text(title)
-                .font(.system(size: 20, weight: .medium))
+                .font(.system(size: 22, weight: .medium))
+                .foregroundStyle(.white)
 
             if !subtitle.isEmpty {
                 Text(subtitle)
-                    .font(.system(size: 15))
-                    .foregroundStyle(.secondary)
+                    .font(.system(size: 16))
+                    .foregroundStyle(.white.opacity(0.5))
             }
         }
         .frame(maxWidth: .infinity, minHeight: 320)
     }
+
+    // MARK: - Filtered / sorted data
 
     private var displayedRecentlyAdded: [PlexMetadata] {
         filtered(items: recentlyAddedItems)
@@ -516,7 +490,9 @@ struct MusicHomeView: View {
         return items.sorted { lhs, rhs in
             let left = lhs.title ?? ""
             let right = rhs.title ?? ""
-            return albumSortAscending ? left.localizedCaseInsensitiveCompare(right) == .orderedAscending : left.localizedCaseInsensitiveCompare(right) == .orderedDescending
+            return albumSortAscending
+                ? left.localizedCaseInsensitiveCompare(right) == .orderedAscending
+                : left.localizedCaseInsensitiveCompare(right) == .orderedDescending
         }
     }
 
@@ -525,7 +501,9 @@ struct MusicHomeView: View {
         return items.sorted { lhs, rhs in
             let left = lhs.title ?? ""
             let right = rhs.title ?? ""
-            return songSortAscending ? left.localizedCaseInsensitiveCompare(right) == .orderedAscending : left.localizedCaseInsensitiveCompare(right) == .orderedDescending
+            return songSortAscending
+                ? left.localizedCaseInsensitiveCompare(right) == .orderedAscending
+                : left.localizedCaseInsensitiveCompare(right) == .orderedDescending
         }
     }
 
@@ -533,29 +511,6 @@ struct MusicHomeView: View {
         guard let selectedGenre else { return items }
         return items.filter { item in
             (item.Genre ?? []).contains(where: { $0.tag == selectedGenre })
-        }
-    }
-
-    private var backgroundArtworkURL: URL? {
-        guard let item = focusedArtworkItem ?? currentArtworkItems.first,
-              let thumb = item.thumb ?? item.parentThumb,
-              let serverURL = authManager.selectedServerURL,
-              let token = authManager.selectedServerToken else { return nil }
-        return URL(string: "\(serverURL)\(thumb)?X-Plex-Token=\(token)")
-    }
-
-    private var currentArtworkItems: [PlexMetadata] {
-        switch selectedCategory {
-        case .recentlyAdded:
-            return displayedRecentlyAdded
-        case .playlists:
-            return displayedPlaylists
-        case .artists:
-            return displayedArtists
-        case .albums:
-            return displayedAlbums
-        case .songs, .composers:
-            return []
         }
     }
 
@@ -571,14 +526,28 @@ struct MusicHomeView: View {
             return displayedAlbums.isEmpty ? "" : "\(displayedAlbums.count) albums"
         case .songs:
             return displayedTracks.isEmpty ? "" : "\(displayedTracks.count) songs"
-        case .composers:
-            return ""
         }
     }
 
     private var currentSortIcon: String {
         let ascending = selectedCategory == .albums ? albumSortAscending : songSortAscending
         return ascending ? "arrow.up" : "arrow.down"
+    }
+
+    // MARK: - Actions
+
+    private func selectCategory(_ category: MusicLibraryCategory) {
+        selectedCategory = category
+        selectedGenre = nil
+        Task { await loadCategoryData(category) }
+    }
+
+    private func selectGenre(_ genre: String) {
+        selectedGenre = (selectedGenre == genre) ? nil : genre
+        // Make sure the underlying category data is loaded so the filter has something to chew on
+        if selectedGenre != nil {
+            Task { await loadCategoryData(selectedCategory) }
+        }
     }
 
     private func toggleSortDirection() {
@@ -589,68 +558,75 @@ struct MusicHomeView: View {
         }
     }
 
-    private func selectCategory(_ category: MusicLibraryCategory) {
-        selectedCategory = category
-        selectedGenre = nil
-        focusedArtworkItem = nil
-        contentResetID = UUID()
-        focusedSidebarTarget = .category(category)
-        Task { await loadCategoryData(category) }
-    }
-
-    private func applyLandingState() {
-        selectedCategory = .recentlyAdded
-        selectedGenre = nil
-        selectedItem = nil
-        focusedArtworkItem = nil
-        contentResetID = UUID()
-        focusedSidebarTarget = .category(.recentlyAdded)
-    }
-
     private func formatDuration(_ ms: Int) -> String {
         let totalSeconds = ms / 1000
         return "\(totalSeconds / 60):\(String(format: "%02d", totalSeconds % 60))"
     }
+
+    // MARK: - Data loading
 
     private func loadRecentlyAdded() async {
         guard let serverURL = authManager.selectedServerURL,
               let token = authManager.selectedServerToken else { return }
 
         isLoading = true
-
-        if let cached = dataStore.libraryHubs[libraryKey], !cached.isEmpty {
-            let hubItems = cached.flatMap { $0.Metadata ?? [] }
-            let albums = hubItems.filter { $0.type == "album" }
-            recentlyAddedItems = albums.isEmpty ? hubItems : albums
-            isLoading = false
-            return
-        }
+        recentlyAddedItems = []
+        recentlyAddedTotal = nil
 
         do {
-            let hubs = try await networkManager.getLibraryHubs(
+            // Sort by addedAt descending on the library/sections/all endpoint —
+            // gives us the same data as /recentlyAdded but with full pagination.
+            let result = try await networkManager.getLibraryItemsWithTotal(
                 serverURL: serverURL,
                 authToken: token,
-                sectionId: libraryKey
+                sectionId: libraryKey,
+                start: 0,
+                size: recentlyAddedPageSize,
+                sort: "addedAt:desc",
+                type: 9 // 9 = album
             )
-            let hubItems = hubs.flatMap { $0.Metadata ?? [] }
-            let albums = hubItems.filter { $0.type == "album" }
-            recentlyAddedItems = albums.isEmpty ? hubItems : albums
-
-            if recentlyAddedItems.isEmpty {
-                recentlyAddedItems = try await networkManager.getLibraryItems(
-                    serverURL: serverURL,
-                    authToken: token,
-                    sectionId: libraryKey,
-                    start: 0,
-                    size: 50,
-                    type: 9
-                )
-            }
+            recentlyAddedItems = result.items
+            recentlyAddedTotal = result.totalSize
         } catch {
             print("MusicHome: Failed to load recently added: \(error)")
         }
 
         isLoading = false
+    }
+
+    private func loadMoreRecentlyAddedIfNeeded() async {
+        guard !isLoadingMoreRecentlyAdded else { return }
+        guard let total = recentlyAddedTotal else { return }
+        guard recentlyAddedItems.count < total else { return }
+        guard let serverURL = authManager.selectedServerURL,
+              let token = authManager.selectedServerToken else { return }
+
+        isLoadingMoreRecentlyAdded = true
+        defer { isLoadingMoreRecentlyAdded = false }
+
+        do {
+            let result = try await networkManager.getLibraryItemsWithTotal(
+                serverURL: serverURL,
+                authToken: token,
+                sectionId: libraryKey,
+                start: recentlyAddedItems.count,
+                size: recentlyAddedPageSize,
+                sort: "addedAt:desc",
+                type: 9
+            )
+            // De-dupe by ratingKey in case the server returns overlap.
+            let existingKeys = Set(recentlyAddedItems.compactMap(\.ratingKey))
+            let newItems = result.items.filter { item in
+                guard let key = item.ratingKey else { return true }
+                return !existingKeys.contains(key)
+            }
+            recentlyAddedItems.append(contentsOf: newItems)
+            if let newTotal = result.totalSize {
+                recentlyAddedTotal = newTotal
+            }
+        } catch {
+            print("MusicHome: Failed to load more recently added: \(error)")
+        }
     }
 
     private func loadGenres() async {
@@ -710,8 +686,6 @@ struct MusicHomeView: View {
                 size: 500,
                 type: 10
             )) ?? []
-        case .composers:
-            break
         }
 
         loadedCategories.insert(category)
@@ -742,55 +716,179 @@ struct MusicHomeView: View {
     }
 }
 
+// MARK: - MusicSidebarRow
+
+/// Apple Music tvOS sidebar row.
+/// Uses the system `Button` focus (white glass pill, dark text on focus) for the focus state.
+/// "Selected but unfocused" is shown via a small leading accent dot, NOT a background pill —
+/// because the system focus highlight already owns the background treatment.
 private struct MusicSidebarRow: View {
     let title: String
     let isSelected: Bool
-    let target: MusicSidebarFocusTarget
-    let focus: FocusState<MusicSidebarFocusTarget?>.Binding
     let action: () -> Void
 
-    private var isFocused: Bool {
-        focus.wrappedValue == target
-    }
-
-    private var highlightOpacity: Double {
-        if isFocused {
-            return 0.34
-        }
-        if isSelected {
-            return 0.18
-        }
-        return 0
-    }
-
-    private var foregroundOpacity: Double {
-        isFocused || isSelected ? 0.98 : 0.8
-    }
+    @FocusState private var isFocused: Bool
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 11) {
+            HStack(spacing: 14) {
+                // Leading accent dot — only visible when this row represents the selected
+                // category but isn't currently focused. When focused, the system pill is
+                // the indicator, so we hide the dot to avoid double-marking.
                 Circle()
-                    .fill(.white.opacity(isFocused || isSelected ? 0.95 : 0.42))
-                    .frame(width: isFocused || isSelected ? 7 : 5, height: isFocused || isSelected ? 7 : 5)
-                    .frame(width: 9, alignment: .center)
+                    .fill(Color.white)
+                    .frame(width: 8, height: 8)
+                    .opacity(isSelected && !isFocused ? 0.95 : 0)
 
                 Text(title)
-                    .font(.system(size: 17, weight: .regular))
+                    .font(.system(size: 26, weight: (isSelected || isFocused) ? .semibold : .regular))
                     .lineLimit(1)
 
                 Spacer(minLength: 0)
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
-            .foregroundStyle(.white.opacity(foregroundOpacity))
-            .background(
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .fill(Color.white.opacity(highlightOpacity))
-            )
+            .padding(.vertical, 4)
         }
-        .buttonStyle(.plain)
-        .focused(focus, equals: target)
-        .animation(.easeInOut(duration: 0.16), value: isFocused)
+    }
+}
+
+// MARK: - MusicGridCard
+
+private struct MusicGridCard: View {
+    enum Shape {
+        case square
+        case circle
+    }
+
+    let item: PlexMetadata
+    let shape: Shape
+    let artworkURL: URL?
+    let subtitle: String?
+    let action: () -> Void
+
+    @FocusState private var isFocused: Bool
+
+    var body: some View {
+        Button(action: action) {
+            VStack(alignment: shape == .circle ? .center : .leading, spacing: 0) {
+                artwork
+                    .aspectRatio(1, contentMode: .fit)
+                    .frame(maxWidth: .infinity)
+                    .scaleEffect(isFocused ? 1.08 : 1.0)
+                    .shadow(
+                        color: .black.opacity(isFocused ? 0.55 : 0.35),
+                        radius: isFocused ? 24 : 14,
+                        x: 0,
+                        y: isFocused ? 18 : 12
+                    )
+
+                Text(item.title ?? "Unknown")
+                    .font(.system(size: 22, weight: .medium))
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+                    .multilineTextAlignment(shape == .circle ? .center : .leading)
+                    .frame(maxWidth: .infinity, alignment: shape == .circle ? .center : .leading)
+                    .padding(.top, isFocused ? 22 : 16)
+
+                if let subtitle, !subtitle.isEmpty {
+                    Text(subtitle)
+                        .font(.system(size: 18, weight: .regular))
+                        .foregroundStyle(.white.opacity(0.6))
+                        .lineLimit(1)
+                        .frame(maxWidth: .infinity, alignment: shape == .circle ? .center : .leading)
+                        .padding(.top, 4)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: shape == .circle ? .center : .leading)
+        }
+        .buttonStyle(CardButtonStyle())
+        .hoverEffectDisabled()
+        .focused($isFocused)
+        .animation(.easeOut(duration: 0.22), value: isFocused)
+    }
+
+    @ViewBuilder
+    private var artwork: some View {
+        CachedAsyncImage(url: artworkURL) { phase in
+            switch phase {
+            case .success(let image):
+                image
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+            case .empty, .failure:
+                ZStack {
+                    LinearGradient(
+                        colors: [Color.white.opacity(0.14), Color.white.opacity(0.06)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                    Image(systemName: item.type == "artist" ? "person.fill" : "music.note")
+                        .font(.system(size: 64, weight: .regular))
+                        .foregroundStyle(.white.opacity(0.28))
+                }
+            @unknown default:
+                Color.white.opacity(0.08)
+            }
+        }
+        .clipShape(artworkClipShape)
+    }
+
+    private var artworkClipShape: AnyShape {
+        switch shape {
+        case .square:
+            return AnyShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        case .circle:
+            return AnyShape(Circle())
+        }
+    }
+}
+
+// MARK: - Focus container
+
+/// Wraps the music view in a UIHostingController that overrides `shouldUpdateFocus`
+/// to block leftward focus escape — preventing the system tvOS sidebar tab bar from
+/// stealing focus when the user navigates left within the music section.
+///
+/// Mirrors the `FocusContainedView` used in SettingsView.swift.
+private struct MusicFocusContainedView<Content: View>: UIViewControllerRepresentable {
+    let blockLeftEscape: Bool
+    let onLeftBlocked: () -> Void
+    let content: Content
+
+    init(blockLeftEscape: Bool, onLeftBlocked: @escaping () -> Void, @ViewBuilder content: () -> Content) {
+        self.blockLeftEscape = blockLeftEscape
+        self.onLeftBlocked = onLeftBlocked
+        self.content = content()
+    }
+
+    func makeUIViewController(context: Context) -> MusicFocusContainedHostingController<Content> {
+        let vc = MusicFocusContainedHostingController(rootView: content)
+        vc.view.backgroundColor = .clear
+        vc.blockLeftEscape = blockLeftEscape
+        vc.onLeftBlocked = onLeftBlocked
+        return vc
+    }
+
+    func updateUIViewController(_ vc: MusicFocusContainedHostingController<Content>, context: Context) {
+        vc.blockLeftEscape = blockLeftEscape
+        vc.onLeftBlocked = onLeftBlocked
+        vc.rootView = content
+    }
+}
+
+private final class MusicFocusContainedHostingController<Content: View>: UIHostingController<Content> {
+    var blockLeftEscape = false
+    var onLeftBlocked: (() -> Void)?
+
+    override func shouldUpdateFocus(in context: UIFocusUpdateContext) -> Bool {
+        if blockLeftEscape,
+           context.focusHeading == .left,
+           let nextView = context.nextFocusedView,
+           !nextView.isDescendant(of: view) {
+            DispatchQueue.main.async { [weak self] in
+                self?.onLeftBlocked?()
+            }
+            return false
+        }
+        return super.shouldUpdateFocus(in: context)
     }
 }

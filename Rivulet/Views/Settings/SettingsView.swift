@@ -258,6 +258,12 @@ struct SettingsView: View {
     @State private var navigationStack: [SettingsPage] = [.root]
     @State private var isForward = true
 
+    // Page transition animation state (driven outside FocusContainedView's
+    // UIHostingController because .transition() / .id() don't fire on rootView
+    // swaps — see navigate(to:)/goBack() for the two-phase slide).
+    @State private var pageOffsetX: CGFloat = 0
+    @State private var pageOpacity: Double = 1
+
     private var currentPage: SettingsPage {
         navigationStack.last ?? .root
     }
@@ -414,6 +420,11 @@ struct SettingsView: View {
                                 removal: .opacity.combined(with: .offset(x: isForward ? -60 : 60))
                             ))
                         }
+                        // Implicit animation scoped inside FocusContainedView's
+                        // UIHostingController — withAnimation transactions from
+                        // the parent don't reliably propagate across the
+                        // UIViewControllerRepresentable boundary for transitions.
+                        .animation(.easeOut(duration: 0.45), value: currentPage)
                     }
                     .frame(width: geo.size.width * 0.45)
                 }

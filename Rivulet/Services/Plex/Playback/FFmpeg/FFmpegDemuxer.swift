@@ -178,6 +178,13 @@ final class FFmpegDemuxer: @unchecked Sendable {
     // MARK: - Private State
 
     private var formatContext: UnsafeMutablePointer<AVFormatContext>?
+    /// Custom AVIOContext when we are driving I/O via URLSession. Nil when
+    /// we fall back to libavformat's built-in protocols (e.g. file://).
+    private var customAVIOContext: UnsafeMutablePointer<AVIOContext>?
+    /// Reused across `readPacket()` calls. `av_read_frame` fills this in
+    /// place; we `av_packet_unref` at the end of each call instead of
+    /// alloc/free-ing per iteration.
+    private var reusablePacket: UnsafeMutablePointer<AVPacket>?
     private var isOpen = false
     private let lock = NSLock()
     private var hasLoggedADTSStripping = false
@@ -206,28 +213,83 @@ final class FFmpegDemuxer: @unchecked Sendable {
         // in the read loop, not by refusing to open the file.
         ctx.pointee.max_streams = Int32.max
 
+        // Prefer Apple's URLSession over libavformat's built-in HTTP for
+        // http/https URLs. URLSession saturates the network on tvOS where
+        // FFmpeg's HTTP was observed to cap around 7 Mbps — a hard
+        // bottleneck for 50+ Mbps 4K HEVC. For non-HTTP URLs (file://, etc.)
+        // we fall back to libavformat's own I/O.
+        let scheme = url.scheme?.lowercased() ?? ""
+        let useURLSessionIO = (scheme == "http" || scheme == "https")
+
         var options: OpaquePointer? = nil
-        if let headers = headers, !headers.isEmpty {
-            let headerString = headers.map { "\($0.key): \($0.value)" }.joined(separator: "\r\n")
-            av_dict_set(&options, "headers", headerString, 0)
-            av_dict_set(&options, "reconnect", "1", 0)
-            av_dict_set(&options, "reconnect_streamed", "1", 0)
-            av_dict_set(&options, "reconnect_delay_max", "5", 0)
+        var localAVIOContext: UnsafeMutablePointer<AVIOContext>? = nil
+
+        if useURLSessionIO {
+            let source = URLSessionAVIOSource(url: url, headers: headers)
+            guard let avio = URLSessionAVIOSource.makeAVIOContext(for: source) else {
+                throw FFmpegError.allocationFailed
+            }
+            localAVIOContext = avio
+            ctx.pointee.pb = avio
+            ctx.pointee.flags |= AVFMT_FLAG_CUSTOM_IO
+            print("[FFmpegDemuxer] Using URLSession-backed AVIO for \(url.absoluteString)")
+        } else {
+            if let headers = headers, !headers.isEmpty {
+                let headerString = headers.map { "\($0.key): \($0.value)" }.joined(separator: "\r\n")
+                av_dict_set(&options, "headers", headerString, 0)
+                av_dict_set(&options, "reconnect", "1", 0)
+                av_dict_set(&options, "reconnect_streamed", "1", 0)
+                av_dict_set(&options, "reconnect_delay_max", "5", 0)
+            }
+            av_dict_set(&options, "buffer_size", "33554432", 0)
+            av_dict_set(&options, "recv_buffer_size", "16777216", 0)
+            av_dict_set(&options, "multiple_requests", "1", 0)
+            av_dict_set(&options, "http_persistent", "1", 0)
+            av_dict_set(&options, "seekable", "1", 0)
+            av_dict_set(&options, "tcp_nodelay", "1", 0)
         }
 
         var mutableCtx: UnsafeMutablePointer<AVFormatContext>? = ctx
-        let ret = avformat_open_input(&mutableCtx, url.absoluteString, nil, &options)
+        // When custom I/O is attached, pass a nil URL so libavformat uses
+        // ctx.pb exclusively. Otherwise, pass the URL and let libavformat
+        // open its own protocol handler.
+        let openURLCString = useURLSessionIO ? nil : url.absoluteString
+        let ret = avformat_open_input(&mutableCtx, openURLCString, nil, &options)
         av_dict_free(&options)
 
         guard ret >= 0, let openCtx = mutableCtx else {
+            if let avio = localAVIOContext {
+                URLSessionAVIOSource.freeAVIOContext(avio)
+            }
             throw FFmpegError.openFailed(averror: ret)
         }
 
         let findRet = avformat_find_stream_info(openCtx, nil)
         guard findRet >= 0 else {
             avformat_close_input(&mutableCtx)
+            // avformat_close_input doesn't touch custom IO; free it ourselves.
+            if let avio = localAVIOContext {
+                URLSessionAVIOSource.freeAVIOContext(avio)
+            }
             throw FFmpegError.streamInfoFailed(averror: findRet)
         }
+
+        // Only take ownership of the custom AVIO pointer on success so the
+        // error paths above don't double-free.
+        self.customAVIOContext = localAVIOContext
+
+        // Allocate a single AVPacket we can reuse across every readPacket()
+        // call. av_read_frame fills it in place; we unref at the end of each
+        // call instead of alloc/free-ing ~250 times per second.
+        guard let reusable = av_packet_alloc() else {
+            avformat_close_input(&mutableCtx)
+            if let avio = self.customAVIOContext {
+                URLSessionAVIOSource.freeAVIOContext(avio)
+                self.customAVIOContext = nil
+            }
+            throw FFmpegError.allocationFailed
+        }
+        self.reusablePacket = reusable
 
         self.formatContext = openCtx
         self.isOpen = true
@@ -267,19 +329,20 @@ final class FFmpegDemuxer: @unchecked Sendable {
     // MARK: - Read Packets
 
     func readPacket() throws -> DemuxedPacket? {
-        guard let ctx = formatContext, isOpen else { throw FFmpegError.notOpen }
-
-        var pkt = av_packet_alloc()
-        guard let packet = pkt else { throw FFmpegError.allocationFailed }
-        defer { av_packet_free(&pkt) }
+        guard let ctx = formatContext, isOpen, let packet = reusablePacket else {
+            throw FFmpegError.notOpen
+        }
 
         while true {
             let ret = av_read_frame(ctx, packet)
 
             if ret == AVERROR_EOF_VALUE {
+                // No packet data to release on EOF; av_read_frame leaves
+                // the buffer clean.
                 return nil
             }
             guard ret >= 0 else {
+                av_packet_unref(packet)
                 throw FFmpegError.readFailed(averror: ret)
             }
 
@@ -367,6 +430,9 @@ final class FFmpegDemuxer: @unchecked Sendable {
         )
         selectedAudioStream = index
         audioFormatDescription = newFD
+        // Re-apply discard flags so the demuxer stops pulling bytes for the
+        // previously-selected audio track and starts delivering the new one.
+        applyStreamDiscardFlags(in: ctx, loggingPrefix: "Audio switch discard update")
     }
 
     /// Select an audio stream for reading without rebuilding the format description.
@@ -382,12 +448,16 @@ final class FFmpegDemuxer: @unchecked Sendable {
 
         selectedAudioStream = index
         // Don't update audioFormatDescription — caller is responsible for audio format
+        applyStreamDiscardFlags(in: ctx, loggingPrefix: "Audio switch discard update (client decode)")
     }
 
     /// Select a subtitle stream to include in readPacket() results.
     /// Pass -1 to disable subtitle reading.
     func selectSubtitleStream(index: Int32) {
         selectedSubtitleStream = index
+        if let ctx = formatContext, isOpen {
+            applyStreamDiscardFlags(in: ctx, loggingPrefix: "Subtitle switch discard update")
+        }
     }
 
     // MARK: - Codec Parameters Access
@@ -409,6 +479,20 @@ final class FFmpegDemuxer: @unchecked Sendable {
 
         avformat_close_input(&formatContext)
         formatContext = nil
+
+        // AVFMT_FLAG_CUSTOM_IO prevents avformat_close_input from touching
+        // our AVIOContext. Free it ourselves (which also releases the
+        // retained URLSessionAVIOSource and cancels its URLSession).
+        if let avio = customAVIOContext {
+            URLSessionAVIOSource.freeAVIOContext(avio)
+            customAVIOContext = nil
+        }
+
+        // Release the shared read packet.
+        if reusablePacket != nil {
+            av_packet_free(&reusablePacket)
+        }
+
         videoFormatDescription = nil
         audioFormatDescription = nil
         videoTracks = []
@@ -802,27 +886,56 @@ final class FFmpegDemuxer: @unchecked Sendable {
         let bestAudio = av_find_best_stream(ctx, AVMEDIA_TYPE_AUDIO, -1, -1, nil, 0)
         if bestAudio >= 0 { selectedAudioStream = bestAudio }
 
-        // Tell FFmpeg to discard packets from streams we don't need.
-        // MKVs with 70+ PGS subtitle tracks flood av_read_frame with subtitle packets,
-        // starving video/audio throughput. Marking unwanted streams as AVDISCARD_ALL
-        // lets the demuxer skip them entirely.
+        // Tell FFmpeg to discard packets from every stream we don't actively use.
+        //
+        // Multi-audio MKVs (many Plex DV files ship with 10-15 audio tracks:
+        // TrueHD + EAC3 + PCM 24-bit + AC3 + DTS in multiple channel layouts)
+        // push ~20-25 Mbps of audio-track bytes through the HTTP stream that we
+        // never use. Combined with 76+ PGS subtitle streams, the read loop can't
+        // keep up with real-time on typical home networks even though the single
+        // stream we actually consume is well under 5 Mbps.
+        //
+        // Keep only the selected video and selected audio stream. The subtitle
+        // path is routed separately through selectSubtitleStream; callers that
+        // need a bitmap subtitle track will flip that stream's discard flag.
+        applyStreamDiscardFlags(in: ctx, loggingPrefix: "Stream discard")
+    }
+
+    /// Re-apply `AVDISCARD_*` flags based on the current `selectedVideoStream`,
+    /// `selectedAudioStream`, and `selectedSubtitleStream`. Called during
+    /// initial stream selection and after audio/subtitle track switches so the
+    /// demuxer doesn't keep shipping bytes from tracks we stopped using.
+    private func applyStreamDiscardFlags(
+        in ctx: UnsafeMutablePointer<AVFormatContext>,
+        loggingPrefix: String
+    ) {
         let streamCount = Int(ctx.pointee.nb_streams)
-        let audioStreamIndices = Set(audioTracks.map { $0.streamIndex })
+        var keptVideo = 0
+        var keptAudio = 0
+        var keptSubtitle = 0
+        var keptOther = 0
         var discardedCount = 0
         for i in 0..<streamCount {
             let streamIdx = Int32(i)
             guard let stream = ctx.pointee.streams[i] else { continue }
-            if streamIdx == selectedVideoStream || audioStreamIndices.contains(streamIdx) {
+            let isKept = streamIdx == selectedVideoStream
+                || streamIdx == selectedAudioStream
+                || (selectedSubtitleStream >= 0 && streamIdx == selectedSubtitleStream)
+            if isKept {
                 stream.pointee.discard = AVDISCARD_DEFAULT
+                let codecType = stream.pointee.codecpar.pointee.codec_type
+                switch codecType {
+                case AVMEDIA_TYPE_VIDEO: keptVideo += 1
+                case AVMEDIA_TYPE_AUDIO: keptAudio += 1
+                case AVMEDIA_TYPE_SUBTITLE: keptSubtitle += 1
+                default: keptOther += 1
+                }
             } else {
                 stream.pointee.discard = AVDISCARD_ALL
                 discardedCount += 1
             }
         }
-        if discardedCount > 0 {
-            let kept = streamCount - discardedCount
-            print("[FFmpegDemuxer] Stream discard: keeping \(kept) streams, discarding \(discardedCount) (subtitle/attachment)")
-        }
+        print("[FFmpegDemuxer] \(loggingPrefix): kept video=\(keptVideo) audio=\(keptAudio) subtitle=\(keptSubtitle) other=\(keptOther), discarding \(discardedCount) streams")
     }
 
     // MARK: - Private: Format Description Creation

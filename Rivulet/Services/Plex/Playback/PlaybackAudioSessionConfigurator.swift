@@ -55,6 +55,27 @@ enum PlaybackAudioSessionConfigurator {
         let session = AVAudioSession.sharedInstance()
         let now = CFAbsoluteTimeGetCurrent()
 
+        // Idempotency check: if the session is already in the desired state (correct
+        // category, correct mode, and active with our policy already applied), do not
+        // re-apply setCategory/setActive. Re-applying setCategory on a running session
+        // forces an HDMI route renegotiation that silently breaks in-flight compressed
+        // bitstream passthrough (e.g. EAC3 7.1 mid-stream). This was previously hidden
+        // by the brief minimumReactivationInterval dedup, but the deferred .running
+        // state change means NowPlayingService now re-activates AFTER preroll, well
+        // past that window — so we must guard the underlying API itself, not just dedup.
+        let alreadyConfigured = session.category == .playback
+            && session.mode == mode
+            && session.routeSharingPolicy == .longFormAudio
+            && lastActivationModeRawValue == mode.rawValue
+            && lastActivationTimestamp > 0
+        if alreadyConfigured {
+            Task { @MainActor in
+                AudioRouteDiagnostics.shared.start(owner: owner)
+                AudioRouteDiagnostics.shared.logCurrentRoute(owner: owner, reason: "activate_playback_session_reused")
+            }
+            return
+        }
+
         // Multiple playback components may request activation back-to-back (NowPlaying + player).
         // Skip duplicate re-activation bursts to reduce route churn and log noise.
         if now - lastActivationTimestamp < minimumReactivationInterval &&
@@ -116,11 +137,16 @@ enum PlaybackAudioSessionConfigurator {
 
     static func recommendedAudioPolicy(for snapshot: RouteAudioSnapshot) -> RouteAudioPolicy {
         guard snapshot.isAirPlay else {
+            // Local HDMI: give the audio renderer a 0.5 s startup cushion. With 0 here
+            // the renderer plays the very first sample and immediately underruns if the
+            // read loop briefly stalls (which it does for ~10 s on 4K DV/HDR over HTTP
+            // while TCP and FFmpeg's HTTP buffer warm up). The cushion absorbs that
+            // warmup without changing steady-state behavior.
             return RouteAudioPolicy(
                 profile: .local,
                 useAudioPullMode: true,
-                audioPullStartBufferDuration: 0,
-                audioPullResumeBufferDuration: 0,
+                audioPullStartBufferDuration: 0.5,
+                audioPullResumeBufferDuration: 0.2,
                 targetOutputSampleRate: 0,
                 preferAudioEngineForPCM: false,
                 forceClientDecodeAllAudio: false,

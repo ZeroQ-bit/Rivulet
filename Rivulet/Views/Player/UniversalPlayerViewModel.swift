@@ -268,6 +268,20 @@ enum SeekIndicator: Equatable {
     }
 }
 
+/// Which detail section to show under the transport scrubber.
+enum TransportDetailPanel: Equatable {
+    case info
+    case chapters
+}
+
+/// Top-level playback UI layer model for the custom cinematic shell.
+enum PlaybackOverlayLayer: Equatable {
+    case cleanPlayback
+    case transport
+    case infoDeck
+    case fullDetail
+}
+
 @MainActor
 final class UniversalPlayerViewModel: ObservableObject {
 
@@ -279,16 +293,23 @@ final class UniversalPlayerViewModel: ObservableObject {
     @Published private(set) var isBuffering = false
     @Published private(set) var errorMessage: String?
 
-    @Published var showControls = true
-    @Published var showInfoPanel = false
+    @Published var showControls = true {
+        didSet { syncOverlayLayerFromLegacyFlags() }
+    }
+    @Published var showInfoPanel = false {
+        didSet { syncOverlayLayerFromLegacyFlags() }
+    }
     @Published var isScrubbing = false
     @Published var showPausedPoster = false
     @Published var shouldDismiss = false  // Used to request player dismissal on tvOS
     @Published var compatibilityNotice: String?
+    @Published var transportDetailPanel: TransportDetailPanel = .info
+    @Published private(set) var overlayLayer: PlaybackOverlayLayer = .transport
 
     // MARK: - Seek Indicator State
     /// Shows a brief indicator when user taps left/right to skip 10 seconds
     @Published var seekIndicator: SeekIndicator?
+    @Published private(set) var scrubFeedbackIconName: String?
 
     // MARK: - Chapter Thumbnails
     private var chapterThumbnails: [Int: Data] = [:]  // index → image data
@@ -326,7 +347,9 @@ final class UniversalPlayerViewModel: ObservableObject {
     @Published private(set) var currentAudioTrackId: Int?
     @Published private(set) var currentSubtitleTrackId: Int?
     private var compatibilityNoticeTimer: Timer?
+    private var scrubFeedbackTimer: Timer?
     private nonisolated(unsafe) var userActivity: NSUserActivity?
+    private var isSyncingOverlayFlags = false
 
     // MARK: - Playback Settings Panel State (Column-based layout)
 
@@ -446,6 +469,21 @@ final class UniversalPlayerViewModel: ObservableObject {
             return "\(show) \(season)\(episode)"
         }
         return metadata.year.map { String($0) }
+    }
+
+    var chapters: [PlexChapter] {
+        (metadata.Chapter ?? []).sorted {
+            ($0.startTimeOffset ?? 0) < ($1.startTimeOffset ?? 0)
+        }
+    }
+
+    var currentChapter: PlexChapter? {
+        chapters.first { chapter in
+            guard let startMs = chapter.startTimeOffset else { return false }
+            let endMs = chapter.endTimeOffset ?? Int((duration > 0 ? duration : currentTime) * 1000)
+            let currentMs = Int(currentTime * 1000)
+            return currentMs >= startMs && currentMs < endMs
+        }
     }
 
     // MARK: - Private State
@@ -1093,13 +1131,9 @@ final class UniversalPlayerViewModel: ObservableObject {
                 self?.subtitleManager.addBitmapCue(cue)
             }
 
-            try await rp.load(route: plan.primary, startTime: startOffset)
-            rp.play()
-
-            playbackState = .playing
-            self.duration = rp.duration
-
-            // Observe RivuletPlayer state
+            // Observe RivuletPlayer state BEFORE load/play so we never miss the
+            // initial .playing transition (which is now driven by the pipeline
+            // after preroll completes, not by an optimistic local set).
             rp.playbackStatePublisher
                 .receive(on: DispatchQueue.main)
                 .sink { [weak self] state in
@@ -1122,6 +1156,14 @@ final class UniversalPlayerViewModel: ObservableObject {
                     self?.playbackState = .failed(.loadFailed(error.localizedDescription))
                 }
                 .store(in: &cancellables)
+
+            try await rp.load(route: plan.primary, startTime: startOffset)
+            rp.play()
+
+            // Don't optimistically set .playing here. RivuletPlayer publishes
+            // .playing once the pipeline reports it has actually begun (after
+            // preroll), keeping the loading view visible until video starts.
+            self.duration = rp.duration
 
             updateTrackLists()
             preloadThumbnails()
@@ -1157,6 +1199,7 @@ final class UniversalPlayerViewModel: ObservableObject {
     }
 
     private func handleRivuletStateChange(_ state: UniversalPlaybackState) {
+        let previous = playbackState
         switch state {
         case .playing:
             playbackState = .playing
@@ -1171,6 +1214,11 @@ final class UniversalPlayerViewModel: ObservableObject {
             break
         default:
             break
+        }
+        if playbackState != previous {
+            print("[StartupTrace] playbackState \(previous) → \(playbackState) (rivulet=\(state))")
+        } else {
+            print("[StartupTrace] playbackState unchanged (rivulet=\(state), state=\(playbackState))")
         }
     }
 
@@ -2158,6 +2206,85 @@ final class UniversalPlayerViewModel: ObservableObject {
         focusedRowIndex = 0
     }
 
+    func setOverlayLayer(_ layer: PlaybackOverlayLayer) {
+        overlayLayer = layer
+        isSyncingOverlayFlags = true
+        switch layer {
+        case .cleanPlayback:
+            showControls = false
+            showInfoPanel = false
+        case .transport, .infoDeck:
+            showControls = true
+            showInfoPanel = false
+        case .fullDetail:
+            showControls = true
+            showInfoPanel = true
+        }
+        isSyncingOverlayFlags = false
+    }
+
+    func showTransportLayerTemporarily() {
+        if overlayLayer == .fullDetail || overlayLayer == .infoDeck {
+            return
+        }
+        setOverlayLayer(.transport)
+        startControlsHideTimer()
+    }
+
+    func openInfoDeck(panel: TransportDetailPanel = .info) {
+        transportDetailPanel = panel
+        controlsTimer?.invalidate()
+        setOverlayLayer(.infoDeck)
+    }
+
+    func openFullDetail(focusedColumn: Int = 0) {
+        resetSettingsPanel()
+        self.focusedColumn = max(0, min(1, focusedColumn))
+        setOverlayLayer(.fullDetail)
+    }
+
+    /// Handles layered back navigation. Returns true if handled in-place.
+    func handleBackInOverlayStack() -> Bool {
+        if isScrubbing {
+            cancelScrub()
+            return true
+        }
+
+        switch overlayLayer {
+        case .fullDetail:
+            setOverlayLayer(.infoDeck)
+            return true
+        case .infoDeck:
+            setOverlayLayer(.transport)
+            startControlsHideTimer()
+            return true
+        case .transport:
+            setOverlayLayer(.cleanPlayback)
+            return true
+        case .cleanPlayback:
+            return false
+        }
+    }
+
+    func activateTransportDetailPanel(_ panel: TransportDetailPanel) {
+        transportDetailPanel = panel
+        if overlayLayer == .cleanPlayback {
+            setOverlayLayer(.transport)
+        }
+    }
+
+    func seekToChapter(_ chapter: PlexChapter) {
+        guard let startMs = chapter.startTimeOffset else { return }
+        Task {
+            await seek(to: TimeInterval(startMs) / 1000.0)
+        }
+    }
+
+    func chapterThumbnail(for chapter: PlexChapter) -> UIImage? {
+        guard let index = chapter.index, let data = chapterThumbnails[index] else { return nil }
+        return UIImage(data: data)
+    }
+
     func seek(to time: TimeInterval) async {
         if let rp = rivuletPlayer {
             await rp.seek(to: time)
@@ -2227,6 +2354,7 @@ final class UniversalPlayerViewModel: ObservableObject {
     func scrubInDirection(forward: Bool) {
         hidePausedPoster()
         let direction = forward ? 1 : -1
+        showScrubFeedbackIcon(forward ? "goforward.10" : "gobackward.10")
 
         if !isScrubbing {
             // Start scrubbing
@@ -2279,9 +2407,15 @@ final class UniversalPlayerViewModel: ObservableObject {
 
     /// Update scrub position by a relative amount (for swipe gestures)
     /// - Parameter seconds: Amount to seek (positive = forward, negative = backward)
-    func updateSwipeScrubPosition(by seconds: TimeInterval) {
+    func updateSwipeScrubPosition(
+        by seconds: TimeInterval,
+        source: PlaybackInputSource = .swiftUICommand
+    ) {
         if !isScrubbing {
             startSwipeScrubbing()
+        }
+        if source == .siriMicroGamepad {
+            showScrubFeedbackIcon(seconds >= 0 ? "arrow.clockwise" : "arrow.counterclockwise")
         }
         scrubTime = max(0, min(duration, scrubTime + seconds))
         loadThumbnail(for: scrubTime)
@@ -2294,6 +2428,7 @@ final class UniversalPlayerViewModel: ObservableObject {
         // ~10 seconds per full rotation (2π radians), so ~1.6 seconds per radian
         let secondsPerRadian: TimeInterval = 10.0
         let seekDelta = TimeInterval(radians) * secondsPerRadian
+        showScrubFeedbackIcon(seekDelta >= 0 ? "arrow.clockwise" : "arrow.counterclockwise")
 
         if !isScrubbing {
             hidePausedPoster()
@@ -2329,6 +2464,7 @@ final class UniversalPlayerViewModel: ObservableObject {
             scrubSpeed = 0
             scrubStartTime = nil
             scrubThumbnail = nil
+            hideScrubFeedbackIcon()
         }
     }
 
@@ -2339,6 +2475,7 @@ final class UniversalPlayerViewModel: ObservableObject {
         scrubStartTime = nil
         scrubTime = currentTime
         scrubThumbnail = nil
+        hideScrubFeedbackIcon()
         startControlsHideTimer()
     }
 
@@ -2355,6 +2492,26 @@ final class UniversalPlayerViewModel: ObservableObject {
     private func stopScrubTimer() {
         scrubTimer?.invalidate()
         scrubTimer = nil
+    }
+
+    private func showScrubFeedbackIcon(_ systemName: String) {
+        scrubFeedbackTimer?.invalidate()
+        withAnimation(.easeOut(duration: 0.12)) {
+            scrubFeedbackIconName = systemName
+        }
+        scrubFeedbackTimer = Timer.scheduledTimer(withTimeInterval: 1.2, repeats: false) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.hideScrubFeedbackIcon()
+            }
+        }
+    }
+
+    private func hideScrubFeedbackIcon() {
+        scrubFeedbackTimer?.invalidate()
+        scrubFeedbackTimer = nil
+        withAnimation(.easeOut(duration: 0.2)) {
+            scrubFeedbackIconName = nil
+        }
     }
 
     private func updateScrubFromTimer() {
@@ -2826,8 +2983,7 @@ final class UniversalPlayerViewModel: ObservableObject {
     // MARK: - Controls Visibility
 
     func showControlsTemporarily() {
-        showControls = true
-        startControlsHideTimer()
+        showTransportLayerTemporarily()
     }
 
     private func startControlsHideTimer() {
@@ -2837,11 +2993,31 @@ final class UniversalPlayerViewModel: ObservableObject {
             let isPlaying = self.playbackState == .playing
             Task { @MainActor [weak self] in
                 guard let self, isPlaying else { return }
+                guard self.overlayLayer == .transport else { return }
+                guard !self.isScrubbing else { return }
                 withAnimation(.easeOut(duration: 0.3)) {
-                    self.showControls = false
+                    self.setOverlayLayer(.cleanPlayback)
                 }
             }
         }
+    }
+
+    private func syncOverlayLayerFromLegacyFlags() {
+        guard !isSyncingOverlayFlags else { return }
+
+        if showInfoPanel {
+            overlayLayer = .fullDetail
+            return
+        }
+
+        if showControls {
+            if overlayLayer != .infoDeck {
+                overlayLayer = .transport
+            }
+            return
+        }
+
+        overlayLayer = .cleanPlayback
     }
 
     // MARK: - Compatibility Notice
@@ -3668,6 +3844,7 @@ final class UniversalPlayerViewModel: ObservableObject {
         countdownTimer?.invalidate()
         seekIndicatorTimer?.invalidate()
         introSkipCountdownTimer?.invalidate()
+        scrubFeedbackTimer?.invalidate()
         if let observer = appBackgroundObserver {
             NotificationCenter.default.removeObserver(observer)
         }

@@ -31,6 +31,7 @@ struct TVSidebarView: View {
     @State private var showWhatsNew = false
     @State private var whatsNewVersion = ""
     @State private var deepLinkDetailItem: PlexMetadata?
+    @State private var musicLibraryEntryToken = UUID()
 
     @Namespace private var contentNamespace
     @Environment(\.resetFocus) private var resetFocus
@@ -76,6 +77,9 @@ struct TVSidebarView: View {
             nestedNavState.isNested = false
             nestedNavState.goBackAction = nil
             previousTab = newTab
+            if isMusicLibraryTab(newTab) {
+                musicLibraryEntryToken = UUID()
+            }
         }
         // Reset tab selection when live TV source mode changes
         .onChange(of: combineLiveTVSources) { _, combined in
@@ -299,7 +303,8 @@ struct TVSidebarView: View {
                 case .library(let key):
                     if let lib = dataStore.libraries.first(where: { $0.key == key }) {
                         if lib.isMusicLibrary {
-                            MusicHomeView(libraryKey: lib.key, libraryTitle: lib.title)
+                                MusicHomeView(libraryKey: lib.key, libraryTitle: lib.title)
+                                    .id("\(lib.key)-\(musicLibraryEntryToken.uuidString)")
                         } else {
                             PlexLibraryView(libraryKey: lib.key, libraryTitle: lib.title)
                         }
@@ -356,6 +361,11 @@ struct TVSidebarView: View {
         case .dispatcharr: return "antenna.radiowaves.left.and.right"
         case .genericM3U: return "list.bullet.rectangle"
         }
+    }
+
+    private func isMusicLibraryTab(_ tab: SidebarTab) -> Bool {
+        guard case .library(let key) = tab else { return false }
+        return dataStore.libraries.first(where: { $0.key == key })?.isMusicLibrary ?? false
     }
 
     // MARK: - Deep Link Player

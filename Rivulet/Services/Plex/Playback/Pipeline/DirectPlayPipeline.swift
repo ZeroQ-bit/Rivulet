@@ -91,6 +91,89 @@ private final class AudioBufferGate: @unchecked Sendable {
     }
 }
 
+/// Backpressure gate for queued raw video packets headed to the video processing
+/// task. The read loop reserves a slot when yielding a packet; the video task
+/// decrements after processing (DV conversion → sample buffer → enqueueVideo →
+/// post-enqueue MainActor block). When pending exceeds 90% of `limit` we treat
+/// the gate as "approaching limit" and the read loop pre-emptively sheds
+/// non-keyframes — this avoids ever filling the gate enough to require dropping
+/// a keyframe (which would cause cascading decode artifacts until the next IDR).
+private final class VideoBufferGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var pending = 0
+    private var dropped = 0
+    private var keyframesDropped = 0
+    private var maxPending = 0
+    let limit: Int
+
+    init(limit: Int) {
+        self.limit = limit
+    }
+
+    /// Attempts to reserve one queue slot and updates queue diagnostics.
+    func reserveSlot() -> (accepted: Bool, depth: Int, dropped: Int) {
+        lock.lock()
+        defer { lock.unlock() }
+
+        let depth = pending
+        if depth > maxPending {
+            maxPending = depth
+        }
+
+        if depth >= limit {
+            dropped += 1
+            return (accepted: false, depth: depth, dropped: dropped)
+        }
+
+        pending += 1
+        return (accepted: true, depth: depth, dropped: dropped)
+    }
+
+    func completeOne() {
+        lock.lock()
+        defer { lock.unlock() }
+        if pending > 0 {
+            pending -= 1
+        }
+    }
+
+    /// Returns true when the gate is at or above 90% capacity. The read loop
+    /// uses this to shed non-keyframes pre-emptively before the hard limit.
+    func isApproachingLimit() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return pending * 10 >= limit * 9
+    }
+
+    /// Records that a keyframe was dropped after the brief blocking wait
+    /// failed to free a slot. Should be very rare; if not, the gate is undersized.
+    func recordKeyframeDrop() {
+        lock.lock()
+        defer { lock.unlock() }
+        keyframesDropped += 1
+    }
+
+    func snapshot() -> (pending: Int, dropped: Int, maxPending: Int, keyframesDropped: Int) {
+        lock.lock()
+        defer { lock.unlock() }
+        return (
+            pending: pending,
+            dropped: dropped,
+            maxPending: maxPending,
+            keyframesDropped: keyframesDropped
+        )
+    }
+}
+
+/// Payload yielded from the read loop to the video processing task. Wraps a
+/// raw `DemuxedPacket` plus the read-time metadata needed for ordering and
+/// timing diagnostics.
+private struct VideoTaskPayload: @unchecked Sendable {
+    let packet: DemuxedPacket
+    let videoPacketIndex: Int      // counter assigned by the read loop
+    let frameWallStart: CFAbsoluteTime  // wall-clock when read loop saw the packet
+}
+
 /// Direct play pipeline: FFmpegDemuxer → CMSampleBuffer → SampleBufferRenderer
 @MainActor
 final class DirectPlayPipeline {
@@ -176,10 +259,20 @@ final class DirectPlayPipeline {
 
     private var readTask: Task<Void, Never>?
     private var audioEnqueueTask: Task<Void, Never>?
+    /// Detached consumer task that drains raw video packets from the read loop,
+    /// performs DV conversion + sample-buffer creation + late-frame detection +
+    /// `renderer.enqueueVideo`, and runs the post-enqueue MainActor state hop.
+    /// Decoupled from the read loop so display-layer backpressure / lookahead
+    /// pacing / DV conversion CPU spikes never block the FFmpeg packet reads
+    /// (which would also stop audio packet reads and starve the audio renderer).
+    private var videoEnqueueTask: Task<Void, Never>?
     private var isPlaying = false
     private var playbackRate: Float = 1.0
     private var needsInitialSync = false
     private var needsRateRestoreAfterSeek = false
+    /// When true, the most recent fresh start() deferred its onStateChange?(.running)
+    /// emission until preroll completes. Cleared once the running state is published.
+    private var deferRunningStateChange = false
     private var streamURL: URL?
     private var lastRequestedSeekTime: TimeInterval = -1
     private var lastSeekWallTime: CFAbsoluteTime = 0
@@ -254,13 +347,20 @@ final class DirectPlayPipeline {
               "videoFD=\(demuxer.videoFormatDescription != nil), " +
               "audioFD=\(demuxer.audioFormatDescription != nil)")
 
-        // Set DV lookahead AFTER opening demuxer so we use FFmpeg-detected DV state,
-        // not just the caller's hint (which may be wrong for P8 with profile=-1 metadata).
-        if demuxer.hasDolbyVision || enableDVConversion || isDolbyVision {
-            renderer.maxVideoLookahead = 0.6
-        } else {
-            renderer.maxVideoLookahead = 0.35
-        }
+        // Lookahead controls how far the video processing task is allowed to get
+        // ahead of the playback clock before `renderer.enqueueVideo` blocks on
+        // its internal pacing loop. Since per-frame video work is now on a
+        // dedicated consumer task (see `videoEnqueueTask`), backpressure from
+        // this lookahead OR from `displayLayer.isReadyForMoreMediaData` only
+        // blocks the consumer task — the FFmpeg read loop continues pulling
+        // packets and audio reads stay flowing.
+        //
+        // 10s gives the consumer task room to absorb ~5–7s of network stalls
+        // before the lookahead pacing kicks in. The display layer's own
+        // internal queue caps end-to-end buffering at ~3–5s of 4K HEVC anyway,
+        // so the consumer always blocks on the display layer first; this is
+        // primarily a safety net.
+        renderer.maxVideoLookahead = 10.0
         print("[DirectPlay] Renderer lookahead set to \(String(format: "%.1f", renderer.maxVideoLookahead))s")
 
         // Set up DV format description and conversion
@@ -455,18 +555,23 @@ final class DirectPlayPipeline {
         isPlaying = true
         playbackRate = rate
         state = .running
-        onStateChange?(.running)
 
         if isResume {
             // Resume: read loop is already running and blocked on pacing (rate=0).
             // Just set the rate so the synchronizer advances and pacing unblocks.
             renderer.resumeAudio()
             renderer.setRate(rate)
+            onStateChange?(.running)
             print("[DirectPlay] resume (rate=\(rate))")
         } else {
-            // Fresh start: sync to first video frame's PTS
+            // Fresh start: sync to first video frame's PTS. Defer the .running
+            // emission until preroll actually completes so the player UI keeps
+            // showing the loading view (which covers the player layer) instead
+            // of revealing the first frame several seconds before audio begins.
             needsInitialSync = true
+            deferRunningStateChange = true
             print("[DirectPlay] start(rate=\(rate))")
+            print("[StartupTrace] start(): deferring .running emission until preroll completes")
             startReadLoop()
         }
     }
@@ -488,6 +593,10 @@ final class DirectPlayPipeline {
         print("[PlaybackHealth] EVENT=resume")
         state = .running
         onStateChange?(.running)
+        // resume() emits .running synchronously above; clear any leftover
+        // deferred flag from a paused-during-preroll fresh start so the
+        // preroll completion handler doesn't emit a duplicate .running.
+        deferRunningStateChange = false
 
         if readTask == nil {
             // Read loop exited after a paused seek (only a preview frame was shown).
@@ -504,8 +613,11 @@ final class DirectPlayPipeline {
 
     func stop() {
         isPlaying = false
+        deferRunningStateChange = false
         audioEnqueueTask?.cancel()
         audioEnqueueTask = nil
+        videoEnqueueTask?.cancel()
+        videoEnqueueTask = nil
         readTask?.cancel()
         readTask = nil
         audioEncoder?.close()
@@ -528,15 +640,23 @@ final class DirectPlayPipeline {
         isPlaying = false
 
         audioEnqueueTask?.cancel()
+        videoEnqueueTask?.cancel()
         readTask?.cancel()
 
         let oldAudioTask = audioEnqueueTask
+        let oldVideoTask = videoEnqueueTask
         let oldReadTask = readTask
         audioEnqueueTask = nil
+        videoEnqueueTask = nil
         readTask = nil
 
-        await oldAudioTask?.value
+        // The read loop is responsible for finishing the video stream's
+        // continuation before exiting; awaiting the read task here ensures
+        // the video task has been signalled to drain. We then await the
+        // video task itself for full deterministic shutdown.
         await oldReadTask?.value
+        await oldAudioTask?.value
+        await oldVideoTask?.value
 
         audioEncoder?.close()
         audioEncoder = nil
@@ -620,15 +740,21 @@ final class DirectPlayPipeline {
         state = .seeking
         renderer.jitterStats.reset()
 
-        // Cancel current read loop
+        // Cancel current read loop. The read loop is responsible for
+        // finishing the video stream's continuation before exiting, so
+        // awaiting the read task ensures the video task can drain.
         audioEnqueueTask?.cancel()
+        videoEnqueueTask?.cancel()
         let oldAudioTask = audioEnqueueTask
+        let oldVideoTask = videoEnqueueTask
         audioEnqueueTask = nil
+        videoEnqueueTask = nil
         readTask?.cancel()
         let oldTask = readTask
         readTask = nil
-        await oldAudioTask?.value
         await oldTask?.value
+        await oldAudioTask?.value
+        await oldVideoTask?.value
 
         // Flush renderer buffers and discard any batched/encoded audio
         renderer.flush()
@@ -646,6 +772,9 @@ final class DirectPlayPipeline {
         self.isPlaying = isPlaying
         needsInitialSync = false
         needsRateRestoreAfterSeek = isPlaying
+        // Seek has its own state machine (.seeking → .running) handled in the
+        // read loop; clear any deferred fresh-start emission to avoid duplicates.
+        deferRunningStateChange = false
 
         // Restart reading
         startReadLoop()
@@ -702,13 +831,17 @@ final class DirectPlayPipeline {
         // Stop the read loop — it captures audioDecoder/audioFD at startup,
         // so we must restart it to pick up the new decoder configuration.
         audioEnqueueTask?.cancel()
+        videoEnqueueTask?.cancel()
         let oldAudioTask = audioEnqueueTask
+        let oldVideoTask = videoEnqueueTask
         audioEnqueueTask = nil
+        videoEnqueueTask = nil
         readTask?.cancel()
         let oldTask = readTask
         readTask = nil
-        await oldAudioTask?.value
         await oldTask?.value
+        await oldAudioTask?.value
+        await oldVideoTask?.value
 
         // Flush audio, decoder, and encoder
         renderer.flush()
@@ -784,6 +917,8 @@ final class DirectPlayPipeline {
     private func startReadLoop() {
         audioEnqueueTask?.cancel()
         audioEnqueueTask = nil
+        videoEnqueueTask?.cancel()
+        videoEnqueueTask = nil
         readTask?.cancel()
         renderer.onAudioPrimedForPlayback = nil
 
@@ -827,10 +962,42 @@ final class DirectPlayPipeline {
             audioContinuation = continuation
 
             audioEnqueueTask = Task.detached {
+                // Throughput tracking so we can distinguish "audio task isn't
+                // being scheduled" from "audio task is scheduled but has no
+                // samples to consume" (network bottleneck).
+                var iterationsSinceLastLog = 0
+                var pullDirectHits = 0
+                var fallbackHits = 0
+                var lastLogWall = CFAbsoluteTimeGetCurrent()
+
                 for await sampleBuffer in stream {
                     guard !Task.isCancelled else { break }
-                    await renderer.enqueueAudio(sampleBuffer)
+                    // Try the nonisolated pull-mode fast path first. This
+                    // bypasses the @MainActor hop entirely so the audio
+                    // task can deliver samples even when the video task is
+                    // hogging MainActor on enqueueVideo backpressure waits.
+                    if renderer.enqueueAudioPullDirect(sampleBuffer) {
+                        pullDirectHits += 1
+                    } else {
+                        fallbackHits += 1
+                        await renderer.enqueueAudio(sampleBuffer)
+                    }
                     gate.completeOne()
+                    iterationsSinceLastLog += 1
+
+                    let now = CFAbsoluteTimeGetCurrent()
+                    if now - lastLogWall >= 2.0 {
+                        let elapsed = now - lastLogWall
+                        let rate = Double(iterationsSinceLastLog) / elapsed
+                        print("[AudioTaskThroughput] iter=\(iterationsSinceLastLog) " +
+                              "elapsed=\(String(format: "%.2f", elapsed))s " +
+                              "rate=\(String(format: "%.1f", rate))/s " +
+                              "direct=\(pullDirectHits) fallback=\(fallbackHits)")
+                        iterationsSinceLastLog = 0
+                        pullDirectHits = 0
+                        fallbackHits = 0
+                        lastLogWall = now
+                    }
                 }
             }
         }
@@ -848,62 +1015,91 @@ final class DirectPlayPipeline {
             print("[DirectPlay] Audio decode queue enabled (limit=\(gate.limit))")
         }
 
+        // Video processing decoupling. Mirror of the audio gate/stream pattern,
+        // but the consumer task does the entire per-frame video pipeline (DV
+        // conversion, sample buffer creation, late-frame check, enqueueVideo,
+        // post-enqueue MainActor hop, timing diagnostics) instead of just the
+        // enqueue. The read loop becomes a thin packet shuttler so nothing
+        // per-frame on the video side can stall audio packet reads.
+        //
+        // 144 frames ≈ 6 s at 24 fps ≈ ~38 MB of compressed 4K HEVC. The
+        // display layer's own internal queue caps end-to-end buffering well
+        // before this in normal operation; the gate is only here as a safety
+        // net for pathological backpressure.
+        let videoGateLocal = VideoBufferGate(limit: 144)
+        let (vStream, vContinuation) = AsyncStream<VideoTaskPayload>.makeStream(
+            bufferingPolicy: .unbounded
+        )
+        print("[DirectPlay] Video processing queue enabled (limit=\(videoGateLocal.limit))")
+
         let localAudioEnqueueTask = audioEnqueueTask
         let localAudioContinuation = audioContinuation
         let localAudioGate = audioGate
         let localAudioDecodeStream = audioDecodeStream
         let localAudioDecodeContinuation = audioDecodeContinuation
         let localAudioDecodeGate = audioDecodeGate
+        let localVideoGate = videoGateLocal
+        let localVideoContinuation = vContinuation
 
         print("[DirectPlay] Starting read loop (audioFD=\(audioFD != nil), hasDV=\(hasDV), conversion=\(requiresConversion))")
 
         let capturedLookahead = renderer.maxVideoLookahead
         let capturedContainer = streamURL?.pathExtension ?? "?"
 
-        readTask = Task.detached { [weak self] in
-            print("[DirectPlay] Read loop started on background thread")
-            print("[PlaybackHealth] CONFIG hasDV=\(hasDV) conversion=\(requiresConversion) " +
-                  "lookahead=\(String(format: "%.1f", capturedLookahead))s " +
-                  "audioDecoder=\(audioDecoder != nil) container=\(capturedContainer)")
-            var isFirstVideoFrame = true
-            var videoPacketCount = 0
-            var audioPacketCount = 0
+        // Late-frame detection thresholds — used by the video task. DV content
+        // needs more headroom because VT's DV decoder has higher variability.
+        let lateVideoDropThreshold: TimeInterval = hasDV ? 3.0 : 1.5
+        let forceLateResyncThreshold: TimeInterval = hasDV ? 8.0 : 4.0
+        let maxConsecutiveLateFramesBeforeResync = hasDV ? 120 : 48
+        let lateResyncCooldown: TimeInterval = hasDV ? 2.0 : 1.0
+        let softLateDropThreshold: TimeInterval = hasDV ? 3.0 : 2.0
+        let maxSoftLateDropsPerBurst = hasDV ? 24 : 12
+        let startupGracePeriod: TimeInterval = hasDV ? 60.0 : 15.0
+        let healthReportInterval: TimeInterval = 5.0
+
+        // ── Video processing task ──
+        // Drains raw video packets from the read loop and runs the entire
+        // per-frame pipeline (late-frame check → DV conversion → sample buffer →
+        // enqueueVideo → post-enqueue MainActor hop → timing/health diagnostics).
+        // All per-frame video state is task-local; nothing crosses the boundary
+        // back to the read loop except `videoGate.completeOne()`.
+        videoEnqueueTask = Task.detached { [weak self] in
+            // Task-local state (mirrors what used to live inside the read loop's
+            // video case)
+            var taskFirstFrame = true
+            var taskFramesProcessed = 0
             var conversionDisabled = false
-            let videoDiagStartWall = CFAbsoluteTimeGetCurrent()
-            var firstVideoPTSForDiag: TimeInterval?
-            var lastVideoWallTime: CFAbsoluteTime?
-            var maxVideoWallGapMs: Double = 0
-            var longVideoWallGaps = 0
+            // True once the post-enqueue state has been transitioned through
+            // .seeking → .running at least once. After that the per-frame state
+            // transition branch is skipped to save a MainActor hop per frame.
+            var hasObservedRunning = false
+
+            // Late-frame detection state
             var lateVideoObservationCount = 0
-            // Timing breakdown accumulators (reset every 120 frames)
-            var timingReadGapMs: Double = 0     // time between prev enqueue and current frame start (demux + audio dispatch)
-            var timingConversionMs: Double = 0  // DV conversion
-            var timingSampleMs: Double = 0      // CMSampleBuffer creation
-            var timingSyncMs: Double = 0        // MainActor sync prep
-            var timingEnqueueMs: Double = 0     // renderer enqueue (incl isReady wait)
-            var timingTotalMs: Double = 0       // total per-frame
-            var timingFrameCount: Int = 0
-            var lastVideoEnqueueEnd: CFAbsoluteTime = 0
             var lateVideoDropCount = 0
             var lateVideoSoftDropCount = 0
             var consecutiveLateVideoFrames = 0
             var lateVideoResyncCount = 0
             var lastLateVideoResyncWall: CFAbsoluteTime = 0
-            // HTTP streaming pipelines need ramp-up time. Aggressive drop/resync cascades
-            // during startup flush the decode pipeline repeatedly, creating a death spiral
-            // that prevents the pipeline from reaching steady-state throughput.
-            // DV content needs extra headroom due to VT's DV decoder variability.
-            let lateVideoDropThreshold: TimeInterval = hasDV ? 3.0 : 1.5
-            let forceLateResyncThreshold: TimeInterval = hasDV ? 8.0 : 4.0
-            let maxConsecutiveLateFramesBeforeResync = hasDV ? 120 : 48 // 2s at 24fps
-            let lateResyncCooldown: TimeInterval = hasDV ? 2.0 : 1.0
-            let softLateDropThreshold: TimeInterval = hasDV ? 3.0 : 2.0
-            let maxSoftLateDropsPerBurst = hasDV ? 24 : 12
+
+            // Timing accumulators (reset every 120 frames)
+            var timingReadGapMs: Double = 0
+            var timingConversionMs: Double = 0
+            var timingSampleMs: Double = 0
+            var timingSyncMs: Double = 0
+            var timingEnqueueMs: Double = 0
+            var timingTotalMs: Double = 0
+            var timingFrameCount: Int = 0
+            var lastVideoEnqueueEnd: CFAbsoluteTime = 0
+
+            // Wall-clock cadence tracking
+            var lastVideoWallTime: CFAbsoluteTime?
+            var maxVideoWallGapMs: Double = 0
+            var longVideoWallGaps = 0
             var slowVideoPipelineCount = 0
 
-            // Health report state (emits every 5s)
+            // Health report state
             var lastHealthReportWall: CFAbsoluteTime = 0
-            let healthReportInterval: TimeInterval = 5.0
             var healthLateFramesSinceReport = 0
             var healthDropsSinceReport = 0
             var healthResyncsSinceReport = 0
@@ -912,6 +1108,415 @@ final class DirectPlayPipeline {
             var healthLastPullDeliveries = 0
             var healthLastPeriodPTS: TimeInterval = 0
             var healthLastPeriodWall: CFAbsoluteTime = 0
+
+            var firstVideoPTSForDiag: TimeInterval?
+            let videoTaskStartWall = CFAbsoluteTimeGetCurrent()
+
+            for await payload in vStream {
+                if Task.isCancelled { break }
+
+                let packet = payload.packet
+                let frameWallStart = payload.frameWallStart
+                let videoPacketIndex = payload.videoPacketIndex
+                let ptsSeconds = packet.ptsSeconds
+
+                if firstVideoPTSForDiag == nil {
+                    firstVideoPTSForDiag = ptsSeconds
+                    healthLastPeriodPTS = ptsSeconds
+                    healthLastPeriodWall = frameWallStart
+                    lastHealthReportWall = frameWallStart
+                }
+
+                // 1. Late-frame check.
+                // Uses the CURRENT renderer.currentTime (after any time spent
+                // in the gate / earlier task work), so it reflects what's
+                // actually about to be enqueued — more accurate than checking
+                // at read time.
+                let elapsedSinceTaskStart = CFAbsoluteTimeGetCurrent() - videoTaskStartWall
+                let inGracePeriod = elapsedSinceTaskStart < startupGracePeriod
+
+                var droppedThisIteration = false
+
+                if !taskFirstFrame && !inGracePeriod {
+                    // renderer.currentTime is nonisolated — no MainActor hop needed.
+                    let syncTime = renderer.currentTime
+                    let lateness = syncTime - ptsSeconds
+                    if lateness > lateVideoDropThreshold {
+                        lateVideoObservationCount += 1
+                        healthLateFramesSinceReport += 1
+                        consecutiveLateVideoFrames += 1
+
+                        let nowWall = CFAbsoluteTimeGetCurrent()
+                        let keyframeResyncThreshold = hasDV ? 48 : 4
+                        let wantsKeyframeResync = packet.isKeyframe && consecutiveLateVideoFrames >= keyframeResyncThreshold
+                        let wantsForcedResync = lateness > forceLateResyncThreshold ||
+                            consecutiveLateVideoFrames >= maxConsecutiveLateFramesBeforeResync
+                        let canResync = nowWall - lastLateVideoResyncWall >= lateResyncCooldown
+                        var didResync = false
+
+                        if (wantsKeyframeResync || wantsForcedResync) && canResync {
+                            let resyncRate = await MainActor.run { [weak self] in
+                                guard let self else { return Float?.none }
+                                let rate = self.isPlaying ? self.playbackRate : Float(0)
+                                renderer.setRate(rate, time: packet.cmPTS)
+                                return rate
+                            }
+
+                            if let resyncRate {
+                                lateVideoResyncCount += 1
+                                healthResyncsSinceReport += 1
+                                lastLateVideoResyncWall = nowWall
+
+                                if lateVideoResyncCount <= 10 || lateVideoResyncCount % 60 == 0 {
+                                    print("[DirectPlayDiag] Late-video resync #\(lateVideoResyncCount): " +
+                                          "rate=\(String(format: "%.2f", resyncRate)) " +
+                                          "pts=\(String(format: "%.3f", ptsSeconds))s " +
+                                          "sync=\(String(format: "%.3f", syncTime))s " +
+                                          "lateness=\(String(format: "%.0f", lateness * 1000))ms " +
+                                          "lateBurst=\(consecutiveLateVideoFrames) keyframe=\(packet.isKeyframe)")
+                                }
+                                consecutiveLateVideoFrames = 0
+                                didResync = true
+                            }
+                        }
+
+                        if !didResync {
+                            let shouldSoftDrop = !packet.isKeyframe &&
+                                lateness >= softLateDropThreshold &&
+                                consecutiveLateVideoFrames <= maxSoftLateDropsPerBurst
+
+                            if shouldSoftDrop {
+                                lateVideoDropCount += 1
+                                lateVideoSoftDropCount += 1
+                                healthDropsSinceReport += 1
+                                if lateVideoSoftDropCount <= 10 || lateVideoSoftDropCount % 120 == 0 {
+                                    print("[DirectPlayDiag] Soft drop late video #\(lateVideoSoftDropCount): " +
+                                          "pts=\(String(format: "%.3f", ptsSeconds))s " +
+                                          "sync=\(String(format: "%.3f", syncTime))s " +
+                                          "lateness=\(String(format: "%.0f", lateness * 1000))ms " +
+                                          "burst=\(consecutiveLateVideoFrames) keyframe=\(packet.isKeyframe)")
+                                }
+                                droppedThisIteration = true
+                            } else if lateVideoObservationCount <= 10 || lateVideoObservationCount % 120 == 0 {
+                                print("[DirectPlayDiag] Late video frame #\(lateVideoObservationCount): " +
+                                      "pts=\(String(format: "%.3f", ptsSeconds))s " +
+                                      "sync=\(String(format: "%.3f", syncTime))s " +
+                                      "lateness=\(String(format: "%.0f", lateness * 1000))ms " +
+                                      "burst=\(consecutiveLateVideoFrames) keyframe=\(packet.isKeyframe)")
+                            }
+                        }
+
+                        // Emergency hard drop for extremely stale frames
+                        if !droppedThisIteration && lateness > 4.0 {
+                            lateVideoDropCount += 1
+                            healthDropsSinceReport += 1
+                            if lateVideoDropCount <= 10 || lateVideoDropCount % 60 == 0 {
+                                print("[DirectPlayDiag] Emergency drop #\(lateVideoDropCount): " +
+                                      "pts=\(String(format: "%.3f", ptsSeconds))s " +
+                                      "sync=\(String(format: "%.3f", syncTime))s " +
+                                      "lateness=\(String(format: "%.0f", lateness * 1000))ms")
+                            }
+                            droppedThisIteration = true
+                        }
+                    } else if consecutiveLateVideoFrames > 0 {
+                        if consecutiveLateVideoFrames >= 8 {
+                            print("[DirectPlayDiag] Late-video burst recovered after \(consecutiveLateVideoFrames) frames")
+                        }
+                        consecutiveLateVideoFrames = 0
+                    }
+                }
+
+                if droppedThisIteration {
+                    videoGateLocal.completeOne()
+                    taskFirstFrame = false
+                    taskFramesProcessed += 1
+                    continue
+                }
+
+                // 2. DV conversion (RPU + EL strip; ~0.7 ms/frame for P8 direct,
+                //    can be 10–50 ms/frame for P7 conversion)
+                let conversionStart = CFAbsoluteTimeGetCurrent()
+                var packetData = packet.data
+                if requiresConversion && !conversionDisabled, let converter = profileConverter {
+                    packetData = converter.processVideoSample(packetData)
+
+                    if converter.framesConverted == 48 {
+                        if !converter.canSustainRealTime() {
+                            conversionDisabled = true
+                            print("[DirectPlay] DV conversion too slow " +
+                                  "(avg=\(String(format: "%.1f", converter.averageConversionTimeMs))ms/frame, " +
+                                  "budget=41.7ms), switching to HDR10 passthrough")
+                        } else {
+                            print("[DirectPlay] DV conversion sustaining realtime " +
+                                  "(avg=\(String(format: "%.1f", converter.averageConversionTimeMs))ms/frame)")
+                        }
+                    }
+                }
+                let conversionEnd = CFAbsoluteTimeGetCurrent()
+
+                // 3. Sample buffer creation
+                let sampleCreateStart = CFAbsoluteTimeGetCurrent()
+                let processedPacket = DemuxedPacket(
+                    streamIndex: packet.streamIndex,
+                    trackType: packet.trackType,
+                    data: packetData,
+                    pts: packet.pts, dts: packet.dts,
+                    duration: packet.duration,
+                    timebase: packet.timebase,
+                    isKeyframe: packet.isKeyframe
+                )
+                let effectiveVideoFD = hasDV ? (demuxer.videoFormatDescription ?? videoFD) : videoFD
+                let sampleBuffer: CMSampleBuffer
+                do {
+                    sampleBuffer = try demuxer.createVideoSampleBuffer(
+                        from: processedPacket,
+                        formatDescription: effectiveVideoFD
+                    )
+                } catch {
+                    print("[DirectPlay] Failed to create video sample buffer for frame \(videoPacketIndex): \(error)")
+                    videoGateLocal.completeOne()
+                    taskFirstFrame = false
+                    taskFramesProcessed += 1
+                    continue
+                }
+                let sampleCreateEnd = CFAbsoluteTimeGetCurrent()
+
+                // 4-6. Combined MainActor entry: jitter stats + enqueueVideo +
+                //      post-enqueue state. Folded into a single hop to halve
+                //      MainActor entries from 3 to 1 per frame (reduces audio
+                //      task starvation under contention). The seek→running
+                //      transition only fires once per playback session, so
+                //      after the first observed-running frame we skip its
+                //      branch entirely. The display-layer-error check is
+                //      cheap and stays inside the hop.
+                let syncPrepStart = CFAbsoluteTimeGetCurrent()
+                let needsSeekToRunningTransition = !hasObservedRunning
+                let displayErrorReport: String? = await MainActor.run { [weak self] () -> String? in
+                    renderer.jitterStats.recordVideoPTS(ptsSeconds)
+                    if needsSeekToRunningTransition, let self {
+                        if self.state == .seeking && self.isPlaying {
+                            self.state = .running
+                            self.onStateChange?(.running)
+                        }
+                    }
+                    return renderer.displayLayerError?.localizedDescription
+                }
+                let syncPrepEnd = CFAbsoluteTimeGetCurrent()
+                let mainActorHopMs = (syncPrepEnd - syncPrepStart) * 1000
+
+                if displayErrorReport != nil {
+                    print("[DirectPlay] Display layer error after frame \(videoPacketIndex): \(displayErrorReport ?? "unknown")")
+                    healthDisplayErrorsSinceReport += 1
+                }
+
+                // 5. Enqueue. May block on lookahead pacing or display layer
+                //    backpressure — but only blocks THIS task, not the read loop.
+                let enqueueStart = CFAbsoluteTimeGetCurrent()
+                await renderer.enqueueVideo(sampleBuffer, bypassLookahead: false)
+                let enqueueEnd = CFAbsoluteTimeGetCurrent()
+                let enqueueOnlyMs = (enqueueEnd - enqueueStart) * 1000
+                let enqueueMs = (enqueueEnd - syncPrepStart) * 1000
+                if enqueueMs > 100 {
+                    print("[VideoTask] enqueue stall=\(String(format: "%.0f", enqueueMs))ms mainActorHop=\(String(format: "%.0f", mainActorHopMs))ms enqueueVideo=\(String(format: "%.0f", enqueueOnlyMs))ms frame=\(videoPacketIndex) pts=\(String(format: "%.3f", ptsSeconds))s")
+                }
+
+                // After the first frame is enqueued post-preroll, the pipeline
+                // is in .running. Skip the state-transition branch on subsequent
+                // frames so we don't hop into MainActor for a no-op check.
+                hasObservedRunning = true
+
+                // 7. Timing accumulators
+                let totalPipelineMs = (enqueueEnd - frameWallStart) * 1000
+                if totalPipelineMs > 120 {
+                    slowVideoPipelineCount += 1
+                    healthSlowFramesSinceReport += 1
+                }
+
+                if lastVideoEnqueueEnd > 0 {
+                    timingReadGapMs += (frameWallStart - lastVideoEnqueueEnd) * 1000
+                }
+                timingConversionMs += (conversionEnd - conversionStart) * 1000
+                timingSampleMs += (sampleCreateEnd - sampleCreateStart) * 1000
+                timingSyncMs += (syncPrepEnd - syncPrepStart) * 1000
+                timingEnqueueMs += enqueueMs
+                timingTotalMs += totalPipelineMs
+                timingFrameCount += 1
+                lastVideoEnqueueEnd = enqueueEnd
+
+                if timingFrameCount == 120 {
+                    let n = Double(timingFrameCount)
+                    print("[DirectPlayTiming] \(timingFrameCount)f avg: " +
+                          "readGap=\(String(format: "%.1f", timingReadGapMs/n))ms " +
+                          "convert=\(String(format: "%.1f", timingConversionMs/n))ms " +
+                          "sample=\(String(format: "%.1f", timingSampleMs/n))ms " +
+                          "sync=\(String(format: "%.1f", timingSyncMs/n))ms " +
+                          "enqueue=\(String(format: "%.1f", timingEnqueueMs/n))ms " +
+                          "total=\(String(format: "%.1f", timingTotalMs/n))ms " +
+                          "budget=\(String(format: "%.1f", 1000.0/24.0))ms")
+                    timingReadGapMs = 0; timingConversionMs = 0; timingSampleMs = 0
+                    timingSyncMs = 0; timingEnqueueMs = 0; timingTotalMs = 0
+                    timingFrameCount = 0
+                }
+
+                // 8. Wall-clock cadence tracking
+                let nowWall = CFAbsoluteTimeGetCurrent()
+                if let prev = lastVideoWallTime {
+                    let wallGapMs = (nowWall - prev) * 1000
+                    if wallGapMs > maxVideoWallGapMs {
+                        maxVideoWallGapMs = wallGapMs
+                    }
+                    if wallGapMs > 120 {
+                        longVideoWallGaps += 1
+                    }
+                }
+                lastVideoWallTime = nowWall
+
+                // 9. Periodic [DirectPlayDiag] (every 240 task frames)
+                taskFramesProcessed += 1
+                if taskFramesProcessed % 240 == 0 {
+                    // renderer.currentTime is nonisolated — no MainActor hop needed
+                    let syncTime = renderer.currentTime
+                    let syncMinusPTS = (syncTime - ptsSeconds) * 1000
+                    let elapsedWall = nowWall - videoTaskStartWall
+                    let streamElapsed = firstVideoPTSForDiag.map { ptsSeconds - $0 } ?? 0
+                    let playbackRateVsWall = elapsedWall > 0 ? (streamElapsed / elapsedWall) : 0
+                    let audioSnapshot = audioGate?.snapshot()
+                    let audioDecodeSnapshot = audioDecodeGate?.snapshot()
+                    let videoSnapshot = videoGateLocal.snapshot()
+                    let audioQueueDepth = audioSnapshot?.pending ?? -1
+                    let audioQueueMaxDepth = audioSnapshot?.maxPending ?? -1
+                    let audioQueueDrops = audioSnapshot?.dropped ?? -1
+                    let audioDecodeQueueDepth = audioDecodeSnapshot?.pending ?? -1
+                    let audioDecodeQueueMaxDepth = audioDecodeSnapshot?.maxPending ?? -1
+                    let audioDecodeQueueDrops = audioDecodeSnapshot?.dropped ?? -1
+
+                    print(
+                        "[DirectPlayDiag] v=\(videoPacketIndex) " +
+                        "pts=\(String(format: "%.3f", ptsSeconds))s sync=\(String(format: "%.3f", syncTime))s " +
+                        "sync-pts=\(String(format: "%.0f", syncMinusPTS))ms " +
+                        "media/wall=\(String(format: "%.3f", playbackRateVsWall))x " +
+                        "audioQ=\(audioQueueDepth) maxGap=\(String(format: "%.0f", maxVideoWallGapMs))ms " +
+                        "videoQ=\(videoSnapshot.pending) maxVideoQ=\(videoSnapshot.maxPending) " +
+                        "videoDrops=\(videoSnapshot.dropped) videoKfDrops=\(videoSnapshot.keyframesDropped) " +
+                        "maxAudioQ=\(audioQueueMaxDepth) audioQDrops=\(audioQueueDrops) " +
+                        "audioDecQ=\(audioDecodeQueueDepth) maxAudioDecQ=\(audioDecodeQueueMaxDepth) " +
+                        "audioDecDrops=\(audioDecodeQueueDrops) " +
+                        "longGaps=\(longVideoWallGaps) lateObs=\(lateVideoObservationCount) " +
+                        "lateDrops=\(lateVideoDropCount) lateSoftDrops=\(lateVideoSoftDropCount) " +
+                        "lateBurst=\(consecutiveLateVideoFrames) " +
+                        "lateResyncs=\(lateVideoResyncCount) slowFrames=\(slowVideoPipelineCount)"
+                    )
+                }
+
+                // 10. Periodic [PlaybackHealth] (every 5s wall time)
+                if nowWall - lastHealthReportWall >= healthReportInterval {
+                    let periodWall = nowWall - healthLastPeriodWall
+                    let periodStream = ptsSeconds - healthLastPeriodPTS
+                    let wallRate = periodWall > 0 ? (periodStream / periodWall) : 1.0
+                    let audioSnapshot = audioGate?.snapshot()
+                    let audioDrops = audioSnapshot?.dropped ?? 0
+                    let capturedLate = healthLateFramesSinceReport
+                    let capturedDrops = healthDropsSinceReport
+                    let capturedResyncs = healthResyncsSinceReport
+                    let capturedSlow = healthSlowFramesSinceReport
+                    let capturedDispErr = healthDisplayErrorsSinceReport
+
+                    let isClientDecode = audioDecoder != nil
+                    let healthResult = await MainActor.run { [weak self] () -> (line: String, totalPullDel: Int)? in
+                        guard let self else { return nil }
+                        let jitter = self.renderer.jitterStats.healthSnapshot()
+                        let status = Int(self.renderer.audioRenderer.status.rawValue)
+                        let isPull = self.renderer.useAudioPullMode
+                        let syncTime = self.renderer.currentTime
+                        let audioAhead = ptsSeconds - syncTime
+                        let dispErr = (self.renderer.displayLayerError != nil ? 1 : 0) + capturedDispErr
+                        let totalPullDel = self.renderer.totalAudioPullDeliveries
+                        let pullDel = totalPullDel - healthLastPullDeliveries
+                        let isAirPlay = PlaybackAudioSessionConfigurator.isAirPlayRouteActive()
+                        let report = PlaybackHealthReport(
+                            playbackTime: ptsSeconds,
+                            fps: jitter.fps,
+                            wallRate: wallRate,
+                            lateFrames: capturedLate,
+                            droppedFrames: capturedDrops,
+                            resyncs: capturedResyncs,
+                            slowFrames: capturedSlow,
+                            audioStatus: status,
+                            audioPullMode: isPull,
+                            audioAhead: audioAhead,
+                            audioDrops: audioDrops,
+                            audioPath: isClientDecode ? .clientDecode : .passthrough,
+                            audioRoute: isAirPlay ? .airPlay : .hdmi,
+                            audioPullDeliveries: pullDel,
+                            displayErrors: dispErr,
+                            gapMaxMs: jitter.gapMaxMs,
+                            gapStdDevMs: jitter.gapStdDevMs,
+                            syncDriftPercent: jitter.syncDriftPercent
+                        )
+                        return (report.logLine, totalPullDel)
+                    }
+
+                    if let result = healthResult {
+                        print(result.line)
+                        healthLastPullDeliveries = result.totalPullDel
+                    }
+
+                    healthLateFramesSinceReport = 0
+                    healthDropsSinceReport = 0
+                    healthResyncsSinceReport = 0
+                    healthSlowFramesSinceReport = 0
+                    healthDisplayErrorsSinceReport = 0
+                    healthLastPeriodPTS = ptsSeconds
+                    healthLastPeriodWall = nowWall
+                    lastHealthReportWall = nowWall
+                }
+
+                taskFirstFrame = false
+                videoGateLocal.completeOne()
+            }
+
+            // Loop exit summary
+            let summary = videoGateLocal.snapshot()
+            print("[DirectPlay] Video task exiting: processed=\(taskFramesProcessed) " +
+                  "maxVideoQ=\(summary.maxPending) videoDrops=\(summary.dropped) " +
+                  "videoKfDrops=\(summary.keyframesDropped) " +
+                  "lateObs=\(lateVideoObservationCount) lateDrops=\(lateVideoDropCount) " +
+                  "lateResyncs=\(lateVideoResyncCount) slowFrames=\(slowVideoPipelineCount) " +
+                  "maxWallGap=\(String(format: "%.0f", maxVideoWallGapMs))ms longGaps=\(longVideoWallGaps)")
+        }
+
+        let localVideoEnqueueTask = videoEnqueueTask
+
+        readTask = Task.detached { [weak self] in
+            print("[DirectPlay] Read loop started on background thread")
+            print("[PlaybackHealth] CONFIG hasDV=\(hasDV) conversion=\(requiresConversion) " +
+                  "lookahead=\(String(format: "%.1f", capturedLookahead))s " +
+                  "audioDecoder=\(audioDecoder != nil) container=\(capturedContainer)")
+
+            // The read loop is now a thin packet shuttler. Per-frame video state
+            // (late counters, timing accumulators, health report, cadence tracking,
+            // conversion fallback flag) lives in the videoEnqueueTask above. The
+            // read loop only tracks counters needed for the audio path and the
+            // inline preroll / paused-seek code paths.
+            var isFirstVideoFrame = true
+            var videoPacketCount = 0
+            var audioPacketCount = 0
+
+            // Per-period throughput counters — emitted every 2 seconds so we
+            // can distinguish network bottlenecks (low read rate) from
+            // downstream bottlenecks (audio task not draining / audio gate
+            // dropping / video task stalling).
+            var throughputVideoReadsSincePeriod = 0
+            var throughputAudioReadsSincePeriod = 0
+            var throughputAvReadTotalMs: Double = 0
+            var throughputAvReadMaxMs: Double = 0
+            var throughputBytesSincePeriod = 0
+            var throughputLastLogWall = CFAbsoluteTimeGetCurrent()
+            // Conversion fallback flag for the inline preroll / paused-seek
+            // paths only. The video task has its own copy; both observe the
+            // same shared `converter.framesConverted` counter, so whichever
+            // path hits frame 48 first triggers the auto-fallback.
+            var conversionDisabled = false
 
             var waitingForPrerollStart = false
             var prerollWaitStartWall: CFAbsoluteTime?
@@ -982,13 +1587,14 @@ final class DirectPlayPipeline {
                     return max(0, maxVPTS - anchor)
                 }()
                 // Required video lead before the clock starts. DV/HDR content from Plex
-                // takes several seconds for the HTTP read loop to warm up — without enough
-                // initial buffer the clock starts before the read loop can sustain realtime
-                // and the first ~10 s look choppy. Buffering more before playback turns the
-                // jank into a slightly longer "loading" period.
+                // takes ~10 s for the HTTP read loop to warm up; during that warmup the
+                // read loop sustains roughly 0.4–0.82× realtime, so a too-small lead is
+                // depleted before the network reaches steady state and the audio renderer
+                // underruns. Aim for enough buffer to bridge the entire warmup phase
+                // (warmup_seconds × (1 - average_warmup_rate) ≈ 3 s).
                 let requiredPrerollLeadSeconds: Double = {
                     if requiresConversion { return 5.0 }
-                    if hasDV { return 1.5 }
+                    if hasDV { return 3.0 }
                     return 0.20
                 }()
                 let videoReady = videoLeadSeconds >= requiredPrerollLeadSeconds
@@ -996,11 +1602,12 @@ final class DirectPlayPipeline {
                     guard let start = prerollWaitStartWall else { return 0 }
                     return (CFAbsoluteTimeGetCurrent() - start) * 1000
                 }()
-                // Generous timeout for DV/HDR so we actually wait for the lead instead of
-                // bailing out after 1 s with an underfilled buffer.
+                // Timeout = enough wall time to actually buffer the requested lead at the
+                // worst-case warmup rate (~0.4×), so the lead requirement isn't bypassed
+                // by a too-aggressive timeout.
                 let prerollTimeout: Double = {
-                    if requiresConversion { return 8000 }
-                    if hasDV { return 5000 }
+                    if requiresConversion { return 12000 }
+                    if hasDV { return 10000 }
                     return 1000
                 }()
                 let timedOut = hasAudioPath && waitedMs >= prerollTimeout
@@ -1056,6 +1663,20 @@ final class DirectPlayPipeline {
                 )
                 print("[PlaybackHealth] EVENT=preroll_complete elapsed=\(String(format: "%.0f", waitedMs))ms")
 
+                // Emit any .running state change that fresh start() deferred until
+                // playback was actually visible. This dismisses the player loading
+                // view at the same instant audio/video begins.
+                await MainActor.run { [weak self] in
+                    guard let self else { return }
+                    if self.deferRunningStateChange {
+                        self.deferRunningStateChange = false
+                        print("[StartupTrace] deferred .running emitted (preroll done, audio+video flowing)")
+                        self.onStateChange?(.running)
+                    } else {
+                        print("[StartupTrace] preroll done but no deferred .running (flag already cleared)")
+                    }
+                }
+
                 return true
             }
 
@@ -1071,7 +1692,13 @@ final class DirectPlayPipeline {
                 let samplePTS = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
                 let samplePTSSeconds = CMTimeGetSeconds(samplePTS)
 
-                await maybePrimePrerollTimeline(samplePTSSeconds, samplePTS, "audio")
+                // Skip the preroll-prime call entirely once preroll has
+                // completed. The closure has its own early-return guard, but
+                // the await suspension overhead is non-trivial at 30+ audio
+                // packets/sec and adds to MainActor contention.
+                if waitingForPrerollStart || audioPacketCount < 8 {
+                    await maybePrimePrerollTimeline(samplePTSSeconds, samplePTS, "audio")
+                }
 
                 if waitingForPrerollStart,
                    let anchor = prerollAnchorPTSSeconds,
@@ -1189,196 +1816,162 @@ final class DirectPlayPipeline {
 
             readLoop: while !Task.isCancelled {
                 do {
+                    // Measure av_read_frame wall time so we can see whether the
+                    // read loop is starving on network I/O vs downstream work.
+                    let readStartWall = CFAbsoluteTimeGetCurrent()
                     guard let packet = try demuxer.readPacket() else {
                         exitReason = .eos
                         break readLoop
                     }
+                    let readEndWall = CFAbsoluteTimeGetCurrent()
+                    let readMs = (readEndWall - readStartWall) * 1000
+                    throughputAvReadTotalMs += readMs
+                    if readMs > throughputAvReadMaxMs {
+                        throughputAvReadMaxMs = readMs
+                    }
+                    throughputBytesSincePeriod += packet.data.count
+
+                    // Read-loop rate throttle. Without this, a fast network
+                    // (ethernet on this Apple TV runs ~900 Mbps — 14× realtime
+                    // for a 63 Mbps stream) lets the read loop pull content
+                    // faster than the video pipeline can render it, which
+                    // saturates the display layer and forces multi-second
+                    // enqueue stalls. The threshold is tuned to keep us
+                    // slightly ahead of what AVSampleBufferDisplayLayer can
+                    // actually hold in its internal queue for 4K HEVC on tvOS
+                    // (empirically ~3–5 s). Preroll bypasses the throttle so
+                    // the initial buffer still fills quickly.
+                    if !waitingForPrerollStart {
+                        let renderedNow = renderer.currentTime
+                        if renderedNow > 0.1 {
+                            let ahead = packet.ptsSeconds - renderedNow
+                            // Throttle at 0.8 s ahead. AVSampleBufferDisplayLayer's
+                            // effective forward acceptance window for 4K HEVC on
+                            // tvOS is ~1.0 s — frames queued further ahead get
+                            // refused until the clock catches up. Measured by
+                            // instrumenting isReadyForMoreMediaData waits: every
+                            // stall exited when the frame was ~0.9 s ahead of
+                            // the synchronizer. 0.8 s keeps the pipeline buffer
+                            // below the layer's cap with a small safety margin.
+                            let throttleThreshold: TimeInterval = 0.8
+                            if ahead > throttleThreshold {
+                                let napSeconds = min(ahead - throttleThreshold, 0.05)
+                                try? await Task.sleep(nanoseconds: UInt64(napSeconds * 1_000_000_000))
+                            }
+                        }
+                    }
+
+                    // Emit throughput log every 2 seconds so we can see read-
+                    // rate vs consumer-rate separation in real time.
+                    if readEndWall - throughputLastLogWall >= 2.0 {
+                        let elapsed = readEndWall - throughputLastLogWall
+                        let totalReads = throughputVideoReadsSincePeriod + throughputAudioReadsSincePeriod
+                        let avgReadMs = totalReads > 0 ? throughputAvReadTotalMs / Double(totalReads) : 0
+                        let mbps = (Double(throughputBytesSincePeriod) * 8 / 1_000_000) / elapsed
+                        print("[ReadLoopThroughput] elapsed=\(String(format: "%.2f", elapsed))s " +
+                              "video=\(throughputVideoReadsSincePeriod) audio=\(throughputAudioReadsSincePeriod) " +
+                              "videoRate=\(String(format: "%.1f", Double(throughputVideoReadsSincePeriod) / elapsed))/s " +
+                              "audioRate=\(String(format: "%.1f", Double(throughputAudioReadsSincePeriod) / elapsed))/s " +
+                              "avReadAvg=\(String(format: "%.2f", avgReadMs))ms " +
+                              "avReadMax=\(String(format: "%.1f", throughputAvReadMaxMs))ms " +
+                              "bytes=\(throughputBytesSincePeriod) " +
+                              "Mbps=\(String(format: "%.1f", mbps))")
+                        throughputVideoReadsSincePeriod = 0
+                        throughputAudioReadsSincePeriod = 0
+                        throughputAvReadTotalMs = 0
+                        throughputAvReadMaxMs = 0
+                        throughputBytesSincePeriod = 0
+                        throughputLastLogWall = readEndWall
+                    }
 
                     switch packet.trackType {
                     case .video:
+                        throughputVideoReadsSincePeriod += 1
                         let frameWallStart = CFAbsoluteTimeGetCurrent()
                         videoPacketCount += 1
-                        if videoPacketCount == 1 {
-                            print("[DirectPlay] First video packet: pts=\(packet.ptsSeconds)s size=\(packet.data.count)B keyframe=\(packet.isKeyframe) tb=\(packet.timebase.timescale)")
-                        } else if videoPacketCount % 500 == 0 {
-                            print("[DirectPlay] Progress: \(videoPacketCount) video / \(audioPacketCount) audio packets, pts=\(String(format: "%.1f", packet.ptsSeconds))s")
-                        }
-
-                        // If the render clock has run ahead of packet PTS, attempt bounded
-                        // clock recovery; only drop in emergency stale-frame cases.
-                        // ALL HTTP-streamed content needs a startup grace period — the read
-                        // loop takes time to reach steady-state throughput. Aggressive
-                        // drop/resync cascades during ramp-up create a death spiral.
-                        // DV content gets longer grace due to VT decoder warmup.
-                        let startupGracePeriod: TimeInterval = hasDV ? 60.0 : 15.0
-                        let elapsedSinceStart = CFAbsoluteTimeGetCurrent() - videoDiagStartWall
-                        let inGracePeriod = elapsedSinceStart < startupGracePeriod
-                        if !isFirstVideoFrame && !inGracePeriod {
-                            let syncTime = renderer.currentTime
-                            let lateness = syncTime - packet.ptsSeconds
-                            if lateness > lateVideoDropThreshold {
-                                lateVideoObservationCount += 1
-                                healthLateFramesSinceReport += 1
-                                consecutiveLateVideoFrames += 1
-
-                                let nowWall = CFAbsoluteTimeGetCurrent()
-                                let keyframeResyncThreshold = hasDV ? 48 : 4
-                                let wantsKeyframeResync = packet.isKeyframe && consecutiveLateVideoFrames >= keyframeResyncThreshold
-                                let wantsForcedResync = lateness > forceLateResyncThreshold ||
-                                    consecutiveLateVideoFrames >= maxConsecutiveLateFramesBeforeResync
-                                let canResync = nowWall - lastLateVideoResyncWall >= lateResyncCooldown
-                                var didResync = false
-
-                                if (wantsKeyframeResync || wantsForcedResync) && canResync {
-                                    let resyncRate = await MainActor.run { [weak self] in
-                                        guard let self else { return Float?.none }
-                                        let rate = self.isPlaying ? self.playbackRate : Float(0)
-                                        renderer.setRate(rate, time: packet.cmPTS)
-                                        return rate
-                                    }
-
-                                    if let resyncRate {
-                                        lateVideoResyncCount += 1
-                                        healthResyncsSinceReport += 1
-                                        lastLateVideoResyncWall = nowWall
-
-                                        if lateVideoResyncCount <= 10 || lateVideoResyncCount % 60 == 0 {
-                                            print("[DirectPlayDiag] Late-video resync #\(lateVideoResyncCount): " +
-                                                  "rate=\(String(format: "%.2f", resyncRate)) " +
-                                                  "pts=\(String(format: "%.3f", packet.ptsSeconds))s " +
-                                                  "sync=\(String(format: "%.3f", syncTime))s " +
-                                                  "lateness=\(String(format: "%.0f", lateness * 1000))ms " +
-                                                  "lateBurst=\(consecutiveLateVideoFrames) keyframe=\(packet.isKeyframe)")
-                                        }
-                                        consecutiveLateVideoFrames = 0
-                                        didResync = true
-                                    }
-                                }
-
-                                if !didResync {
-                                    let shouldSoftDrop = !packet.isKeyframe &&
-                                        lateness >= softLateDropThreshold &&
-                                        consecutiveLateVideoFrames <= maxSoftLateDropsPerBurst
-
-                                    if shouldSoftDrop {
-                                        lateVideoDropCount += 1
-                                        lateVideoSoftDropCount += 1
-                                        healthDropsSinceReport += 1
-                                        if lateVideoSoftDropCount <= 10 || lateVideoSoftDropCount % 120 == 0 {
-                                            print("[DirectPlayDiag] Soft drop late video #\(lateVideoSoftDropCount): " +
-                                                  "pts=\(String(format: "%.3f", packet.ptsSeconds))s " +
-                                                  "sync=\(String(format: "%.3f", syncTime))s " +
-                                                  "lateness=\(String(format: "%.0f", lateness * 1000))ms " +
-                                                  "burst=\(consecutiveLateVideoFrames) keyframe=\(packet.isKeyframe)")
-                                        }
-                                        continue
-                                    }
-
-                                    if lateVideoObservationCount <= 10 || lateVideoObservationCount % 120 == 0 {
-                                        print("[DirectPlayDiag] Late video frame #\(lateVideoObservationCount): " +
-                                              "pts=\(String(format: "%.3f", packet.ptsSeconds))s " +
-                                              "sync=\(String(format: "%.3f", syncTime))s " +
-                                              "lateness=\(String(format: "%.0f", lateness * 1000))ms " +
-                                              "burst=\(consecutiveLateVideoFrames) keyframe=\(packet.isKeyframe)")
-                                    }
-                                }
-                                // Emergency only: if a frame is extremely stale, drop it.
-                                if lateness > 4.0 {
-                                    lateVideoDropCount += 1
-                                    healthDropsSinceReport += 1
-                                    if lateVideoDropCount <= 10 || lateVideoDropCount % 60 == 0 {
-                                        print("[DirectPlayDiag] Emergency drop #\(lateVideoDropCount): " +
-                                              "pts=\(String(format: "%.3f", packet.ptsSeconds))s " +
-                                              "sync=\(String(format: "%.3f", syncTime))s " +
-                                              "lateness=\(String(format: "%.0f", lateness * 1000))ms")
-                                    }
-                                    continue
-                                }
-                            } else if consecutiveLateVideoFrames > 0 {
-                                if consecutiveLateVideoFrames >= 8 {
-                                    print("[DirectPlayDiag] Late-video burst recovered after \(consecutiveLateVideoFrames) frames")
-                                }
-                                consecutiveLateVideoFrames = 0
-                            }
-                        }
-
-                        // Inline DV conversion: RPU conversion + EL stripping (~0.7ms/frame)
-                        let conversionStart = CFAbsoluteTimeGetCurrent()
-                        var packetData = packet.data
-                        if requiresConversion && !conversionDisabled, let converter = profileConverter {
-                            packetData = converter.processVideoSample(packetData)
-
-                            // Auto-fallback: after 48 frames, check if conversion can sustain
-                            // realtime. If not, disable for the rest of the stream (HDR10 passthrough).
-                            if converter.framesConverted == 48 {
-                                if !converter.canSustainRealTime() {
-                                    conversionDisabled = true
-                                    print("[DirectPlay] DV conversion too slow " +
-                                          "(avg=\(String(format: "%.1f", converter.averageConversionTimeMs))ms/frame, " +
-                                          "budget=41.7ms), switching to HDR10 passthrough")
-                                } else {
-                                    print("[DirectPlay] DV conversion sustaining realtime " +
-                                          "(avg=\(String(format: "%.1f", converter.averageConversionTimeMs))ms/frame)")
-                                }
-                            }
-                        }
-                        let conversionEnd = CFAbsoluteTimeGetCurrent()
-
-                        let processedPacket = DemuxedPacket(
-                            streamIndex: packet.streamIndex,
-                            trackType: packet.trackType,
-                            data: packetData,
-                            pts: packet.pts, dts: packet.dts,
-                            duration: packet.duration,
-                            timebase: packet.timebase,
-                            isKeyframe: packet.isKeyframe
-                        )
-
-                        let sampleCreateStart = CFAbsoluteTimeGetCurrent()
-                        let effectiveVideoFD = hasDV ? (demuxer.videoFormatDescription ?? videoFD) : videoFD
-                        let sampleBuffer = try demuxer.createVideoSampleBuffer(
-                            from: processedPacket, formatDescription: effectiveVideoFD
-                        )
-                        let sampleCreateEnd = CFAbsoluteTimeGetCurrent()
-
-                        let isFirst = isFirstVideoFrame
                         let ptsSeconds = packet.ptsSeconds
-
-                        let syncPrepStart = CFAbsoluteTimeGetCurrent()
-                        await MainActor.run {
-                            renderer.jitterStats.recordVideoPTS(ptsSeconds)
+                        if videoPacketCount == 1 {
+                            print("[DirectPlay] First video packet: pts=\(ptsSeconds)s size=\(packet.data.count)B keyframe=\(packet.isKeyframe) tb=\(packet.timebase.timescale)")
+                        } else if videoPacketCount % 500 == 0 {
+                            print("[DirectPlay] Progress: \(videoPacketCount) video / \(audioPacketCount) audio packets, pts=\(String(format: "%.1f", ptsSeconds))s")
                         }
-                        await maybePrimePrerollTimeline(ptsSeconds, packet.cmPTS, "video")
-                        if !waitingForPrerollStart {
+
+                        // bufferedTime tracks the demuxer's read position. Batch
+                        // the MainActor hop to once every 30 frames (~1 second
+                        // at 24-30 fps) — UI progress bars don't need higher
+                        // precision and this removes 30+ hops/sec from the
+                        // read-loop hot path, which was contending with the
+                        // video task and audio task on MainActor.
+                        if videoPacketCount % 30 == 0 {
                             await MainActor.run { [weak self] in
-                                guard let self else { return }
-                                if !self.isPlaying && isFirst {
-                                    renderer.setRate(0, time: packet.cmPTS)
-                                }
+                                self?.bufferedTime = ptsSeconds
                             }
                         }
-                        let syncPrepEnd = CFAbsoluteTimeGetCurrent()
 
-                        // Always bypass the video lookahead during preroll.
-                        // The lookahead sleep loop blocks on currentTime advancing,
-                        // but during preroll rate=0 so time never advances — deadlock.
-                        // The display layer's own isReadyForMoreMediaData prevents overflow.
-                        let prerollBypassLookahead = waitingForPrerollStart
+                        // Prime preroll timeline if needed. The closure has its
+                        // own MainActor hop that early-returns post-preroll, but
+                        // even the await itself has overhead — check the local
+                        // flag first to skip it entirely on the hot path.
+                        if waitingForPrerollStart || isFirstVideoFrame {
+                            await maybePrimePrerollTimeline(ptsSeconds, packet.cmPTS, "video")
+                        }
 
-                        let enqueueStart = CFAbsoluteTimeGetCurrent()
-                        await renderer.enqueueVideo(
-                            sampleBuffer,
-                            bypassLookahead: prerollBypassLookahead
-                        )
-                        let enqueueEnd = CFAbsoluteTimeGetCurrent()
-
+                        // ── Inline preroll path ──
+                        // During preroll, run the entire video pipeline inline on
+                        // the read loop (DV conversion → sample buffer → enqueue
+                        // with bypassLookahead=true → preroll bookkeeping). This
+                        // mirrors the audio enqueueAudioBuffer preroll bypass and
+                        // keeps prerollAnchor*/prerollMax* state lock-free
+                        // (single-thread access). Preroll is brief (~3-7s), so
+                        // the brief duplication of conversion+sampleBuffer code
+                        // here vs. the video task is acceptable.
                         if waitingForPrerollStart {
+                            var packetData = packet.data
+                            if requiresConversion && !conversionDisabled, let converter = profileConverter {
+                                packetData = converter.processVideoSample(packetData)
+                                if converter.framesConverted == 48 {
+                                    if !converter.canSustainRealTime() {
+                                        conversionDisabled = true
+                                        print("[DirectPlay] DV conversion too slow " +
+                                              "(avg=\(String(format: "%.1f", converter.averageConversionTimeMs))ms/frame, " +
+                                              "budget=41.7ms), switching to HDR10 passthrough")
+                                    } else {
+                                        print("[DirectPlay] DV conversion sustaining realtime " +
+                                              "(avg=\(String(format: "%.1f", converter.averageConversionTimeMs))ms/frame)")
+                                    }
+                                }
+                            }
+
+                            let processedPacket = DemuxedPacket(
+                                streamIndex: packet.streamIndex,
+                                trackType: packet.trackType,
+                                data: packetData,
+                                pts: packet.pts, dts: packet.dts,
+                                duration: packet.duration,
+                                timebase: packet.timebase,
+                                isKeyframe: packet.isKeyframe
+                            )
+
+                            let effectiveVideoFD = hasDV ? (demuxer.videoFormatDescription ?? videoFD) : videoFD
+                            let sampleBuffer = try demuxer.createVideoSampleBuffer(
+                                from: processedPacket, formatDescription: effectiveVideoFD
+                            )
+
+                            await MainActor.run {
+                                renderer.jitterStats.recordVideoPTS(ptsSeconds)
+                            }
+
+                            // Bypass lookahead during preroll: rate=0 means
+                            // currentTime never advances, so the lookahead sleep
+                            // would deadlock. Display layer's own backpressure
+                            // still prevents overflow.
+                            await renderer.enqueueVideo(sampleBuffer, bypassLookahead: true)
+
                             if let maxPTS = prerollMaxPTSSeconds {
                                 prerollMaxPTSSeconds = max(maxPTS, ptsSeconds)
                             } else {
                                 prerollMaxPTSSeconds = ptsSeconds
                             }
-                            // Track video PTS separately for accurate preroll lead
                             if let maxVPTS = prerollMaxVideoPTSSeconds {
                                 prerollMaxVideoPTSSeconds = max(maxVPTS, ptsSeconds)
                             } else {
@@ -1400,7 +1993,7 @@ final class DirectPlayPipeline {
                                 }()
                                 let requiredPrerollLeadSeconds: Double = {
                                     if requiresConversion { return 5.0 }
-                                    if hasDV { return 1.5 }
+                                    if hasDV { return 3.0 }
                                     return 0.20
                                 }()
                                 let waitedMs: Double = {
@@ -1412,192 +2005,113 @@ final class DirectPlayPipeline {
                                     "pts=\(String(format: "%.3f", ptsSeconds))s audioQ=\(localAudioGate?.snapshot().pending ?? -1) " +
                                     "audioPrimed=\(audioPrimed) audioReady=\(audioReady) reliableStart=\(audioReliableStart) " +
                                     "videoLead=\(String(format: "%.0f", prerollLeadSeconds * 1000))ms " +
-                                    "bypass=\(prerollBypassLookahead) " +
+                                    "bypass=true " +
                                     "needLead=\(String(format: "%.0f", requiredPrerollLeadSeconds * 1000))ms " +
                                     "wait=\(String(format: "%.0f", waitedMs))ms"
                                 )
                             }
+
+                            isFirstVideoFrame = false
+                            continue
                         }
 
-                        let totalPipelineMs = (enqueueEnd - frameWallStart) * 1000
-                        if totalPipelineMs > 120 {
-                            slowVideoPipelineCount += 1
-                            healthSlowFramesSinceReport += 1
-                        }
-
-                        // Timing breakdown accumulation
-                        if lastVideoEnqueueEnd > 0 {
-                            timingReadGapMs += (frameWallStart - lastVideoEnqueueEnd) * 1000
-                        }
-                        timingConversionMs += (conversionEnd - conversionStart) * 1000
-                        timingSampleMs += (sampleCreateEnd - sampleCreateStart) * 1000
-                        timingSyncMs += (syncPrepEnd - syncPrepStart) * 1000
-                        timingEnqueueMs += (enqueueEnd - enqueueStart) * 1000
-                        timingTotalMs += totalPipelineMs
-                        timingFrameCount += 1
-                        lastVideoEnqueueEnd = enqueueEnd
-
-                        if timingFrameCount == 120 {
-                            let n = Double(timingFrameCount)
-                            print("[DirectPlayTiming] \(timingFrameCount)f avg: " +
-                                  "readGap=\(String(format: "%.1f", timingReadGapMs/n))ms " +
-                                  "convert=\(String(format: "%.1f", timingConversionMs/n))ms " +
-                                  "sample=\(String(format: "%.1f", timingSampleMs/n))ms " +
-                                  "sync=\(String(format: "%.1f", timingSyncMs/n))ms " +
-                                  "enqueue=\(String(format: "%.1f", timingEnqueueMs/n))ms " +
-                                  "total=\(String(format: "%.1f", timingTotalMs/n))ms " +
-                                  "budget=\(String(format: "%.1f", 1000.0/24.0))ms")
-                            timingReadGapMs = 0; timingConversionMs = 0; timingSampleMs = 0
-                            timingSyncMs = 0; timingEnqueueMs = 0; timingTotalMs = 0
-                            timingFrameCount = 0
-                        }
-
-                        // Video cadence diagnostics (ground truth for jump/stutter analysis).
-                        // Tracks wall-clock inter-frame gaps and render-clock drift vs enqueued PTS.
-                        let nowWall = CFAbsoluteTimeGetCurrent()
-                        if let previousWall = lastVideoWallTime {
-                            let wallGapMs = (nowWall - previousWall) * 1000
-                            if wallGapMs > maxVideoWallGapMs {
-                                maxVideoWallGapMs = wallGapMs
+                        // ── Paused-seek inline path ──
+                        // After seek(to:isPlaying:false), the very first video
+                        // frame must be enqueued inline so we can break the read
+                        // loop synchronously (the consumer task can't break the
+                        // loop). This is the only case where the read loop calls
+                        // renderer.enqueueVideo directly post-preroll.
+                        if isFirstVideoFrame {
+                            let isPlayingNow = await MainActor.run { [weak self] () -> Bool in
+                                self?.isPlaying ?? false
                             }
-                            if wallGapMs > 120 {
-                                longVideoWallGaps += 1
-                            }
-                        }
-                        lastVideoWallTime = nowWall
+                            if !isPlayingNow {
+                                var packetData = packet.data
+                                if requiresConversion && !conversionDisabled, let converter = profileConverter {
+                                    packetData = converter.processVideoSample(packetData)
+                                }
 
-                        if firstVideoPTSForDiag == nil {
-                            firstVideoPTSForDiag = ptsSeconds
-                        }
-
-                        if videoPacketCount % 240 == 0 {
-                            let syncTime = renderer.currentTime
-                            let syncMinusPTS = (syncTime - ptsSeconds) * 1000
-                            let elapsedWall = nowWall - videoDiagStartWall
-                            let streamElapsed = firstVideoPTSForDiag.map { ptsSeconds - $0 } ?? 0
-                            let playbackRateVsWall = elapsedWall > 0 ? (streamElapsed / elapsedWall) : 0
-                            let audioSnapshot = localAudioGate?.snapshot()
-                            let audioDecodeSnapshot = localAudioDecodeGate?.snapshot()
-                            let audioQueueDepth = audioSnapshot?.pending ?? -1
-                            let audioQueueMaxDepth = audioSnapshot?.maxPending ?? -1
-                            let audioQueueDrops = audioSnapshot?.dropped ?? -1
-                            let audioDecodeQueueDepth = audioDecodeSnapshot?.pending ?? -1
-                            let audioDecodeQueueMaxDepth = audioDecodeSnapshot?.maxPending ?? -1
-                            let audioDecodeQueueDrops = audioDecodeSnapshot?.dropped ?? -1
-
-                            print(
-                                "[DirectPlayDiag] v=\(videoPacketCount) a=\(audioPacketCount) " +
-                                "pts=\(String(format: "%.3f", ptsSeconds))s sync=\(String(format: "%.3f", syncTime))s " +
-                                "sync-pts=\(String(format: "%.0f", syncMinusPTS))ms " +
-                                "media/wall=\(String(format: "%.3f", playbackRateVsWall))x " +
-                                "audioQ=\(audioQueueDepth) maxGap=\(String(format: "%.0f", maxVideoWallGapMs))ms " +
-                                "maxAudioQ=\(audioQueueMaxDepth) audioQDrops=\(audioQueueDrops) " +
-                                "audioDecQ=\(audioDecodeQueueDepth) maxAudioDecQ=\(audioDecodeQueueMaxDepth) " +
-                                "audioDecDrops=\(audioDecodeQueueDrops) " +
-                                "longGaps=\(longVideoWallGaps) lateObs=\(lateVideoObservationCount) " +
-                                "lateDrops=\(lateVideoDropCount) lateSoftDrops=\(lateVideoSoftDropCount) " +
-                                "lateBurst=\(consecutiveLateVideoFrames) " +
-                                "lateResyncs=\(lateVideoResyncCount) slowFrames=\(slowVideoPipelineCount)"
-                            )
-                        }
-
-                        // Periodic health report (every 5s wall time)
-                        if nowWall - lastHealthReportWall >= healthReportInterval {
-                            // Per-period wall rate (current throughput, not cumulative)
-                            let periodWall = nowWall - healthLastPeriodWall
-                            let periodStream = ptsSeconds - healthLastPeriodPTS
-                            let wallRate = periodWall > 0 ? (periodStream / periodWall) : 1.0
-                            let audioSnapshot = localAudioGate?.snapshot()
-                            let audioDrops = audioSnapshot?.dropped ?? 0
-                            let capturedLate = healthLateFramesSinceReport
-                            let capturedDrops = healthDropsSinceReport
-                            let capturedResyncs = healthResyncsSinceReport
-                            let capturedSlow = healthSlowFramesSinceReport
-                            let capturedDispErr = healthDisplayErrorsSinceReport
-
-                            let isClientDecode = audioDecoder != nil
-                            let healthResult = await MainActor.run { [weak self] () -> (line: String, totalPullDel: Int)? in
-                                guard let self else { return nil }
-                                let jitter = self.renderer.jitterStats.healthSnapshot()
-                                let status = Int(self.renderer.audioRenderer.status.rawValue)
-                                let isPull = self.renderer.useAudioPullMode
-                                let syncTime = self.renderer.currentTime
-                                let audioAhead = ptsSeconds - syncTime
-                                let dispErr = (self.renderer.displayLayerError != nil ? 1 : 0) + capturedDispErr
-                                let totalPullDel = self.renderer.totalAudioPullDeliveries
-                                let pullDel = totalPullDel - healthLastPullDeliveries
-                                let isAirPlay = PlaybackAudioSessionConfigurator.isAirPlayRouteActive()
-                                let report = PlaybackHealthReport(
-                                    playbackTime: ptsSeconds,
-                                    fps: jitter.fps,
-                                    wallRate: wallRate,
-                                    lateFrames: capturedLate,
-                                    droppedFrames: capturedDrops,
-                                    resyncs: capturedResyncs,
-                                    slowFrames: capturedSlow,
-                                    audioStatus: status,
-                                    audioPullMode: isPull,
-                                    audioAhead: audioAhead,
-                                    audioDrops: audioDrops,
-                                    audioPath: isClientDecode ? .clientDecode : .passthrough,
-                                    audioRoute: isAirPlay ? .airPlay : .hdmi,
-                                    audioPullDeliveries: pullDel,
-                                    displayErrors: dispErr,
-                                    gapMaxMs: jitter.gapMaxMs,
-                                    gapStdDevMs: jitter.gapStdDevMs,
-                                    syncDriftPercent: jitter.syncDriftPercent
+                                let processedPacket = DemuxedPacket(
+                                    streamIndex: packet.streamIndex,
+                                    trackType: packet.trackType,
+                                    data: packetData,
+                                    pts: packet.pts, dts: packet.dts,
+                                    duration: packet.duration,
+                                    timebase: packet.timebase,
+                                    isKeyframe: packet.isKeyframe
                                 )
-                                return (report.logLine, totalPullDel)
-                            }
 
-                            if let result = healthResult {
-                                print(result.line)
-                                healthLastPullDeliveries = result.totalPullDel
-                            }
+                                let effectiveVideoFD = hasDV ? (demuxer.videoFormatDescription ?? videoFD) : videoFD
+                                let sampleBuffer = try demuxer.createVideoSampleBuffer(
+                                    from: processedPacket, formatDescription: effectiveVideoFD
+                                )
 
-                            // Reset per-period counters
-                            healthLateFramesSinceReport = 0
-                            healthDropsSinceReport = 0
-                            healthResyncsSinceReport = 0
-                            healthSlowFramesSinceReport = 0
-                            healthDisplayErrorsSinceReport = 0
-                            healthLastPeriodPTS = ptsSeconds
-                            healthLastPeriodWall = nowWall
-                            lastHealthReportWall = nowWall
+                                await MainActor.run {
+                                    renderer.jitterStats.recordVideoPTS(ptsSeconds)
+                                    renderer.setRate(0, time: packet.cmPTS)
+                                }
+
+                                await renderer.enqueueVideo(sampleBuffer, bypassLookahead: false)
+
+                                await MainActor.run { [weak self] in
+                                    guard let self else { return }
+                                    if let layerError = renderer.displayLayerError {
+                                        print("[DirectPlay] Display layer error after paused-seek frame \(videoPacketCount): \(layerError)")
+                                    }
+                                    self.state = .paused
+                                    self.onStateChange?(.paused)
+                                }
+                                exitReason = .pausedSeek
+                                break readLoop
+                            }
                         }
 
-                        // Single MainActor hop for post-enqueue state updates
-                        // (state transition + paused-seek check + bufferedTime + layer error).
-                        let shouldStop = await MainActor.run { [weak self] () -> Bool in
-                            guard let self else { return false }
-
-                            if let layerError = renderer.displayLayerError {
-                                print("[DirectPlay] Display layer error after frame \(videoPacketCount): \(layerError)")
-                            }
-
-                            if self.state == .seeking && self.isPlaying {
-                                self.state = .running
-                                self.onStateChange?(.running)
-                            }
-
-                            self.bufferedTime = ptsSeconds
-
-                            if isFirst && !self.isPlaying {
-                                self.state = .paused
-                                self.onStateChange?(.paused)
-                                return true
-                            }
-                            return false
-                        }
-                        if shouldStop {
-                            exitReason = .pausedSeek
-                            break readLoop
+                        // ── Normal path: yield to video task ──
+                        // Keyframe-aware drop policy:
+                        //  - Above 90% gate depth, shed non-keyframes pre-emptively
+                        //    so we don't fill up and force a keyframe drop.
+                        //  - At hard limit, briefly wait for a slot for keyframes
+                        //    (50 ms); silently drop non-keyframes.
+                        if localVideoGate.isApproachingLimit() && !packet.isKeyframe {
+                            isFirstVideoFrame = false
+                            continue
                         }
 
+                        var reservation = localVideoGate.reserveSlot()
+                        if !reservation.accepted {
+                            if packet.isKeyframe {
+                                let waitStart = CFAbsoluteTimeGetCurrent()
+                                while CFAbsoluteTimeGetCurrent() - waitStart < 0.050 && !Task.isCancelled {
+                                    try? await Task.sleep(nanoseconds: 5_000_000)
+                                    let retry = localVideoGate.reserveSlot()
+                                    if retry.accepted {
+                                        reservation = retry
+                                        break
+                                    }
+                                }
+                                if !reservation.accepted {
+                                    localVideoGate.recordKeyframeDrop()
+                                    print("[VideoGate] keyframe DROPPED at depth=\(localVideoGate.snapshot().pending) frame=\(videoPacketCount)")
+                                    isFirstVideoFrame = false
+                                    continue
+                                }
+                            } else {
+                                isFirstVideoFrame = false
+                                continue
+                            }
+                        }
+
+                        let payload = VideoTaskPayload(
+                            packet: packet,
+                            videoPacketIndex: videoPacketCount,
+                            frameWallStart: frameWallStart
+                        )
+                        localVideoContinuation.yield(payload)
                         isFirstVideoFrame = false
 
                     case .audio:
                         audioPacketCount += 1
+                        throughputAudioReadsSincePeriod += 1
                         if audioPacketCount == 1 {
                             let durationSeconds = CMTimeGetSeconds(packet.cmDuration)
                             let dtsSeconds = CMTimeGetSeconds(packet.cmDTS)
@@ -1705,28 +2219,34 @@ final class DirectPlayPipeline {
             // --- Cleanup ---
             let summaryAudio = localAudioGate?.snapshot()
             let summaryAudioDec = localAudioDecodeGate?.snapshot()
+            let summaryVideo = localVideoGate.snapshot()
             let summaryMaxAudioQ = summaryAudio?.maxPending ?? -1
             let summaryAudioDrops = summaryAudio?.dropped ?? -1
             let summaryMaxAudioDecQ = summaryAudioDec?.maxPending ?? -1
             let summaryAudioDecDrops = summaryAudioDec?.dropped ?? -1
             print("[DirectPlay] Read loop exiting: reason=\(exitReason) video=\(videoPacketCount) audio=\(audioPacketCount)")
-            print("[DirectPlayDiag] Summary: maxWallGap=\(String(format: "%.0f", maxVideoWallGapMs))ms " +
+            print("[DirectPlayDiag] Read summary: " +
                   "maxAudioQ=\(summaryMaxAudioQ) audioQDrops=\(summaryAudioDrops) " +
                   "maxAudioDecQ=\(summaryMaxAudioDecQ) audioDecDrops=\(summaryAudioDecDrops) " +
-                  "longGaps=\(longVideoWallGaps) lateObs=\(lateVideoObservationCount) " +
-                  "lateDrops=\(lateVideoDropCount) lateSoftDrops=\(lateVideoSoftDropCount) " +
-                  "lateResyncs=\(lateVideoResyncCount) " +
-                  "slowFrames=\(slowVideoPipelineCount)")
+                  "maxVideoQ=\(summaryVideo.maxPending) videoDrops=\(summaryVideo.dropped) " +
+                  "videoKfDrops=\(summaryVideo.keyframesDropped)")
 
+            // CRITICAL: finish ALL continuations before awaiting any tasks. If
+            // any await happens before the corresponding continuation is
+            // finished, the `for await` loop in that task never exits and we
+            // hang here forever (and shutdown()/seek() also hang).
             localAudioDecodeContinuation?.finish()
-            await localAudioDecodeTask?.value
-
             localAudioContinuation?.finish()
+            localVideoContinuation.finish()
+
+            await localAudioDecodeTask?.value
             await localAudioEnqueueTask?.value
+            await localVideoEnqueueTask?.value
 
             await MainActor.run { [weak self] in
                 renderer.onAudioPrimedForPlayback = nil
                 self?.audioEnqueueTask = nil
+                self?.videoEnqueueTask = nil
             }
 
             // Handle exit reason
