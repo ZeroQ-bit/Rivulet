@@ -572,7 +572,6 @@ struct PlexHomeView: View {
                     }
                 }
                 .padding(.top, heroActive ? 0 : 48)
-                .padding(.bottom, 500)  // Large padding prevents aggressive end-of-content scroll
             }
         }
         .scrollClipDisabled()  // Allow shadow overflow

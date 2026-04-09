@@ -61,6 +61,11 @@ struct PreviewOverlayHost: View {
     @State private var pagingFromIndex: Int?
     @State private var pagingProgress: CGFloat = 0
     @State private var metadataGate = PreviewLoadGate()
+    /// Flipped to `true` once the entry/paging animation cascade has fully
+    /// settled. `PreviewCarouselCard` forwards it into `PlexDetailView` so
+    /// the detail data cascade only runs after the spring + staged fades
+    /// have finished — keeping the main thread quiet during animation.
+    @State private var previewAnimationSettled = false
     @FocusState private var focusedArea: PreviewFocusArea?
 
     private let topInset: CGFloat = 52
@@ -140,6 +145,7 @@ struct PreviewOverlayHost: View {
                         allowActionRowInteraction: expandedChromeVisible,
                         motionLocked: stateMachine.motionLocked,
                         backgroundParallaxOffset: parallaxOffset(for: index, centeredFrame: centeredFrame),
+                        previewAnimationSettled: previewAnimationSettled,
                         onPreviewExitRequested: handleExpandedExit,
                         onDetailsBecameVisible: {
                             if index == selectedIndex {
@@ -175,8 +181,17 @@ struct PreviewOverlayHost: View {
             .onAppear {
                 capturedSourceFrame = sourceFrames[request.sourceTarget]
                 focusedArea = .carousel
-                prefetchAssets(around: selectedIndex)
+                // Skip the initial prefetch until the entry animation completes —
+                // the `onChange(of: previewAnimationSettled)` below picks it up
+                // once the flag flips true. Paging prefetches (in `onChange(of:
+                // selectedIndex)`) still fire immediately because they're
+                // backgrounded and wouldn't contend with the spring.
                 startEntryAnimation()
+            }
+            .onChange(of: previewAnimationSettled) { _, settled in
+                if settled {
+                    prefetchAssets(around: selectedIndex)
+                }
             }
             .onChange(of: selectedIndex) { _, newIndex in
                 prefetchAssets(around: newIndex)
@@ -215,6 +230,9 @@ struct PreviewOverlayHost: View {
         pagingMotionActive = false
         pagingFromIndex = nil
         pagingProgress = 0
+        // Reset the settle flag so the detail cascade is suspended for the
+        // duration of the entry animation.
+        previewAnimationSettled = false
         let token = metadataGate.begin()
 
         Task { @MainActor in
@@ -237,6 +255,15 @@ struct PreviewOverlayHost: View {
             withAnimation(.easeOut(duration: 0.34)) {
                 metadataVisible = true
             }
+
+            // Phase 3: Text fade finishes — unblock PlexDetailView's data
+            // cascade. The 0.34s duration matches the withAnimation above;
+            // waiting for the fade to visually complete means any view
+            // invalidations the cascade causes land after the user perceives
+            // the animation as "done".
+            try? await Task.sleep(nanoseconds: 340_000_000)
+            guard metadataGate.isCurrent(token) else { return }
+            previewAnimationSettled = true
         }
     }
 
@@ -255,6 +282,10 @@ struct PreviewOverlayHost: View {
         pagingMotionActive = true
         pagingFromIndex = selectedIndex
         pagingProgress = 0
+        // Resuspend the detail cascade while the card travels. Rapid paging
+        // (left-left-left) keeps the flag false until the user stops, so the
+        // cascade only fires once — on the card they finally land on.
+        previewAnimationSettled = false
 
         let token = metadataGate.begin()
         stateMachine.beginPaging()
@@ -285,6 +316,12 @@ struct PreviewOverlayHost: View {
             withAnimation(.easeOut(duration: 0.48)) {
                 metadataVisible = true
             }
+
+            // Wait for the text fade to complete visually, then release the
+            // cascade on the new current card.
+            try? await Task.sleep(nanoseconds: 480_000_000)
+            guard metadataGate.isCurrent(token) else { return }
+            previewAnimationSettled = true
         }
     }
 
@@ -309,6 +346,12 @@ struct PreviewOverlayHost: View {
             stateMachine.beginExpand()
             focusedArea = nil
         }
+
+        // User has committed to this card — release the detail cascade so
+        // the expanded view is fully populated by the time chrome appears.
+        // If the cascade has already run during carouselStable, this is a
+        // no-op.
+        previewAnimationSettled = true
 
         Task { @MainActor in
             try? await Task.sleep(nanoseconds: 160_000_000)
@@ -567,6 +610,7 @@ private struct PreviewCarouselCard: View {
     let allowActionRowInteraction: Bool
     let motionLocked: Bool
     let backgroundParallaxOffset: CGFloat
+    let previewAnimationSettled: Bool
     let onPreviewExitRequested: () -> Void
     let onDetailsBecameVisible: () -> Void
     let cornerRadius: CGFloat
@@ -606,7 +650,8 @@ private struct PreviewCarouselCard: View {
                     backdropWindowFrame: stageWindowFrame,
                     onPreviewExitRequested: onPreviewExitRequested,
                     onDetailsBecameVisible: onDetailsBecameVisible,
-                    enableDetailDataLoading: isCurrent
+                    enableDetailDataLoading: isCurrent,
+                    previewAnimationSettled: previewAnimationSettled
                 )
                 .allowsHitTesting(usesExpandedSurface && isCardExpanded)
 
@@ -672,6 +717,7 @@ private struct PreviewHeroSurface: View {
     let onPreviewExitRequested: () -> Void
     let onDetailsBecameVisible: () -> Void
     let enableDetailDataLoading: Bool
+    let previewAnimationSettled: Bool
 
     var body: some View {
         PlexDetailView(
@@ -689,25 +735,36 @@ private struct PreviewHeroSurface: View {
             backdropWindowFrame: backdropWindowFrame,
             onPreviewExitRequested: onPreviewExitRequested,
             onDetailsBecameVisible: onDetailsBecameVisible,
-            enableDetailDataLoading: enableDetailDataLoading
+            enableDetailDataLoading: enableDetailDataLoading,
+            previewAnimationSettled: previewAnimationSettled
         )
     }
 }
 
+/// Lightweight placeholder card shown only during `.entryMorph` phase (see
+/// `PreviewCarouselCard.body`). Once `carouselStable` is reached, all three
+/// visible cards route through `PlexDetailView`/`HeroBackdropCoordinator`.
+///
+/// This was previously backed by a per-card `HeroBackdropCoordinator`; the
+/// coordinator adds nothing here because the only thing the side card shows
+/// is the downsampled backdrop for ~600ms before the real hero surface takes
+/// over. Binding `HeroBackdropImage` directly to the resolved URL removes a
+/// `@Published` publisher and a `.task(id:)` from the entry window.
 private struct PreviewCarouselSideCard: View {
     let item: PlexMetadata
     let serverURL: String
     let authToken: String
     let motionLocked: Bool
 
-    @StateObject private var backdropCoordinator = HeroBackdropCoordinator()
-
     private var request: HeroBackdropRequest {
         item.heroBackdropRequest(serverURL: serverURL, authToken: authToken)
     }
 
     var body: some View {
-        HeroBackdropImage(url: backdropCoordinator.session.displayedBackdropURL) {
+        HeroBackdropImage(
+            url: request.plexBackdropURL ?? request.plexThumbnailURL,
+            useFullSize: false
+        ) {
             Rectangle()
                 .fill(
                     LinearGradient(
@@ -730,12 +787,6 @@ private struct PreviewCarouselSideCard: View {
                 style: .continuous
             )
             .strokeBorder(.white.opacity(0.08), lineWidth: 1)
-        }
-        .task(id: request) {
-            backdropCoordinator.load(request: request, motionLocked: motionLocked)
-        }
-        .onChange(of: motionLocked) { _, locked in
-            backdropCoordinator.setMotionLocked(locked)
         }
     }
 }

@@ -28,6 +28,11 @@ struct PlexDetailView: View {
     var onPreviewExitRequested: (() -> Void)? = nil
     var onDetailsBecameVisible: (() -> Void)? = nil
     var enableDetailDataLoading: Bool = true
+    /// When hosted inside `PreviewOverlayHost`, reflects whether the entry /
+    /// paging animation has fully settled. The detail data cascade is deferred
+    /// until this flips to `true` so the main thread stays quiet while the
+    /// spring + staged fades are running.
+    var previewAnimationSettled: Bool = true
 
     /// Tracks the currently displayed item - allows swapping content in place
     /// When set, this overrides `item` so collection/recommended navigation
@@ -118,8 +123,21 @@ struct PlexDetailView: View {
         if !isPreviewCarousel { return true }
         return enableDetailDataLoading
     }
+    /// Cascade work is gated on both `shouldLoadDetailData` (which card is
+    /// current) and `previewAnimationSettled` (no animation in flight). Both
+    /// must be satisfied before we start hitting the network on MainActor.
+    private var canRunDetailCascade: Bool {
+        shouldLoadDetailData && previewAnimationSettled
+    }
+    /// Task ID keyed only on the rating key. We deliberately do *not* include
+    /// `shouldLoadDetailData` or `previewAnimationSettled` here — those gates
+    /// are checked *inside* the task body via early-return, and a separate
+    /// `.onChange` re-invokes `loadDetailData()` when they flip. Including
+    /// them in the task ID would cause `.task(id:)` to cancel and restart
+    /// mid-paging when `isCurrent` flips, which was the dominant paging-jank
+    /// source.
     private var detailLoadTaskID: String {
-        "\(currentItem.ratingKey ?? "unknown")-\(shouldLoadDetailData ? "active" : "passive")"
+        currentItem.ratingKey ?? "unknown"
     }
     private var effectiveHeroLogoURL: URL? {
         heroBackdrop.session.logoURL ?? retainedLogoURL
@@ -279,9 +297,19 @@ struct PlexDetailView: View {
                         .frame(width: geo.size.width, height: geo.size.height)
                         .clipped()
                         .overlay {
-                            Rectangle()
-                                .fill(.regularMaterial)
-                                .opacity(scrollProgress)
+                            // `.regularMaterial` is backed by `UIVisualEffectView`
+                            // on tvOS, which runs a blur render pass every frame
+                            // it's composited — even at opacity 0. In carousel
+                            // mode vertical scroll is disabled, so `scrollProgress`
+                            // is pinned at 0 and the material contributes nothing
+                            // visually. Gating on `scrollProgress > 0.01` removes
+                            // the blur view from the tree entirely during the
+                            // entry/paging animation.
+                            if scrollProgress > 0.01 {
+                                Rectangle()
+                                    .fill(.regularMaterial)
+                                    .opacity(scrollProgress)
+                            }
                         }
                 }
 
@@ -451,97 +479,17 @@ struct PlexDetailView: View {
         }
         .ignoresSafeArea()
         .task(id: detailLoadTaskID) {
-            // Passive carousel cards should keep any already-resolved metadata/logo
-            // so transitions never swap logo -> title mid-motion.
-            guard shouldLoadDetailData else {
-                syncHeroBackdrop()
-                return
-            }
-
-            // Reset state for new item
-            seasons = []
-            episodes = []
-            selectedSeason = nil
-            unifiedEpisodes = []
-            episodeScrollTarget = nil
-            fullMetadata = nil
-            collectionItems = []
-            collectionName = nil
-            recommendedItems = []
-            nextUpEpisode = nil
-            isSummaryExpanded = false
-            scrollProgress = 0
-            belowFoldTitleOpacity = 0
-            parentShowLogoPath = nil
-            syncHeroBackdrop()
-
-            // Index for Siri search
-            browseActivity?.resignCurrent()
-            let activity = NSUserActivity(activityType: "com.rivulet.viewMedia")
-            activity.title = currentItem.title
-            activity.isEligibleForSearch = true
-            activity.userInfo = ["ratingKey": currentItem.ratingKey ?? ""]
-            activity.targetContentIdentifier = "rivulet://detail?ratingKey=\(currentItem.ratingKey ?? "")"
-            activity.becomeCurrent()
-            browseActivity = activity
-
-            // Initialize watched state
-            isWatched = currentItem.isWatched
-
-            // Initialize progress for animation
-            displayedProgress = currentItem.watchProgress ?? 0
-
-            // Initialize starred state for music (userRating > 0 means starred)
-            isStarred = (currentItem.userRating ?? 0) > 0
-
-            // Load full metadata for cast/crew and trailer
-            await loadFullMetadata()
-
-            // Refresh hero art/logo with the full Plex metadata now that it's loaded.
-            await refreshHeroBackdropAssets()
-
-            // Load collection and recommendations for movies
-            if currentItem.type == "movie" {
-                // Load collection items if movie is part of a collection
-                if let collection = fullMetadata?.Collection?.first,
-                   let collectionId = collection.idString,
-                   let sectionId = fullMetadata?.librarySectionID {
-                    let name = (collection.tag ?? "Collection") + " Collection"
-                    await loadCollectionItems(sectionId: String(sectionId), collectionId: collectionId, name: name)
-                }
-                // Load TMDB-powered recommendations
-                await loadRecommendedItems()
-            }
-
-            // Load seasons for TV shows
-            if currentItem.type == "show" {
-                await loadSeasons()
-                await loadAllEpisodes()
-                await loadNextUpEpisode()
-            }
-
-            // Load episodes for seasons
-            if currentItem.type == "season" {
-                await loadSeasonsForCurrentSeason()
-                await loadEpisodesForSeason()
-                // Determine the "next up" episode for the Play button
-                await loadNextUpEpisode()
-            }
-
-            // Load seasons for episodes (show parent show's seasons inline)
-            if currentItem.type == "episode" {
-                await loadSeasonsForEpisode()
-                await loadAllEpisodes()
-            }
-
-            // Load tracks for albums
-            if currentItem.type == "album" {
-                await loadTracks()
-            }
-
-            // Load albums for artists
-            if currentItem.type == "artist" {
-                await loadAlbums()
+            await loadDetailData()
+        }
+        .onChange(of: canRunDetailCascade) { _, canRun in
+            // When a previously-passive card becomes current, or when the
+            // entry animation finishes, re-invoke the cascade. The task
+            // ID itself no longer changes on active/passive flips, so this
+            // is the only path that promotes a side card's passive stub
+            // into a full load.
+            guard canRun else { return }
+            Task { @MainActor in
+                await loadDetailData()
             }
         }
         .task(id: "kenburns-\(currentItem.ratingKey ?? "")") {
@@ -743,10 +691,17 @@ struct PlexDetailView: View {
 
     // MARK: - Hero Components (Apple TV+ style — backdrop fixed, content scrolls over)
 
-    /// Fixed backdrop image (behind everything, doesn't scroll)
+    /// Fixed backdrop image (behind everything, doesn't scroll).
+    ///
+    /// The `useFullSize` flag is inverted from the coordinator's pending-
+    /// upgrade flag — while the coordinator has the upgrade pending, we
+    /// render via the cheap downsampled decode path (`useFullSize: false`);
+    /// after `applyPendingUpgradeIfReady` clears the flag, we reload via
+    /// the full-size decode path (`useFullSize: true`).
     private var heroBackdropImage: some View {
         HeroBackdropImage(
             url: heroBackdrop.session.displayedBackdropURL,
+            useFullSize: !heroBackdrop.session.hasPendingFullSizeUpgrade,
             animationDuration: isPreviewCarousel ? 0.38 : 0.26
         ) {
             Rectangle()
@@ -793,7 +748,18 @@ struct PlexDetailView: View {
                                     image
                                         .resizable()
                                         .aspectRatio(contentMode: .fit)
-                                        .shadow(color: .black.opacity(0.8), radius: 20, x: 0, y: 4)
+                                        // Shadow is redundant in carousel mode — the bottom
+                                        // vignette at lines ~305-321 already hits 95% black
+                                        // opacity where the logo sits, so the drop shadow is
+                                        // invisible. Removing it during carousel avoids the
+                                        // per-frame offscreen compositing pass the shadow forces
+                                        // while `heroMetadataOverlay` opacity is animating.
+                                        .shadow(
+                                            color: .black.opacity(isPreviewCarousel ? 0 : 0.8),
+                                            radius: isPreviewCarousel ? 0 : 20,
+                                            x: 0,
+                                            y: isPreviewCarousel ? 0 : 4
+                                        )
                                         .onAppear {
                                             if !hasDisplayedHeroLogoImage {
                                                 hasDisplayedHeroLogoImage = true
@@ -1711,6 +1677,123 @@ struct PlexDetailView: View {
     }
 
     // MARK: - Data Loading
+
+    /// Hydrates everything the detail view needs beyond the hero surface
+    /// (cast, seasons, episodes, recommendations, etc.). Split out of the
+    /// inline `.task` body so it can be invoked from both the initial task
+    /// and the `canRunDetailCascade` onChange observer without duplicating
+    /// the reset/cascade logic.
+    ///
+    /// The method is gated twice:
+    /// 1. `shouldLoadDetailData` — only the *current* carousel card runs.
+    ///    Passive side cards still call `syncHeroBackdrop()` so they show
+    ///    the correct logo/art, then early-return.
+    /// 2. `previewAnimationSettled` — even for the current card, the cascade
+    ///    waits for the entry spring + staged fades to finish, and for
+    ///    paging motion to stop. This keeps the main thread quiet during
+    ///    the ~1.5s animation window.
+    private func loadDetailData() async {
+        // Passive carousel cards should keep any already-resolved metadata/logo
+        // so transitions never swap logo -> title mid-motion.
+        guard shouldLoadDetailData else {
+            syncHeroBackdrop()
+            return
+        }
+
+        // Defer network + state-reset churn until the entry/paging animation
+        // settles. The onChange(of: canRunDetailCascade) observer will
+        // re-invoke this method once `previewAnimationSettled` flips to true.
+        guard previewAnimationSettled else {
+            syncHeroBackdrop()
+            return
+        }
+
+        // Reset state for new item
+        seasons = []
+        episodes = []
+        selectedSeason = nil
+        unifiedEpisodes = []
+        episodeScrollTarget = nil
+        fullMetadata = nil
+        collectionItems = []
+        collectionName = nil
+        recommendedItems = []
+        nextUpEpisode = nil
+        isSummaryExpanded = false
+        scrollProgress = 0
+        belowFoldTitleOpacity = 0
+        parentShowLogoPath = nil
+        syncHeroBackdrop()
+
+        // Index for Siri search
+        browseActivity?.resignCurrent()
+        let activity = NSUserActivity(activityType: "com.rivulet.viewMedia")
+        activity.title = currentItem.title
+        activity.isEligibleForSearch = true
+        activity.userInfo = ["ratingKey": currentItem.ratingKey ?? ""]
+        activity.targetContentIdentifier = "rivulet://detail?ratingKey=\(currentItem.ratingKey ?? "")"
+        activity.becomeCurrent()
+        browseActivity = activity
+
+        // Initialize watched state
+        isWatched = currentItem.isWatched
+
+        // Initialize progress for animation
+        displayedProgress = currentItem.watchProgress ?? 0
+
+        // Initialize starred state for music (userRating > 0 means starred)
+        isStarred = (currentItem.userRating ?? 0) > 0
+
+        // Load full metadata for cast/crew and trailer
+        await loadFullMetadata()
+
+        // Refresh hero art/logo with the full Plex metadata now that it's loaded.
+        await refreshHeroBackdropAssets()
+
+        // Load collection and recommendations for movies
+        if currentItem.type == "movie" {
+            // Load collection items if movie is part of a collection
+            if let collection = fullMetadata?.Collection?.first,
+               let collectionId = collection.idString,
+               let sectionId = fullMetadata?.librarySectionID {
+                let name = (collection.tag ?? "Collection") + " Collection"
+                await loadCollectionItems(sectionId: String(sectionId), collectionId: collectionId, name: name)
+            }
+            // Load TMDB-powered recommendations
+            await loadRecommendedItems()
+        }
+
+        // Load seasons for TV shows
+        if currentItem.type == "show" {
+            await loadSeasons()
+            await loadAllEpisodes()
+            await loadNextUpEpisode()
+        }
+
+        // Load episodes for seasons
+        if currentItem.type == "season" {
+            await loadSeasonsForCurrentSeason()
+            await loadEpisodesForSeason()
+            // Determine the "next up" episode for the Play button
+            await loadNextUpEpisode()
+        }
+
+        // Load seasons for episodes (show parent show's seasons inline)
+        if currentItem.type == "episode" {
+            await loadSeasonsForEpisode()
+            await loadAllEpisodes()
+        }
+
+        // Load tracks for albums
+        if currentItem.type == "album" {
+            await loadTracks()
+        }
+
+        // Load albums for artists
+        if currentItem.type == "artist" {
+            await loadAlbums()
+        }
+    }
 
     private func loadFullMetadata() async {
         guard let serverURL = authManager.selectedServerURL,

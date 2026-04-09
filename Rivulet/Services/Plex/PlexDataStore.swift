@@ -702,30 +702,69 @@ class PlexDataStore: ObservableObject {
     // MARK: - Optimistic Updates
 
     /// Update an item's watch status locally (optimistic update)
-    /// This immediately reflects the change in UI before the server refresh completes
+    /// This immediately reflects the change in UI before the server refresh completes.
+    ///
+    /// The same `ratingKey` can appear in multiple hub collections at once:
+    /// - `hubs` — the global `/hubs` response, home of Continue Watching.
+    /// - `libraryHubs[libraryKey]` — per-library hubs, home of "Recently Added <Library>".
+    ///
+    /// Both must be walked so a Mark as Watched from Continue Watching also
+    /// flips the checkmark on the same title in a Recently Added row below.
     func updateItemWatchStatus(ratingKey: String, watched: Bool) {
-        var didUpdate = false
-        // Update in hubs
-        for hubIndex in hubs.indices {
-            if var metadata = hubs[hubIndex].Metadata {
-                for itemIndex in metadata.indices {
-                    if metadata[itemIndex].ratingKey == ratingKey {
-                        if watched {
-                            metadata[itemIndex].viewCount = (metadata[itemIndex].viewCount ?? 0) + 1
-                            metadata[itemIndex].viewOffset = nil
-                        } else {
-                            metadata[itemIndex].viewCount = 0
-                            metadata[itemIndex].viewOffset = nil
-                        }
-                        hubs[hubIndex].Metadata = metadata
-                        didUpdate = true
-                    }
-                }
+        func applyWatchState(to item: inout PlexMetadata) {
+            if watched {
+                item.viewCount = (item.viewCount ?? 0) + 1
+                item.viewOffset = nil
+            } else {
+                item.viewCount = 0
+                item.viewOffset = nil
             }
         }
-        // Bump version so views recompute their derived state
-        if didUpdate {
+
+        var didUpdateHubs = false
+        // Update in global hubs (Continue Watching lives here)
+        for hubIndex in hubs.indices {
+            guard var metadata = hubs[hubIndex].Metadata else { continue }
+            var hubChanged = false
+            for itemIndex in metadata.indices where metadata[itemIndex].ratingKey == ratingKey {
+                applyWatchState(to: &metadata[itemIndex])
+                hubChanged = true
+            }
+            if hubChanged {
+                hubs[hubIndex].Metadata = metadata
+                didUpdateHubs = true
+            }
+        }
+
+        var didUpdateLibraryHubs = false
+        // Update in per-library hubs (Recently Added <Library> rows live here)
+        for (libraryKey, hubList) in libraryHubs {
+            var updatedHubList = hubList
+            var libraryChanged = false
+            for hubIndex in updatedHubList.indices {
+                guard var metadata = updatedHubList[hubIndex].Metadata else { continue }
+                var hubChanged = false
+                for itemIndex in metadata.indices where metadata[itemIndex].ratingKey == ratingKey {
+                    applyWatchState(to: &metadata[itemIndex])
+                    hubChanged = true
+                }
+                if hubChanged {
+                    updatedHubList[hubIndex].Metadata = metadata
+                    libraryChanged = true
+                }
+            }
+            if libraryChanged {
+                libraryHubs[libraryKey] = updatedHubList
+                didUpdateLibraryHubs = true
+            }
+        }
+
+        // Bump versions so views recompute their derived state
+        if didUpdateHubs {
             hubsVersion = UUID()
+        }
+        if didUpdateLibraryHubs {
+            libraryHubsVersion = UUID()
         }
     }
 

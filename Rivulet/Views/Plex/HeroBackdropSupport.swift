@@ -20,18 +20,20 @@ struct HeroBackdropRequest: Hashable {
 
 struct HeroBackdropResolution: Equatable {
     let displayedBackdropURL: URL?
-    let pendingUpgradeURL: URL?
+    /// When true, the displayed URL is currently being rendered via the
+    /// downsampled decode path. Once motion settles, the coordinator swaps
+    /// to the full-size decode of the same URL.
+    let hasPendingFullSizeUpgrade: Bool
     let logoURL: URL?
     let thumbnailURL: URL?
-
-    var canUpgradeAfterSettle: Bool {
-        pendingUpgradeURL != nil && pendingUpgradeURL != displayedBackdropURL
-    }
 }
 
 struct HeroBackdropSession: Equatable {
     var displayedBackdropURL: URL?
-    var pendingUpgradeURL: URL?
+    /// Mirrors `HeroBackdropResolution.hasPendingFullSizeUpgrade`. Flips to
+    /// false after `applyPendingUpgradeIfReady` promotes the displayed image
+    /// from the downsampled variant to the full-size variant.
+    var hasPendingFullSizeUpgrade: Bool = false
     var logoURL: URL?
     var thumbnailURL: URL?
     private(set) var motionLocked = false
@@ -43,23 +45,20 @@ struct HeroBackdropSession: Equatable {
         displayedBackdropURL = request.plexBackdropURL ?? request.plexThumbnailURL
         thumbnailURL = request.plexThumbnailURL
         logoURL = request.plexLogoURL
+        // Seed session always starts on the downsampled path so the first
+        // render never waits on a 3840×2160 decode.
+        hasPendingFullSizeUpgrade = displayedBackdropURL != nil
     }
 
     var canUpgradeAfterSettle: Bool {
-        pendingUpgradeURL != nil && pendingUpgradeURL != displayedBackdropURL
+        hasPendingFullSizeUpgrade && displayedBackdropURL != nil
     }
 
     mutating func stage(_ resolution: HeroBackdropResolution) {
         logoURL = resolution.logoURL
         thumbnailURL = resolution.thumbnailURL
-
-        if resolution.pendingUpgradeURL == nil {
-            displayedBackdropURL = resolution.displayedBackdropURL
-        } else if displayedBackdropURL == nil {
-            displayedBackdropURL = resolution.displayedBackdropURL
-        }
-
-        pendingUpgradeURL = resolution.pendingUpgradeURL
+        displayedBackdropURL = resolution.displayedBackdropURL
+        hasPendingFullSizeUpgrade = resolution.hasPendingFullSizeUpgrade
     }
 
     mutating func setMotionLocked(_ locked: Bool, now: Date = Date()) {
@@ -68,20 +67,24 @@ struct HeroBackdropSession: Equatable {
         lastUnlockedAt = locked ? nil : now
     }
 
+    /// Flag-only promotion. The URL does not change — what changes is the
+    /// decode path `HeroBackdropImage` uses for this URL next time it
+    /// reloads. `HeroBackdropImage` observes `hasPendingFullSizeUpgrade` via
+    /// the coordinator's `@Published session` and re-runs its load task when
+    /// the flag flips.
     @discardableResult
     mutating func applyPendingUpgradeIfReady(
         now: Date = Date(),
         minimumStableDuration: TimeInterval = 0.15
     ) -> Bool {
         guard !motionLocked,
-              let pendingUpgradeURL,
+              hasPendingFullSizeUpgrade,
               let lastUnlockedAt,
               now.timeIntervalSince(lastUnlockedAt) >= minimumStableDuration else {
             return false
         }
 
-        displayedBackdropURL = pendingUpgradeURL
-        self.pendingUpgradeURL = nil
+        hasPendingFullSizeUpgrade = false
         return true
     }
 }
@@ -104,9 +107,15 @@ actor HeroBackdropResolver {
     static let shared = HeroBackdropResolver()
 
     func resolveAssets(for request: HeroBackdropRequest) async -> HeroBackdropResolution {
-        HeroBackdropResolution(
-            displayedBackdropURL: request.plexBackdropURL ?? request.plexThumbnailURL,
-            pendingUpgradeURL: nil,
+        // Always start on the downsampled decode path — ~4× cheaper during
+        // the entry/paging animation. The coordinator's
+        // `schedulePendingUpgradeIfNeeded` path flips the flag off ~150ms
+        // after motion settles, and `HeroBackdropImage` re-loads the same
+        // URL via the full-size decode path at that point.
+        let displayURL = request.plexBackdropURL ?? request.plexThumbnailURL
+        return HeroBackdropResolution(
+            displayedBackdropURL: displayURL,
+            hasPendingFullSizeUpgrade: displayURL != nil,
             logoURL: request.plexLogoURL,
             thumbnailURL: request.plexThumbnailURL
         )
@@ -114,7 +123,7 @@ actor HeroBackdropResolver {
 
     func playerLoadingImages(for request: HeroBackdropRequest) async -> (UIImage?, UIImage?) {
         let resolution = await resolveAssets(for: request)
-        let backdropURL = resolution.pendingUpgradeURL ?? resolution.displayedBackdropURL
+        let backdropURL = resolution.displayedBackdropURL
 
         async let backdropTask: UIImage? = backdropURL != nil
             ? ImageCacheManager.shared.imageFullSize(for: backdropURL!)
@@ -202,16 +211,38 @@ final class HeroBackdropCoordinator: ObservableObject {
     }
 }
 
+/// Max pixel size used for the downsampled hero decode path. 1920 is the
+/// long-edge resolution of a 1080p tvOS stage; at 4K mode the backdrop is
+/// upsampled by 2× briefly before the full-size upgrade swaps in.
+private let heroDownsampleMaxPixelSize: CGFloat = 1920
+
 struct HeroBackdropImage<Placeholder: View>: View {
     let url: URL?
+    /// When true, decode at full resolution via `imageFullSize`. When false,
+    /// decode via `imageDownsampled(maxPixelSize: 1920)` for ~4× cheaper
+    /// decode during motion. Callers in the carousel flow pass `false`
+    /// initially and flip to `true` after motion settles.
+    var useFullSize: Bool = true
     var animationDuration: Double = 0.22
     @ViewBuilder let placeholder: () -> Placeholder
 
-    @State private var currentURL: URL?
+    /// Identity of the currently-displayed variant — (URL, isFullSize).
+    /// Distinct from just the URL because the same URL can be displayed at
+    /// two different decode qualities and we want the upgrade to crossfade.
+    private struct LoadIdentity: Equatable {
+        let url: URL?
+        let fullSize: Bool
+    }
+
+    @State private var currentIdentity: LoadIdentity?
     @State private var currentImage: UIImage?
     @State private var previousImage: UIImage?
     @State private var revealOpacity: Double = 1
     @State private var clearPreviousTask: Task<Void, Never>?
+
+    private var requestedIdentity: LoadIdentity {
+        LoadIdentity(url: url, fullSize: useFullSize)
+    }
 
     var body: some View {
         ZStack {
@@ -227,8 +258,8 @@ struct HeroBackdropImage<Placeholder: View>: View {
                 placeholder()
             }
         }
-        .task(id: url) {
-            await loadImage(for: url)
+        .task(id: requestedIdentity) {
+            await loadImage(for: requestedIdentity)
         }
         .onDisappear {
             clearPreviousTask?.cancel()
@@ -242,25 +273,34 @@ struct HeroBackdropImage<Placeholder: View>: View {
     }
 
     @MainActor
-    private func loadImage(for url: URL?) async {
-        guard url != currentURL else { return }
+    private func loadImage(for identity: LoadIdentity) async {
+        guard identity != currentIdentity else { return }
 
         clearPreviousTask?.cancel()
 
-        guard let url else {
-            currentURL = nil
+        guard let url = identity.url else {
+            currentIdentity = LoadIdentity(url: nil, fullSize: identity.fullSize)
             currentImage = nil
             previousImage = nil
             revealOpacity = 1
             return
         }
 
-        let image = await ImageCacheManager.shared.imageFullSize(for: url)
-        guard !Task.isCancelled, currentURL != url else { return }
+        let image: UIImage?
+        if identity.fullSize {
+            image = await ImageCacheManager.shared.imageFullSize(for: url)
+        } else {
+            image = await ImageCacheManager.shared.imageDownsampled(
+                for: url,
+                maxPixelSize: heroDownsampleMaxPixelSize
+            )
+        }
+
+        guard !Task.isCancelled, currentIdentity != identity else { return }
 
         guard let image else {
             if currentImage == nil {
-                currentURL = url
+                currentIdentity = identity
             }
             return
         }
@@ -269,7 +309,7 @@ struct HeroBackdropImage<Placeholder: View>: View {
             previousImage = currentImage
         }
 
-        currentURL = url
+        currentIdentity = identity
         currentImage = image
         revealOpacity = previousImage == nil ? 1 : 0
 
