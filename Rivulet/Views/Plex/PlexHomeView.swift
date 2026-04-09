@@ -18,7 +18,8 @@ struct PlexHomeView: View {
     @AppStorage("enablePersonalizedRecommendations") private var enablePersonalizedRecommendations = false
     @Environment(\.nestedNavigationState) private var nestedNavState
     @State private var selectedItem: PlexMetadata?
-    @State private var heroItem: PlexMetadata?
+    @State private var heroItems: [PlexMetadata] = []
+    @State private var heroCurrentIndex: Int = 0
     @State private var cachedProcessedHubs: [PlexHub] = []  // Memoized to avoid recalculation on every render
     @State private var recommendations: [PlexMetadata] = []
     @State private var isLoadingRecommendations = false
@@ -166,8 +167,8 @@ struct PlexHomeView: View {
                     dataStore.isHomeContentReady = !cachedProcessedHubs.isEmpty
                 }
                 // Only select hero if we don't have one yet
-                if heroItem == nil {
-                    selectHeroItem()
+                if heroItems.isEmpty {
+                    selectHeroItems()
                 }
                 if enablePersonalizedRecommendations && recommendations.isEmpty {
                     Task { await refreshRecommendations(force: false) }
@@ -182,10 +183,8 @@ struct PlexHomeView: View {
             .onChange(of: dataStore.hubsVersion) { _, _ in
                 // Recompute cached hubs when global hub data changes (for Continue Watching)
                 cachedProcessedHubs = computeProcessedHubs(from: dataStore.hubs)
-                // Only reselect hero if we don't have one yet (avoid redundant selection)
-                if heroItem == nil {
-                    selectHeroItem()
-                }
+                // Refresh hero items when hubs change; stable comparison prevents unnecessary rebuilds.
+                selectHeroItems()
             }
             .onChange(of: dataStore.libraryHubsVersion) { _, _ in
                 // Recompute when library-specific hubs change
@@ -378,30 +377,59 @@ struct PlexHomeView: View {
 
     // MARK: - Hero Selection
 
-    private func selectHeroItem() {
-        // Check cache first - hero persists across navigation
-        if let cachedHero = dataStore.getCachedHero(forLibrary: "home") {
-            heroItem = cachedHero
+    private static let heroItemCap = 15
+
+    /// Populates `heroItems` from the best available hub for the home screen.
+    /// Priority: Plex "promoted" hub (global), then Recently Added, then the first non-empty hub.
+    /// Results are capped at `heroItemCap` and cached per-screen via `PlexDataStore`.
+    private func selectHeroItems() {
+        // Cached result takes precedence on first appearance so navigation feels instant.
+        if heroItems.isEmpty,
+           let cached = dataStore.getCachedHeroItems(forLibrary: "home"),
+           !cached.isEmpty {
+            heroItems = cached
             return
         }
 
-        // Pick a random item from recently added for the hero
-        let recentlyAdded = dataStore.hubs.first { hub in
-            hub.hubIdentifier?.contains("recentlyAdded") == true ||
-            hub.title?.lowercased().contains("recently added") == true
+        let candidates = computeHeroItems(from: dataStore.hubs)
+        guard !candidates.isEmpty else { return }
+
+        // Avoid rebuilding the carousel when the promoted hub is unchanged.
+        let newKeys = candidates.compactMap { $0.ratingKey }
+        let currentKeys = heroItems.compactMap { $0.ratingKey }
+        if newKeys != currentKeys {
+            heroItems = candidates
         }
+        dataStore.cacheHeroItems(candidates, forLibrary: "home")
+    }
+
+    /// Pure helper so the selection logic can be unit-tested or reused elsewhere.
+    private func computeHeroItems(from hubs: [PlexHub]) -> [PlexMetadata] {
+        let promoted = hubs.first { hub in
+            (hub.hubIdentifier?.lowercased().contains("promoted") == true)
+                && (hub.Metadata?.isEmpty == false)
+        }
+        if let items = promoted?.Metadata, !items.isEmpty {
+            homeLog.info("[Hero] Using promoted hub \(promoted?.hubIdentifier ?? "?", privacy: .public) with \(items.count) items")
+            return Array(items.prefix(Self.heroItemCap))
+                .filter { $0.ratingKey != nil }
+        }
+
+        let recentlyAdded = hubs.first { isRecentlyAddedHub($0) && ($0.Metadata?.isEmpty == false) }
         if let items = recentlyAdded?.Metadata, !items.isEmpty {
-            if let newHero = items.randomElement() {
-                heroItem = newHero
-                dataStore.cacheHero(newHero, forLibrary: "home")
-            }
-        } else if let firstHub = dataStore.hubs.first,
-                  let items = firstHub.Metadata, !items.isEmpty {
-            if let newHero = items.first {
-                heroItem = newHero
-                dataStore.cacheHero(newHero, forLibrary: "home")
-            }
+            homeLog.info("[Hero] Fallback to Recently Added hub with \(items.count) items")
+            return Array(items.prefix(Self.heroItemCap))
+                .filter { $0.ratingKey != nil }
         }
+
+        if let firstHub = hubs.first(where: { $0.Metadata?.isEmpty == false }),
+           let items = firstHub.Metadata, !items.isEmpty {
+            homeLog.info("[Hero] Fallback to first non-empty hub \(firstHub.hubIdentifier ?? "?", privacy: .public)")
+            return Array(items.prefix(Self.heroItemCap))
+                .filter { $0.ratingKey != nil }
+        }
+
+        return []
     }
 
     // MARK: - Recommendations
@@ -449,39 +477,53 @@ struct PlexHomeView: View {
     }
 
     private func updateNestedNavigationState() {
-        let isNested = selectedItem != nil
-        nestedNavState.isNested = isNested
-        if isNested {
-            nestedNavState.goBackAction = { [weak nestedNavState] in
-                selectedItem = nil
-                nestedNavState?.isNested = false
-            }
-        } else {
-            nestedNavState.goBackAction = nil
-        }
+        nestedNavState.isNested = selectedItem != nil
     }
 
     // MARK: - Content View
 
     private var contentView: some View {
-        ScrollView(.vertical, showsIndicators: false) {
+        let heroActive = showHomeHero && !heroItems.isEmpty
+        let screenHeight = UIScreen.main.bounds.height
+        // Leave a modest peek for Continue Watching at the bottom of the hero
+        // at the top scroll position, and let everything scroll together.
+        let heroSectionHeight = screenHeight - 180
+
+        return ScrollView(.vertical, showsIndicators: false) {
             LazyVStack(alignment: .leading, spacing: 0) {
                 // Connection error banner (when showing cached content while offline)
                 if !authManager.isConnected {
                     connectionErrorBanner
                 }
 
-                // Hero section (if enabled)
-                if showHomeHero, let hero = heroItem {
-                    HeroView(
-                        item: hero,
-                        serverURL: authManager.selectedServerURL ?? "",
-                        authToken: authManager.selectedServerToken ?? "",
-                        focusTarget: $focusedItemId,
-                        targetValue: "hero"
-                    ) {
-                        selectedItem = hero
+                // Hero section: backdrop art + overlay controls, stacked and
+                // scrolling together as a single unit. Sized so Continue
+                // Watching peeks below it at the top scroll position.
+                if heroActive {
+                    let currentHeroItem: PlexMetadata? = {
+                        let clamped = max(0, min(heroCurrentIndex, heroItems.count - 1))
+                        return heroItems[clamped]
+                    }()
+
+                    ZStack {
+                        HeroBackdropLayer(
+                            currentItem: currentHeroItem,
+                            serverURL: authManager.selectedServerURL ?? "",
+                            authToken: authManager.selectedServerToken ?? ""
+                        )
+
+                        HeroOverlayContent(
+                            items: heroItems,
+                            serverURL: authManager.selectedServerURL ?? "",
+                            authToken: authManager.selectedServerToken ?? "",
+                            currentIndex: $heroCurrentIndex,
+                            onInfo: { item in selectedItem = item },
+                            onPlay: { item in playItemDirectly(item) }
+                        )
                     }
+                    .frame(height: heroSectionHeight)
+                    .clipped()
+                    .focusSection()
                 }
 
                 // Content rows (uses cached processedHubs which merges Continue Watching + On Deck)
@@ -529,11 +571,12 @@ struct PlexHomeView: View {
                         recommendationsSection
                     }
                 }
-                .padding(.top, 48)
+                .padding(.top, heroActive ? 0 : 48)
                 .padding(.bottom, 500)  // Large padding prevents aggressive end-of-content scroll
             }
         }
         .scrollClipDisabled()  // Allow shadow overflow
+        .ignoresSafeArea(.container, edges: heroActive ? [.top, .horizontal] : [])
     }
 
     // MARK: - Connection Error Banner
@@ -737,227 +780,6 @@ struct PlexHomeView: View {
     // MARK: - Navigation Helpers
 
     /// Navigate to the season containing the given episode
-}
-
-// MARK: - Hero View
-
-struct HeroView<FocusTarget: Hashable>: View {
-    let item: PlexMetadata
-    let serverURL: String
-    let authToken: String
-    let onSelect: () -> Void
-
-    @StateObject private var heroBackdrop = HeroBackdropCoordinator()
-
-    // Focus binding - supports both Bool and enum-based patterns
-    private let focusBinding: FocusBinding<FocusTarget>
-
-    enum FocusBinding<T: Hashable> {
-        case bool(FocusState<Bool>.Binding)
-        case enumTarget(FocusState<T?>.Binding, T)
-    }
-
-    /// Initialize with boolean focus binding (for PlexHomeView compatibility)
-    init(
-        item: PlexMetadata,
-        serverURL: String,
-        authToken: String,
-        isPlayButtonFocused: FocusState<Bool>.Binding,
-        onSelect: @escaping () -> Void
-    ) where FocusTarget == Bool {
-        self.item = item
-        self.serverURL = serverURL
-        self.authToken = authToken
-        self.focusBinding = .bool(isPlayButtonFocused)
-        self.onSelect = onSelect
-    }
-
-    /// Initialize with enum-based focus binding (for unified focus management)
-    init(
-        item: PlexMetadata,
-        serverURL: String,
-        authToken: String,
-        focusTarget: FocusState<FocusTarget?>.Binding,
-        targetValue: FocusTarget,
-        onSelect: @escaping () -> Void
-    ) {
-        self.item = item
-        self.serverURL = serverURL
-        self.authToken = authToken
-        self.focusBinding = .enumTarget(focusTarget, targetValue)
-        self.onSelect = onSelect
-    }
-
-    private var isFocused: Bool {
-        switch focusBinding {
-        case .bool(let binding):
-            return binding.wrappedValue
-        case .enumTarget(let binding, let target):
-            return binding.wrappedValue == target
-        }
-    }
-
-    private var heroBackdropRequest: HeroBackdropRequest {
-        item.heroBackdropRequest(
-            serverURL: serverURL,
-            authToken: authToken
-        )
-    }
-
-    var body: some View {
-        heroButtonView
-            .task(id: heroBackdropRequest) {
-                heroBackdrop.load(request: heroBackdropRequest, motionLocked: false)
-            }
-    }
-
-    private var heroContentView: some View {
-        GeometryReader { geo in
-            ZStack(alignment: .bottomLeading) {
-                // Background art - full width edge to edge
-                HeroBackdropImage(url: heroBackdrop.session.displayedBackdropURL) {
-                    Rectangle()
-                        .fill(
-                            LinearGradient(
-                                colors: [Color(white: 0.15), Color(white: 0.08)],
-                                startPoint: .top,
-                                endPoint: .bottom
-                            )
-                        )
-                }
-                .frame(width: geo.size.width, height: geo.size.height)
-                .clipped()
-
-                // Gradient overlay for text legibility (simplified 2-stop gradient)
-                LinearGradient(
-                    colors: [.clear, .black.opacity(0.85)],
-                    startPoint: .init(x: 0.5, y: 0.4),  // Start fade at 40% from top
-                    endPoint: .bottom
-                )
-
-                // Content info
-                VStack(alignment: .leading, spacing: 16) {
-                    // Type badge
-                    if let type = item.type {
-                        Text(type.uppercased())
-                            .font(.system(size: 15, weight: .bold))
-                            .tracking(2)
-                            .foregroundStyle(.white.opacity(0.6))
-                    }
-
-                    // Title
-                    Text(item.title ?? "")
-                        .font(.system(size: 56, weight: .bold))
-                        .foregroundStyle(.white)
-                        .lineLimit(2)
-
-                    // Metadata row
-                    HStack(spacing: 16) {
-                        if let year = item.year {
-                            Text(String(year))
-                        }
-                        if let rating = item.contentRating {
-                            Text(rating)
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 4)
-                                .background(.white.opacity(0.2))
-                                .clipShape(RoundedRectangle(cornerRadius: 6))
-                        }
-                        if let duration = item.duration {
-                            Text(formatDuration(duration))
-                        }
-                    }
-                    .font(.system(size: 20, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.7))
-
-                    // Summary (truncated)
-                    if let summary = item.summary, !summary.isEmpty {
-                        Text(summary)
-                            .font(.system(size: 19))
-                            .foregroundStyle(.white.opacity(0.6))
-                            .lineLimit(2)
-                            .frame(maxWidth: 800, alignment: .leading)
-                    }
-
-                    // More Info indicator
-                    HStack(spacing: 10) {
-                        Image(systemName: "info.circle.fill")
-                            .font(.system(size: 18, weight: .semibold))
-                        Text("More Info")
-                            .font(.system(size: 20, weight: .semibold))
-                    }
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 28)
-                    .padding(.vertical, 14)
-                    .background(
-                        RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .fill(.white.opacity(isFocused ? 0.3 : 0.15))
-                    )
-                    .opacity(isFocused ? 1 : 0.7)
-                    .padding(.top, 8)
-                }
-                .padding(.horizontal, 80)
-                .padding(.bottom, 70)
-            }
-        }
-    }
-
-    @ViewBuilder
-    private var heroButtonView: some View {
-        switch focusBinding {
-        case .bool(let binding):
-            Button(action: onSelect) {
-                heroContentView
-            }
-            .buttonStyle(.plain)
-            .focused(binding)
-            .frame(height: 750)
-            .clipShape(RoundedRectangle(cornerRadius: 32, style: .continuous))
-            .padding(.horizontal, 48)
-            .padding(.top, 20)
-            // Simplified focus effect: removed brightness (CPU-intensive color matrix)
-            // Scale + stroke provides sufficient visual feedback
-            .overlay(
-                RoundedRectangle(cornerRadius: 32, style: .continuous)
-                    .stroke(.white.opacity(isFocused ? 0.4 : 0), lineWidth: 4)
-                    .padding(.horizontal, 48)
-                    .padding(.top, 20)
-            )
-            .scaleEffect(isFocused ? 1.02 : 1.0)
-            .animation(.easeOut(duration: 0.1), value: isFocused)  // Faster de-focus
-
-        case .enumTarget(let binding, let target):
-            Button(action: onSelect) {
-                heroContentView
-            }
-            .buttonStyle(.plain)
-            .focused(binding, equals: target)
-            .frame(height: 750)
-            .clipShape(RoundedRectangle(cornerRadius: 32, style: .continuous))
-            .padding(.horizontal, 48)
-            .padding(.top, 20)
-            // Simplified focus effect: removed brightness (CPU-intensive color matrix)
-            .overlay(
-                RoundedRectangle(cornerRadius: 32, style: .continuous)
-                    .stroke(.white.opacity(isFocused ? 0.4 : 0), lineWidth: 4)
-                    .padding(.horizontal, 48)
-                    .padding(.top, 20)
-            )
-            .scaleEffect(isFocused ? 1.02 : 1.0)
-            .animation(.easeOut(duration: 0.1), value: isFocused)  // Faster de-focus
-        }
-    }
-
-    private func formatDuration(_ ms: Int) -> String {
-        let minutes = ms / 60000
-        let hours = minutes / 60
-        let mins = minutes % 60
-        if hours > 0 {
-            return "\(hours)h \(mins)m"
-        }
-        return "\(mins)m"
-    }
-
 }
 
 // MARK: - Continue Watching Context Menu

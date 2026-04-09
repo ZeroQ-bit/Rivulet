@@ -40,7 +40,6 @@ struct PlexDetailView: View {
     }
 
     @Environment(\.dismiss) private var dismiss
-    @Environment(\.nestedNavigationState) private var nestedNavState
     @Environment(\.previewMenuBridge) private var menuBridge
     @StateObject private var authManager = PlexAuthManager.shared
     @State private var seasons: [PlexMetadata] = []
@@ -705,23 +704,8 @@ struct PlexDetailView: View {
             navigateToEpisode: $navigateToEpisode,
             isEnabled: onPreviewExitRequested == nil
         ))
-        // Update goBackAction when viewing nested album
+        // Restore focus when returning from a nested album view
         .onChange(of: navigateToAlbum) { oldAlbum, newAlbum in
-            if newAlbum != nil {
-                // Override goBackAction to just dismiss the album, not go all the way back
-                nestedNavState.goBackAction = { [weak nestedNavState] in
-                    navigateToAlbum = nil
-                    // Keep nested state true since we're still in artist view
-                    nestedNavState?.isNested = true
-                }
-            } else if oldAlbum != nil {
-                // Returned from album - restore goBackAction to dismiss this view
-                nestedNavState.goBackAction = { [weak nestedNavState] in
-                    nestedNavState?.isNested = false
-                    dismiss()
-                }
-            }
-            // Restore focus when returning from album
             if oldAlbum != nil && newAlbum == nil, let savedFocus = savedAlbumFocus {
                 // Delay slightly to let the view update
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
@@ -2360,6 +2344,14 @@ struct PlexDetailView: View {
                 ratingKey: ratingKey
             )
             unifiedEpisodes = allEps
+
+            // When opened from a specific episode, scroll the unified list to that episode.
+            // Defer one run loop so the ScrollViewReader mounts with the new list before
+            // its .onChange(episodeScrollTarget) observer fires.
+            if currentItem.type == "episode", let targetKey = currentItem.ratingKey {
+                try? await Task.sleep(nanoseconds: 50_000_000) // 50ms
+                episodeScrollTarget = targetKey
+            }
         } catch {
             print("Failed to load all episodes: \(error)")
         }
@@ -2818,27 +2810,42 @@ struct SeasonPillBar: View {
     @FocusState private var focusedSeasonId: String?
 
     var body: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 12) {
-                ForEach(seasons, id: \.ratingKey) { season in
-                    let isSelected = selectedSeason?.ratingKey == season.ratingKey
-                    SeasonPillButton(
-                        label: seasonLabel(for: season),
-                        isSelected: isSelected,
-                        action: {
-                            selectedSeason = season
-                            onSeasonSelected(season)
-                        }
-                    )
-                    .focused($focusedSeasonId, equals: season.ratingKey)
-                    .id(season.ratingKey)
+        ScrollViewReader { proxy in
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 12) {
+                    ForEach(seasons, id: \.ratingKey) { season in
+                        let isSelected = selectedSeason?.ratingKey == season.ratingKey
+                        SeasonPillButton(
+                            label: seasonLabel(for: season),
+                            isSelected: isSelected,
+                            action: {
+                                selectedSeason = season
+                                onSeasonSelected(season)
+                            }
+                        )
+                        .focused($focusedSeasonId, equals: season.ratingKey)
+                        .id(season.ratingKey)
+                    }
+                }
+                .padding(.horizontal, 48)
+                .padding(.vertical, 8)
+            }
+            .scrollClipDisabled()
+            .focusSection()
+            .onAppear {
+                // Initial scroll to selected season (handles "open show from specific episode")
+                guard let key = selectedSeason?.ratingKey else { return }
+                DispatchQueue.main.async {
+                    proxy.scrollTo(key, anchor: .center)
                 }
             }
-            .padding(.horizontal, 48)
-            .padding(.vertical, 8)
+            .onChange(of: selectedSeason?.ratingKey) { _, newKey in
+                guard let newKey else { return }
+                withAnimation(.easeInOut(duration: 0.3)) {
+                    proxy.scrollTo(newKey, anchor: .center)
+                }
+            }
         }
-        .scrollClipDisabled()
-        .focusSection()
     }
 
     private func seasonLabel(for season: PlexMetadata) -> String {
@@ -2955,6 +2962,14 @@ struct EpisodeCard: View {
                                 }
                             }
                         }
+                    }
+                }
+                .overlay(alignment: .topTrailing) {
+                    // Watched indicator — same corner tag used on poster cards.
+                    // In-progress episodes show the bottom bar instead (isWatched excludes that).
+                    if episode.isWatched {
+                        WatchedCornerTag()
+                            .accessibilityLabel("Watched")
                     }
                 }
 

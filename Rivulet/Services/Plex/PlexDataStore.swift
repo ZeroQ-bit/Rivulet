@@ -89,22 +89,23 @@ class PlexDataStore: ObservableObject {
 
     // MARK: - Hero Cache (per library)
 
-    /// Cached hero items per library key - persists across navigation
-    private var heroCache: [String: PlexMetadata] = [:]
+    /// Cached hero items per library key - persists across navigation.
+    /// Keys: "home" for the home screen, each library key for library-scoped carousels.
+    private var heroItemsCache: [String: [PlexMetadata]] = [:]
 
-    /// Get cached hero for a library (returns nil if not cached)
-    func getCachedHero(forLibrary libraryKey: String) -> PlexMetadata? {
-        return heroCache[libraryKey]
+    /// Get cached hero items for a library (returns nil if not cached)
+    func getCachedHeroItems(forLibrary libraryKey: String) -> [PlexMetadata]? {
+        return heroItemsCache[libraryKey]
     }
 
-    /// Cache a hero for a library
-    func cacheHero(_ hero: PlexMetadata, forLibrary libraryKey: String) {
-        heroCache[libraryKey] = hero
+    /// Cache hero items for a library
+    func cacheHeroItems(_ items: [PlexMetadata], forLibrary libraryKey: String) {
+        heroItemsCache[libraryKey] = items
     }
 
     /// Clear hero cache (e.g., on sign out)
     func clearHeroCache() {
-        heroCache.removeAll()
+        heroItemsCache.removeAll()
     }
 
     // MARK: - Dependencies
@@ -1074,7 +1075,7 @@ class PlexDataStore: ObservableObject {
         isLoadingHubs = false
         isLoadingLibraries = false
         nextEpisodeCache.removeAll()
-        heroCache.removeAll()
+        heroItemsCache.removeAll()
         clearFreshnessTimestamps()
         fullMetadataCache.removeAll()
         TopShelfCache.shared.clear()

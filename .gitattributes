@@ -1,0 +1,3 @@
+# Prebuilt FFmpeg / Dovi xcframeworks (vendored binaries, not source we maintain)
+Frameworks/** linguist-vendored
+ffmpeg-tvos-build/** linguist-vendored

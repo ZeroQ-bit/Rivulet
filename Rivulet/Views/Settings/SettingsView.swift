@@ -436,20 +436,14 @@ struct SettingsView: View {
                 focusTrigger += 1
             }
         }
-        .onChange(of: navigationStack) { _, newStack in
-            let isNested = newStack.count > 1
-            nestedNavState.isNested = isNested
-            if isNested {
-                nestedNavState.goBackAction = { [weak nestedNavState] in
-                    goBack()
-                    if navigationStack.count <= 1 {
-                        nestedNavState?.isNested = false
-                    }
-                }
-            } else {
-                nestedNavState.goBackAction = nil
-            }
-        }
+        // Note: Settings sub-page navigation is intra-tab (internal view swaps
+        // via `navigate`/`goBack` and `FocusContainedView`), not a detail-view
+        // push. Coupling it to `nestedNavState.isNested` would hide the sidebar
+        // and animate it back in on return — that hide/show race makes the
+        // sidebar "start to open then immediately close" when the user presses
+        // left from the root page just after backing out of a sub-page.
+        // Leave `nestedNavState` alone so the sidebar stays accessible
+        // throughout settings navigation.
         .onExitCommand(perform: currentPage != .root ? { goBack() } : nil)
     }
 

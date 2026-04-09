@@ -28,6 +28,11 @@ private func headingDescription(_ heading: UIFocusHeading) -> String {
 struct TVSidebarView: View {
     @StateObject private var authManager = PlexAuthManager.shared
     @StateObject private var dataStore = PlexDataStore.shared
+    // Observed directly so the sidebar rebuilds when library visibility/order
+    // changes in settings. `dataStore.visibleMediaLibraries` reads from this
+    // manager but holds it as a plain `let`, so without an explicit
+    // @StateObject here, SwiftUI doesn't see hiddenLibraryKeys updates.
+    @StateObject private var librarySettings = LibrarySettingsManager.shared
     @StateObject private var liveTVDataStore = LiveTVDataStore.shared
     @StateObject private var profileManager = PlexUserProfileManager.shared
     @StateObject private var nestedNavState = NestedNavigationState()
@@ -90,7 +95,6 @@ struct TVSidebarView: View {
         // Handle tab selection
         .onChange(of: selectedTab) { _, newTab in
             nestedNavState.isNested = false
-            nestedNavState.goBackAction = nil
             previousTab = newTab
             if isMusicLibraryTab(newTab) {
                 musicLibraryEntryToken = UUID()
@@ -348,12 +352,23 @@ struct TVSidebarView: View {
                 Text("Welcome to Rivulet")
                     .font(.system(size: 46, weight: .semibold))
 
-                Text("Open the sidebar to navigate to Settings and connect your Plex server.")
+                Text("Connect your Plex server in Settings to get started.")
                     .font(.system(size: 28))
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
                     .frame(maxWidth: 500)
             }
+
+            Button {
+                selectedTab = .settings
+            } label: {
+                Text("Open Settings")
+                    .font(.system(size: 24, weight: .semibold))
+                    .padding(.horizontal, 40)
+                    .padding(.vertical, 16)
+            }
+            .buttonStyle(.card)
+            .padding(.top, 12)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }

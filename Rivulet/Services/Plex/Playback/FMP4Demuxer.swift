@@ -9,7 +9,6 @@
 import Foundation
 import CoreMedia
 import VideoToolbox
-import Sentry
 
 // MARK: - Demuxed Sample
 
@@ -68,14 +67,7 @@ final class FMP4Demuxer {
         let boxes = parseBoxes(data: data, offset: 0, length: data.count)
 
         guard let moov = boxes.first(where: { $0.type == "moov" }) else {
-            let error = DemuxerError.missingBox("moov")
-            SentrySDK.capture(error: error) { scope in
-                scope.setTag(value: "dv_demuxer", key: "component")
-                scope.setTag(value: "init_segment", key: "error_type")
-                scope.setExtra(value: data.count, key: "init_segment_size")
-                scope.setExtra(value: boxes.map { $0.type }.joined(separator: ", "), key: "top_level_boxes")
-            }
-            throw error
+            throw DemuxerError.missingBox("moov")
         }
 
         let moovChildren = parseBoxes(data: data, offset: moov.contentOffset, length: moov.contentLength)
@@ -92,13 +84,7 @@ final class FMP4Demuxer {
         }
 
         if tracks.isEmpty {
-            let error = DemuxerError.noTracksFound
-            SentrySDK.capture(error: error) { scope in
-                scope.setTag(value: "dv_demuxer", key: "component")
-                scope.setTag(value: "init_segment", key: "error_type")
-                scope.setExtra(value: data.count, key: "init_segment_size")
-            }
-            throw error
+            throw DemuxerError.noTracksFound
         }
     }
 
@@ -416,15 +402,7 @@ final class FMP4Demuxer {
         let innerBoxes = parseBoxes(data: data, offset: configOffset, length: innerLength)
         playerDebugLog("🎬 [Demuxer] Video codec: \(entryType), config boxes: \(innerBoxes.map { $0.type }.joined(separator: ", "))")
         guard let hvcC = innerBoxes.first(where: { $0.type == "hvcC" }) else {
-            let error = DemuxerError.missingBox("hvcC in video sample entry (\(entryType))")
-            SentrySDK.capture(error: error) { scope in
-                scope.setTag(value: "dv_demuxer", key: "component")
-                scope.setTag(value: "missing_hvcc", key: "error_type")
-                scope.setTag(value: entryType, key: "video_codec")
-                scope.setExtra(value: "\(width)x\(height)", key: "video_resolution")
-                scope.setExtra(value: innerBoxes.map { $0.type }.joined(separator: ", "), key: "inner_boxes")
-            }
-            throw error
+            throw DemuxerError.missingBox("hvcC in video sample entry (\(entryType))")
         }
 
         let hvcCData = data.subdata(in: hvcC.contentOffset ..< (hvcC.offset + hvcC.size))
@@ -467,15 +445,7 @@ final class FMP4Demuxer {
         )
 
         guard status == noErr, let desc = formatDescription else {
-            let error = DemuxerError.formatDescriptionCreationFailed(status)
-            SentrySDK.capture(error: error) { scope in
-                scope.setTag(value: "dv_demuxer", key: "component")
-                scope.setTag(value: "dvh1_format_creation", key: "error_type")
-                scope.setExtra(value: "\(width)x\(height)", key: "video_resolution")
-                scope.setExtra(value: Int(status), key: "os_status")
-                scope.setExtra(value: hvcCData.count, key: "hvcc_size")
-            }
-            throw error
+            throw DemuxerError.formatDescriptionCreationFailed(status)
         }
 
         playerDebugLog("🎬 [FMP4Demuxer] Created dvh1 format description: \(width)x\(height)")

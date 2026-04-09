@@ -72,6 +72,11 @@ class PlexAuthManager: ObservableObject {
     private let usernameKey = "plexUsername"
     private let serverURLKey = "selectedServerURL"
     private let serverNameKey = "selectedServerName"
+    /// Sentinel set after a successful auth. Used to detect fresh installs —
+    /// UserDefaults is wiped on app uninstall but Keychain persists, so if this
+    /// flag is missing while the Keychain still has tokens, the Keychain data
+    /// is stale from a previous install and must be cleared.
+    private let hasPersistedSessionKey = "plexHasPersistedSession"
 
     // Legacy UserDefaults keys (for migration only)
     private let legacyTokenKey = "plexAuthToken"
@@ -86,6 +91,23 @@ class PlexAuthManager: ObservableObject {
     private init() {
         // Migrate tokens from UserDefaults to Keychain (one-time migration)
         migrateTokensToKeychain()
+
+        // Detect stale Keychain data from a previous install.
+        // On tvOS/iOS, Keychain items with kSecAttrAccessibleAfterFirstUnlock
+        // persist across app uninstalls, but UserDefaults is wiped. If we see
+        // a Keychain token but no record of a prior session in UserDefaults,
+        // this is a fresh install — clear the stale Keychain data so the auth
+        // flow starts from a clean state.
+        let hasPersistedSession = userDefaults.bool(forKey: hasPersistedSessionKey)
+        let keychainHasToken = KeychainHelper.get(keychainTokenKey) != nil
+            || KeychainHelper.get(keychainServerTokenKey) != nil
+        if !hasPersistedSession && keychainHasToken {
+            print("🔐 PlexAuthManager: Detected stale Keychain data from previous install — clearing")
+            KeychainHelper.delete(keychainTokenKey)
+            KeychainHelper.delete(keychainServerTokenKey)
+            state = .idle
+            return
+        }
 
         // Load tokens from Keychain (secure)
         authToken = KeychainHelper.get(keychainTokenKey)
@@ -498,6 +520,7 @@ class PlexAuthManager: ObservableObject {
         userDefaults.removeObject(forKey: usernameKey)
         userDefaults.removeObject(forKey: serverURLKey)
         userDefaults.removeObject(forKey: serverNameKey)
+        userDefaults.removeObject(forKey: hasPersistedSessionKey)
 
         // Clear any legacy tokens that might still exist
         userDefaults.removeObject(forKey: legacyTokenKey)
@@ -663,6 +686,9 @@ class PlexAuthManager: ObservableObject {
     private func handleSuccessfulAuth(token: String) async {
         authToken = token
         KeychainHelper.set(token, forKey: keychainTokenKey)
+        // Mark this install as having a persisted session so a later reinstall
+        // can detect stale Keychain data on first launch.
+        userDefaults.set(true, forKey: hasPersistedSessionKey)
 
         // Fetch user info
         await fetchUserInfo()

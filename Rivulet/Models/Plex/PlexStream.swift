@@ -10,8 +10,15 @@ import Foundation
 /// Represents a media stream within a Plex media part
 /// streamType: 1 = video, 2 = audio, 3 = subtitle
 struct PlexStream: Codable, Identifiable, Sendable {
-    let id: Int
+    /// Plex-assigned stream id. `nil` for streams embedded in the video
+    /// container (e.g., EIA-608 closed captions with `embeddedInVideo: "1"`),
+    /// which Plex omits because they're baked into their parent stream.
+    /// Use `id` (computed below) as the stable public identifier.
+    let _id: Int?
     let streamType: Int
+    /// Stream index within the containing part. Used to synthesize a stable
+    /// `id` when Plex omits one.
+    let index: Int?
     let codec: String?
     let codecID: String?
     let language: String?
@@ -58,6 +65,36 @@ struct PlexStream: Codable, Identifiable, Sendable {
     let key: String?           // For external subtitles
     let extendedDisplayTitle: String?
     let hearingImpaired: Bool?
+
+    // MARK: - Identifiable
+
+    /// Stable identifier. Uses Plex's `_id` verbatim when present; otherwise
+    /// synthesizes a negative id from `streamType` + `index` so embedded
+    /// streams (e.g., closed captions baked into the video) still participate
+    /// in `Identifiable` / `ForEach` without colliding with real Plex ids.
+    var id: Int {
+        if let _id { return _id }
+        return -((streamType * 1_000_000) + (index ?? 0) + 1)
+    }
+
+    // MARK: - Codable
+
+    enum CodingKeys: String, CodingKey {
+        case _id = "id"
+        case streamType, index
+        case codec, codecID
+        case language, languageCode, languageTag
+        case displayTitle, title
+        case `default`, forced, selected
+        case bitDepth, chromaLocation, chromaSubsampling
+        case colorPrimaries, colorRange, colorSpace, colorTrc
+        case DOVIBLCompatID, DOVIBLPresent, DOVIELPresent
+        case DOVILevel, DOVIPresent, DOVIProfile
+        case DOVIRPUPresent, DOVIVersion
+        case frameRate, height, width, level, profile, refFrames, scanType
+        case audioChannelLayout, channels, bitrate, samplingRate
+        case format, key, extendedDisplayTitle, hearingImpaired
+    }
 
     // MARK: - Convenience Properties
 

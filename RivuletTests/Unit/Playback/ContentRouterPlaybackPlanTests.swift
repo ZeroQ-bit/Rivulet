@@ -327,8 +327,9 @@ final class ContentRouterPlaybackPlanTests: XCTestCase {
 
     private func makeAudioStream(id: Int, codec: String, channels: Int) -> PlexStream {
         PlexStream(
-            id: id,
+            _id: id,
             streamType: 2,
+            index: nil,
             codec: codec,
             codecID: nil,
             language: "eng",

@@ -13,89 +13,125 @@ struct WhatsNewView: View {
     @Binding var isPresented: Bool
     let version: String
 
-    @FocusState private var isContinueFocused: Bool
+    @FocusState private var focusedItem: FocusItem?
+
+    private enum FocusItem: Hashable {
+        case feature(Int)
+        case continueButton
+    }
 
     private var features: [String] {
         Self.features(for: version) ?? []
     }
 
     var body: some View {
-        VStack(spacing: 24) {
-            Spacer()
-
-            ScrollView {
-                VStack(spacing: 32) {
-                    // Header
-                    VStack(spacing: 8) {
-                        Text("What's New")
-                            .font(.system(size: 46, weight: .bold))
-                            .foregroundStyle(.white)
-
-                        Text("Version \(version)")
-                            .font(.system(size: 23, weight: .regular))
-                            .foregroundStyle(.white.opacity(0.5))
-                    }
-                    .padding(.top, 40)
-
-                    // Feature list
-                    VStack(alignment: .leading, spacing: 14) {
-                        ForEach(Array(features.enumerated()), id: \.offset) { _, feature in
-                            HStack(alignment: .top, spacing: 14) {
-                                Circle()
-                                    .fill(.white.opacity(0.4))
-                                    .frame(width: 8, height: 8)
-                                    .padding(.top, 10)
-
-                                Text(feature)
-                                    .font(.system(size: 26, weight: .medium))
-                                    .foregroundStyle(.white.opacity(0.85))
-                                    .fixedSize(horizontal: false, vertical: true)
-                            }
-                        }
-                    }
-                    .padding(.horizontal, 40)
-
-                    // Continue button
-                    Button {
-                        isPresented = false
-                    } label: {
-                        Text("Continue")
-                            .font(.system(size: 26, weight: .semibold))
-                            .foregroundStyle(.white)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 18)
-                            .background(
-                                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                                    .fill(isContinueFocused ? .white.opacity(0.18) : .white.opacity(0.08))
-                                    .overlay(
-                                        RoundedRectangle(cornerRadius: 16, style: .continuous)
-                                            .strokeBorder(
-                                                isContinueFocused ? .white.opacity(0.3) : .white.opacity(0.1),
-                                                lineWidth: 1
-                                            )
-                                    )
-                            )
-                    }
-                    .buttonStyle(GlassRowButtonStyle())
-                    .focused($isContinueFocused)
-                    .scaleEffect(isContinueFocused ? 1.02 : 1.0)
-                    .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isContinueFocused)
-                    .padding(.horizontal, 32)
-                    .padding(.bottom, 36)
-                }
-            }
-            .frame(width: 520)
-            .background(
-                RoundedRectangle(cornerRadius: 32, style: .continuous)
-                    .fill(.black.opacity(0.3))
-            )
-            .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 32, style: .continuous))
-
-            Spacer()
+        VStack {
+            Spacer(minLength: 0)
+            card
+            Spacer(minLength: 0)
+        }
+        .onAppear {
+            focusedItem = .continueButton
         }
         .onExitCommand {
             isPresented = false
         }
+    }
+
+    private var card: some View {
+        VStack(spacing: 0) {
+            // Header (fixed above the scroll area)
+            VStack(spacing: 8) {
+                Text("What's New")
+                    .font(.system(size: 46, weight: .bold))
+                    .foregroundStyle(.white)
+
+                Text("Version \(version)")
+                    .font(.system(size: 23, weight: .regular))
+                    .foregroundStyle(.white.opacity(0.5))
+            }
+            .padding(.top, 40)
+            .padding(.bottom, 24)
+
+            // Scrollable feature list. Each row is focusable so the
+            // tvOS focus engine auto-scrolls the ScrollView when the
+            // user navigates up/down through the items.
+            ScrollView {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(Array(features.enumerated()), id: \.offset) { index, feature in
+                        featureRow(text: feature, isFocused: focusedItem == .feature(index))
+                            .focusable(true)
+                            .focused($focusedItem, equals: .feature(index))
+                            .focusEffectDisabled()
+                    }
+                }
+                .padding(.horizontal, 28)
+                .padding(.vertical, 8)
+            }
+            .scrollIndicators(.visible)
+            .frame(maxHeight: 460)
+
+            // Continue button (fixed below the scroll area) — always
+            // visible and receives initial focus.
+            Button {
+                isPresented = false
+            } label: {
+                Text("Continue")
+                    .font(.system(size: 26, weight: .semibold))
+                    .foregroundStyle(focusedItem == .continueButton ? .black : .white)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 18)
+                    .background(
+                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            .fill(focusedItem == .continueButton ? .white : .white.opacity(0.12))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            .strokeBorder(
+                                focusedItem == .continueButton ? .clear : .white.opacity(0.15),
+                                lineWidth: 1
+                            )
+                    )
+            }
+            .buttonStyle(.plain)
+            .focused($focusedItem, equals: .continueButton)
+            .focusEffectDisabled()
+            .scaleEffect(focusedItem == .continueButton ? 1.04 : 1.0)
+            .animation(.spring(response: 0.3, dampingFraction: 0.7), value: focusedItem)
+            .padding(.horizontal, 32)
+            .padding(.top, 20)
+            .padding(.bottom, 36)
+        }
+        .frame(width: 620)
+        .background(
+            RoundedRectangle(cornerRadius: 32, style: .continuous)
+                .fill(.black.opacity(0.3))
+        )
+        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 32, style: .continuous))
+    }
+
+    private func featureRow(text: String, isFocused: Bool) -> some View {
+        HStack(alignment: .top, spacing: 14) {
+            Circle()
+                .fill(.white.opacity(isFocused ? 0.9 : 0.5))
+                .frame(width: 8, height: 8)
+                .padding(.top, 13)
+
+            Text(text)
+                .font(.system(size: 24, weight: .medium))
+                .foregroundStyle(.white.opacity(isFocused ? 1.0 : 0.85))
+                .fixedSize(horizontal: false, vertical: true)
+                .multilineTextAlignment(.leading)
+
+            Spacer(minLength: 0)
+        }
+        .padding(.vertical, 10)
+        .padding(.horizontal, 14)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(isFocused ? .white.opacity(0.14) : .clear)
+        )
+        .animation(.spring(response: 0.25, dampingFraction: 0.8), value: isFocused)
     }
 
     // MARK: - Changelog Data

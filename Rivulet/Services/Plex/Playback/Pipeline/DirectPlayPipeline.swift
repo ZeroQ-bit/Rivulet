@@ -268,6 +268,24 @@ final class DirectPlayPipeline {
     private var videoEnqueueTask: Task<Void, Never>?
     private var isPlaying = false
     private var playbackRate: Float = 1.0
+
+    /// Set to true by `pause()` and cleared by `start()`/`resume()`/`stop()`/
+    /// `shutdown()`/`seek()`/`selectAudioTrack()`. The read loop reads this
+    /// at the top of each iteration and suspends on `pauseGateContinuation`
+    /// while true — this is what prevents the demuxer from drifting forward
+    /// and shedding reference frames from later GOPs during a pause.
+    ///
+    /// Non-isolated so the read loop can cheap-check it without a MainActor
+    /// hop on every packet. Torn reads are harmless because `waitForResume()`
+    /// re-validates the state under MainActor isolation before stashing a
+    /// continuation.
+    private nonisolated(unsafe) var isPausedFlag = false
+
+    /// Single-slot continuation the read loop suspends on while paused.
+    /// Fired by `fireResumeGate()` on resume or teardown. Only mutated on
+    /// the MainActor.
+    private var pauseGateContinuation: CheckedContinuation<Void, Never>?
+
     private var needsInitialSync = false
     private var needsRateRestoreAfterSeek = false
     /// When true, the most recent fresh start() deferred its onStateChange?(.running)
@@ -325,8 +343,14 @@ final class DirectPlayPipeline {
 
         playerDebugLog("[DirectPlay] Loading: \(url.lastPathComponent) (DV=\(isDolbyVision), conversion=\(enableDVConversion))")
 
-        // Open the container with FFmpeg
-        try demuxer.open(url: url, headers: headers, forceDolbyVision: isDolbyVision)
+        // Open the container with FFmpeg off the main thread. `avformat_open_input`
+        // + `avformat_find_stream_info` do blocking HTTP I/O to fetch the moov box
+        // and probe packets — on slow networks this can hang the main thread for
+        // multiple seconds (see RIVULET-1Y, RIVULET-M). Detach so the main actor
+        // stays responsive while the demuxer does its network work.
+        try await Task.detached(priority: .userInitiated) { [demuxer] in
+            try demuxer.open(url: url, headers: headers, forceDolbyVision: isDolbyVision)
+        }.value
 
         self.duration = demuxer.duration
 
@@ -557,10 +581,15 @@ final class DirectPlayPipeline {
         state = .running
 
         if isResume {
-            // Resume: read loop is already running and blocked on pacing (rate=0).
-            // Just set the rate so the synchronizer advances and pacing unblocks.
+            // Resume: the read loop is suspended at the pause gate (see
+            // `waitForResume()`) and the video task is blocked in its
+            // lookahead loop. Clear the pause flag and fire the gate to
+            // wake the read loop; restoring the synchronizer rate unblocks
+            // the video task naturally.
+            isPausedFlag = false
             renderer.resumeAudio()
             renderer.setRate(rate)
+            fireResumeGate()
             onStateChange?(.running)
             playerDebugLog("[DirectPlay] resume (rate=\(rate))")
         } else {
@@ -579,6 +608,10 @@ final class DirectPlayPipeline {
     func pause() {
         guard isPlaying else { return }
         isPlaying = false
+        // Arm the pause gate before pausing the renderer so the read loop
+        // suspends on its next iteration instead of pumping the demuxer
+        // forward while the synchronizer is frozen.
+        isPausedFlag = true
         renderer.pauseAudio()
         renderer.setRate(0)
         state = .paused
@@ -590,6 +623,7 @@ final class DirectPlayPipeline {
     func resume() {
         guard !isPlaying, state == .paused else { return }
         isPlaying = true
+        isPausedFlag = false
         playerDebugLog("[PlaybackHealth] EVENT=resume")
         state = .running
         onStateChange?(.running)
@@ -608,7 +642,42 @@ final class DirectPlayPipeline {
             playerDebugLog("[DirectPlay] resume (rate=\(playbackRate))")
             renderer.resumeAudio()
             renderer.setRate(playbackRate)
+            fireResumeGate()
         }
+    }
+
+    // MARK: - Pause Gate
+
+    /// Called by the read loop when it observes `isPausedFlag == true`.
+    /// Suspends on `pauseGateContinuation` until `fireResumeGate()` is called
+    /// by a resume, stop, shutdown, seek, or track-switch path.
+    ///
+    /// Re-validates the paused state under MainActor isolation to close the
+    /// race where the flag flips back to false between the read loop's
+    /// cheap check and this suspension.
+    private func waitForResume() async {
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            if !isPausedFlag {
+                cont.resume()
+                return
+            }
+            precondition(
+                pauseGateContinuation == nil,
+                "pauseGateContinuation already has a waiter — only the read loop should wait on this gate"
+            )
+            pauseGateContinuation = cont
+        }
+    }
+
+    /// Resume the read loop's pause-gate continuation, if any. Safe to call
+    /// when nothing is waiting (no-op). Callers that also need to tear the
+    /// read loop down (stop/shutdown/seek/selectAudioTrack) must call
+    /// `readTask?.cancel()` **before** this so the loop observes
+    /// `Task.isCancelled` after waking.
+    private func fireResumeGate() {
+        guard let cont = pauseGateContinuation else { return }
+        pauseGateContinuation = nil
+        cont.resume()
     }
 
     func stop() {
@@ -619,6 +688,10 @@ final class DirectPlayPipeline {
         videoEnqueueTask?.cancel()
         videoEnqueueTask = nil
         readTask?.cancel()
+        // Wake a suspended read loop so it can observe cancellation and
+        // exit — otherwise a paused-then-stopped task would leak forever.
+        isPausedFlag = false
+        fireResumeGate()
         readTask = nil
         audioEncoder?.close()
         audioEncoder = nil
@@ -642,6 +715,12 @@ final class DirectPlayPipeline {
         audioEnqueueTask?.cancel()
         videoEnqueueTask?.cancel()
         readTask?.cancel()
+
+        // Wake a suspended read loop so it can observe cancellation. Must
+        // happen before the `await oldReadTask?.value` below, otherwise a
+        // paused-then-shutdown pipeline would deadlock here.
+        isPausedFlag = false
+        fireResumeGate()
 
         let oldAudioTask = audioEnqueueTask
         let oldVideoTask = videoEnqueueTask
@@ -750,6 +829,11 @@ final class DirectPlayPipeline {
         audioEnqueueTask = nil
         videoEnqueueTask = nil
         readTask?.cancel()
+        // Wake the read loop if it's suspended at the pause gate so it
+        // observes cancellation. Must happen before the await below or
+        // a seek-while-paused would deadlock.
+        isPausedFlag = false
+        fireResumeGate()
         let oldTask = readTask
         readTask = nil
         await oldTask?.value
@@ -837,6 +921,12 @@ final class DirectPlayPipeline {
         audioEnqueueTask = nil
         videoEnqueueTask = nil
         readTask?.cancel()
+        // Wake the read loop if it's suspended at the pause gate so the
+        // await below can observe its exit. If the user had paused before
+        // the track switch, the new read loop will hit the paused-seek
+        // inline exit path on its first video frame.
+        isPausedFlag = false
+        fireResumeGate()
         let oldTask = readTask
         readTask = nil
         await oldTask?.value
@@ -1815,6 +1905,21 @@ final class DirectPlayPipeline {
             var exitReason: LoopExit = .cancelled
 
             readLoop: while !Task.isCancelled {
+                // Pause gate: suspend here (without polling) while transport
+                // is paused. This prevents the demuxer from drifting forward
+                // while the renderer synchronizer is frozen at rate=0, which
+                // would otherwise fill the video gate, shed non-keyframe
+                // references, and produce chunky/pixelated decode on resume.
+                //
+                // The flag is nonisolated(unsafe) and cheaply read per
+                // iteration; `waitForResume()` re-validates the paused state
+                // under MainActor isolation before stashing a continuation.
+                if self?.isPausedFlag == true {
+                    await self?.waitForResume()
+                    if Task.isCancelled { break readLoop }
+                    continue
+                }
+
                 do {
                     // Measure av_read_frame wall time so we can see whether the
                     // read loop is starving on network I/O vs downstream work.

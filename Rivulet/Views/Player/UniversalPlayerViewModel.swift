@@ -2603,10 +2603,11 @@ final class UniversalPlayerViewModel: ObservableObject {
         let hintedFormat: SubtitleFormat? = isLikelyTextSubtitle ? SubtitleFormat(from: codec) : .srt
         let headers = ["X-Plex-Token": authToken]
 
-        // Build candidate subtitle URLs.
-        // 1) Use direct track key when available.
-        // 2) Include explicit SRT conversion for track key.
-        // 3) Fallback to /library/streams/{id} variants.
+        // Build candidate subtitle URLs from the track's key only. Plex's
+        // `/library/streams/{id}` endpoint is PUT-only (used to change stream
+        // selection); a GET against it returns 501, so the old fallback just
+        // spammed HTTPClientError events without ever loading a subtitle.
+        // If there's no `subtitleKey`, there's nothing to fetch.
         var candidateURLStrings: [String] = []
         if let trackKey = track.subtitleKey {
             let isAbsolute = trackKey.hasPrefix("http://") || trackKey.hasPrefix("https://")
@@ -2617,8 +2618,6 @@ final class UniversalPlayerViewModel: ObservableObject {
             let separator = baseKeyURL.contains("?") ? "&" : "?"
             candidateURLStrings.append(baseKeyURL + "\(separator)format=srt")
         }
-        candidateURLStrings.append("\(serverURL)/library/streams/\(trackId)")
-        candidateURLStrings.append("\(serverURL)/library/streams/\(trackId)?format=srt")
 
         // Preserve order but avoid duplicate network requests.
         var seen = Set<String>()

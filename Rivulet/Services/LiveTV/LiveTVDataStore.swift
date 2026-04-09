@@ -34,7 +34,12 @@ class LiveTVDataStore: ObservableObject {
 
     /// Error states
     @Published var channelsError: String?
-    @Published var epgError: String?
+    /// Per-source EPG failures. Populated after a `loadEPG` run that had at
+    /// least one provider throw. Used by the Live TV guide to surface a
+    /// user-readable "EPG unavailable" banner so users can tell that an empty
+    /// guide is caused by a third-party / configuration problem rather than
+    /// by Rivulet itself.
+    @Published var epgIssues: [EPGFetchIssue] = []
 
     /// Active provider configurations
     @Published private(set) var sources: [LiveTVSourceInfo] = []
@@ -74,6 +79,18 @@ class LiveTVDataStore: ObservableObject {
         let channelCount: Int
         let isConnected: Bool
         let lastSync: Date?
+    }
+
+    // MARK: - EPG Errors
+
+    /// A user-facing description of a single failed EPG fetch. Produced from
+    /// the thrown error in `loadEPG` so the Live TV guide view can distinguish
+    /// "third-party EPG server is down" from "Rivulet is broken".
+    struct EPGFetchIssue: Identifiable, Equatable, Sendable {
+        let id = UUID()
+        let sourceId: String
+        let sourceName: String
+        let reason: String
     }
 
     // MARK: - Computed Properties
@@ -437,13 +454,20 @@ class LiveTVDataStore: ObservableObject {
         epgLoadTask?.cancel()
 
         isLoadingEPG = true
-        epgError = nil
+        epgIssues = []
 
         let endDate = Calendar.current.date(byAdding: .hour, value: hours, to: startDate) ?? startDate
 
+        // Snapshot provider display names up-front so the task group doesn't
+        // need to touch the @MainActor-bound providers dictionary after
+        // suspension.
+        let sourceNames: [String: String] = providers.reduce(into: [:]) { acc, entry in
+            acc[entry.key] = entry.value.displayName
+        }
+
         epgLoadTask = Task {
             var allEPG: [String: [UnifiedProgram]] = [:]
-            var errors: [String] = []
+            var issues: [EPGFetchIssue] = []
 
             // Group channels by source
             let channelsBySource = Dictionary(grouping: channels, by: { $0.sourceId })
@@ -477,9 +501,13 @@ class LiveTVDataStore: ObservableObject {
                             allEPG[channelId] = programs
                         }
                     case .failure(let error):
-                        // EPG errors are not critical, just log them
-                        errors.append("\(sourceId): \(error.localizedDescription)")
                         print("📺 LiveTVDataStore: ⚠️ EPG load failed for \(sourceId): \(error)")
+                        let sourceName = sourceNames[sourceId] ?? sourceId
+                        issues.append(EPGFetchIssue(
+                            sourceId: sourceId,
+                            sourceName: sourceName,
+                            reason: Self.shortEPGFailureReason(for: error)
+                        ))
                     }
                 }
             }
@@ -487,13 +515,61 @@ class LiveTVDataStore: ObservableObject {
             await MainActor.run {
                 self.epg = allEPG
                 self.isLoadingEPG = false
-                if !errors.isEmpty {
-                    self.epgError = errors.joined(separator: "\n")
-                }
+                self.epgIssues = issues
             }
         }
 
         await epgLoadTask?.value
+    }
+
+    /// Converts a thrown EPG fetch error into a short, user-readable phrase
+    /// for the guide banner. Keep these deliberately concrete — "EPG server
+    /// returned HTTP 404" tells the user where to look, whereas the raw
+    /// `error.localizedDescription` is often opaque.
+    static func shortEPGFailureReason(for error: Error) -> String {
+        if let xmltv = error as? XMLTVParseError {
+            switch xmltv {
+            case .httpError(let code):
+                return "EPG server returned HTTP \(code)"
+            case .parseFailed:
+                return "EPG data could not be parsed"
+            }
+        }
+
+        let nsError = error as NSError
+        if nsError.domain == NSURLErrorDomain {
+            switch nsError.code {
+            case NSURLErrorCancelled:
+                return "EPG request cancelled"
+            case NSURLErrorTimedOut:
+                return "EPG server didn't respond in time"
+            case NSURLErrorCannotFindHost:
+                return "EPG server hostname could not be resolved"
+            case NSURLErrorCannotConnectToHost:
+                return "Could not connect to EPG server"
+            case NSURLErrorNetworkConnectionLost:
+                return "Network connection was lost"
+            case NSURLErrorDNSLookupFailed:
+                return "DNS lookup failed for EPG server"
+            case NSURLErrorNotConnectedToInternet:
+                return "Not connected to the internet"
+            case NSURLErrorBadServerResponse:
+                return "EPG server returned invalid data"
+            case NSURLErrorSecureConnectionFailed,
+                 NSURLErrorServerCertificateHasBadDate,
+                 NSURLErrorServerCertificateUntrusted,
+                 NSURLErrorServerCertificateHasUnknownRoot,
+                 NSURLErrorServerCertificateNotYetValid:
+                return "EPG server TLS certificate issue"
+            case NSURLErrorClientCertificateRejected,
+                 NSURLErrorClientCertificateRequired:
+                return "EPG server requires a client certificate"
+            default:
+                break
+            }
+        }
+
+        return error.localizedDescription
     }
 
     // MARK: - Background Preloading
@@ -664,7 +740,7 @@ class LiveTVDataStore: ObservableObject {
         epg = [:]
         sources = []
         channelsError = nil
-        epgError = nil
+        epgIssues = []
         isLoadingChannels = false
         isLoadingEPG = false
     }

@@ -90,16 +90,7 @@ struct PlexSearchView: View {
             scheduleSearch(for: newValue)
         }
         .onChange(of: selectedItem) { _, newValue in
-            let isNested = newValue != nil
-            nestedNavState.isNested = isNested
-            if isNested {
-                nestedNavState.goBackAction = { [weak nestedNavState] in
-                    selectedItem = nil
-                    nestedNavState?.isNested = false
-                }
-            } else {
-                nestedNavState.goBackAction = nil
-            }
+            nestedNavState.isNested = newValue != nil
         }
         .onSubmit {
             submitSearch()

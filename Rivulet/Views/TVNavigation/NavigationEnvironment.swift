@@ -23,25 +23,12 @@ enum SidebarTab: Hashable {
 
 // MARK: - Nested Navigation State
 
-/// Preference key for nested navigation state (bubbles up from child views)
-struct IsInNestedNavigationKey: PreferenceKey {
-    static var defaultValue: Bool = false
-    static func reduce(value: inout Bool, nextValue: () -> Bool) {
-        value = value || nextValue()  // True if any child is in nested nav
-    }
-}
-
-/// Observable object to track nested navigation state across views
+/// Observable object to track nested navigation state across views.
+/// `isNested` is set true while a child view has pushed a detail view;
+/// the sidebar reads it to hide the tab bar and block tab switches.
 @MainActor
 class NestedNavigationState: ObservableObject {
     @Published var isNested: Bool = false
-
-    /// Action to go back from nested navigation (set by child views)
-    var goBackAction: (() -> Void)?
-
-    func goBack() {
-        goBackAction?()
-    }
 }
 
 /// Environment key for nested navigation state

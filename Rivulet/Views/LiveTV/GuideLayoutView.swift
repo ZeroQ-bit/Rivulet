@@ -164,6 +164,16 @@ struct GuideLayoutView: View {
             selectFocusedChannel(trigger: "button")
         } label: {
             VStack(spacing: 0) {
+                // EPG failure banner — surfaced so an empty guide doesn't look
+                // like a Rivulet bug when the real cause is a broken third-party
+                // EPG URL (404/DNS/timeout/etc).
+                if !dataStore.epgIssues.isEmpty {
+                    EPGIssueBanner(issues: dataStore.epgIssues)
+                        .padding(.horizontal, 40)
+                        .padding(.top, 16)
+                        .padding(.bottom, 8)
+                }
+
                 // Header row with time slots
                 HStack(spacing: 0) {
                     Color(white: 0.08)
@@ -557,6 +567,54 @@ private struct TimeLineView: View {
                 .frame(width: 2, height: totalHeight)
                 .offset(x: x)
         }
+    }
+}
+
+// MARK: - EPG Issue Banner
+
+/// Passive banner shown above the guide when one or more EPG fetches failed.
+/// Tells the user *which* source failed and *why* in a short phrase, so that
+/// an empty guide reads as "your EPG server is down" rather than "Rivulet is
+/// broken". Non-focusable by design — the fix belongs in Settings or on the
+/// upstream server, not behind a button here.
+private struct EPGIssueBanner: View {
+    let issues: [LiveTVDataStore.EPGFetchIssue]
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 14) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 22, weight: .semibold))
+                .foregroundStyle(.yellow.opacity(0.9))
+                .padding(.top, 2)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(issues.count == 1
+                     ? "Guide data unavailable"
+                     : "Guide data unavailable (\(issues.count) sources)")
+                    .font(.system(size: 20, weight: .semibold))
+                    .foregroundStyle(.white)
+
+                ForEach(issues) { issue in
+                    Text("\(issue.sourceName): \(issue.reason)")
+                        .font(.system(size: 16, weight: .regular))
+                        .foregroundStyle(.white.opacity(0.7))
+                        .lineLimit(2)
+                }
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 22)
+        .padding(.vertical, 16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(.white.opacity(0.08))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(.white.opacity(0.08), lineWidth: 1)
+        )
     }
 }
 

@@ -187,9 +187,11 @@ actor IPTVProvider: LiveTVProvider {
                 parseResult = try await xmltvParser.parse(from: epgURL)
             }
         } catch {
-            // Only capture unexpected EPG errors — skip cancellations
-            let isCancelled = (error as NSError).code == NSURLErrorCancelled
-            if !isCancelled {
+            // Only capture unexpected EPG errors. The EPG URL is user-supplied
+            // third-party content, so upstream HTTP failures, DNS/timeout/TLS
+            // errors, and task cancellations are not Rivulet bugs — log them
+            // locally and surface via the UI, but don't file Sentry events.
+            if shouldCaptureEPGError(error) {
                 let capturedDisplayName = self.displayName
                 SentrySDK.capture(error: error) { scope in
                     scope.setTag(value: "iptv", key: "component")
@@ -283,5 +285,47 @@ actor IPTVProvider: LiveTVProvider {
         cachedEPG = [:]
         lastChannelFetch = nil
         lastEPGFetch = nil
+    }
+
+    // MARK: - Error Classification
+
+    /// Returns `true` only when an EPG fetch error looks like a Rivulet bug
+    /// rather than a third-party / configuration failure. User-supplied EPG
+    /// URLs can return any HTTP status, time out, or fail DNS without it
+    /// being our fault, so those get surfaced via the UI but not filed to
+    /// Sentry. Parse failures on otherwise-valid responses still get captured.
+    private func shouldCaptureEPGError(_ error: Error) -> Bool {
+        // Upstream HTTP failure (4xx/5xx from the EPG server)
+        if error is XMLTVParseError {
+            if case XMLTVParseError.httpError = error {
+                return false
+            }
+        }
+
+        let nsError = error as NSError
+        if nsError.domain == NSURLErrorDomain {
+            switch nsError.code {
+            case NSURLErrorCancelled,
+                 NSURLErrorTimedOut,
+                 NSURLErrorCannotFindHost,
+                 NSURLErrorCannotConnectToHost,
+                 NSURLErrorNetworkConnectionLost,
+                 NSURLErrorDNSLookupFailed,
+                 NSURLErrorNotConnectedToInternet,
+                 NSURLErrorBadServerResponse,
+                 NSURLErrorSecureConnectionFailed,
+                 NSURLErrorServerCertificateHasBadDate,
+                 NSURLErrorServerCertificateUntrusted,
+                 NSURLErrorServerCertificateHasUnknownRoot,
+                 NSURLErrorServerCertificateNotYetValid,
+                 NSURLErrorClientCertificateRejected,
+                 NSURLErrorClientCertificateRequired:
+                return false
+            default:
+                break
+            }
+        }
+
+        return true
     }
 }
