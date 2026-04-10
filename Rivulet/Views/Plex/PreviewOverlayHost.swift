@@ -761,10 +761,7 @@ private struct PreviewCarouselSideCard: View {
     }
 
     var body: some View {
-        HeroBackdropImage(
-            url: request.plexBackdropURL ?? request.plexThumbnailURL,
-            useFullSize: false
-        ) {
+        HeroBackdropImage(url: request.plexBackdropURL ?? request.plexThumbnailURL) {
             Rectangle()
                 .fill(
                     LinearGradient(

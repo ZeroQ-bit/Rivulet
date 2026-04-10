@@ -171,9 +171,11 @@ class PlexUserProfileManager: ObservableObject {
             saveSelectedUser(user)
 
             // Notify data store to reload if user actually changed
-            // Skip when previousUser is nil (initial selection, not a real switch)
             if let previousUser, previousUser.id != user.id {
                 await PlexDataStore.shared.onProfileSwitched()
+            } else if previousUser == nil {
+                // Initial selection on app launch — sync user-specific settings
+                LibrarySettingsManager.shared.onProfileSwitched()
             }
 
             return true

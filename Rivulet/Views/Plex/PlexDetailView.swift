@@ -691,17 +691,10 @@ struct PlexDetailView: View {
 
     // MARK: - Hero Components (Apple TV+ style — backdrop fixed, content scrolls over)
 
-    /// Fixed backdrop image (behind everything, doesn't scroll).
-    ///
-    /// The `useFullSize` flag is inverted from the coordinator's pending-
-    /// upgrade flag — while the coordinator has the upgrade pending, we
-    /// render via the cheap downsampled decode path (`useFullSize: false`);
-    /// after `applyPendingUpgradeIfReady` clears the flag, we reload via
-    /// the full-size decode path (`useFullSize: true`).
+    /// Fixed backdrop image (behind everything, doesn't scroll)
     private var heroBackdropImage: some View {
         HeroBackdropImage(
             url: heroBackdrop.session.displayedBackdropURL,
-            useFullSize: !heroBackdrop.session.hasPendingFullSizeUpgrade,
             animationDuration: isPreviewCarousel ? 0.38 : 0.26
         ) {
             Rectangle()

@@ -45,7 +45,7 @@ final class HeroBackdropSessionTests: XCTestCase {
         session.stage(
             HeroBackdropResolution(
                 displayedBackdropURL: plexURL,
-                hasPendingFullSizeUpgrade: false,
+                pendingUpgradeURL: nil,
                 logoURL: logoURL,
                 thumbnailURL: thumbURL
             )
@@ -54,7 +54,6 @@ final class HeroBackdropSessionTests: XCTestCase {
         XCTAssertEqual(session.displayedBackdropURL, plexURL)
         XCTAssertEqual(session.logoURL, logoURL)
         XCTAssertEqual(session.thumbnailURL, thumbURL)
-        XCTAssertFalse(session.hasPendingFullSizeUpgrade)
     }
 
     func testLoadGateInvalidatesOlderGeneration() {

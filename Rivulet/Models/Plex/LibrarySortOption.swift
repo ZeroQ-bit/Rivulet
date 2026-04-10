@@ -31,7 +31,7 @@ enum LibrarySortOption: String, CaseIterable, Codable, CustomStringConvertible {
     case resolutionAsc = "mediaHeight:asc"   // Lowest Quality (SD first)
 
     // TV Shows only
-    case lastEpisodeAddedDesc = "lastEpisodeAddedAt:desc" // New Episodes
+    case lastEpisodeAddedDesc = "episode.addedAt:desc" // New Episodes
 
     /// User-friendly display name
     var displayName: String {
@@ -119,8 +119,6 @@ enum LibrarySortOption: String, CaseIterable, Codable, CustomStringConvertible {
                 .titleAsc,
                 .titleDesc,
                 .lastEpisodeAddedDesc,
-                .releaseDateDesc,
-                .releaseDateAsc,
                 .ratingDesc
             ]
         case "artist":

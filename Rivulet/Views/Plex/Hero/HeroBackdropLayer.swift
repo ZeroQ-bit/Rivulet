@@ -20,10 +20,7 @@ struct HeroBackdropLayer: View {
 
     var body: some View {
         ZStack {
-            HeroBackdropImage(
-                url: backdrop.session.displayedBackdropURL,
-                useFullSize: !backdrop.session.hasPendingFullSizeUpgrade
-            ) {
+            HeroBackdropImage(url: backdrop.session.displayedBackdropURL) {
                 Rectangle()
                     .fill(
                         LinearGradient(

@@ -1082,7 +1082,12 @@ final class UniversalPlayerViewModel: ObservableObject {
             let plan = ContentRouter.plan(for: routingContext)
             playbackPlan = plan
 
-            let rp = RivuletPlayer()
+            // Reuse existing RivuletPlayer when transitioning episodes so the
+            // AVSampleBufferDisplayLayer stays in the view hierarchy. Creating a
+            // new player orphans the old display layer (still showing credits)
+            // while the new one is never attached — causing stale video on screen.
+            let isReuse = rivuletPlayer != nil
+            let rp = rivuletPlayer ?? RivuletPlayer()
             self.rivuletPlayer = rp
 
             // Wire up subtitle callbacks
@@ -1093,35 +1098,41 @@ final class UniversalPlayerViewModel: ObservableObject {
                 self?.subtitleManager.addBitmapCue(cue)
             }
 
+            // Clear stale subtitle cues from previous episode
+            subtitleManager.clear()
+
             try await rp.load(route: plan.primary, startTime: startOffset)
             rp.play()
 
             playbackState = .playing
             self.duration = rp.duration
 
-            // Observe RivuletPlayer state
-            rp.playbackStatePublisher
-                .receive(on: DispatchQueue.main)
-                .sink { [weak self] state in
-                    self?.handleRivuletStateChange(state)
-                }
-                .store(in: &cancellables)
+            // Only subscribe to publishers on first creation — reuse keeps
+            // existing subscriptions which continue to receive new events.
+            if !isReuse {
+                rp.playbackStatePublisher
+                    .receive(on: DispatchQueue.main)
+                    .sink { [weak self] state in
+                        self?.handleRivuletStateChange(state)
+                    }
+                    .store(in: &cancellables)
 
-            rp.timePublisher
-                .receive(on: DispatchQueue.main)
-                .sink { [weak self] time in
-                    self?.currentTime = time
-                    self?.checkMarkers(at: time)
-                }
-                .store(in: &cancellables)
+                rp.timePublisher
+                    .receive(on: DispatchQueue.main)
+                    .sink { [weak self] time in
+                        self?.currentTime = time
+                        self?.checkMarkers(at: time)
+                    }
+                    .store(in: &cancellables)
 
-            rp.errorPublisher
-                .receive(on: DispatchQueue.main)
-                .sink { [weak self] error in
-                    self?.errorMessage = error.userFacingDescription
-                    self?.playbackState = .failed(.loadFailed(error.localizedDescription))
-                }
-                .store(in: &cancellables)
+                rp.errorPublisher
+                    .receive(on: DispatchQueue.main)
+                    .sink { [weak self] error in
+                        self?.errorMessage = error.userFacingDescription
+                        self?.playbackState = .failed(.loadFailed(error.localizedDescription))
+                    }
+                    .store(in: &cancellables)
+            }
 
             updateTrackLists()
             preloadThumbnails()
@@ -3554,11 +3565,14 @@ final class UniversalPlayerViewModel: ObservableObject {
         // Reset start offset so next episode starts from beginning (not resume position)
         startOffset = nil
 
-        // Reset skip tracking for new episode
+        // Reset skip tracking for new episode — but keep hasTriggeredPostVideo = true
+        // until after startPlayback() completes. The old time observer can emit stale
+        // time values (from the previous episode's position) during the async transition.
+        // If hasTriggeredPostVideo were false, checkMarkers could immediately re-trigger
+        // post-video using the stale time against the new episode's credits markers.
         hasSkippedIntro = false
         skippedCreditsIds.removeAll()
         skippedCommercialIds.removeAll()
-        hasTriggeredPostVideo = false
 
         // Reset intro skip countdown state
         introSkipCountdownTimer?.invalidate()
@@ -3586,8 +3600,12 @@ final class UniversalPlayerViewModel: ObservableObject {
         // Clear preloaded data
         clearPreloadedData()
 
-        // Start playback
+        // Start playback — new time observer starts with time ≈ 0 after this returns
         await startPlayback()
+
+        // Safe to allow post-video detection now: the old time observer has been
+        // replaced and time values reflect the new episode's actual position.
+        hasTriggeredPostVideo = false
     }
 
     /// Dismiss post-video overlay and return to fullscreen video
