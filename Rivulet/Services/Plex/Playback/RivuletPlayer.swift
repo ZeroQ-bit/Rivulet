@@ -192,6 +192,7 @@ final class RivuletPlayer: ObservableObject {
     ///   - enableDVConversion: Enable DV P7/P8.6 → P8.1 conversion
     func load(route: PlaybackRoute, startTime: TimeInterval?, isDolbyVision: Bool = false, enableDVConversion: Bool = false) async throws {
         hasStartedPlayback = false
+        isPlaying = false
         playbackStateSubject.send(.loading)
         resetAirPlayRouteOverrides()
 

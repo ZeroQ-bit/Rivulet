@@ -495,6 +495,13 @@ struct PlexDetailView: View {
             syncHeroBackdrop()
             await loadFullMetadata()
             await refreshHeroBackdropAssets()
+
+            // In non-carousel flows (direct navigation), the cascade gate
+            // is already open so onChange(of: canRunDetailCascade) won't
+            // fire (no change). Run the heavy cascade directly.
+            if canRunDetailCascade {
+                await loadDetailData()
+            }
         }
         .onChange(of: shouldLoadDetailData) { _, isActive in
             // A previously-passive side card just became current. Load its

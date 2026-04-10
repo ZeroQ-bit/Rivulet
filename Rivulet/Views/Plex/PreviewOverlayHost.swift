@@ -347,12 +347,6 @@ struct PreviewOverlayHost: View {
             focusedArea = nil
         }
 
-        // User has committed to this card — release the detail cascade so
-        // the expanded view is fully populated by the time chrome appears.
-        // If the cascade has already run during carouselStable, this is a
-        // no-op.
-        previewAnimationSettled = true
-
         Task { @MainActor in
             try? await Task.sleep(nanoseconds: 160_000_000)
             guard metadataGate.isCurrent(token) else { return }
@@ -375,6 +369,14 @@ struct PreviewOverlayHost: View {
                 expandedChromeVisible = true
             }
             verticalScrollEnabled = true
+
+            // Release the detail cascade AFTER the chrome is visible and
+            // focus has been set on the play button. Firing it earlier
+            // caused the cascade's state resets to trigger a view tree
+            // rebuild that could race with the focus-set timing.
+            try? await Task.sleep(nanoseconds: 60_000_000)
+            guard metadataGate.isCurrent(token) else { return }
+            previewAnimationSettled = true
         }
     }
 
