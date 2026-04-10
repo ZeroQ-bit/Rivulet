@@ -489,7 +489,8 @@ struct PlexHomeView: View {
         // at the top scroll position, and let everything scroll together.
         let heroSectionHeight = screenHeight - 180
 
-        return ScrollView(.vertical, showsIndicators: false) {
+        return ScrollViewReader { scrollProxy in
+        ScrollView(.vertical, showsIndicators: false) {
             LazyVStack(alignment: .leading, spacing: 0) {
                 // Connection error banner (when showing cached content while offline)
                 if !authManager.isConnected {
@@ -518,12 +519,18 @@ struct PlexHomeView: View {
                             authToken: authManager.selectedServerToken ?? "",
                             currentIndex: $heroCurrentIndex,
                             onInfo: { item in selectedItem = item },
-                            onPlay: { item in playItemDirectly(item) }
+                            onPlay: { item in playItemDirectly(item) },
+                            onHeroFocused: {
+                                withAnimation(.spring(response: 1.0, dampingFraction: 0.95)) {
+                                    scrollProxy.scrollTo("homeHero", anchor: .top)
+                                }
+                            }
                         )
                     }
                     .frame(height: heroSectionHeight)
                     .clipped()
                     .focusSection()
+                    .id("homeHero")
                 }
 
                 // Content rows (uses cached processedHubs which merges Continue Watching + On Deck)
@@ -576,6 +583,7 @@ struct PlexHomeView: View {
         }
         .scrollClipDisabled()  // Allow shadow overflow
         .ignoresSafeArea(.container, edges: heroActive ? [.top, .horizontal] : [])
+        } // ScrollViewReader
     }
 
     // MARK: - Connection Error Banner

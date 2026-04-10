@@ -20,6 +20,7 @@ struct HeroOverlayContent: View {
     @Binding var currentIndex: Int
     let onInfo: (PlexMetadata) -> Void
     let onPlay: (PlexMetadata) -> Void
+    var onHeroFocused: (() -> Void)? = nil
 
     @State private var resolvedPlayTargets: [String: PlexMetadata] = [:]
     @State private var watchedOverrides: [String: Bool] = [:]
@@ -118,6 +119,11 @@ struct HeroOverlayContent: View {
                 withAnimation(.easeInOut(duration: 0.22)) {
                     displayedIndex = newIndex
                 }
+            }
+        }
+        .onChange(of: focusedButton) { oldButton, newButton in
+            if newButton != nil && oldButton == nil {
+                onHeroFocused?()
             }
         }
         .onChange(of: items.map(\.ratingKey)) { _, _ in

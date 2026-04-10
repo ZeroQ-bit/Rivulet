@@ -425,7 +425,8 @@ struct PlexLibraryView: View {
         // full-width, near-full-height with a modest peek for the row below.
         let heroSectionHeight = screenHeight - 180
 
-        return ScrollView(.vertical, showsIndicators: false) {
+        return ScrollViewReader { scrollProxy in
+        ScrollView(.vertical, showsIndicators: false) {
             LazyVStack(alignment: .leading, spacing: 0) {
                 // Hero section first — backdrop art + overlay controls, stacked
                 // and scrolling together as a single unit.
@@ -448,12 +449,18 @@ struct PlexLibraryView: View {
                             authToken: authManager.selectedServerToken ?? "",
                             currentIndex: $heroCurrentIndex,
                             onInfo: { item in selectedItem = item },
-                            onPlay: { item in playItemDirectly(item) }
+                            onPlay: { item in playItemDirectly(item) },
+                            onHeroFocused: {
+                                withAnimation(.spring(response: 1.0, dampingFraction: 0.95)) {
+                                    scrollProxy.scrollTo("libraryHero", anchor: .top)
+                                }
+                            }
                         )
                     }
                     .frame(height: heroSectionHeight)
                     .clipped()
                     .focusSection()
+                    .id("libraryHero")
                 }
 
                 essentialRowsView
@@ -476,6 +483,7 @@ struct PlexLibraryView: View {
         .scrollClipDisabled()  // Allow shadow overflow
         .ignoresSafeArea(.container, edges: heroActive ? [.top, .horizontal] : [])
         .id(libraryKey)  // Force fresh ScrollView when library changes - starts at top
+        } // ScrollViewReader
         .opacity(rowPreviewRequest != nil ? 0.12 : 1)
         .offset(y: rowPreviewRequest != nil ? 20 : 0)
         .allowsHitTesting(rowPreviewRequest == nil)
