@@ -448,30 +448,55 @@ struct PreviewOverlayHost: View {
         let ratingKeys = itemsToPrefetch.compactMap(\.ratingKey)
 
         Task.detached(priority: .utility) {
-            [requests, ratingKeys, serverURLValue, authTokenValue, networkManager] in
+            [requests, ratingKeys, itemsToPrefetch, serverURLValue, authTokenValue, networkManager] in
             for request in requests {
                 _ = await HeroBackdropResolver.shared.resolveAssets(for: request)
             }
 
             guard !ratingKeys.isEmpty else { return }
-            for ratingKey in ratingKeys {
-                let isFresh = await MainActor.run {
-                    PlexDataStore.shared.isFullMetadataFresh(for: ratingKey)
-                }
-                if isFresh {
-                    continue
-                }
 
-                guard let metadata = try? await networkManager.getFullMetadata(
-                    serverURL: serverURLValue,
-                    authToken: authTokenValue,
-                    ratingKey: ratingKey
-                ) else {
-                    continue
-                }
+            // Prefetch fullMetadata + children (episodes/leaves) in parallel
+            // for each neighbor so the data cascade is instant when paged to.
+            await withTaskGroup(of: Void.self) { group in
+                for item in itemsToPrefetch {
+                    guard let ratingKey = item.ratingKey else { continue }
 
-                await MainActor.run {
-                    PlexDataStore.shared.cacheFullMetadata(metadata, for: ratingKey)
+                    // fullMetadata
+                    group.addTask {
+                        let isFresh = await MainActor.run {
+                            PlexDataStore.shared.isFullMetadataFresh(for: ratingKey)
+                        }
+                        guard !isFresh else { return }
+                        guard let metadata = try? await networkManager.getFullMetadata(
+                            serverURL: serverURLValue,
+                            authToken: authTokenValue,
+                            ratingKey: ratingKey
+                        ) else { return }
+                        await MainActor.run {
+                            PlexDataStore.shared.cacheFullMetadata(metadata, for: ratingKey)
+                        }
+                    }
+
+                    // For shows: prefetch all-episodes (getAllLeaves) so the
+                    // episode thumbnails + data are cached before the user
+                    // pages to this card.
+                    if item.type == "show" {
+                        group.addTask {
+                            guard let episodes = try? await networkManager.getAllLeaves(
+                                serverURL: serverURLValue,
+                                authToken: authTokenValue,
+                                ratingKey: ratingKey
+                            ) else { return }
+                            // Warm the first ~8 episode thumbnails
+                            let thumbURLs = episodes.prefix(8).compactMap { ep -> URL? in
+                                guard let thumb = ep.thumb else { return nil }
+                                return URL(string: "\(serverURLValue)\(thumb)?X-Plex-Token=\(authTokenValue)")
+                            }
+                            for url in thumbURLs {
+                                _ = await ImageCacheManager.shared.image(for: url)
+                            }
+                        }
+                    }
                 }
             }
         }

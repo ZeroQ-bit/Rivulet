@@ -896,7 +896,7 @@ final class RivuletPlayer: ObservableObject {
         // don't have stale data from a previous pipeline.
         renderer.flush()
         renderer.disableAudioEngine()
-        renderer.setRate(0)
+        renderer.setRate(0, time: .zero)
         resetAirPlayInstabilityState()
     }
 
@@ -912,7 +912,9 @@ final class RivuletPlayer: ObservableObject {
 
         renderer.flush()
         renderer.disableAudioEngine()
-        renderer.setRate(0)
+        // Reset synchronizer to time 0 so the time observer doesn't emit
+        // stale position from the previous content during episode transitions.
+        renderer.setRate(0, time: .zero)
         resetAirPlayInstabilityState()
     }
 

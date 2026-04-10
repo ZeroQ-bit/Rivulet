@@ -95,6 +95,7 @@ struct PlexDetailView: View {
     @State private var isLoadingShufflePlay = false
     @State private var shuffledEpisodeQueue: [PlexMetadata] = []
     @StateObject private var heroBackdrop = HeroBackdropCoordinator()
+    @State private var belowFoldLoaded = false  // Flipped true after the full cascade finishes
     @State private var scrollProgress: CGFloat = 0  // 0 = at rest (peek), 1 = fully scrolled
     @State private var belowFoldTitleOpacity: CGFloat = 0
     @State private var scrollResetID = UUID()
@@ -166,14 +167,15 @@ struct PlexDetailView: View {
     /// Effective vignette visibility — vignette fades in before text (Apple TV+ two-phase reveal)
     private var effectiveVignetteVisible: Bool {
         guard showVignette else { return false }
-        // In standalone mode, vignette always shows when metadata would show
         if !isPreviewCarousel && !isExpandedPreviewFlow { return true }
         return true
     }
 
-    /// Effective metadata visibility — in preview/carousel flows, gates on
-    /// fullMetadata being loaded so genres, cast, summary all appear together
-    /// instead of popping in piecemeal.
+    /// Effective metadata visibility — requires both the host's staged fade
+    /// timing (`showMetadata`) AND `fullMetadata` being loaded, so genres,
+    /// cast, and summary all appear together. Because `loadFullMetadata`
+    /// fires immediately on appear (not gated by `previewAnimationSettled`),
+    /// it typically returns before the text fade at ~750ms.
     private var effectiveMetadataVisible: Bool {
         guard showMetadata else { return false }
         if isPreviewCarousel || isExpandedPreviewFlow {
@@ -448,8 +450,8 @@ struct PlexDetailView: View {
                                 .opacity(belowFoldTitleOpacity)
                                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                         }
-                        .opacity(effectiveMetadataVisible ? 1 : 0)
-                        .animation(.easeOut(duration: 0.5), value: effectiveMetadataVisible)
+                        .opacity(belowFoldLoaded ? 1 : 0)
+                        .animation(.easeOut(duration: 0.35), value: belowFoldLoaded)
                     }
                 }
                 .onScrollGeometryChange(for: CGFloat.self) { geometry in
@@ -479,7 +481,29 @@ struct PlexDetailView: View {
         }
         .ignoresSafeArea()
         .task(id: detailLoadTaskID) {
-            await loadDetailData()
+            // Fetch full metadata immediately — not gated by
+            // `previewAnimationSettled`. This is a single network call
+            // with no layout churn, and it needs to land before the
+            // text fade at ~750ms so genres/cast/summary are ready
+            // when the hero metadata fades in.
+            guard shouldLoadDetailData else {
+                syncHeroBackdrop()
+                return
+            }
+            fullMetadata = nil
+            parentShowLogoPath = nil
+            syncHeroBackdrop()
+            await loadFullMetadata()
+            await refreshHeroBackdropAssets()
+        }
+        .onChange(of: shouldLoadDetailData) { _, isActive in
+            // A previously-passive side card just became current. Load its
+            // fullMetadata so the hero overlay has genres/cast/summary ready.
+            guard isActive, fullMetadata == nil else { return }
+            Task { @MainActor in
+                await loadFullMetadata()
+                await refreshHeroBackdropAssets()
+            }
         }
         .onChange(of: canRunDetailCascade) { _, canRun in
             // When a previously-passive card becomes current, or when the
@@ -1701,13 +1725,16 @@ struct PlexDetailView: View {
             return
         }
 
-        // Reset state for new item
+        // Reset below-fold state — stays hidden until the full cascade
+        // completes so sections don't pop in one at a time.
+        // fullMetadata + parentShowLogoPath are reset in the ungated
+        // .task above (they run during the entry animation).
+        belowFoldLoaded = false
         seasons = []
         episodes = []
         selectedSeason = nil
         unifiedEpisodes = []
         episodeScrollTarget = nil
-        fullMetadata = nil
         collectionItems = []
         collectionName = nil
         recommendedItems = []
@@ -1715,7 +1742,6 @@ struct PlexDetailView: View {
         isSummaryExpanded = false
         scrollProgress = 0
         belowFoldTitleOpacity = 0
-        parentShowLogoPath = nil
         syncHeroBackdrop()
 
         // Index for Siri search
@@ -1737,54 +1763,111 @@ struct PlexDetailView: View {
         // Initialize starred state for music (userRating > 0 means starred)
         isStarred = (currentItem.userRating ?? 0) > 0
 
-        // Load full metadata for cast/crew and trailer
-        await loadFullMetadata()
+        // fullMetadata + refreshHeroBackdropAssets are handled by the
+        // ungated .task(id: detailLoadTaskID) above so they fire during
+        // the entry animation and land before the text fade. By the time
+        // we reach here, fullMetadata is already populated.
 
-        // Refresh hero art/logo with the full Plex metadata now that it's loaded.
-        await refreshHeroBackdropAssets()
+        // Load type-specific data — run independent calls in parallel
+        // where possible so the total wall-clock time is the slowest
+        // single call, not the sum.
+        switch currentItem.type {
+        case "movie":
+            // Collection + recommendations are independent of each other
+            async let collectionTask: Void = {
+                if let collection = fullMetadata?.Collection?.first,
+                   let collectionId = collection.idString,
+                   let sectionId = fullMetadata?.librarySectionID {
+                    let name = (collection.tag ?? "Collection") + " Collection"
+                    await loadCollectionItems(sectionId: String(sectionId), collectionId: collectionId, name: name)
+                }
+            }()
+            async let recommendTask: Void = loadRecommendedItems()
+            _ = await (collectionTask, recommendTask)
 
-        // Load collection and recommendations for movies
-        if currentItem.type == "movie" {
-            // Load collection items if movie is part of a collection
-            if let collection = fullMetadata?.Collection?.first,
-               let collectionId = collection.idString,
-               let sectionId = fullMetadata?.librarySectionID {
-                let name = (collection.tag ?? "Collection") + " Collection"
-                await loadCollectionItems(sectionId: String(sectionId), collectionId: collectionId, name: name)
-            }
-            // Load TMDB-powered recommendations
-            await loadRecommendedItems()
-        }
+        case "show":
+            // Seasons and all-episodes are independent network calls
+            async let seasonsTask: Void = loadSeasons()
+            async let episodesTask: Void = loadAllEpisodes()
+            async let nextUpTask: Void = loadNextUpEpisode()
+            _ = await (seasonsTask, episodesTask, nextUpTask)
 
-        // Load seasons for TV shows
-        if currentItem.type == "show" {
-            await loadSeasons()
-            await loadAllEpisodes()
-            await loadNextUpEpisode()
-        }
+        case "season":
+            async let seasonsTask: Void = loadSeasonsForCurrentSeason()
+            async let episodesTask: Void = loadEpisodesForSeason()
+            async let nextUpTask: Void = loadNextUpEpisode()
+            _ = await (seasonsTask, episodesTask, nextUpTask)
 
-        // Load episodes for seasons
-        if currentItem.type == "season" {
-            await loadSeasonsForCurrentSeason()
-            await loadEpisodesForSeason()
-            // Determine the "next up" episode for the Play button
-            await loadNextUpEpisode()
-        }
+        case "episode":
+            async let seasonsTask: Void = loadSeasonsForEpisode()
+            async let episodesTask: Void = loadAllEpisodes()
+            _ = await (seasonsTask, episodesTask)
 
-        // Load seasons for episodes (show parent show's seasons inline)
-        if currentItem.type == "episode" {
-            await loadSeasonsForEpisode()
-            await loadAllEpisodes()
-        }
-
-        // Load tracks for albums
-        if currentItem.type == "album" {
+        case "album":
             await loadTracks()
+
+        case "artist":
+            await loadAlbums()
+
+        default:
+            break
         }
 
-        // Load albums for artists
-        if currentItem.type == "artist" {
-            await loadAlbums()
+        // Warm the first batch of episode/recommendation thumbnails into the
+        // image cache so they're instant when the below-fold fades in.
+        // CachedAsyncImage checks the memory cache synchronously — if the
+        // image is there, it renders on the first frame with no flash.
+        await prefetchBelowFoldThumbnails()
+
+        // All below-fold data + thumbnails are now populated — fade in.
+        belowFoldLoaded = true
+    }
+
+    /// Warms the first visible episode / recommendation / collection
+    /// thumbnails into the memory cache so `CachedAsyncImage` hits the
+    /// synchronous path on first render — no flash, no placeholder frame.
+    /// Caps at ~10 images to avoid delaying the below-fold reveal.
+    private func prefetchBelowFoldThumbnails() async {
+        guard let serverURL = authManager.selectedServerURL,
+              let token = authManager.selectedServerToken else { return }
+
+        var urls: [URL] = []
+
+        // Episode thumbnails (first ~8 visible in the horizontal scroll)
+        let visibleEpisodes = Array(unifiedEpisodes.prefix(8)) + Array(episodes.prefix(8))
+        for ep in visibleEpisodes {
+            if let thumb = ep.thumb, let url = URL(string: "\(serverURL)\(thumb)?X-Plex-Token=\(token)") {
+                urls.append(url)
+            }
+        }
+
+        // Recommendation / collection poster thumbnails (first ~6)
+        let posterItems = Array(recommendedItems.prefix(6)) + Array(collectionItems.prefix(6))
+        for item in posterItems {
+            if let thumb = item.thumb ?? item.bestThumb,
+               let url = URL(string: "\(serverURL)\(thumb)?X-Plex-Token=\(token)") {
+                urls.append(url)
+            }
+        }
+
+        // Album art / track thumbs
+        let musicItems = Array(albums.prefix(6)) + Array(tracks.prefix(6))
+        for item in musicItems {
+            if let thumb = item.thumb,
+               let url = URL(string: "\(serverURL)\(thumb)?X-Plex-Token=\(token)") {
+                urls.append(url)
+            }
+        }
+
+        guard !urls.isEmpty else { return }
+
+        // Load concurrently (up to 8 at a time via the cache's coalescing)
+        await withTaskGroup(of: Void.self) { group in
+            for url in urls.prefix(12) {
+                group.addTask {
+                    _ = await ImageCacheManager.shared.image(for: url)
+                }
+            }
         }
     }
 
