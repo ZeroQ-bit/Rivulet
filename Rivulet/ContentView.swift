@@ -146,7 +146,15 @@ private struct AutoPlayLauncherModifier: ViewModifier {
                     print("[AutoPlay] DV Profile \(dvProfile), BL CompatID \(dvStream?.DOVIBLCompatID ?? -1)")
                 }
 
-                // Create viewModel and present player
+                // Create viewModel and present player. Mirrors the real user
+                // flow in TVSidebarView.presentPlayerForDeepLink so autoplay
+                // tests exercise the same RPlayer UI (UniversalPlayerView +
+                // PlayerContainerViewController) that users actually see.
+                // Without this, autoplay presented NativePlayerViewController
+                // (AVPlayerViewController) which waits on viewModel.$player —
+                // but RPlayer never populates $player, so the screen sat on
+                // the loading indicator while RPlayer decoded in the
+                // background. See debugging notes 2026-04-11.
                 await MainActor.run {
                     let viewModel = UniversalPlayerViewModel(
                         metadata: metadata,
@@ -157,7 +165,23 @@ private struct AutoPlayLauncherModifier: ViewModifier {
                         loadingArtImage: nil,
                         loadingThumbImage: nil
                     )
-                    let nativePlayer = NativePlayerViewController(viewModel: viewModel)
+
+                    let useApplePlayer = UserDefaults.standard.bool(forKey: "useApplePlayer")
+                    let playerVC: UIViewController
+                    if useApplePlayer {
+                        playerVC = NativePlayerViewController(viewModel: viewModel)
+                    } else {
+                        let inputCoordinator = PlaybackInputCoordinator()
+                        let playerView = UniversalPlayerView(
+                            viewModel: viewModel,
+                            inputCoordinator: inputCoordinator
+                        )
+                        playerVC = PlayerContainerViewController(
+                            rootView: playerView,
+                            viewModel: viewModel,
+                            inputCoordinator: inputCoordinator
+                        )
+                    }
 
                     if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
                        let rootVC = windowScene.windows.first?.rootViewController {
@@ -165,7 +189,7 @@ private struct AutoPlayLauncherModifier: ViewModifier {
                         while let presented = topVC.presentedViewController {
                             topVC = presented
                         }
-                        topVC.present(nativePlayer, animated: false)
+                        topVC.present(playerVC, animated: false)
                     }
 
                     // Schedule auto-stop after test duration
