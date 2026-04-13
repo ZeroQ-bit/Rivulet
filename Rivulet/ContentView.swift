@@ -104,9 +104,10 @@ private struct AutoPlayLauncherModifier: ViewModifier {
 
                 let testDuration = TimeInterval(env["RIVULET_AUTOPLAY_DURATION"] ?? "45") ?? 45
                 let skipLifecycle = env["RIVULET_AUTOPLAY_SKIP_LIFECYCLE"] == "1"
+                let startOffset: TimeInterval? = env["RIVULET_AUTOPLAY_OFFSET"].flatMap { TimeInterval($0) }
 
                 hasLaunched = true
-                print("[AutoPlay] Starting: ratingKey=\(ratingKey) duration=\(testDuration)s skipLifecycle=\(skipLifecycle)")
+                print("[AutoPlay] Starting: ratingKey=\(ratingKey) duration=\(testDuration)s skipLifecycle=\(skipLifecycle) offset=\(startOffset.map { String(format: "%.0f", $0) } ?? "none")")
 
                 // Wait for auth to be ready
                 let authManager = PlexAuthManager.shared
@@ -160,7 +161,7 @@ private struct AutoPlayLauncherModifier: ViewModifier {
                         metadata: metadata,
                         serverURL: serverURL,
                         authToken: authToken,
-                        startOffset: nil,
+                        startOffset: startOffset,
                         shuffledQueue: [],
                         loadingArtImage: nil,
                         loadingThumbImage: nil

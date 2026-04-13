@@ -126,7 +126,18 @@ final class SampleBufferRenderer {
     // MARK: - Init
 
     init() {
+        // Add BOTH renderers to the synchronizer so it can coordinate
+        // video and audio timing together — including AirPlay latency
+        // compensation. Per WWDC 2017 (Introducing AirPlay 2):
+        // "AVSampleBufferDisplayLayer integrates identically to the
+        // AudioRenderer — add it to a RenderSynchronizer just as you
+        // add the AudioRenderer."
+        //
+        // Previously only the audio renderer was added, and the display
+        // layer used controlTimebase. That bypassed the synchronizer's
+        // A/V coordination, breaking pause/resume sync on AirPlay.
         renderSynchronizer.addRenderer(audioRenderer)
+        renderSynchronizer.addRenderer(displayLayer)
 
         if #available(tvOS 14.5, *) {
             // Keep the system's reliable-start gate enabled so AirPlay routes can
@@ -134,7 +145,6 @@ final class SampleBufferRenderer {
             renderSynchronizer.delaysRateChangeUntilHasSufficientMediaData = true
         }
 
-        displayLayer.controlTimebase = renderSynchronizer.timebase
         displayLayer.videoGravity = .resizeAspect
 
         audioRenderer.volume = 1.0
@@ -337,8 +347,6 @@ final class SampleBufferRenderer {
             playerDebugLog("[Renderer] setRate(\(rate))")
         }
 
-        // Update separate video timebase (audio engine only — AirPlay compensation
-        // uses synchronizer's timebase as source, so rate propagates automatically)
         if useAudioEngine, let timebase = videoTimebase {
             CMTimebaseSetRate(timebase, rate: Float64(rate))
         }
@@ -1032,13 +1040,28 @@ final class SampleBufferRenderer {
         let bufferedDuration = audioPullBufferedDuration
         audioPullLock.unlock()
 
-        guard !isRequesting, buffered > 0 else { return }
+        if isRequesting {
+            playerDebugLog("[Renderer] Audio pull resume: already requesting, buffered=\(buffered)")
+            return
+        }
 
-        playerDebugLog(
-            "[Renderer] Audio pull resume for transport: buffered=\(buffered) " +
-            "bufferedDur=\(String(format: "%.3f", bufferedDuration))s"
-        )
-        startAudioPullMode()
+        if buffered > 0 {
+            playerDebugLog(
+                "[Renderer] Audio pull resume for transport: buffered=\(buffered) " +
+                "bufferedDur=\(String(format: "%.3f", bufferedDuration))s"
+            )
+            startAudioPullMode()
+        } else {
+            // Pull buffer was empty at pause time (normal — it's kept small).
+            // Don't start pull mode yet. enqueueAudioPullMode() will restart
+            // it once enough audio arrives from the read loop. Use the resume
+            // threshold (0.3s) not startup threshold (1.0s) for faster restart.
+            audioPullLock.lock()
+            hasStartedAudioPullSinceReset = true
+            hasReachedReliableAudioPullStartSinceReset = true
+            audioPullLock.unlock()
+            playerDebugLog("[Renderer] Audio pull resume: buffer empty, will restart on next audio (resume threshold)")
+        }
     }
 
     /// Flush audio renderer and pull-mode state without touching video.
@@ -1205,16 +1228,16 @@ final class SampleBufferRenderer {
                 let syncTime = CMTimeGetSeconds(self.renderSynchronizer.currentTime())
                 let rate = self.renderSynchronizer.rate
 
-                if rate == 0 {
-                    // Auto-flush during pause (typically from NowPlaying session re-activation).
-                    // Skip destructive reset — the pull mode will recover naturally on resume.
-                    playerDebugLog("[Renderer] Audio renderer auto-flushed during pause at \(String(format: "%.3f", flushTimeSeconds))s — skipping reset")
-                    return
-                }
-
+                // Always handle auto-flush, even during pause (rate==0).
+                // Per Apple's SampleBufferPlayer sample code, auto-flush
+                // requires a full restart — the renderer's AirPlay transport
+                // is invalidated and will silently discard audio if not
+                // recovered. Previously we skipped this during pause, which
+                // caused silent audio on resume.
+                let isPaused = rate == 0
                 playerDebugLog("[Renderer] Audio renderer auto-flushed at \(String(format: "%.3f", flushTimeSeconds))s " +
-                      "(syncTime=\(String(format: "%.3f", syncTime))s, " +
-                      "enqueued=\(self.audioEnqueueCount), drops=\(self.audioBackpressureDropCount))")
+                      "(syncTime=\(String(format: "%.3f", syncTime))s, rate=\(rate), " +
+                      "paused=\(isPaused), enqueued=\(self.audioEnqueueCount), drops=\(self.audioBackpressureDropCount))")
 
                 self.resetAudioState()
                 self.onAudioRendererFlushedAutomatically?(flushTime)

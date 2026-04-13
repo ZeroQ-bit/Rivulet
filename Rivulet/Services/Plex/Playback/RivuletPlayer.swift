@@ -270,7 +270,12 @@ final class RivuletPlayer: ObservableObject {
 
     private func handleAudioRendererAutoFlush(flushTime: CMTime) async {
         _ = applyCurrentAudioPolicy(reason: "audio_renderer_auto_flush")
-        guard isPlaying else { return }
+        // Always handle auto-flush, even during pause. Per Apple's
+        // SampleBufferPlayer sample code, auto-flush must trigger a full
+        // restart — the renderer's internal AirPlay transport is
+        // invalidated and will silently discard audio on resume if
+        // not recovered. The recovery (seek-to-flush-time) is safe
+        // during pause because seek handles the paused state.
         let instabilityHandled = recordAirPlayInstabilityEvent(.autoFlush)
         if instabilityHandled { return }
         await recoverAudioFromRendererEvent(afterFlushTime: flushTime, reason: "audio_renderer_auto_flush")

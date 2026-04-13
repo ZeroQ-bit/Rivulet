@@ -586,6 +586,10 @@ final class DirectPlayPipeline {
             // lookahead loop. Clear the pause flag and fire the gate to
             // wake the read loop; restoring the synchronizer rate unblocks
             // the video task naturally.
+            //
+            // The synchronizer manages both the display layer and audio
+            // renderer (both added via addRenderer), so it coordinates
+            // AirPlay latency compensation automatically on resume.
             isPausedFlag = false
             renderer.resumeAudio()
             renderer.setRate(rate)
