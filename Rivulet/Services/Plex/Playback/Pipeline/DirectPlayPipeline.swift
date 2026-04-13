@@ -1619,7 +1619,6 @@ final class DirectPlayPipeline {
             var prerollMaxPTSSeconds: Double?
             var prerollMaxVideoPTSSeconds: Double?  // Video-only PTS for accurate preroll lead
             let hasAudioPath = (audioDecoder != nil || audioFD != nil)
-            let prerollStartHostLeadSeconds: TimeInterval = activeTargetOutputSampleRate > 0 ? 0.10 : 0.03
 
             let maybePrimePrerollTimeline: @Sendable (Double, CMTime, String) async -> Void = { ptsSeconds, ptsTime, source in
                 guard ptsSeconds.isFinite, ptsSeconds >= 0 else { return }
@@ -1715,7 +1714,7 @@ final class DirectPlayPipeline {
 
                 guard (audioReady && videoReady) || timedOut else { return false }
 
-                let startedRate = await MainActor.run { [weak self] () -> (Float, Double, Double, String)? in
+                let startedRate = await MainActor.run { [weak self] () -> (Float, Double, String)? in
                     guard let self else { return nil }
                     let shouldStartPlayback = (self.state == .running) || self.isPlaying
                     guard shouldStartPlayback else { return nil }
@@ -1725,22 +1724,21 @@ final class DirectPlayPipeline {
                         preferredTimescale: 90_000
                     )
                     let anchorSeconds = prerollAnchorPTSSeconds ?? CMTimeGetSeconds(anchorTime)
-                    // Start against a short future host-time edge so the first
-                    // enqueued preroll samples define the playback timeline rather
-                    // than being treated as already late.
-                    let hostLead = prerollStartHostLeadSeconds
-                    let hostTime = CMTimeAdd(
-                        CMClockGetTime(CMClockGetHostTimeClock()),
-                        CMTime(seconds: hostLead, preferredTimescale: 90_000)
-                    )
-                    renderer.setRate(rate, time: anchorTime, atHostTime: hostTime)
+                    // Use 2-arg setRate so the synchronizer chooses its own
+                    // start timing. On AirPlay the synchronizer knows the
+                    // transport latency and aligns the clock with when audio
+                    // actually reaches the speaker. A forced atHostTime with a
+                    // short hostLead (100 ms) starts the video clock before the
+                    // AirPlay buffer is filled, producing a perceptible
+                    // audio-behind-video offset after pause/resume.
+                    renderer.setRate(rate, time: anchorTime)
                     let reason = timedOut ? "timeout" : "audio+video_primed"
-                    return (rate, anchorSeconds, hostLead, reason)
+                    return (rate, anchorSeconds, reason)
                 }
 
                 guard let started = startedRate else { return false }
 
-                let (playbackRate, anchorTime, hostLead, reason) = started
+                let (playbackRate, anchorTime, reason) = started
                 let packetTime = currentPTSSeconds ?? prerollMaxPTSSeconds ?? anchorTime
                 waitingForPrerollStart = false
                 prerollWaitStartWall = nil
@@ -1752,8 +1750,7 @@ final class DirectPlayPipeline {
                     "[DirectPlay] Preroll complete: starting clock from anchor=\(String(format: "%.3f", anchorTime))s " +
                     "packet=\(String(format: "%.3f", packetTime))s rate=\(String(format: "%.2f", playbackRate)) " +
                     "reason=\(reason) wait=\(String(format: "%.0f", waitedMs))ms " +
-                    "lead=\(String(format: "%.0f", prerollLeadSeconds * 1000))ms " +
-                    "hostLead=\(String(format: "%.0f", hostLead * 1000))ms"
+                    "lead=\(String(format: "%.0f", prerollLeadSeconds * 1000))ms"
                 )
                 playerDebugLog("[PlaybackHealth] EVENT=preroll_complete elapsed=\(String(format: "%.0f", waitedMs))ms")
 
