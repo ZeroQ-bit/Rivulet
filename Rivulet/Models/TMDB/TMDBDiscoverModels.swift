@@ -98,11 +98,18 @@ struct TMDBListItem: Codable, Identifiable, Hashable, Sendable {
         releaseDate = (try? c.decode(String.self, forKey: .releaseDate))
             ?? (try? c.decode(String.self, forKey: .firstAirDate))
         voteAverage = try? c.decode(Double.self, forKey: .voteAverage)
-        if let raw = try? c.decode(String.self, forKey: .mediaType),
-           let parsed = TMDBMediaType(rawValue: raw) {
+        if c.contains(.mediaType) {
+            let raw = try c.decode(String.self, forKey: .mediaType)
+            guard let parsed = TMDBMediaType(rawValue: raw) else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .mediaType, in: c,
+                    debugDescription: "Unknown TMDB media_type: \(raw)"
+                )
+            }
             mediaType = parsed
         } else {
-            // Caller sets mediaType when decoding from a typed list endpoint.
+            // Typed list endpoints (popular movies, popular tv, etc.) omit media_type.
+            // The service layer stamps the correct type after decode using the section's mediaType.
             mediaType = .movie
         }
     }
@@ -132,4 +139,97 @@ struct TMDBItemDetail: Codable, Identifiable, Sendable {
     let voteAverage: Double?
     let cast: [TMDBCredit]
     let mediaType: TMDBMediaType
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case title
+        case name
+        case overview
+        case posterPath = "poster_path"
+        case backdropPath = "backdrop_path"
+        case releaseDate = "release_date"
+        case firstAirDate = "first_air_date"
+        case runtime
+        case genres
+        case voteAverage = "vote_average"
+        case cast
+        case mediaType = "media_type"
+    }
+
+    init(
+        id: Int,
+        title: String,
+        overview: String?,
+        posterPath: String?,
+        backdropPath: String?,
+        releaseDate: String?,
+        runtime: Int?,
+        genres: [TMDBGenre],
+        voteAverage: Double?,
+        cast: [TMDBCredit],
+        mediaType: TMDBMediaType
+    ) {
+        self.id = id
+        self.title = title
+        self.overview = overview
+        self.posterPath = posterPath
+        self.backdropPath = backdropPath
+        self.releaseDate = releaseDate
+        self.runtime = runtime
+        self.genres = genres
+        self.voteAverage = voteAverage
+        self.cast = cast
+        self.mediaType = mediaType
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(Int.self, forKey: .id)
+        guard let t = (try? c.decode(String.self, forKey: .title))
+                   ?? (try? c.decode(String.self, forKey: .name)) else {
+            throw DecodingError.keyNotFound(
+                CodingKeys.title,
+                DecodingError.Context(codingPath: c.codingPath, debugDescription: "Expected 'title' or 'name'")
+            )
+        }
+        title = t
+        overview = try? c.decode(String.self, forKey: .overview)
+        posterPath = try? c.decode(String.self, forKey: .posterPath)
+        backdropPath = try? c.decode(String.self, forKey: .backdropPath)
+        releaseDate = (try? c.decode(String.self, forKey: .releaseDate))
+            ?? (try? c.decode(String.self, forKey: .firstAirDate))
+        runtime = try? c.decode(Int.self, forKey: .runtime)
+        genres = (try? c.decode([TMDBGenre].self, forKey: .genres)) ?? []
+        voteAverage = try? c.decode(Double.self, forKey: .voteAverage)
+        cast = (try? c.decode([TMDBCredit].self, forKey: .cast)) ?? []
+        if c.contains(.mediaType) {
+            let raw = try c.decode(String.self, forKey: .mediaType)
+            guard let parsed = TMDBMediaType(rawValue: raw) else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .mediaType, in: c,
+                    debugDescription: "Unknown TMDB media_type: \(raw)"
+                )
+            }
+            mediaType = parsed
+        } else {
+            // Typed detail endpoints omit media_type.
+            // The service layer stamps the correct type after decode.
+            mediaType = .movie
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(title, forKey: .title)
+        try c.encodeIfPresent(overview, forKey: .overview)
+        try c.encodeIfPresent(posterPath, forKey: .posterPath)
+        try c.encodeIfPresent(backdropPath, forKey: .backdropPath)
+        try c.encodeIfPresent(releaseDate, forKey: .releaseDate)
+        try c.encodeIfPresent(runtime, forKey: .runtime)
+        try c.encode(genres, forKey: .genres)
+        try c.encodeIfPresent(voteAverage, forKey: .voteAverage)
+        try c.encode(cast, forKey: .cast)
+        try c.encode(mediaType.rawValue, forKey: .mediaType)
+    }
 }
