@@ -11,6 +11,10 @@ final class TMDBDiscoverServiceTests: XCTestCase {
         super.setUp()
         URLProtocol.registerClass(TMDBMockURLProtocol.self)
         TMDBMockURLProtocol.responses = [:]
+        // Clear any stale disk cache from previous runs
+        let cachesDir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
+        let detailDir = cachesDir.appendingPathComponent("TMDBDiscoverDetailCache", isDirectory: true)
+        try? FileManager.default.removeItem(at: detailDir)
     }
 
     override func tearDown() {
@@ -77,6 +81,26 @@ final class TMDBDiscoverServiceTests: XCTestCase {
         TMDBMockURLProtocol.responses["tmdb/list/popular?type=movie"] = (500, Data())
         let second = await service.fetchSection(.moviePopular)
         XCTAssertEqual(second.first?.id, 1)
+    }
+
+    func testFetchDetailStampsTVMediaType() async {
+        let json = """
+        {"id": 300, "name": "Test Show", "genres": [], "cast": []}
+        """.data(using: .utf8)!
+        TMDBMockURLProtocol.responses["tmdb/details/300?type=tv"] = (200, json)
+
+        let service = TMDBDiscoverService(session: makeMockSession())
+        let detail = await service.fetchDetail(tmdbId: 300, type: .tv)
+
+        XCTAssertEqual(detail?.mediaType, .tv)
+        XCTAssertEqual(detail?.title, "Test Show")
+    }
+
+    func testFetchDetailReturnsNilOnFailure() async {
+        TMDBMockURLProtocol.responses["tmdb/details/1?type=movie"] = (404, Data())
+        let service = TMDBDiscoverService(session: makeMockSession())
+        let detail = await service.fetchDetail(tmdbId: 1, type: .movie)
+        XCTAssertNil(detail)
     }
 
     private func makeMockSession() -> URLSession {

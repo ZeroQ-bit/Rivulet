@@ -85,9 +85,22 @@ actor TMDBDiscoverService {
         let queryItems = [URLQueryItem(name: "type", value: type.rawValue)]
 
         guard let data = try? await fetchData(endpoint: endpoint, queryItems: queryItems),
-              let detail = try? JSONDecoder().decode(TMDBItemDetail.self, from: data) else {
+              let decoded = try? JSONDecoder().decode(TMDBItemDetail.self, from: data) else {
             return nil
         }
+        let detail = TMDBItemDetail(
+            id: decoded.id,
+            title: decoded.title,
+            overview: decoded.overview,
+            posterPath: decoded.posterPath,
+            backdropPath: decoded.backdropPath,
+            releaseDate: decoded.releaseDate,
+            runtime: decoded.runtime,
+            genres: decoded.genres,
+            voteAverage: decoded.voteAverage,
+            cast: decoded.cast,
+            mediaType: type
+        )
         saveDetailToDisk(detail, tmdbId: tmdbId, type: type)
         return detail
     }
