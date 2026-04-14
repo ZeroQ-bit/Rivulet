@@ -109,6 +109,10 @@ struct TVSidebarView: View {
             if !old && new && selectedTab == .settings {
                 selectedTab = .home
             }
+            if old && !new {
+                // Clear watchlist state on logout
+                PlexWatchlistService.shared.reset()
+            }
         }
         // Reset tab selection when live TV source mode changes
         .onChange(of: combineLiveTVSources) { _, combined in
@@ -145,11 +149,39 @@ struct TVSidebarView: View {
             // CRITICAL PATH: Only hubs needed for home screen to render
             await dataStore.loadHubsIfNeeded()
 
+            // Kick off watchlist fetch independently — doesn't block home screen
+            Task { await PlexWatchlistService.shared.fetchWatchlist() }
+
             // BACKGROUND: Libraries -> library hubs -> prefetch (chained, not blocking home)
             Task {
                 await dataStore.loadLibrariesIfNeeded()
                 await dataStore.loadLibraryHubsIfNeeded()
                 dataStore.startBackgroundPrefetch(libraries: dataStore.visibleVideoLibraries)
+
+                // Rebuild the library GUID index in the background. Used by Discover and
+                // Watchlist surfaces to answer "do I own this?" in O(1).
+                Task.detached(priority: .background) {
+                    let (serverURL, token) = await MainActor.run {
+                        (PlexAuthManager.shared.selectedServerURL, PlexAuthManager.shared.selectedServerToken)
+                    }
+                    guard let serverURL, let token else { return }
+
+                    let visible = await MainActor.run { PlexDataStore.shared.visibleVideoLibraries }
+
+                    var allItems: [PlexMetadata] = []
+                    for library in visible {
+                        if let result = try? await PlexNetworkManager.shared.getLibraryItemsWithTotal(
+                            serverURL: serverURL,
+                            authToken: token,
+                            sectionId: library.key,
+                            start: 0,
+                            size: 5000
+                        ) {
+                            allItems.append(contentsOf: result.items)
+                        }
+                    }
+                    await LibraryGUIDIndex.shared.replace(with: allItems)
+                }
             }
         }
         .task {
