@@ -50,9 +50,7 @@ struct DiscoverView: View {
                 .presentationBackground(.black)
         }
         .fullScreenCover(item: $presentedTMDBItem) { item in
-            // TMDBItemDetailView will be added in Task 8.
-            // For now, a minimal stub so this file compiles.
-            TMDBItemDetailViewStub(item: item)
+            TMDBItemDetailView(item: item)
                 .presentationBackground(.black)
         }
     }
@@ -65,25 +63,6 @@ struct DiscoverView: View {
                 presentedTMDBItem = item
             }
         }
-    }
-}
-
-// MARK: - TMDB detail stub (replaced in Task 8)
-
-private struct TMDBItemDetailViewStub: View {
-    let item: TMDBListItem
-    @Environment(\.dismiss) private var dismiss
-    var body: some View {
-        ZStack {
-            Color.black.ignoresSafeArea()
-            VStack(spacing: 16) {
-                Text(item.title).font(.title)
-                Text("TMDB detail coming soon").foregroundStyle(.white.opacity(0.6))
-                Button("Close") { dismiss() }
-            }
-            .foregroundStyle(.white)
-        }
-        .onExitCommand { dismiss() }
     }
 }
 
@@ -120,11 +99,16 @@ final class DiscoverViewModel: ObservableObject {
         // Precompute the in-library TMDB id set for sync lookup from row closures.
         await recomputeInLibrarySet()
 
-        // For You row (cold-start-safe).
-        let watchedItems = await collectWatchHistory()
-        if !watchedItems.isEmpty {
-            let profile = await WatchProfileBuilder.build(from: watchedItems)
-            forYou = await recommendationService.forYouRow(profile: profile)
+        // For You row (cold-start-safe). Respect the user's Discover For You preference. Default is on.
+        let showForYou = UserDefaults.standard.object(forKey: "showForYouOnDiscover") as? Bool ?? true
+        if showForYou {
+            let watchedItems = await collectWatchHistory()
+            if !watchedItems.isEmpty {
+                let profile = await WatchProfileBuilder.build(from: watchedItems)
+                forYou = await recommendationService.forYouRow(profile: profile)
+            }
+        } else {
+            forYou = []
         }
     }
 
