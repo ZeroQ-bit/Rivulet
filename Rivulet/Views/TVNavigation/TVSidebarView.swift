@@ -280,6 +280,10 @@ struct TVSidebarView: View {
                 tabContent(for: .home)
             }
 
+            Tab("Discover", systemImage: "sparkles", value: SidebarTab.discover) {
+                tabContent(for: .discover)
+            }
+
             if liveTVAboveLibraries {
                 if liveTVDataStore.hasConfiguredSources {
                     liveTVTabSection
@@ -361,6 +365,8 @@ struct TVSidebarView: View {
                     } else {
                         welcomeView
                     }
+                case .discover:
+                    DiscoverView()
                 case .library(let key):
                     if let lib = dataStore.libraries.first(where: { $0.key == key }) {
                         if lib.isMusicLibrary {

@@ -16,6 +16,7 @@ enum SidebarTab: Hashable {
     case account
     case search
     case home
+    case discover
     case library(key: String)
     case liveTV(sourceId: String?)
     case settings
