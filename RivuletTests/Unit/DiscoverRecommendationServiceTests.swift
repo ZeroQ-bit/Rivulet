@@ -48,6 +48,25 @@ final class DiscoverRecommendationServiceTests: XCTestCase {
         XCTAssertEqual(Set(items.map(\.id)), [1, 2])
     }
 
+    func testReturnsEmptyWhenTopGenresHaveNoKnownTMDBIds() async {
+        var profile = FeatureProfile()
+        profile.add(features: TMDBItemFeatures(
+            keywords: [],
+            cast: [], directors: [],
+            genres: ["unknown-genre-a", "unknown-genre-b", "unknown-genre-c"],
+            voteAverage: nil, voteCount: nil
+        ), weight: 1.0)
+
+        let stub = StubDiscoverFetcher()
+        stub.movies = [
+            TMDBListItem(id: 1, title: "Should not appear", overview: nil, posterPath: nil, backdropPath: nil, releaseDate: nil, voteAverage: nil, mediaType: .movie)
+        ]
+
+        let service = DiscoverRecommendationService(fetcher: stub, libraryIndex: LibraryGUIDIndex())
+        let items = await service.forYouRow(profile: profile)
+        XCTAssertTrue(items.isEmpty)
+    }
+
     func testCapsAtMaxItems() async {
         let stub = StubDiscoverFetcher()
         stub.movies = (0..<30).map { i in

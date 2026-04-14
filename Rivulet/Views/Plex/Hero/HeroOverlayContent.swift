@@ -26,7 +26,6 @@ struct HeroOverlayContent: View {
     @ObservedObject private var watchlistService = PlexWatchlistService.shared
 
     @State private var resolvedPlayTargets: [String: PlexMetadata] = [:]
-    @State private var watchedOverrides: [String: Bool] = [:]
     @State private var isResolvingPlay: Bool = false
     /// Lags behind `currentIndex` by `slideSwapDelay` so the backdrop has
     /// time to crossfade before the logo/metadata/buttons swap in.
@@ -51,13 +50,6 @@ struct HeroOverlayContent: View {
     }
 
     private var canAdvance: Bool { items.count > 1 }
-
-    private func isWatched(_ item: PlexMetadata) -> Bool {
-        if let key = item.ratingKey, let override = watchedOverrides[key] {
-            return override
-        }
-        return item.isWatched
-    }
 
     /// Must match the hero-section height computed in `PlexHomeView.contentView`
     /// and `PlexLibraryView.contentView` (`UIScreen.main.bounds.height - 180`).
@@ -209,46 +201,20 @@ struct HeroOverlayContent: View {
             await service.remove(guid: guid)
         } else {
             let watchType: PlexWatchlistItem.WatchlistType = (item.type == "show") ? .show : .movie
+            let posterURL: URL? = {
+                guard let thumbPath = item.thumb, !thumbPath.isEmpty else { return nil }
+                return URL(string: "\(serverURL)\(thumbPath)?X-Plex-Token=\(authToken)")
+            }()
             let watchlistItem = PlexWatchlistItem(
                 id: guid,
                 title: item.title ?? "",
                 year: item.year,
                 type: watchType,
-                posterURL: nil,
+                posterURL: posterURL,
                 guids: [guid]
             )
             await service.add(guid: guid, item: watchlistItem)
         }
     }
 
-    // MARK: - Watched Toggle
-
-    private func handleToggleWatched(_ item: PlexMetadata) {
-        guard let key = item.ratingKey else { return }
-        let nextState = !isWatched(item)
-        watchedOverrides[key] = nextState
-
-        Task { @MainActor in
-            let network = PlexNetworkManager.shared
-            do {
-                if nextState {
-                    try await network.markWatched(
-                        serverURL: serverURL,
-                        authToken: authToken,
-                        ratingKey: key
-                    )
-                } else {
-                    try await network.markUnwatched(
-                        serverURL: serverURL,
-                        authToken: authToken,
-                        ratingKey: key
-                    )
-                }
-                NotificationCenter.default.post(name: .plexDataNeedsRefresh, object: nil)
-            } catch {
-                overlayLog.error("[HeroOverlay] markWatched(\(nextState)) failed for \(key, privacy: .public): \(error.localizedDescription, privacy: .public)")
-                watchedOverrides[key] = !nextState
-            }
-        }
-    }
 }

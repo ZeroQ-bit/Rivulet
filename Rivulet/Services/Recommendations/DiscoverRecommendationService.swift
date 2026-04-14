@@ -26,7 +26,12 @@ actor DiscoverRecommendationService {
     private let coldStartGenreThreshold = 3
     private let maxItems = 20
 
-    // TMDB genre name → ID for both movies and TV.
+    // TODO: Genre normalization in WatchProfileBuilder collapses TV-specific genre
+    // labels (war & politics, tv movie, reality, soap, kids, talk) into their
+    // closest movie equivalents before they reach the profile. As a result the
+    // TV-specific IDs below (10762, 10763, 10764, 10766, 10767, 10768) are
+    // currently unreachable through the `forYouRow` path. Revisit when we track
+    // media-type separately in the profile.
     private static let genreNameToId: [String: Int] = [
         "action": 28, "adventure": 12, "animation": 16, "comedy": 35, "crime": 80,
         "documentary": 99, "drama": 18, "family": 10751, "fantasy": 14, "history": 36,
@@ -47,6 +52,7 @@ actor DiscoverRecommendationService {
         guard topGenres.count >= coldStartGenreThreshold else { return [] }
 
         let genreIds = topGenres.compactMap { Self.genreNameToId[$0] }
+        guard !genreIds.isEmpty else { return [] }
         // Keywords in our profile are TMDB keyword names, not IDs.
         // Without a name→ID map we omit keyword filters for v1.
         let movies = await fetcher.discover(type: .movie, withGenres: genreIds, withKeywords: [])
