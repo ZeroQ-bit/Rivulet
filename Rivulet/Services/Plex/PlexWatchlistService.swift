@@ -73,9 +73,11 @@ final class PlexWatchlistService: ObservableObject {
         let snapshotItems = watchlistItems
         let snapshotGUIDs = watchlistGUIDs
 
-        // Optimistic update
+        // Optimistic update: remove matching items and ALL their associated GUIDs
+        let removedItems = watchlistItems.filter { $0.guids.contains(guid) }
+        let removedGuids = Set(removedItems.flatMap(\.guids))
         watchlistItems.removeAll { $0.guids.contains(guid) }
-        watchlistGUIDs.subtract([guid])
+        watchlistGUIDs.subtract(removedGuids)
 
         do {
             try await api.remove(guid: guid)

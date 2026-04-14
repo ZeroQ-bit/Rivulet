@@ -19,7 +19,7 @@ protocol WatchlistCacheProtocol: Sendable {
     func clear()
 }
 
-final class PlexWatchlistAPI: PlexWatchlistAPIProtocol, @unchecked Sendable {
+final class PlexWatchlistAPI: PlexWatchlistAPIProtocol, Sendable {
     private let session: URLSession
     private let baseURL = URL(string: "https://metadata.provider.plex.tv")!
 

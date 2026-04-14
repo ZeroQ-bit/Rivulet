@@ -73,6 +73,29 @@ final class PlexWatchlistServiceTests: XCTestCase {
         XCTAssertTrue(service.watchlistGUIDs.isEmpty)
     }
 
+    func testRemoveClearsAllGuidsForItem() async {
+        let api = StubWatchlistAPI()
+        let service = PlexWatchlistService(api: api, cache: NullWatchlistCache())
+
+        let multiGuidItem = PlexWatchlistItem(
+            id: "1",
+            title: "Multi",
+            year: 2024,
+            type: .movie,
+            posterURL: nil,
+            guids: ["tmdb://42", "imdb://tt123", "tvdb://999"]
+        )
+        await service.add(guid: "tmdb://42", item: multiGuidItem)
+        XCTAssertTrue(service.watchlistGUIDs.contains("imdb://tt123"))
+
+        await service.remove(guid: "tmdb://42")
+
+        XCTAssertFalse(service.watchlistGUIDs.contains("tmdb://42"))
+        XCTAssertFalse(service.watchlistGUIDs.contains("imdb://tt123"))
+        XCTAssertFalse(service.watchlistGUIDs.contains("tvdb://999"))
+        XCTAssertTrue(service.watchlistItems.isEmpty)
+    }
+
     private func makeItem(id: String, guid: String = "tmdb://1") -> PlexWatchlistItem {
         PlexWatchlistItem(
             id: id,
