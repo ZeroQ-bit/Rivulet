@@ -16,6 +16,10 @@ class PlexDataStore: ObservableObject {
     // MARK: - Published State
 
     @Published var hubs: [PlexHub] = []
+    /// Continue Watching hub fetched from Plex's dedicated `/hubs/continueWatching`
+    /// endpoint — matches what Plex's own apps display (respects user dismissals and
+    /// library exclusion settings). Nil until first fetch completes.
+    @Published var continueWatchingHub: PlexHub?
     @Published var libraries: [PlexLibrary] = []
     @Published var isLoadingHubs = false
     @Published var isLoadingLibraries = false
@@ -391,7 +395,10 @@ class PlexDataStore: ObservableObject {
         let userId = profileManager.selectedUserId
 
         do {
-            let fetchedHubs = try await fetchHubsOffMain(serverURL: serverURL, token: token, userId: userId)
+            async let hubsTask = fetchHubsOffMain(serverURL: serverURL, token: token, userId: userId)
+            async let continueWatchingTask = fetchContinueWatchingOffMain(serverURL: serverURL, token: token, userId: userId)
+            let fetchedHubs = try await hubsTask
+            let fetchedContinueWatching = try? await continueWatchingTask
 
             // Reset recovery flag on success
             hasAttemptedConnectionRecovery = false
@@ -401,6 +408,11 @@ class PlexDataStore: ObservableObject {
                 self.hubs = fetchedHubs
                 self.hubsVersion = UUID()  // Signal that content changed
             } else {
+            }
+
+            if !continueWatchingHubsAreEqual(self.continueWatchingHub, fetchedContinueWatching) {
+                self.continueWatchingHub = fetchedContinueWatching
+                self.hubsVersion = UUID()
             }
 
             // Always update Top Shelf cache after fetching (lightweight, idempotent)
@@ -682,6 +694,19 @@ class PlexDataStore: ObservableObject {
             try Task.checkCancellation()
             return try await PlexNetworkManager.shared.getHubs(serverURL: serverURL, authToken: token, userId: userId)
         }.value
+    }
+
+    private func fetchContinueWatchingOffMain(serverURL: String, token: String, userId: Int?) async throws -> PlexHub? {
+        try await Task.detached(priority: .userInitiated) {
+            try Task.checkCancellation()
+            return try await PlexNetworkManager.shared.getContinueWatching(serverURL: serverURL, authToken: token, userId: userId)
+        }.value
+    }
+
+    private func continueWatchingHubsAreEqual(_ lhs: PlexHub?, _ rhs: PlexHub?) -> Bool {
+        let lhsKeys = lhs?.Metadata?.compactMap { $0.ratingKey } ?? []
+        let rhsKeys = rhs?.Metadata?.compactMap { $0.ratingKey } ?? []
+        return lhsKeys == rhsKeys
     }
 
     private func fetchLibrariesOffMain(serverURL: String, token: String, userId: Int?) async throws -> [PlexLibrary] {

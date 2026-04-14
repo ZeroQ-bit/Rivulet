@@ -690,6 +690,37 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
         return container.MediaContainer.Metadata ?? []
     }
 
+    /// Get the dedicated "Continue Watching" hub. This matches what Plex's own apps
+    /// display — it respects user dismissals and library exclusion settings, unlike
+    /// `/library/onDeck` (raw in-progress list) or the per-library hubs returned by
+    /// `/hubs` (stale entries and duplicates).
+    func getContinueWatching(
+        serverURL: String,
+        authToken: String,
+        userId: Int? = nil,
+        count: Int = 50
+    ) async throws -> PlexHub? {
+        guard var components = URLComponents(string: "\(serverURL)/hubs/continueWatching") else {
+            throw PlexAPIError.invalidURL
+        }
+
+        components.queryItems = [
+            URLQueryItem(name: "X-Plex-Container-Start", value: "0"),
+            URLQueryItem(name: "X-Plex-Container-Size", value: "\(count)")
+        ]
+
+        guard let url = components.url else {
+            throw PlexAPIError.invalidURL
+        }
+
+        let container: PlexMediaContainerWrapper = try await request(
+            url,
+            headers: plexHeaders(authToken: authToken, userId: userId)
+        )
+
+        return container.MediaContainer.Hub?.first
+    }
+
     /// Get recently added items
     func getRecentlyAdded(
         serverURL: String,

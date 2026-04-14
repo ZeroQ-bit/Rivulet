@@ -37,18 +37,17 @@ struct PlexHomeView: View {
     // MARK: - Processed Hubs (merged Continue Watching + library-specific sections)
 
     /// Computes processed hubs with library-specific sections
-    /// - Continue Watching is merged from global hubs (across all libraries)
+    /// - Continue Watching comes from `dataStore.continueWatchingHub` (Plex's dedicated
+    ///   `/hubs/continueWatching` endpoint, matching the Plex app exactly)
     /// - Other hubs come from library-specific endpoints with library name prefixes
     private func computeProcessedHubs(from hubsToProcess: [PlexHub]) -> [PlexHub] {
         var result: [PlexHub] = []
 
-        // 1. Extract and merge Continue Watching / On Deck from global hubs
-        let continueWatchingHub = extractContinueWatchingHub(from: hubsToProcess)
-        if let hub = continueWatchingHub {
+        if let hub = dataStore.continueWatchingHub, hub.Metadata?.isEmpty == false {
             result.append(hub)
         }
 
-        // 2. Add "Recently Added" hub for each library shown on Home (video and music)
+        // Add "Recently Added" hub for each library shown on Home (video and music)
         for library in dataStore.librariesForHomeScreen {
             if let hubs = dataStore.libraryHubs[library.key] {
                 // Find the "Recently Added" hub for this library
@@ -61,36 +60,6 @@ struct PlexHomeView: View {
         }
 
         return result
-    }
-
-    /// Extract Continue Watching / On Deck items and merge into a single hub
-    private func extractContinueWatchingHub(from hubs: [PlexHub]) -> PlexHub? {
-        var continueWatchingItems: [PlexMetadata] = []
-        var seenRatingKeys: Set<String> = []
-
-        for hub in hubs {
-            if isContinueWatchingHub(hub) {
-                if let items = hub.Metadata {
-                    for item in items {
-                        if let key = item.ratingKey, !seenRatingKeys.contains(key) {
-                            seenRatingKeys.insert(key)
-                            continueWatchingItems.append(item)
-                        }
-                    }
-                }
-            }
-        }
-
-        guard !continueWatchingItems.isEmpty else { return nil }
-
-        // Sort by lastViewedAt (most recent first)
-        continueWatchingItems.sort { ($0.lastViewedAt ?? 0) > ($1.lastViewedAt ?? 0) }
-
-        var mergedHub = PlexHub()
-        mergedHub.hubIdentifier = "continueWatching"
-        mergedHub.title = "Continue Watching"
-        mergedHub.Metadata = continueWatchingItems
-        return mergedHub
     }
 
     /// Check if a hub is a Continue Watching or On Deck hub
