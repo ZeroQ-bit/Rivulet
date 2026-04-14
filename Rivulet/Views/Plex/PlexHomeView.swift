@@ -489,7 +489,7 @@ struct PlexHomeView: View {
         // Leave a modest peek for Continue Watching at the bottom of the hero
         // at the top scroll position. The backdrop fills the full screen behind
         // the scroll view; this height controls where the overlay content ends.
-        let heroSectionHeight = screenHeight - 180
+        let heroSectionHeight = screenHeight - 200
 
         let currentHeroItem: PlexMetadata? = {
             guard heroActive, !heroItems.isEmpty else { return nil }
@@ -508,7 +508,7 @@ struct PlexHomeView: View {
                     authToken: authManager.selectedServerToken ?? ""
                 )
                 .ignoresSafeArea()
-                .offset(y: -heroScrollOffset * 1.3 - min(60, heroScrollOffset * 0.6))
+                .offset(y: -heroScrollOffset * 1.3 - min(72, heroScrollOffset * 0.72))
                 .allowsHitTesting(false)
             }
 
@@ -934,7 +934,7 @@ struct ContentRow: View {
     var onItemSelected: ((PlexMetadata) -> Void)?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 24) {
+        VStack(alignment: .leading, spacing: 22) {
             // Section title
             Text(title)
                 .font(.system(size: ScaledDimensions.sectionTitleSize, weight: .semibold))
@@ -1033,11 +1033,11 @@ struct InfiniteContentRow: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: 0) {
             // Section title with item count
             HStack(spacing: 12) {
                 Text(title)
-                    .font(.system(size: 28, weight: .semibold))
+                    .font(.system(size: 30, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.6))
 
                 if let total = totalSize, total > items.count {

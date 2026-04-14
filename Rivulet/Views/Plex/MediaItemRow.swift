@@ -17,7 +17,7 @@ struct MediaItemRow: View {
     var onItemSelected: ((PlexMetadata) -> Void)?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: 14) {
             Text(title)
                 .font(.system(size: ScaledDimensions.sectionTitleSize, weight: .bold))
                 .foregroundStyle(.white)

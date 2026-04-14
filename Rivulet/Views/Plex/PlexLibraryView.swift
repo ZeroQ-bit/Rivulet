@@ -424,7 +424,7 @@ struct PlexLibraryView: View {
         let screenHeight = UIScreen.main.bounds.height
         // Same sizing as the home hero so both screens feel consistent:
         // full-width, near-full-height with a modest peek for the row below.
-        let heroSectionHeight = screenHeight - 180
+        let heroSectionHeight = screenHeight - 200
 
         let currentHeroItem: PlexMetadata? = {
             guard heroActive, !heroItems.isEmpty else { return nil }
@@ -443,7 +443,7 @@ struct PlexLibraryView: View {
                     authToken: authManager.selectedServerToken ?? ""
                 )
                 .ignoresSafeArea()
-                .offset(y: -heroScrollOffset * 1.3 - min(110, heroScrollOffset * 1.1))
+                .offset(y: -heroScrollOffset * 1.3 - min(122, heroScrollOffset * 1.22))
                 .allowsHitTesting(false)
             }
 

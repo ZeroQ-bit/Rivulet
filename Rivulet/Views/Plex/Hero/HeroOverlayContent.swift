@@ -63,48 +63,56 @@ struct HeroOverlayContent: View {
     /// the parent's `.frame(height:)` through the ZStack — which wasn't
     /// reaching the VStack reliably and caused the controls to overflow below
     /// the clipped hero bounds.
-    private static let heroHeight: CGFloat = UIScreen.main.bounds.height - 180
+    private static let heroHeight: CGFloat = UIScreen.main.bounds.height - 200
 
     var body: some View {
-        VStack(spacing: 0) {
-            // Push everything to the bottom of the hero.
-            Spacer(minLength: 0)
+        ZStack(alignment: .bottom) {
+            VStack(spacing: 0) {
+                // Push everything to the bottom of the hero.
+                Spacer(minLength: 0)
 
-            if let item = displayedItem {
-                VStack(alignment: .leading, spacing: 28) {
-                    HeroSlideContent(
-                        item: item,
-                        serverURL: serverURL,
-                        authToken: authToken
-                    )
-                    .id(item.ratingKey ?? "idx-\(displayedIndex)")
-                    .transition(.opacity)
+                if let item = displayedItem {
+                    VStack(alignment: .leading, spacing: 28) {
+                        HeroSlideContent(
+                            item: item,
+                            serverURL: serverURL,
+                            authToken: authToken
+                        )
+                        .id(item.ratingKey ?? "idx-\(displayedIndex)")
+                        .transition(.opacity)
 
-                    HeroButtonRow(
-                        isResolvingPlay: isResolvingPlay,
-                        isWatched: isWatched(item),
-                        canAdvance: canAdvance,
-                        focusedButton: $focusedButton,
-                        onPlay: { handlePlay(item) },
-                        onToggleWatched: { handleToggleWatched(item) },
-                        onInfo: { onInfo(item) },
-                        onNext: { advance() }
-                    )
+                        HeroButtonRow(
+                            isResolvingPlay: isResolvingPlay,
+                            isWatched: isWatched(item),
+                            canAdvance: canAdvance,
+                            focusedButton: $focusedButton,
+                            onPlay: { handlePlay(item) },
+                            onToggleWatched: { handleToggleWatched(item) },
+                            onInfo: { onInfo(item) },
+                            onNext: { advance() }
+                        )
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.leading, 120)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.leading, 120)
+
+                // Reserve bottom space for dots so logo/buttons sit above them.
+                Spacer().frame(height: 120)
             }
 
-            // Gap between buttons and paging dots.
+            // Paging dots — pinned to the bottom of the hero independently
+            // of the logo/buttons column.
             if canAdvance {
-                Spacer().frame(height: 44)
-
                 pagingDots
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .background(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .fill(Color.black.opacity(0.35))
+                    )
                     .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.bottom, 24)
             }
-
-            // Bottom inset — distance from the very bottom of the hero.
-            Spacer().frame(height: 80)
         }
         .frame(maxWidth: .infinity)
         .frame(height: Self.heroHeight)
