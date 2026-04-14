@@ -22,37 +22,9 @@ private struct RecommendationResult: Codable {
     let serverURL: String
 }
 
-private struct FeatureProfile {
-    var keywords: [String: Double] = [:]
-    var genres: [String: Double] = [:]
-    var cast: [String: Double] = [:]
-    var directors: [String: Double] = [:]
-
-    var maxKeyword: Double { keywords.values.max() ?? 0 }
-    var maxGenre: Double { genres.values.max() ?? 0 }
-    var maxCast: Double { cast.values.max() ?? 0 }
-    var maxDirector: Double { directors.values.max() ?? 0 }
-
-    mutating func add(features: TMDBItemFeatures, weight: Double) {
-        for tag in features.keywords {
-            keywords[tag, default: 0] += weight
-        }
-        for tag in features.genres {
-            genres[tag, default: 0] += weight
-        }
-        for name in features.cast {
-            cast[name, default: 0] += weight
-        }
-        for name in features.directors {
-            directors[name, default: 0] += weight
-        }
-    }
-}
-
 actor PersonalizedRecommendationService {
     static let shared = PersonalizedRecommendationService()
 
-    private let tmdbClient = TMDBClient.shared
     private let networkManager = PlexNetworkManager.shared
     private let dataStore = PlexDataStore.shared
     private let authManager = PlexAuthManager.shared
@@ -68,23 +40,6 @@ actor PersonalizedRecommendationService {
     private let maxItemsPerLibrary = 200
     private let maxWatchedForProfile = 120
     private let maxRecommendations = 40
-
-    // Genre normalization (common variants)
-    private let genreNormalization: [String: String] = [
-        "sci-fi": "science fiction",
-        "scifi": "science fiction",
-        "science-fiction": "science fiction",
-        "sci-fi & fantasy": "science fiction",
-        "action & adventure": "action",
-        "action/adventure": "action",
-        "war & politics": "war",
-        "tv movie": "drama",
-        "news": "documentary",
-        "talk": "comedy",
-        "reality": "documentary",
-        "soap": "drama",
-        "kids": "family"
-    ]
 
     func recommendations(
         forceRefresh: Bool = false,
@@ -132,7 +87,7 @@ actor PersonalizedRecommendationService {
         }
 
         // Build feature profile from the current item
-        let itemFeatures = await buildFeatures(for: item)
+        let itemFeatures = await WatchProfileBuilder.buildFeatures(for: item)
         var itemProfile = FeatureProfile()
         itemProfile.add(features: itemFeatures, weight: 1.0)
 
@@ -171,7 +126,7 @@ actor PersonalizedRecommendationService {
         // Score candidates
         var scored: [(PlexMetadata, Double)] = []
         for candidate in candidates {
-            let features = await buildFeatures(for: candidate)
+            let features = await WatchProfileBuilder.buildFeatures(for: candidate)
             let itemScore = score(features: features, profile: profile, metadata: candidate)
             scored.append((candidate, itemScore))
         }
@@ -246,19 +201,11 @@ actor PersonalizedRecommendationService {
         // Build profile from most recently watched items
         let recentWatched = watchedItems.sorted { ($0.lastViewedAt ?? 0) > ($1.lastViewedAt ?? 0) }
         let watchedSample = Array(recentWatched.prefix(maxWatchedForProfile))
-        var profile = FeatureProfile()
-
-        for item in watchedSample {
-            let features = await buildFeatures(for: item)
-            let weight = recencyWeight(lastViewedAt: item.lastViewedAt)
-                * rewatchBoost(viewCount: item.viewCount)
-                * ratingMultiplier(userRating: item.userRating)
-            profile.add(features: features, weight: weight)
-        }
+        let profile = await WatchProfileBuilder.build(from: watchedSample)
 
         var scored: [(PlexMetadata, Double)] = []
         for item in unwatchedItems {
-            let features = await buildFeatures(for: item)
+            let features = await WatchProfileBuilder.buildFeatures(for: item)
             let score = score(features: features, profile: profile, metadata: item)
             scored.append((item, score))
         }
@@ -272,62 +219,7 @@ actor PersonalizedRecommendationService {
         return Array(sorted)
     }
 
-    // MARK: - Feature helpers
-
-    private func buildFeatures(for item: PlexMetadata) async -> TMDBItemFeatures {
-        func normalize(_ genre: String) -> String {
-            let lower = genre.lowercased()
-            return genreNormalization[lower] ?? lower
-        }
-
-        var features = TMDBItemFeatures(
-            keywords: [],
-            cast: item.castNames,
-            directors: item.directorNames,
-            genres: item.genreTags.map(normalize),
-            voteAverage: nil,
-            voteCount: nil
-        )
-
-        if let tmdbId = item.tmdbId {
-            if let tmdbFeatures = await tmdbClient.fetchFeatures(tmdbId: tmdbId, type: item.tmdbMediaType) {
-                features.merge(from: tmdbFeatures)
-            }
-        }
-
-        return features.normalized()
-    }
-
-    private func recencyWeight(lastViewedAt: Int?) -> Double {
-        guard let ts = lastViewedAt else { return 1.0 }
-        let days = (Date().timeIntervalSince1970 - Double(ts)) / (60 * 60 * 24)
-        switch days {
-        case ..<30: return 1.0
-        case ..<90: return 0.75
-        case ..<180: return 0.5
-        case ..<365: return 0.25
-        default: return 0.1
-        }
-    }
-
-    private func rewatchBoost(viewCount: Int?) -> Double {
-        let count = Double(viewCount ?? 0)
-        if count <= 1 { return 1.0 }
-        return log2(count) + 1.0
-    }
-
-    /// Rating multiplier for profile building (upstream v2.8.7+)
-    /// User's star rating directly weights how much an item influences the profile
-    private func ratingMultiplier(userRating: Double?) -> Double {
-        guard let rating = userRating, rating > 0 else { return 0.6 }  // Unrated = 0.6x
-        switch rating {
-        case 9...10: return 1.0    // 5 stars
-        case 7..<9: return 0.75    // 4 stars
-        case 5..<7: return 0.5     // 3 stars
-        case 4..<5: return 0.25    // 2 stars
-        default: return 0.6        // Unrated default
-        }
-    }
+    // MARK: - Scoring helpers
 
     /// Popularity dampening: slightly penalizes very popular content (upstream v2.8+)
     private func popularityDampening(voteCount: Int?) -> Double {
@@ -436,20 +328,13 @@ actor PersonalizedRecommendationService {
         }
 
         // Sort by recency and take top items
-        let recentWatched = watchedItems
-            .sorted { ($0.lastViewedAt ?? 0) > ($1.lastViewedAt ?? 0) }
-            .prefix(maxWatchedForProfile)
+        let recentWatched = Array(
+            watchedItems
+                .sorted { ($0.lastViewedAt ?? 0) > ($1.lastViewedAt ?? 0) }
+                .prefix(maxWatchedForProfile)
+        )
 
-        var profile = FeatureProfile()
-        for item in recentWatched {
-            let features = await buildFeatures(for: item)
-            let weight = recencyWeight(lastViewedAt: item.lastViewedAt)
-                * rewatchBoost(viewCount: item.viewCount)
-                * ratingMultiplier(userRating: item.userRating)
-            profile.add(features: features, weight: weight)
-        }
-
-        return profile
+        return await WatchProfileBuilder.build(from: recentWatched)
     }
 
     /// Blend two profiles with specified weights
