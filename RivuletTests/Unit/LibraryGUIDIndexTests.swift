@@ -10,9 +10,9 @@ final class LibraryGUIDIndexTests: XCTestCase {
     func testParsesTMDBImdbTvdbGUIDs() async {
         var item = PlexMetadata(
             ratingKey: "1",
+            guid: "plex://movie/abc",
             type: "movie",
-            title: "Foo",
-            guid: "plex://movie/abc"
+            title: "Foo"
         )
         item.Guid = [
             PlexGuid(id: "tmdb://12345"),
@@ -37,7 +37,7 @@ final class LibraryGUIDIndexTests: XCTestCase {
     }
 
     func testIgnoresItemsWithoutExternalGUIDs() async {
-        let item = PlexMetadata(ratingKey: "1", type: "movie", title: "Foo", guid: "plex://movie/abc")
+        let item = PlexMetadata(ratingKey: "1", guid: "plex://movie/abc", type: "movie", title: "Foo")
         let index = LibraryGUIDIndex()
         await index.replace(with: [item])
 
@@ -55,8 +55,11 @@ final class LibraryGUIDIndexTests: XCTestCase {
         let index = LibraryGUIDIndex()
         await index.replace(with: [movie, show])
 
-        XCTAssertEqual(await index.lookup(tmdbId: 100, type: .movie)?.ratingKey, "1")
-        XCTAssertEqual(await index.lookup(tmdbId: 100, type: .tv)?.ratingKey, "2")
+        let movieMatch = await index.lookup(tmdbId: 100, type: .movie)
+        XCTAssertEqual(movieMatch?.ratingKey, "1")
+
+        let showMatch = await index.lookup(tmdbId: 100, type: .tv)
+        XCTAssertEqual(showMatch?.ratingKey, "2")
     }
 
     func testReplaceClearsPreviousState() async {
@@ -70,8 +73,11 @@ final class LibraryGUIDIndexTests: XCTestCase {
         await index.replace(with: [item1])
         await index.replace(with: [item2])
 
-        XCTAssertNil(await index.lookup(tmdbId: 1, type: .movie))
-        XCTAssertEqual(await index.lookup(tmdbId: 2, type: .movie)?.ratingKey, "2")
+        let stale = await index.lookup(tmdbId: 1, type: .movie)
+        XCTAssertNil(stale)
+
+        let fresh = await index.lookup(tmdbId: 2, type: .movie)
+        XCTAssertEqual(fresh?.ratingKey, "2")
     }
 
     func testIgnoresNonMovieNonShowItems() async {
@@ -82,7 +88,10 @@ final class LibraryGUIDIndexTests: XCTestCase {
         await index.replace(with: [episode])
 
         // Episodes shouldn't be indexed by tmdbId — that index is movie/show only.
-        XCTAssertNil(await index.lookup(tmdbId: 500, type: .movie))
-        XCTAssertNil(await index.lookup(tmdbId: 500, type: .tv))
+        let asMovie = await index.lookup(tmdbId: 500, type: .movie)
+        XCTAssertNil(asMovie)
+
+        let asTV = await index.lookup(tmdbId: 500, type: .tv)
+        XCTAssertNil(asTV)
     }
 }
