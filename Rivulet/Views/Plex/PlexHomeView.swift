@@ -29,6 +29,7 @@ struct PlexHomeView: View {
     @State private var previewRestoreTarget: PreviewSourceTarget?
     @State private var capturedSourceFrames: [PreviewSourceTarget: CGRect] = [:]
     @State private var showPreviewCover = false
+    @State private var heroScrollOffset: CGFloat = 0
 
     private let recommendationService = PersonalizedRecommendationService.shared
     private let recommendationsContentType: RecommendationContentType = .moviesAndShows
@@ -486,33 +487,44 @@ struct PlexHomeView: View {
         let heroActive = showHomeHero && !heroItems.isEmpty
         let screenHeight = UIScreen.main.bounds.height
         // Leave a modest peek for Continue Watching at the bottom of the hero
-        // at the top scroll position, and let everything scroll together.
+        // at the top scroll position. The backdrop fills the full screen behind
+        // the scroll view; this height controls where the overlay content ends.
         let heroSectionHeight = screenHeight - 180
 
-        return ScrollViewReader { scrollProxy in
-        ScrollView(.vertical, showsIndicators: false) {
-            LazyVStack(alignment: .leading, spacing: 0) {
-                // Connection error banner (when showing cached content while offline)
-                if !authManager.isConnected {
-                    connectionErrorBanner
-                }
+        let currentHeroItem: PlexMetadata? = {
+            guard heroActive, !heroItems.isEmpty else { return nil }
+            let clamped = max(0, min(heroCurrentIndex, heroItems.count - 1))
+            return heroItems[clamped]
+        }()
 
-                // Hero section: backdrop art + overlay controls, stacked and
-                // scrolling together as a single unit. Sized so Continue
-                // Watching peeks below it at the top scroll position.
-                if heroActive {
-                    let currentHeroItem: PlexMetadata? = {
-                        let clamped = max(0, min(heroCurrentIndex, heroItems.count - 1))
-                        return heroItems[clamped]
-                    }()
+        return ZStack(alignment: .top) {
+            // Layer 0: Fixed backdrop — fills the screen behind the scroll view.
+            // Parallax offset at 40% of scroll speed creates the Apple TV
+            // "receding hero" effect as the user scrolls down.
+            if heroActive {
+                HeroBackdropLayer(
+                    currentItem: currentHeroItem,
+                    serverURL: authManager.selectedServerURL ?? "",
+                    authToken: authManager.selectedServerToken ?? ""
+                )
+                .ignoresSafeArea()
+                .offset(y: -heroScrollOffset * 1.3 - min(60, heroScrollOffset * 0.6))
+                .allowsHitTesting(false)
+            }
 
-                    ZStack {
-                        HeroBackdropLayer(
-                            currentItem: currentHeroItem,
-                            serverURL: authManager.selectedServerURL ?? "",
-                            authToken: authManager.selectedServerToken ?? ""
-                        )
+            // Layer 1: Scrollable content — hero overlay (transparent) scrolls
+            // normally so focus management works, backdrop shows through.
+            ScrollViewReader { scrollProxy in
+            ScrollView(.vertical, showsIndicators: false) {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    // Connection error banner (when showing cached content while offline)
+                    if !authManager.isConnected {
+                        connectionErrorBanner
+                    }
 
+                    // Hero overlay: transparent foreground (logo/buttons/dots)
+                    // that scrolls with content. The backdrop behind is fixed.
+                    if heroActive {
                         HeroOverlayContent(
                             items: heroItems,
                             serverURL: authManager.selectedServerURL ?? "",
@@ -521,69 +533,86 @@ struct PlexHomeView: View {
                             onInfo: { item in selectedItem = item },
                             onPlay: { item in playItemDirectly(item) },
                             onHeroFocused: {
-                                withAnimation(.spring(response: 1.0, dampingFraction: 0.95)) {
+                                withAnimation(.smooth(duration: 0.8)) {
                                     scrollProxy.scrollTo("homeHero", anchor: .top)
                                 }
-                            }
+                            },
+                            onHeroExited: nil
                         )
+                        .frame(height: heroSectionHeight)
+                        .focusSection()
+                        .id("homeHero")
                     }
-                    .frame(height: heroSectionHeight)
-                    .clipped()
-                    .focusSection()
-                    .id("homeHero")
-                }
 
-                // Content rows (uses cached processedHubs which merges Continue Watching + On Deck)
-                VStack(alignment: .leading, spacing: 48) {
-                    ForEach(Array(cachedProcessedHubs.enumerated()), id: \.element.id) { index, hub in
-                        if let items = hub.Metadata, !items.isEmpty {
-                            let isContinueWatching = isContinueWatchingHub(hub)
-                            InfiniteContentRow(
-                                rowID: homeRowID(for: hub, index: index),
-                                title: hub.title ?? "Unknown",
-                                initialItems: items,
-                                hubKey: hub.key ?? hub.hubKey,
-                                hubIdentifier: hub.hubIdentifier,
-                                serverURL: authManager.selectedServerURL ?? "",
-                                authToken: authManager.selectedServerToken ?? "",
-                                isContinueWatching: isContinueWatching,
-                                contextMenuSource: isContinueWatching ? .continueWatching : .other,
-                                onItemSelected: { item in
-                                    selectedItem = item
-                                },
-                                onPlayItem: { item in
-                                    playItemDirectly(item)
-                                },
-                                onPlayFromBeginning: { item in
-                                    playItemDirectly(item, fromBeginning: true)
-                                },
-                                onGoToItem: { item in
-                                    selectedItem = item
-                                },
-                                onRefreshNeeded: {
-                                    await dataStore.refreshHubs()
-                                },
-                                onPreviewRequested: isContinueWatching ? nil : { request in
-                                    homeLog.info("[Preview] Opening carousel: \(request.items.count) items, tapped index=\(request.selectedIndex), title=\(request.items[request.selectedIndex].title ?? "?")")
-                                    rowPreviewRequest = request
-                                    showPreviewCover = true
-                                },
-                                restorePreviewFocusTarget: $previewRestoreTarget
-                            )
+                    // Content rows (uses cached processedHubs which merges Continue Watching + On Deck)
+                    VStack(alignment: .leading, spacing: 48) {
+                        // Invisible anchor so we can scroll to place Continue
+                        // Watching at roughly mid-screen (matching Apple TV).
+                        Color.clear
+                            .frame(height: 0)
+                            .id("contentRowsAnchor")
+                        ForEach(Array(cachedProcessedHubs.enumerated()), id: \.element.id) { index, hub in
+                            if let items = hub.Metadata, !items.isEmpty {
+                                let isContinueWatching = isContinueWatchingHub(hub)
+                                InfiniteContentRow(
+                                    rowID: homeRowID(for: hub, index: index),
+                                    title: hub.title ?? "Unknown",
+                                    initialItems: items,
+                                    hubKey: hub.key ?? hub.hubKey,
+                                    hubIdentifier: hub.hubIdentifier,
+                                    serverURL: authManager.selectedServerURL ?? "",
+                                    authToken: authManager.selectedServerToken ?? "",
+                                    isContinueWatching: isContinueWatching,
+                                    contextMenuSource: isContinueWatching ? .continueWatching : .other,
+                                    onItemSelected: { item in
+                                        selectedItem = item
+                                    },
+                                    onPlayItem: { item in
+                                        playItemDirectly(item)
+                                    },
+                                    onPlayFromBeginning: { item in
+                                        playItemDirectly(item, fromBeginning: true)
+                                    },
+                                    onGoToItem: { item in
+                                        selectedItem = item
+                                    },
+                                    onRefreshNeeded: {
+                                        await dataStore.refreshHubs()
+                                    },
+                                    onPreviewRequested: isContinueWatching ? nil : { request in
+                                        homeLog.info("[Preview] Opening carousel: \(request.items.count) items, tapped index=\(request.selectedIndex), title=\(request.items[request.selectedIndex].title ?? "?")")
+                                        rowPreviewRequest = request
+                                        showPreviewCover = true
+                                    },
+                                    restorePreviewFocusTarget: $previewRestoreTarget,
+                                    onRowFocused: {
+                                        let targetID = homeRowID(for: hub, index: index)
+                                        withAnimation(.smooth(duration: 0.8)) {
+                                            scrollProxy.scrollTo(targetID, anchor: UnitPoint(x: 0.5, y: 0.5))
+                                        }
+                                    }
+                                )
+                                .id(homeRowID(for: hub, index: index))
+                            }
+                        }
+
+                        // Recommendations at the end of all library hubs
+                        if enablePersonalizedRecommendations {
+                            recommendationsSection
                         }
                     }
-
-                    // Recommendations at the end of all library hubs
-                    if enablePersonalizedRecommendations {
-                        recommendationsSection
-                    }
+                    .padding(.top, heroActive ? 0 : 48)
                 }
-                .padding(.top, heroActive ? 0 : 48)
             }
+            .onScrollGeometryChange(for: CGFloat.self) { geometry in
+                geometry.contentOffset.y
+            } action: { _, offset in
+                heroScrollOffset = max(0, offset)
+            }
+            .scrollClipDisabled()  // Allow shadow overflow
+            .ignoresSafeArea(.container, edges: heroActive ? [.top, .horizontal] : [])
+            } // ScrollViewReader
         }
-        .scrollClipDisabled()  // Allow shadow overflow
-        .ignoresSafeArea(.container, edges: heroActive ? [.top, .horizontal] : [])
-        } // ScrollViewReader
     }
 
     // MARK: - Connection Error Banner
@@ -956,6 +985,7 @@ struct InfiniteContentRow: View {
     var onRefreshNeeded: MediaItemRefreshCallback?
     var onPreviewRequested: ((PreviewRequest) -> Void)?
     var restorePreviewFocusTarget: Binding<PreviewSourceTarget?> = .constant(nil)
+    var onRowFocused: (() -> Void)?
 
     @State private var items: [PlexMetadata] = []
     @State private var isLoadingMore = false
@@ -1117,6 +1147,11 @@ struct InfiniteContentRow: View {
                         focusedItemId = savedFocusId
                     }
                 }
+            }
+        }
+        .onChange(of: focusedItemId) { oldValue, newValue in
+            if oldValue == nil && newValue != nil {
+                onRowFocused?()
             }
         }
         .onChange(of: restorePreviewFocusTarget.wrappedValue) { _, target in

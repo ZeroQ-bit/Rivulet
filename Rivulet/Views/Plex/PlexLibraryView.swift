@@ -31,6 +31,7 @@ struct PlexLibraryView: View {
     @State private var selectedItem: PlexMetadata?
     @State private var heroItems: [PlexMetadata] = []
     @State private var heroCurrentIndex: Int = 0
+    @State private var heroScrollOffset: CGFloat = 0
     @State private var lastLoadedLibraryKey: String?  // Track which library is currently loaded
     @State private var hasPrefetched = false  // Track if we've already prefetched for this library
     @State private var hasMoreItems = true  // Whether there are more items to load
@@ -425,24 +426,34 @@ struct PlexLibraryView: View {
         // full-width, near-full-height with a modest peek for the row below.
         let heroSectionHeight = screenHeight - 180
 
-        return ScrollViewReader { scrollProxy in
-        ScrollView(.vertical, showsIndicators: false) {
-            LazyVStack(alignment: .leading, spacing: 0) {
-                // Hero section first — backdrop art + overlay controls, stacked
-                // and scrolling together as a single unit.
-                if heroActive {
-                    let currentHeroItem: PlexMetadata? = {
-                        let clamped = max(0, min(heroCurrentIndex, heroItems.count - 1))
-                        return heroItems[clamped]
-                    }()
+        let currentHeroItem: PlexMetadata? = {
+            guard heroActive, !heroItems.isEmpty else { return nil }
+            let clamped = max(0, min(heroCurrentIndex, heroItems.count - 1))
+            return heroItems[clamped]
+        }()
 
-                    ZStack {
-                        HeroBackdropLayer(
-                            currentItem: currentHeroItem,
-                            serverURL: authManager.selectedServerURL ?? "",
-                            authToken: authManager.selectedServerToken ?? ""
-                        )
+        return ZStack(alignment: .top) {
+            // Layer 0: Fixed backdrop — fills the full screen behind the scroll
+            // view. Parallax offset at 40% of scroll speed creates the Apple TV
+            // "receding hero" effect as the user scrolls down.
+            if heroActive {
+                HeroBackdropLayer(
+                    currentItem: currentHeroItem,
+                    serverURL: authManager.selectedServerURL ?? "",
+                    authToken: authManager.selectedServerToken ?? ""
+                )
+                .ignoresSafeArea()
+                .offset(y: -heroScrollOffset * 1.3 - min(110, heroScrollOffset * 1.1))
+                .allowsHitTesting(false)
+            }
 
+            // Layer 1: Scrollable content
+            ScrollViewReader { scrollProxy in
+            ScrollView(.vertical, showsIndicators: false) {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    // Hero overlay: transparent foreground (logo/buttons/dots)
+                    // that scrolls with content. The backdrop behind is fixed.
+                    if heroActive {
                         HeroOverlayContent(
                             items: heroItems,
                             serverURL: authManager.selectedServerURL ?? "",
@@ -451,39 +462,43 @@ struct PlexLibraryView: View {
                             onInfo: { item in selectedItem = item },
                             onPlay: { item in playItemDirectly(item) },
                             onHeroFocused: {
-                                withAnimation(.spring(response: 1.0, dampingFraction: 0.95)) {
+                                withAnimation(.smooth(duration: 0.8)) {
                                     scrollProxy.scrollTo("libraryHero", anchor: .top)
                                 }
                             }
                         )
+                        .frame(height: heroSectionHeight)
+                        .focusSection()
+                        .id("libraryHero")
                     }
-                    .frame(height: heroSectionHeight)
-                    .clipped()
-                    .focusSection()
-                    .id("libraryHero")
-                }
 
-                essentialRowsView
-                discoveryRowsView
-                librarySectionHeader
-                libraryGridView
+                    essentialRowsView(scrollProxy: scrollProxy)
+                    discoveryRowsView(scrollProxy: scrollProxy)
+                    librarySectionHeader
+                    libraryGridView
 
-                // Loading more indicator
-                if isLoadingMore {
-                    HStack {
-                        Spacer()
-                        ProgressView()
-                            .scaleEffect(1.2)
-                        Spacer()
+                    // Loading more indicator
+                    if isLoadingMore {
+                        HStack {
+                            Spacer()
+                            ProgressView()
+                                .scaleEffect(1.2)
+                            Spacer()
+                        }
+                        .padding(.bottom, 40)
                     }
-                    .padding(.bottom, 40)
                 }
             }
+            .onScrollGeometryChange(for: CGFloat.self) { geometry in
+                geometry.contentOffset.y
+            } action: { _, offset in
+                heroScrollOffset = max(0, offset)
+            }
+            .scrollClipDisabled()  // Allow shadow overflow
+            .ignoresSafeArea(.container, edges: heroActive ? [.top, .horizontal] : [])
+            .id(libraryKey)  // Force fresh ScrollView when library changes - starts at top
+            } // ScrollViewReader
         }
-        .scrollClipDisabled()  // Allow shadow overflow
-        .ignoresSafeArea(.container, edges: heroActive ? [.top, .horizontal] : [])
-        .id(libraryKey)  // Force fresh ScrollView when library changes - starts at top
-        } // ScrollViewReader
         .opacity(rowPreviewRequest != nil ? 0.12 : 1)
         .offset(y: rowPreviewRequest != nil ? 20 : 0)
         .allowsHitTesting(rowPreviewRequest == nil)
@@ -585,15 +600,16 @@ struct PlexLibraryView: View {
     // MARK: - Essential Rows View (Continue Watching, Recently Added, Recently Released)
 
     @ViewBuilder
-    private var essentialRowsView: some View {
+    private func essentialRowsView(scrollProxy: ScrollViewProxy) -> some View {
         if !essentialHubs.isEmpty {
             VStack(alignment: .leading, spacing: 40) {
                 let continueWatchingIndex = essentialHubs.firstIndex(where: isContinueWatchingHub)
                 ForEach(Array(essentialHubs.enumerated()), id: \.element.hubIdentifier) { index, hub in
                     if let hubItems = hub.Metadata, !hubItems.isEmpty {
                         let isContinueWatching = isContinueWatchingHub(hub)
+                        let rowID = libraryRowID(for: hub, section: "essential", index: index)
                         InfiniteContentRow(
-                            rowID: libraryRowID(for: hub, section: "essential", index: index),
+                            rowID: rowID,
                             title: hub.title ?? "Untitled",
                             initialItems: hubItems,
                             hubKey: hub.key ?? hub.hubKey,
@@ -623,13 +639,19 @@ struct PlexLibraryView: View {
                                     showPreviewCover = true
                                 }
                             },
-                            restorePreviewFocusTarget: $previewRestoreTarget
+                            restorePreviewFocusTarget: $previewRestoreTarget,
+                            onRowFocused: {
+                                withAnimation(.smooth(duration: 0.8)) {
+                                    scrollProxy.scrollTo(rowID, anchor: UnitPoint(x: 0.5, y: 0.5))
+                                }
+                            }
                         )
+                        .id(rowID)
 
                         if enablePersonalizedRecommendations,
                            shouldShowRecommendationsRow,
                            continueWatchingIndex == index {
-                            recommendationsSection
+                            recommendationsSection(scrollProxy: scrollProxy)
                         }
                     }
                 }
@@ -645,7 +667,7 @@ struct PlexLibraryView: View {
     // MARK: - Recommendations Section
 
     @ViewBuilder
-    private var recommendationsSection: some View {
+    private func recommendationsSection(scrollProxy: ScrollViewProxy) -> some View {
         if isLoadingRecommendations && recommendations.isEmpty {
             HStack(spacing: 14) {
                 ProgressView()
@@ -678,8 +700,9 @@ struct PlexLibraryView: View {
                 .buttonStyle(AppStoreButtonStyle())
             }
         } else if !recommendations.isEmpty {
+            let rowID = "library:\(libraryKey):recommendations"
             InfiniteContentRow(
-                rowID: "library:\(libraryKey):recommendations",
+                rowID: rowID,
                 title: "Personalized Recommendations",
                 initialItems: recommendations,
                 hubKey: nil,
@@ -699,21 +722,28 @@ struct PlexLibraryView: View {
                         showPreviewCover = true
                     }
                 },
-                restorePreviewFocusTarget: $previewRestoreTarget
+                restorePreviewFocusTarget: $previewRestoreTarget,
+                onRowFocused: {
+                    withAnimation(.smooth(duration: 0.8)) {
+                        scrollProxy.scrollTo(rowID, anchor: UnitPoint(x: 0.5, y: 0.5))
+                    }
+                }
             )
+            .id(rowID)
         }
     }
 
     // MARK: - Discovery Rows View (Rediscover, Recommendations, etc.)
 
     @ViewBuilder
-    private var discoveryRowsView: some View {
+    private func discoveryRowsView(scrollProxy: ScrollViewProxy) -> some View {
         if showLibraryRecommendations && !discoveryHubs.isEmpty {
             VStack(alignment: .leading, spacing: 40) {
                 ForEach(discoveryHubs, id: \.hubIdentifier) { hub in
                     if let hubItems = hub.Metadata, !hubItems.isEmpty {
+                        let rowID = libraryRowID(for: hub, section: "discovery", index: discoveryHubs.firstIndex(where: { $0.hubIdentifier == hub.hubIdentifier }) ?? 0)
                         InfiniteContentRow(
-                            rowID: libraryRowID(for: hub, section: "discovery", index: discoveryHubs.firstIndex(where: { $0.hubIdentifier == hub.hubIdentifier }) ?? 0),
+                            rowID: rowID,
                             title: hub.title ?? "Untitled",
                             initialItems: hubItems,
                             hubKey: hub.key ?? hub.hubKey,
@@ -733,8 +763,14 @@ struct PlexLibraryView: View {
                                     showPreviewCover = true
                                 }
                             },
-                            restorePreviewFocusTarget: $previewRestoreTarget
+                            restorePreviewFocusTarget: $previewRestoreTarget,
+                            onRowFocused: {
+                                withAnimation(.smooth(duration: 0.8)) {
+                                    scrollProxy.scrollTo(rowID, anchor: UnitPoint(x: 0.5, y: 0.5))
+                                }
+                            }
                         )
+                        .id(rowID)
                     }
                 }
             }
