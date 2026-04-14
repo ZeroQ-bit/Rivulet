@@ -137,6 +137,11 @@ struct WhatsNewView: View {
     // MARK: - Changelog Data
 
     static let changelogs: [(version: String, features: [String])] = [
+        ("1.0.0 (47)", [
+            "New Discover page — browse Popular, Top Rated, Now Playing, and Upcoming content from TMDB",
+            "Plex Watchlist integration — saved items appear on Home and you can add/remove from anywhere",
+            "Hero bookmark button now toggles your Plex Watchlist. Mark Watched moved to the detail page",
+        ]),
         ("1.0.0 (46)", [
             "Fixed watched episodes not automatically playing",
             "Fixed some animation jank",

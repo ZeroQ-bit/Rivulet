@@ -277,6 +277,7 @@ struct SettingsView: View {
     @AppStorage("showLibraryRecommendations") private var showLibraryRecommendations = true
     @AppStorage("showLibraryRecentRows") private var showLibraryRecentRows = true
     @AppStorage("enablePersonalizedRecommendations") private var enablePersonalizedRecommendations = false
+    @AppStorage("showForYouOnDiscover") private var showForYouOnDiscover = true
     @AppStorage("liveTVLayout") private var liveTVLayoutRaw = LiveTVLayout.guide.rawValue
     @AppStorage("confirmExitMultiview") private var confirmExitMultiview = true
     @AppStorage("allowFourStreams") private var allowFourStreams = false
@@ -660,6 +661,13 @@ struct SettingsView: View {
                 title: "Personalized Recommendations",
                 isOn: $enablePersonalizedRecommendations,
                 onFocusChange: { if $0 { focusState.focusedSettingId = "personalizedRecs" } }
+            )
+
+            SettingsToggleRow(
+                title: "Show For You on Discover",
+                description: "Personalized suggestions based on your watch history",
+                isOn: $showForYouOnDiscover,
+                onFocusChange: { if $0 { focusState.focusedSettingId = "showForYouOnDiscover" } }
             )
         }
     }
