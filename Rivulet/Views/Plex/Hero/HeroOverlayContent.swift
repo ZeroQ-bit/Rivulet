@@ -23,6 +23,8 @@ struct HeroOverlayContent: View {
     var onHeroFocused: (() -> Void)? = nil
     var onHeroExited: (() -> Void)? = nil
 
+    @ObservedObject private var watchlistService = PlexWatchlistService.shared
+
     @State private var resolvedPlayTargets: [String: PlexMetadata] = [:]
     @State private var watchedOverrides: [String: Bool] = [:]
     @State private var isResolvingPlay: Bool = false
@@ -83,11 +85,11 @@ struct HeroOverlayContent: View {
 
                         HeroButtonRow(
                             isResolvingPlay: isResolvingPlay,
-                            isWatched: isWatched(item),
+                            isOnWatchlist: item.tmdbId.map { watchlistService.contains(tmdbId: $0) } ?? false,
                             canAdvance: canAdvance,
                             focusedButton: $focusedButton,
                             onPlay: { handlePlay(item) },
-                            onToggleWatched: { handleToggleWatched(item) },
+                            onToggleWatchlist: { Task { await toggleWatchlist(for: item) } },
                             onInfo: { onInfo(item) },
                             onNext: { advance() }
                         )
@@ -194,6 +196,28 @@ struct HeroOverlayContent: View {
             }
             isResolvingPlay = false
             onPlay(resolved)
+        }
+    }
+
+    // MARK: - Watchlist Toggle
+
+    private func toggleWatchlist(for item: PlexMetadata) async {
+        guard let tmdbId = item.tmdbId else { return }
+        let guid = "tmdb://\(tmdbId)"
+        let service = PlexWatchlistService.shared
+        if service.contains(guid: guid) {
+            await service.remove(guid: guid)
+        } else {
+            let watchType: PlexWatchlistItem.WatchlistType = (item.type == "show") ? .show : .movie
+            let watchlistItem = PlexWatchlistItem(
+                id: guid,
+                title: item.title ?? "",
+                year: item.year,
+                type: watchType,
+                posterURL: nil,
+                guids: [guid]
+            )
+            await service.add(guid: guid, item: watchlistItem)
         }
     }
 

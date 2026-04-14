@@ -2,9 +2,9 @@
 //  HeroButtonRow.swift
 //  Rivulet
 //
-//  The focusable action row for the hero carousel: Play, Watchlist (mark
-//  watched), Info, Next. Mirrors the `AppStoreActionButtonStyle` pattern
-//  used by `PlexDetailView` for consistent focus treatment across the app.
+//  The focusable action row for the hero carousel: Play, Watchlist, Info,
+//  Next. Mirrors the `AppStoreActionButtonStyle` pattern used by
+//  `PlexDetailView` for consistent focus treatment across the app.
 //
 
 import SwiftUI
@@ -18,13 +18,13 @@ enum HeroButton: Hashable {
 
 struct HeroButtonRow: View {
     let isResolvingPlay: Bool
-    let isWatched: Bool
+    let isOnWatchlist: Bool
     let canAdvance: Bool
 
     @FocusState.Binding var focusedButton: HeroButton?
 
     let onPlay: () -> Void
-    let onToggleWatched: () -> Void
+    let onToggleWatchlist: () -> Void
     let onInfo: () -> Void
     let onNext: () -> Void
 
@@ -70,8 +70,8 @@ struct HeroButtonRow: View {
     // MARK: - Secondary Circle Buttons
 
     private var watchlistButton: some View {
-        Button(action: onToggleWatched) {
-            Image(systemName: isWatched ? "checkmark" : "plus")
+        Button(action: onToggleWatchlist) {
+            Image(systemName: isOnWatchlist ? "bookmark.fill" : "bookmark")
                 .font(.system(size: 24, weight: .semibold))
                 .frame(width: circleButtonSize, height: circleButtonSize)
         }
@@ -81,7 +81,7 @@ struct HeroButtonRow: View {
             isPrimary: false
         ))
         .focused($focusedButton, equals: .watchlist)
-        .accessibilityLabel(isWatched ? "Mark unwatched" : "Mark watched")
+        .accessibilityLabel(isOnWatchlist ? "Remove from Watchlist" : "Add to Watchlist")
     }
 
     private var infoButton: some View {
