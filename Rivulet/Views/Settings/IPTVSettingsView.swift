@@ -42,7 +42,6 @@ struct IPTVSettingsView: View {
                 icon: "plus",
                 iconColor: .blue,
                 title: "Add Live TV Source",
-                subtitle: "",
                 action: { onNavigateToAddSource?() },
                 onFocusChange: { if $0 { focusedSettingId = "addLiveTVSource" } }
             )

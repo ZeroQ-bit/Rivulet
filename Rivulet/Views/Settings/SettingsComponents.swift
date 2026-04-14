@@ -36,7 +36,10 @@ struct SettingsRow: View {
     var icon: String? = nil
     var iconColor: Color = .clear
     let title: String
-    let subtitle: String
+    /// Descriptive text shown under the title on the left.
+    var description: String = ""
+    /// Current-value readout shown on the right (e.g. "Normal", "English").
+    var value: String = ""
     let action: () -> Void
     var focusTrigger: Int? = nil
     var onFocusChange: ((Bool) -> Void)? = nil
@@ -58,20 +61,29 @@ struct SettingsRow: View {
                     }
                 }
 
-                Text(title)
-                    .font(.system(size: 36))
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(title)
+                        .font(.system(size: 36))
+                        .foregroundStyle(isFocused ? .black : .white)
+
+                    if !description.isEmpty {
+                        Text(description)
+                            .font(.system(size: 22))
+                            .foregroundStyle(isFocused ? .black.opacity(0.6) : .secondary)
+                    }
+                }
 
                 Spacer()
 
-                if !subtitle.isEmpty {
-                    Text(subtitle)
+                if !value.isEmpty {
+                    Text(value)
                         .font(.system(size: 32))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(isFocused ? .black.opacity(0.6) : .secondary)
                 }
 
                 Image(systemName: "chevron.right")
                     .font(.system(size: 40, weight: .semibold))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(isFocused ? .black.opacity(0.6) : .secondary)
             }
         }
         .focused($isFocused)
@@ -100,20 +112,19 @@ struct SettingsInfoRow: View {
     let value: String
 
     var body: some View {
-        HStack {
+        HStack(spacing: 20) {
             Text(title)
+                .font(.system(size: 36))
+                .foregroundStyle(.white)
 
             Spacer()
 
             Text(value)
+                .font(.system(size: 32))
                 .foregroundStyle(.secondary)
         }
         .padding(.horizontal, 28)
         .padding(.vertical, 18)
-        .background(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .fill(.white.opacity(0.12))
-        )
     }
 }
 
@@ -123,7 +134,8 @@ struct SettingsToggleRow: View {
     var icon: String? = nil
     var iconColor: Color = .clear
     let title: String
-    let subtitle: String
+    /// Descriptive text shown under the title on the left.
+    var description: String = ""
     @Binding var isOn: Bool
     var onFocusChange: ((Bool) -> Void)? = nil
 
@@ -146,20 +158,23 @@ struct SettingsToggleRow: View {
                     }
                 }
 
-                Text(title)
-                    .font(.system(size: 32))
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(title)
+                        .font(.system(size: 32))
+                        .foregroundStyle(isFocused ? .black : .white)
 
-                if !subtitle.isEmpty {
-                    Text(subtitle)
-                        .font(.system(size: 28))
-                        .foregroundStyle(.secondary)
+                    if !description.isEmpty {
+                        Text(description)
+                            .font(.system(size: 22))
+                            .foregroundStyle(isFocused ? .black.opacity(0.6) : .secondary)
+                    }
                 }
 
                 Spacer()
 
                 Text(isOn ? "On" : "Off")
                     .font(.system(size: 32))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(isFocused ? .black.opacity(0.6) : .secondary)
             }
         }
         .focused($isFocused)
@@ -185,7 +200,7 @@ struct SettingsActionRow: View {
                 Spacer()
                 Text(title)
                     .font(.system(size: 32))
-                    .foregroundStyle(isDestructive ? .red : .primary)
+                    .foregroundStyle(isDestructive ? .red : (isFocused ? .black : .white))
                 Spacer()
             }
         }
@@ -202,7 +217,8 @@ struct SettingsPickerRow<T: Hashable & CustomStringConvertible>: View {
     var icon: String? = nil
     var iconColor: Color = .clear
     let title: String
-    let subtitle: String
+    /// Descriptive text shown under the title on the left.
+    var description: String = ""
     @Binding var selection: T
     let options: [T]
     var onFocusChange: ((Bool) -> Void)? = nil
@@ -226,20 +242,23 @@ struct SettingsPickerRow<T: Hashable & CustomStringConvertible>: View {
                     }
                 }
 
-                Text(title)
-                    .font(.system(size: 32))
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(title)
+                        .font(.system(size: 32))
+                        .foregroundStyle(isFocused ? .black : .white)
 
-                if !subtitle.isEmpty {
-                    Text(subtitle)
-                        .font(.system(size: 28))
-                        .foregroundStyle(.secondary)
+                    if !description.isEmpty {
+                        Text(description)
+                            .font(.system(size: 22))
+                            .foregroundStyle(isFocused ? .black.opacity(0.6) : .secondary)
+                    }
                 }
 
                 Spacer()
 
                 Text(selection.description)
                     .font(.system(size: 32))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(isFocused ? .black.opacity(0.6) : .secondary)
             }
         }
         .focused($isFocused)
@@ -261,7 +280,8 @@ struct SettingsListPickerRow<T: Hashable & CustomStringConvertible>: View {
     var icon: String? = nil
     var iconColor: Color = .clear
     let title: String
-    let subtitle: String
+    /// Descriptive text shown under the title on the left.
+    var description: String = ""
     @Binding var selection: T
     let options: [T]
     var onFocusChange: ((Bool) -> Void)? = nil
@@ -286,19 +306,28 @@ struct SettingsListPickerRow<T: Hashable & CustomStringConvertible>: View {
                     }
                 }
 
-                Text(title)
-                    .font(.system(size: 32))
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(title)
+                        .font(.system(size: 32))
+                        .foregroundStyle(isFocused ? .black : .white)
+
+                    if !description.isEmpty {
+                        Text(description)
+                            .font(.system(size: 22))
+                            .foregroundStyle(isFocused ? .black.opacity(0.6) : .secondary)
+                    }
+                }
 
                 Spacer()
 
                 HStack(spacing: 8) {
                     Text(selection.description)
                         .font(.system(size: 32))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(isFocused ? .black.opacity(0.6) : .secondary)
 
                     Image(systemName: "chevron.right")
                         .font(.system(size: 22, weight: .semibold))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(isFocused ? .black.opacity(0.6) : .secondary)
                 }
             }
         }

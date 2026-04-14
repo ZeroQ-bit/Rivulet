@@ -384,12 +384,16 @@ struct SettingsView: View {
     var body: some View {
         GeometryReader { geo in
             VStack(spacing: 0) {
-                // Page title
+                // Page title. The parent TabView(.sidebarAdaptable) reserves
+                // a container-safe-area inset at the top; we ignore that on
+                // the Settings root so the title can sit higher, matching
+                // Apple's Settings app. `.padding(.top)` below is the actual
+                // distance from the top edge.
                 Text(currentPage.title)
                     .font(.system(size: 52, weight: .bold))
                     .foregroundStyle(.white.opacity(0.65))
                     .frame(maxWidth: .infinity, alignment: .center)
-                    .padding(.top, 40)
+                    .padding(.top, 48)
                     .padding(.bottom, 24)
                     .animation(.easeInOut(duration: 0.2), value: currentPage)
 
@@ -424,9 +428,30 @@ struct SettingsView: View {
                     .offset(x: pageOffsetX)
                     .opacity(pageOpacity)
                     .frame(width: geo.size.width * 0.45)
+                    // Manual top-edge fade. tvOS 26's
+                    // `scrollEdgeEffectStyle(.soft)` anchors to the scroll
+                    // view's clip bounds and is defeated by
+                    // `scrollClipDisabled()`, which we need for focus scale
+                    // bleed. A mask only affects alpha, not geometry, so
+                    // extending it horizontally with negative padding keeps
+                    // left/right focus scale intact while fading the top.
+                    .mask(
+                        VStack(spacing: 0) {
+                            LinearGradient(
+                                colors: [.clear, .black],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            )
+                            .frame(height: 48)
+                            Color.black
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.horizontal, -200)
+                    )
                 }
             }
         }
+        .ignoresSafeArea(.container, edges: .top)
         .background(.clear)
         .fullScreenCover(isPresented: $showChangelog) {
             WhatsNewView(isPresented: $showChangelog, version: appVersion)
@@ -442,8 +467,21 @@ struct SettingsView: View {
         // and animate it back in on return — that hide/show race makes the
         // sidebar "start to open then immediately close" when the user presses
         // left from the root page just after backing out of a sub-page.
-        // Leave `nestedNavState` alone so the sidebar stays accessible
-        // throughout settings navigation.
+        //
+        // Instead, mirror sub-page status onto a dedicated flag
+        // (`isSettingsSubPage`) that the sidebar reads to hide the tab bar
+        // and block tab switches while the user is deep in Settings.
+        // Observe `navigationStack` directly — `currentPage` is computed
+        // and `.onChange` on computed properties is brittle.
+        .onChange(of: navigationStack) { _, stack in
+            nestedNavState.isSettingsSubPage = (stack.last ?? .root) != .root
+        }
+        .onAppear {
+            nestedNavState.isSettingsSubPage = (currentPage != .root)
+        }
+        .onDisappear {
+            nestedNavState.isSettingsSubPage = false
+        }
         .onExitCommand(perform: currentPage != .root ? { goBack() } : nil)
     }
 
@@ -527,7 +565,6 @@ struct SettingsView: View {
         Group {
             SettingsRow(
                 title: "Appearance",
-                subtitle: "",
                 action: { navigate(to: .appearance) },
                 focusTrigger: focusTrigger,
                 onFocusChange: { if $0 { focusState.focusedSettingId = "cat_appearance" } }
@@ -535,49 +572,42 @@ struct SettingsView: View {
 
             SettingsRow(
                 title: "Playback",
-                subtitle: "",
                 action: { navigate(to: .playback) },
                 onFocusChange: { if $0 { focusState.focusedSettingId = "cat_playback" } }
             )
 
             SettingsRow(
                 title: "Music",
-                subtitle: "",
                 action: { navigate(to: .music) },
                 onFocusChange: { if $0 { focusState.focusedSettingId = "cat_music" } }
             )
 
             SettingsRow(
                 title: "Live TV",
-                subtitle: "",
                 action: { navigate(to: .liveTV) },
                 onFocusChange: { if $0 { focusState.focusedSettingId = "cat_liveTV" } }
             )
 
             SettingsRow(
                 title: "Servers",
-                subtitle: "",
                 action: { navigate(to: .servers) },
                 onFocusChange: { if $0 { focusState.focusedSettingId = "cat_servers" } }
             )
 
             SettingsRow(
                 title: "User Profiles",
-                subtitle: "",
                 action: { navigate(to: .userProfiles) },
                 onFocusChange: { if $0 { focusState.focusedSettingId = "userProfiles" } }
             )
 
             SettingsRow(
                 title: "Cache & Storage",
-                subtitle: "",
                 action: { navigate(to: .cache) },
                 onFocusChange: { if $0 { focusState.focusedSettingId = "cache" } }
             )
 
             SettingsRow(
                 title: "About",
-                subtitle: "",
                 action: { navigate(to: .about) },
                 onFocusChange: { if $0 { focusState.focusedSettingId = "cat_about" } }
             )
@@ -590,7 +620,6 @@ struct SettingsView: View {
         Group {
             SettingsRow(
                 title: "Sidebar Libraries",
-                subtitle: "",
                 action: { navigate(to: .libraries) },
                 focusTrigger: focusTrigger,
                 onFocusChange: { if $0 { focusState.focusedSettingId = "libraries" } }
@@ -598,42 +627,37 @@ struct SettingsView: View {
 
             SettingsRow(
                 title: "Display Size",
-                subtitle: displaySize.wrappedValue.description,
+                value: displaySize.wrappedValue.description,
                 action: { navigate(to: .displaySizePicker) },
                 onFocusChange: { if $0 { focusState.focusedSettingId = "displaySize" } }
             )
 
             SettingsToggleRow(
                 title: "Home Hero",
-                subtitle: "",
                 isOn: $showHomeHero,
                 onFocusChange: { if $0 { focusState.focusedSettingId = "homeHero" } }
             )
 
             SettingsToggleRow(
                 title: "Library Hero",
-                subtitle: "",
                 isOn: $showLibraryHero,
                 onFocusChange: { if $0 { focusState.focusedSettingId = "libraryHero" } }
             )
 
             SettingsToggleRow(
                 title: "Discovery Rows",
-                subtitle: "",
                 isOn: $showLibraryRecommendations,
                 onFocusChange: { if $0 { focusState.focusedSettingId = "discoveryRows" } }
             )
 
             SettingsToggleRow(
                 title: "Recent Rows",
-                subtitle: "",
                 isOn: $showLibraryRecentRows,
                 onFocusChange: { if $0 { focusState.focusedSettingId = "recentRows" } }
             )
 
             SettingsToggleRow(
                 title: "Personalized Recommendations",
-                subtitle: "",
                 isOn: $enablePersonalizedRecommendations,
                 onFocusChange: { if $0 { focusState.focusedSettingId = "personalizedRecs" } }
             )
@@ -646,14 +670,13 @@ struct SettingsView: View {
         Group {
             SettingsToggleRow(
                 title: "Use Apple's Player",
-                subtitle: "",
                 isOn: $useApplePlayer,
                 onFocusChange: { if $0 { focusState.focusedSettingId = "useApplePlayer" } }
             )
 
             SettingsRow(
                 title: "Audio Language",
-                subtitle: audioLanguage.description,
+                value: audioLanguage.description,
                 action: { navigate(to: .audioLanguagePicker) },
                 focusTrigger: focusTrigger,
                 onFocusChange: { if $0 { focusState.focusedSettingId = "audioLanguage" } }
@@ -661,35 +684,32 @@ struct SettingsView: View {
 
             SettingsRow(
                 title: "Subtitles",
-                subtitle: subtitleOption.description,
+                value: subtitleOption.description,
                 action: { navigate(to: .subtitlesPicker) },
                 onFocusChange: { if $0 { focusState.focusedSettingId = "subtitles" } }
             )
 
             SettingsToggleRow(
                 title: "Auto-Skip Intro",
-                subtitle: "",
                 isOn: $autoSkipIntro,
                 onFocusChange: { if $0 { focusState.focusedSettingId = "autoSkipIntro" } }
             )
 
             SettingsToggleRow(
                 title: "Auto-Skip Credits",
-                subtitle: "",
                 isOn: $autoSkipCredits,
                 onFocusChange: { if $0 { focusState.focusedSettingId = "autoSkipCredits" } }
             )
 
             SettingsToggleRow(
                 title: "Auto-Skip Ads",
-                subtitle: "",
                 isOn: $autoSkipAds,
                 onFocusChange: { if $0 { focusState.focusedSettingId = "autoSkipAds" } }
             )
 
             SettingsRow(
                 title: "Autoplay Countdown",
-                subtitle: autoplayCountdown.wrappedValue.description,
+                value: autoplayCountdown.wrappedValue.description,
                 action: { navigate(to: .autoplayCountdownPicker) },
                 onFocusChange: { if $0 { focusState.focusedSettingId = "autoplayCountdown" } }
             )
@@ -704,7 +724,6 @@ struct SettingsView: View {
         Group {
             SettingsRow(
                 title: "Live TV Sources",
-                subtitle: "",
                 action: { navigate(to: .iptv) },
                 focusTrigger: focusTrigger,
                 onFocusChange: { if $0 { focusState.focusedSettingId = "liveTVSources" } }
@@ -712,28 +731,24 @@ struct SettingsView: View {
 
             SettingsToggleRow(
                 title: "Live TV Above Libraries",
-                subtitle: "",
                 isOn: $liveTVAboveLibraries,
                 onFocusChange: { if $0 { focusState.focusedSettingId = "liveTVAboveLibraries" } }
             )
 
             SettingsToggleRow(
                 title: "Classic TV Mode",
-                subtitle: "",
                 isOn: $classicTVMode,
                 onFocusChange: { if $0 { focusState.focusedSettingId = "classicTVMode" } }
             )
 
             SettingsToggleRow(
                 title: "Combine Sources",
-                subtitle: "",
                 isOn: $combineLiveTVSources,
                 onFocusChange: { if $0 { focusState.focusedSettingId = "combineSources" } }
             )
 
             SettingsPickerRow(
                 title: "Default Layout",
-                subtitle: "",
                 selection: liveTVLayout,
                 options: LiveTVLayout.allCases,
                 onFocusChange: { if $0 { focusState.focusedSettingId = "defaultLayout" } }
@@ -741,14 +756,12 @@ struct SettingsView: View {
 
             SettingsToggleRow(
                 title: "Confirm Exit Multiview",
-                subtitle: "",
                 isOn: $confirmExitMultiview,
                 onFocusChange: { if $0 { focusState.focusedSettingId = "confirmExitMultiview" } }
             )
 
             SettingsToggleRow(
                 title: "Allow 3 or 4 Streams",
-                subtitle: "",
                 isOn: $allowFourStreams,
                 onFocusChange: { if $0 { focusState.focusedSettingId = "allowFourStreams" } }
             )
@@ -761,14 +774,13 @@ struct SettingsView: View {
         Group {
             SettingsToggleRow(
                 title: "Loudness Normalization",
-                subtitle: "Even out volume differences between tracks using ReplayGain",
+                description: "Even out volume differences between tracks using ReplayGain",
                 isOn: $musicLoudnessNormalization,
                 onFocusChange: { if $0 { focusState.focusedSettingId = "musicLoudness" } }
             )
 
             SettingsPickerRow(
                 title: "Crossfade",
-                subtitle: "",
                 selection: crossfadeSelection,
                 options: CrossfadeOption.allCases,
                 onFocusChange: { if $0 { focusState.focusedSettingId = "musicCrossfade" } }
@@ -776,7 +788,7 @@ struct SettingsView: View {
 
             SettingsToggleRow(
                 title: "Audio Quality Badges",
-                subtitle: "Show codec and quality indicators on tracks and albums",
+                description: "Show codec and quality indicators on tracks and albums",
                 isOn: $musicShowQualityBadges,
                 onFocusChange: { if $0 { focusState.focusedSettingId = "musicQualityBadges" } }
             )
@@ -789,7 +801,6 @@ struct SettingsView: View {
         Group {
             SettingsRow(
                 title: "Plex Server",
-                subtitle: "",
                 action: { navigate(to: .plex) },
                 focusTrigger: focusTrigger,
                 onFocusChange: { if $0 { focusState.focusedSettingId = "plexServer" } }
@@ -806,7 +817,6 @@ struct SettingsView: View {
 
             SettingsRow(
                 title: "Changelog",
-                subtitle: "",
                 action: { showChangelog = true },
                 onFocusChange: { if $0 { focusState.focusedSettingId = "changelog" } }
             )
@@ -1062,22 +1072,35 @@ private struct FocusContainedView<Content: View>: UIViewControllerRepresentable 
     }
 }
 
-/// Hosting controller that overrides shouldUpdateFocus to block leftward focus escape.
+/// Hosting controller that intercepts left-press via a gesture recognizer
+/// so it doesn't propagate to the TabView's sidebar focus path.
+///
+/// On tvOS 26 with `TabView(.sidebarAdaptable)`, `shouldUpdateFocus(in:)` is
+/// insufficient — the sidebar-adaptable container catches left-press higher
+/// in the focus hierarchy and the heading never reaches this hosting
+/// controller as `.left`. Overriding `pressesBegan` also doesn't fully stop
+/// propagation. A `UITapGestureRecognizer` restricted to `.leftArrow`
+/// presses *does* consume the event (verified by the pattern used in
+/// PlayerContainerViewController for IR remote support).
 private final class FocusContainedHostingController<Content: View>: UIHostingController<Content> {
-    var blockLeftEscape = false
+    var blockLeftEscape = false {
+        didSet { leftPressGesture?.isEnabled = blockLeftEscape }
+    }
     var onLeftBlocked: (() -> Void)?
 
-    override func shouldUpdateFocus(in context: UIFocusUpdateContext) -> Bool {
-        if blockLeftEscape,
-           context.focusHeading == .left,
-           let nextView = context.nextFocusedView,
-           !nextView.isDescendant(of: view) {
-            DispatchQueue.main.async { [weak self] in
-                self?.onLeftBlocked?()
-            }
-            return false
-        }
-        return super.shouldUpdateFocus(in: context)
+    private var leftPressGesture: UITapGestureRecognizer?
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        let leftTap = UITapGestureRecognizer(target: self, action: #selector(handleLeftPress))
+        leftTap.allowedPressTypes = [NSNumber(value: UIPress.PressType.leftArrow.rawValue)]
+        leftTap.isEnabled = blockLeftEscape
+        view.addGestureRecognizer(leftTap)
+        leftPressGesture = leftTap
+    }
+
+    @objc private func handleLeftPress() {
+        onLeftBlocked?()
     }
 }
 

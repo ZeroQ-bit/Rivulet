@@ -73,8 +73,9 @@ struct TVSidebarView: View {
         Binding(
             get: { selectedTab },
             set: { newTab in
-                // Block tab changes while in nested navigation (carousel, detail view)
-                guard !nestedNavState.isNested else { return }
+                // Block tab changes while in nested navigation (carousel,
+                // detail view, or deep Settings sub-page).
+                guard !nestedNavState.isNested, !nestedNavState.isSettingsSubPage else { return }
 
                 if newTab == .account {
                     if profileManager.hasMultipleProfiles {
@@ -98,6 +99,15 @@ struct TVSidebarView: View {
             previousTab = newTab
             if isMusicLibraryTab(newTab) {
                 musicLibraryEntryToken = UUID()
+            }
+        }
+        .onChange(of: authManager.hasCredentials) { old, new in
+            // On fresh sign-in while the user is on Settings, jump to Home
+            // before the library TabSection structurally appears. Sitting on
+            // Settings while a new TabSection materializes above it wedges
+            // sidebar focus on tvOS (sidebar opens then immediately closes).
+            if !old && new && selectedTab == .settings {
+                selectedTab = .home
             }
         }
         // Reset tab selection when live TV source mode changes
@@ -261,7 +271,7 @@ struct TVSidebarView: View {
             }
         }
         .tabViewStyle(.sidebarAdaptable)
-        .toolbarVisibility((nestedNavState.isNested || isMusicLibrarySelected) ? .hidden : .automatic, for: .tabBar)
+        .toolbarVisibility((nestedNavState.isNested || isMusicLibrarySelected || nestedNavState.isSettingsSubPage) ? .hidden : .automatic, for: .tabBar)
         .animation(.easeInOut(duration: 0.18), value: nestedNavState.isNested)
         .onChange(of: nestedNavState.isNested) { _, isNested in
             guard isNested else { return }

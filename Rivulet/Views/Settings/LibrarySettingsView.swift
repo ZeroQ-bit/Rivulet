@@ -46,9 +46,20 @@ struct LibrarySettingsView: View {
                 }
 
                 SettingsActionRow(
-                    title: "Reset to Defaults",
-                    action: { librarySettings.resetToDefaults() },
-                    onFocusChange: { if $0 { focusedSettingId = "resetLibraries" } }
+                    title: "Add All",
+                    action: {
+                        librarySettings.showAllLibraries(orderedLibraries.map { $0.key })
+                    },
+                    onFocusChange: { if $0 { focusedSettingId = "addAllLibraries" } }
+                )
+
+                SettingsActionRow(
+                    title: "Remove All",
+                    isDestructive: true,
+                    action: {
+                        librarySettings.hideAllLibraries(orderedLibraries.map { $0.key })
+                    },
+                    onFocusChange: { if $0 { focusedSettingId = "removeAllLibraries" } }
                 )
             }
         }

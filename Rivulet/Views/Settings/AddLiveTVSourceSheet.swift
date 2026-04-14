@@ -24,7 +24,6 @@ struct AddLiveTVSourcePickerView: View {
                     icon: "play.rectangle.fill",
                     iconColor: .orange,
                     title: isCheckingPlex ? "Checking..." : "Plex Live TV",
-                    subtitle: "",
                     action: { checkPlexLiveTV() },
                     onFocusChange: { if $0 { focusedSettingId = "addPlexLiveTV" } }
                 )
@@ -34,7 +33,6 @@ struct AddLiveTVSourcePickerView: View {
                 icon: "server.rack",
                 iconColor: .blue,
                 title: "M3U Server",
-                subtitle: "",
                 action: { onNavigate(.addDispatcharrSource) },
                 onFocusChange: { if $0 { focusedSettingId = "addDispatcharrSource" } }
             )
@@ -43,7 +41,6 @@ struct AddLiveTVSourcePickerView: View {
                 icon: "list.bullet.rectangle",
                 iconColor: .green,
                 title: "M3U Playlist",
-                subtitle: "",
                 action: { onNavigate(.addM3USource) },
                 onFocusChange: { if $0 { focusedSettingId = "addM3USource" } }
             )

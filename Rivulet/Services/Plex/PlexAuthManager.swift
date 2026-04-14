@@ -210,6 +210,13 @@ class PlexAuthManager: ObservableObject {
                 isConnected = true
                 connectionError = nil
                 state = .authenticated
+
+                // Prefetch libraries as part of sign-in so the sidebar renders with
+                // library tabs on first build. Without this, the sidebar's
+                // conditional TabSection can latch to "empty" and not recover when
+                // libraries load asynchronously later.
+                await PlexDataStore.shared.loadLibrariesIfNeeded()
+
                 return true
             } else {
                 isConnected = false

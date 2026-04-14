@@ -328,6 +328,21 @@ class LibrarySettingsManager: ObservableObject {
         librarySortOptions = [:]
     }
 
+    /// Show every library in the sidebar (and on Home if Home visibility is configured).
+    func showAllLibraries(_ allLibraryKeys: [String]) {
+        hiddenLibraryKeys = []
+        if homeVisibilityConfigured {
+            for key in allLibraryKeys {
+                librariesShownOnHome.insert(key)
+            }
+        }
+    }
+
+    /// Hide every library from the sidebar.
+    func hideAllLibraries(_ allLibraryKeys: [String]) {
+        hiddenLibraryKeys = Set(allLibraryKeys)
+    }
+
     // MARK: - Sort Options
 
     /// Get the sort option for a specific library

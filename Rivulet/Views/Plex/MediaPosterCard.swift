@@ -184,8 +184,11 @@ struct MediaPosterCard: View, Equatable {
             EmptyView()
         }
         // For TV shows: show unwatched episode count
-        else if let leafCount = item.leafCount, leafCount > 0, item.type == "show" {
-            Text("\(leafCount)")
+        else if item.type == "show",
+                let leafCount = item.leafCount, leafCount > 0,
+                case let unwatched = leafCount - (item.viewedLeafCount ?? 0),
+                unwatched > 0 {
+            Text("\(unwatched)")
                 .font(.system(size: 12, weight: .bold))
                 .foregroundStyle(.white)
                 .padding(.horizontal, 8)
@@ -197,7 +200,11 @@ struct MediaPosterCard: View, Equatable {
                 )
                 .padding(10)
         }
-        // For movies/episodes: show corner tag if fully watched
+        // For fully-watched shows and movies/episodes: show corner tag
+        else if item.type == "show", let leafCount = item.leafCount, leafCount > 0,
+                (item.viewedLeafCount ?? 0) >= leafCount {
+            WatchedCornerTag()
+        }
         else if isFullyWatched {
             WatchedCornerTag()
         }

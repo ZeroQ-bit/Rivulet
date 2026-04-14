@@ -26,9 +26,17 @@ enum SidebarTab: Hashable {
 /// Observable object to track nested navigation state across views.
 /// `isNested` is set true while a child view has pushed a detail view;
 /// the sidebar reads it to hide the tab bar and block tab switches.
+///
+/// `isSettingsSubPage` is a parallel signal specific to Settings sub-pages.
+/// It cannot share `isNested` because Settings sub-page navigation is
+/// intra-tab view swapping (not a real view push), and coupling it to
+/// `isNested` caused a hide/show race with the sidebar when returning to
+/// the root page. A dedicated flag lets us hide the tab bar and block tab
+/// switches while in a Settings sub-page without that race.
 @MainActor
 class NestedNavigationState: ObservableObject {
     @Published var isNested: Bool = false
+    @Published var isSettingsSubPage: Bool = false
 }
 
 /// Environment key for nested navigation state

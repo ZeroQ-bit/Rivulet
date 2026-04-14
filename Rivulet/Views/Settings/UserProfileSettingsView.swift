@@ -47,7 +47,6 @@ struct UserProfileSettingsView: View {
 
                 SettingsToggleRow(
                     title: "Profile Picker on Launch",
-                    subtitle: "",
                     isOn: $profileManager.showProfilePickerOnLaunch,
                     onFocusChange: { if $0 { focusedSettingId = "profilePickerOnLaunch" } }
                 )
