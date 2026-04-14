@@ -14,10 +14,13 @@ private let homeLog = Logger(subsystem: "com.rivulet.app", category: "PlexHome")
 struct PlexHomeView: View {
     @StateObject private var dataStore = PlexDataStore.shared
     @StateObject private var authManager = PlexAuthManager.shared
+    @StateObject private var watchlistService = PlexWatchlistService.shared
     @AppStorage("showHomeHero") private var showHomeHero = false
     @AppStorage("enablePersonalizedRecommendations") private var enablePersonalizedRecommendations = false
     @Environment(\.nestedNavigationState) private var nestedNavState
     @State private var selectedItem: PlexMetadata?
+    @State private var presentedPlexItem: PlexMetadata?
+    @State private var presentedTMDBItem: TMDBListItem?
     @State private var heroItems: [PlexMetadata] = []
     @State private var heroCurrentIndex: Int = 0
     @State private var cachedProcessedHubs: [PlexHub] = []  // Memoized to avoid recalculation on every render
@@ -150,6 +153,9 @@ struct PlexHomeView: View {
                 guard !dataStore.libraries.isEmpty else { return }
                 dataStore.librarySettings.initializeHomeVisibility(for: dataStore.libraries)
             }
+            .task {
+                await watchlistService.fetchWatchlist()
+            }
             .onChange(of: dataStore.hubsVersion) { _, _ in
                 // Recompute cached hubs when global hub data changes (for Continue Watching)
                 cachedProcessedHubs = computeProcessedHubs(from: dataStore.hubs)
@@ -201,6 +207,14 @@ struct PlexHomeView: View {
                     presentPreview(request: request)
                 }
             }
+        }
+        .fullScreenCover(item: $presentedPlexItem) { metadata in
+            PlexDetailView(item: metadata)
+                .presentationBackground(.black)
+        }
+        .fullScreenCover(item: $presentedTMDBItem) { item in
+            TMDBItemDetailView(item: item)
+                .presentationBackground(.black)
         }
         .onChange(of: selectedItem) { _, newValue in
             print("[PlexHome] selectedItem changed: \(newValue?.title ?? "nil") (ratingKey: \(newValue?.ratingKey ?? "nil"))")
@@ -520,6 +534,12 @@ struct PlexHomeView: View {
                         Color.clear
                             .frame(height: 0)
                             .id("contentRowsAnchor")
+                        WatchlistHubRow(
+                            watchlist: watchlistService,
+                            onSelectPlex: { presentedPlexItem = $0 },
+                            onSelectTMDB: { presentedTMDBItem = $0 }
+                        )
+
                         ForEach(Array(cachedProcessedHubs.enumerated()), id: \.element.id) { index, hub in
                             if let items = hub.Metadata, !items.isEmpty {
                                 let isContinueWatching = isContinueWatchingHub(hub)
