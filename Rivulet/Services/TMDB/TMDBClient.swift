@@ -10,7 +10,7 @@
 
 import Foundation
 
-enum TMDBMediaType: String {
+enum TMDBMediaType: String, Codable, Sendable {
     case movie
     case tv
 }
@@ -20,7 +20,7 @@ struct TMDBKeyword: Codable {
     let name: String?
 }
 
-struct TMDBGenre: Codable {
+struct TMDBGenre: Codable, Sendable {
     let id: Int?
     let name: String?
 }
@@ -37,7 +37,7 @@ struct TMDBDetails: Codable {
     }
 }
 
-struct TMDBCredit: Codable {
+struct TMDBCredit: Codable, Sendable {
     let id: Int?
     let name: String?
     let job: String?
