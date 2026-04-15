@@ -40,6 +40,8 @@ struct TVSidebarView: View {
     @StateObject private var musicQueue = MusicQueue.shared
     @AppStorage("combineLiveTVSources") private var combineLiveTVSources = true
     @AppStorage("liveTVAboveLibraries") private var liveTVAboveLibraries = false
+    @AppStorage("showDiscoverTab") private var showDiscoverTab = true
+    @AppStorage("discoverAboveLibraries") private var discoverAboveLibraries = true
     @AppStorage("displaySize") private var displaySizeRaw = DisplaySize.normal.rawValue
     @State private var selectedTab: SidebarTab = .home
     @State private var previousTab: SidebarTab = .home
@@ -118,6 +120,13 @@ struct TVSidebarView: View {
         .onChange(of: combineLiveTVSources) { _, combined in
             if case .liveTV = selectedTab {
                 selectedTab = .liveTV(sourceId: combined ? nil : liveTVDataStore.sources.first?.id)
+            }
+        }
+        // If the user disables the Discover tab while it's selected, bounce
+        // back to Home so they're not stuck on a hidden tab.
+        .onChange(of: showDiscoverTab) { _, shown in
+            if !shown && selectedTab == .discover {
+                selectedTab = .home
             }
         }
         .task(id: authManager.hasCredentials) {
@@ -286,8 +295,12 @@ struct TVSidebarView: View {
                 tabContent(for: .home)
             }
 
-            Tab("Discover", systemImage: "sparkles", value: SidebarTab.discover) {
-                tabContent(for: .discover)
+            // Discover above libraries (and above Live TV when Live TV is
+            // also above libraries).
+            if showDiscoverTab && discoverAboveLibraries {
+                Tab("Discover", systemImage: "sparkles", value: SidebarTab.discover) {
+                    tabContent(for: .discover)
+                }
             }
 
             if liveTVAboveLibraries {
@@ -303,6 +316,14 @@ struct TVSidebarView: View {
                 }
                 if liveTVDataStore.hasConfiguredSources {
                     liveTVTabSection
+                }
+            }
+
+            // Discover below libraries (and below Live TV when Live TV is
+            // above libraries — keeps Discover last in either ordering).
+            if showDiscoverTab && !discoverAboveLibraries {
+                Tab("Discover", systemImage: "sparkles", value: SidebarTab.discover) {
+                    tabContent(for: .discover)
                 }
             }
 

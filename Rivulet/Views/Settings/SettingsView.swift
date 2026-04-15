@@ -278,6 +278,8 @@ struct SettingsView: View {
     @AppStorage("showLibraryRecentRows") private var showLibraryRecentRows = true
     @AppStorage("enablePersonalizedRecommendations") private var enablePersonalizedRecommendations = false
     @AppStorage("showForYouOnDiscover") private var showForYouOnDiscover = true
+    @AppStorage("showDiscoverTab") private var showDiscoverTab = true
+    @AppStorage("discoverAboveLibraries") private var discoverAboveLibraries = true
     @AppStorage("liveTVLayout") private var liveTVLayoutRaw = LiveTVLayout.guide.rawValue
     @AppStorage("confirmExitMultiview") private var confirmExitMultiview = true
     @AppStorage("allowFourStreams") private var allowFourStreams = false
@@ -669,6 +671,20 @@ struct SettingsView: View {
                 isOn: $showForYouOnDiscover,
                 onFocusChange: { if $0 { focusState.focusedSettingId = "showForYouOnDiscover" } }
             )
+
+            SettingsToggleRow(
+                title: "Show Discover Tab",
+                isOn: $showDiscoverTab,
+                onFocusChange: { if $0 { focusState.focusedSettingId = "showDiscoverTab" } }
+            )
+
+            if showDiscoverTab {
+                SettingsToggleRow(
+                    title: "Discover Above Libraries",
+                    isOn: $discoverAboveLibraries,
+                    onFocusChange: { if $0 { focusState.focusedSettingId = "discoverAboveLibraries" } }
+                )
+            }
         }
     }
 
