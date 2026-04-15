@@ -362,44 +362,92 @@ struct PlexHomeView: View {
 
     // MARK: - Hero Selection
 
-    private static let heroItemCap = 15
+    private static let heroItemCap = 9
+    /// Minimum TMDB-matched in-library items required to use the curated source.
+    /// Below this threshold we fall back to Recently Added (small libraries,
+    /// or the GUID index hasn't built yet on cold launch).
+    private static let heroTMDBMinMatches = 3
 
-    /// Populates `heroItems` from the best available hub for the home screen.
-    /// Priority: Plex "promoted" hub (global), then Recently Added, then the first non-empty hub.
-    /// Results are capped at `heroItemCap` and cached per-screen via `PlexDataStore`.
+    /// Populates `heroItems` for the home screen. Renders an immediate fallback
+    /// (cache or Recently Added) so the UI never sits empty, then upgrades to
+    /// TMDB-curated picks once that fetch + library lookup completes.
     private func selectHeroItems() {
-        // Cached result takes precedence on first appearance so navigation feels instant.
+        // 1) Cached result wins on cold launch — feels instant.
         if heroItems.isEmpty,
            let cached = dataStore.getCachedHeroItems(forLibrary: "home"),
            !cached.isEmpty {
             heroItems = cached
+        }
+
+        // 2) Render any hub-derived fallback immediately so we have something
+        //    on screen while TMDB resolves.
+        if heroItems.isEmpty {
+            let candidates = computeHubBackedHero(from: dataStore.hubs)
+            if !candidates.isEmpty {
+                heroItems = candidates
+                dataStore.cacheHeroItems(candidates, forLibrary: "home")
+            }
+        }
+
+        // 3) Try to upgrade to a TMDB-curated set in the background.
+        Task { await upgradeHeroFromTMDB() }
+    }
+
+    /// Fetches Popular Movies + Popular TV from TMDB, filters to items the user
+    /// already has in their library (via the GUID index), and replaces
+    /// `heroItems` with the curated set when at least `heroTMDBMinMatches` match.
+    @MainActor
+    private func upgradeHeroFromTMDB() async {
+        let curated = await Self.computeTMDBHero(cap: Self.heroItemCap)
+
+        guard curated.count >= Self.heroTMDBMinMatches else {
+            homeLog.info("[Hero] TMDB upgrade skipped: only \(curated.count) library matches")
             return
         }
 
-        let candidates = computeHeroItems(from: dataStore.hubs)
-        guard !candidates.isEmpty else { return }
-
-        // Avoid rebuilding the carousel when the promoted hub is unchanged.
-        let newKeys = candidates.compactMap { $0.ratingKey }
+        let newKeys = curated.compactMap { $0.ratingKey }
         let currentKeys = heroItems.compactMap { $0.ratingKey }
-        if newKeys != currentKeys {
-            heroItems = candidates
-        }
-        dataStore.cacheHeroItems(candidates, forLibrary: "home")
+        guard newKeys != currentKeys else { return }
+
+        homeLog.info("[Hero] Upgraded to TMDB-curated set: \(curated.count) items")
+        heroItems = curated
+        dataStore.cacheHeroItems(curated, forLibrary: "home")
     }
 
-    /// Pure helper so the selection logic can be unit-tested or reused elsewhere.
-    private func computeHeroItems(from hubs: [PlexHub]) -> [PlexMetadata] {
-        // Log every hub identifier once per selection so we can see what Plex is
-        // sending. The "spotlight" content lives in `home.*.recommended` /
-        // `*.promoted` / `*.featured` depending on the server's plugins.
+    /// Pure async helper. Returns up to `cap` library items chosen by
+    /// interleaving Popular Movies and Popular TV from TMDB, filtered to items
+    /// the user already owns.
+    static func computeTMDBHero(cap: Int) async -> [PlexMetadata] {
+        async let movies = TMDBDiscoverService.shared.fetchSection(.moviePopular)
+        async let shows = TMDBDiscoverService.shared.fetchSection(.tvPopular)
+        let (m, s) = await (movies, shows)
+
+        // Interleave [m0, s0, m1, s1, ...] preserving TMDB's popularity order.
+        var interleaved: [TMDBListItem] = []
+        let count = max(m.count, s.count)
+        for i in 0..<count {
+            if i < m.count { interleaved.append(m[i]) }
+            if i < s.count { interleaved.append(s[i]) }
+        }
+
+        var matches: [PlexMetadata] = []
+        for item in interleaved {
+            if let plex = await LibraryGUIDIndex.shared.lookup(tmdbId: item.id, type: item.mediaType) {
+                matches.append(plex)
+                if matches.count >= cap { break }
+            }
+        }
+        return matches
+    }
+
+    /// Hub-derived fallback. Used to render something immediately while the
+    /// async TMDB upgrade is in flight.
+    private func computeHubBackedHero(from hubs: [PlexHub]) -> [PlexMetadata] {
         let allIdentifiers = hubs.compactMap { $0.hubIdentifier }.joined(separator: ", ")
         homeLog.debug("[Hero] available hubs: \(allIdentifiers, privacy: .public)")
 
-        // Prefer Plex's curated/recommended hubs over Recently Added. Most Plex
-        // servers expose this as `home.movies.recommended` / `home.shows.recommended`
-        // (or `*.promoted` / `*.featured` when plugins are configured). Match on
-        // any of those names rather than only "promoted".
+        // Some servers expose a curated hub even without Plex Pass — keep
+        // matching it as a higher-priority fallback than Recently Added.
         let curatedKeywords = ["recommended", "promoted", "featured", "spotlight"]
         let curated = hubs.first { hub in
             guard let id = hub.hubIdentifier?.lowercased(),
@@ -408,22 +456,19 @@ struct PlexHomeView: View {
         }
         if let items = curated?.Metadata, !items.isEmpty {
             homeLog.info("[Hero] Using curated hub \(curated?.hubIdentifier ?? "?", privacy: .public) with \(items.count) items")
-            return Array(items.prefix(Self.heroItemCap))
-                .filter { $0.ratingKey != nil }
+            return Array(items.prefix(Self.heroItemCap)).filter { $0.ratingKey != nil }
         }
 
         let recentlyAdded = hubs.first { isRecentlyAddedHub($0) && ($0.Metadata?.isEmpty == false) }
         if let items = recentlyAdded?.Metadata, !items.isEmpty {
             homeLog.info("[Hero] Fallback to Recently Added hub with \(items.count) items")
-            return Array(items.prefix(Self.heroItemCap))
-                .filter { $0.ratingKey != nil }
+            return Array(items.prefix(Self.heroItemCap)).filter { $0.ratingKey != nil }
         }
 
         if let firstHub = hubs.first(where: { $0.Metadata?.isEmpty == false }),
            let items = firstHub.Metadata, !items.isEmpty {
             homeLog.info("[Hero] Fallback to first non-empty hub \(firstHub.hubIdentifier ?? "?", privacy: .public)")
-            return Array(items.prefix(Self.heroItemCap))
-                .filter { $0.ratingKey != nil }
+            return Array(items.prefix(Self.heroItemCap)).filter { $0.ratingKey != nil }
         }
 
         return []
