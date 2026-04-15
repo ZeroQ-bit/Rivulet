@@ -399,8 +399,16 @@ struct PlexHomeView: View {
     }
 
     /// Fetches Popular Movies + Popular TV from TMDB, filters to items the user
-    /// already has in their library (via the GUID index), and replaces
-    /// `heroItems` with the curated set when at least `heroTMDBMinMatches` match.
+    /// already has in their library (via the GUID index), and merges the result
+    /// into `heroItems` so the currently-visible item stays put.
+    ///
+    /// Stable-merge strategy:
+    ///   1. Compute the curated list (capped at `heroItemCap`).
+    ///   2. If the currently-displayed item is in the curated set, reorder the
+    ///      curated set so it stays at the user's current index — preserving
+    ///      backdrop/logo so nothing visually swaps under them.
+    ///   3. If not, keep the currently-displayed item at index 0 and append the
+    ///      curated items behind it (deduped by ratingKey).
     @MainActor
     private func upgradeHeroFromTMDB() async {
         let curated = await Self.computeTMDBHero(cap: Self.heroItemCap)
@@ -410,13 +418,51 @@ struct PlexHomeView: View {
             return
         }
 
-        let newKeys = curated.compactMap { $0.ratingKey }
+        let mergedItems: [PlexMetadata]
+        if let current = displayedHeroItem,
+           let currentKey = current.ratingKey {
+            if curated.contains(where: { $0.ratingKey == currentKey }) {
+                // Current item is in the curated set — rotate so it occupies
+                // `heroCurrentIndex` and the rest fills around it without
+                // disturbing the visible item.
+                let withoutCurrent = curated.filter { $0.ratingKey != currentKey }
+                let targetIndex = max(0, min(heroCurrentIndex, withoutCurrent.count))
+                var rotated = withoutCurrent
+                rotated.insert(current, at: targetIndex)
+                mergedItems = rotated
+            } else {
+                // Current item isn't curated — keep it visible at the front,
+                // append curated behind it (de-duped).
+                var merged: [PlexMetadata] = [current]
+                let seen = Set([currentKey])
+                for item in curated where !(item.ratingKey.map(seen.contains) ?? false) {
+                    merged.append(item)
+                }
+                mergedItems = Array(merged.prefix(Self.heroItemCap))
+                // Ensure the visible index still points at the (still-front) item.
+                if heroCurrentIndex != 0 {
+                    heroCurrentIndex = 0
+                }
+            }
+        } else {
+            mergedItems = curated
+        }
+
+        let newKeys = mergedItems.compactMap { $0.ratingKey }
         let currentKeys = heroItems.compactMap { $0.ratingKey }
         guard newKeys != currentKeys else { return }
 
-        homeLog.info("[Hero] Upgraded to TMDB-curated set: \(curated.count) items")
-        heroItems = curated
-        dataStore.cacheHeroItems(curated, forLibrary: "home")
+        homeLog.info("[Hero] Merged TMDB-curated set: \(mergedItems.count) items (preserving displayed)")
+        heroItems = mergedItems
+        dataStore.cacheHeroItems(mergedItems, forLibrary: "home")
+    }
+
+    /// Currently-displayed hero item (clamped). Used by `upgradeHeroFromTMDB`
+    /// to keep the visible backdrop stable across the curated-set merge.
+    private var displayedHeroItem: PlexMetadata? {
+        guard !heroItems.isEmpty else { return nil }
+        let clamped = max(0, min(heroCurrentIndex, heroItems.count - 1))
+        return heroItems[clamped]
     }
 
     /// Pure async helper. Returns up to `cap` library items chosen by
@@ -647,8 +693,14 @@ struct PlexHomeView: View {
                         WatchlistHubRow(
                             watchlist: watchlistService,
                             onSelectPlex: { presentedPlexItem = $0 },
-                            onSelectTMDB: { presentedTMDBItem = $0 }
+                            onSelectTMDB: { presentedTMDBItem = $0 },
+                            onRowFocused: {
+                                withAnimation(.smooth(duration: 0.8)) {
+                                    scrollProxy.scrollTo("watchlistHubRow", anchor: UnitPoint(x: 0.5, y: 0.5))
+                                }
+                            }
                         )
+                        .id("watchlistHubRow")
 
                         // Recommendations at the end of all library hubs
                         if enablePersonalizedRecommendations {

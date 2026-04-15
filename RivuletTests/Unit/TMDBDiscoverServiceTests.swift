@@ -11,10 +11,11 @@ final class TMDBDiscoverServiceTests: XCTestCase {
         super.setUp()
         URLProtocol.registerClass(TMDBMockURLProtocol.self)
         TMDBMockURLProtocol.responses = [:]
-        // Clear any stale disk cache from previous runs
+        // Clear any stale disk caches from previous runs
         let cachesDir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
-        let detailDir = cachesDir.appendingPathComponent("TMDBDiscoverDetailCache", isDirectory: true)
-        try? FileManager.default.removeItem(at: detailDir)
+        for sub in ["TMDBDiscoverDetailCache", "TMDBDiscoverListCache"] {
+            try? FileManager.default.removeItem(at: cachesDir.appendingPathComponent(sub, isDirectory: true))
+        }
     }
 
     override func tearDown() {

@@ -11,8 +11,9 @@ actor TMDBDiscoverService {
     static let shared = TMDBDiscoverService()
 
     private let session: URLSession
-    private let listCacheTTL: TimeInterval = 60 * 60        // 1 hour
-    private let detailCacheTTL: TimeInterval = 60 * 60 * 24 * 30  // 30 days
+    private let listCacheTTL: TimeInterval = 60 * 60                // 1 hour: prefer fresh
+    private let listDiskFallbackTTL: TimeInterval = 60 * 60 * 24 * 7 // 1 week: usable cold-launch fallback
+    private let detailCacheTTL: TimeInterval = 60 * 60 * 24 * 30    // 30 days
 
     private struct ListCacheEntry {
         let fetchedAt: Date
@@ -20,6 +21,7 @@ actor TMDBDiscoverService {
     }
 
     private var listCache: [TMDBDiscoverSection: ListCacheEntry] = [:]
+    private let listCacheDirectory: URL
     private let detailCacheDirectory: URL
 
     init(session: URLSession? = nil) {
@@ -33,13 +35,22 @@ actor TMDBDiscoverService {
         }
         let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSTemporaryDirectory())
+        listCacheDirectory = caches.appendingPathComponent("TMDBDiscoverListCache", isDirectory: true)
         detailCacheDirectory = caches.appendingPathComponent("TMDBDiscoverDetailCache", isDirectory: true)
+        try? FileManager.default.createDirectory(at: listCacheDirectory, withIntermediateDirectories: true)
         try? FileManager.default.createDirectory(at: detailCacheDirectory, withIntermediateDirectories: true)
     }
 
     func fetchSection(_ section: TMDBDiscoverSection) async -> [TMDBListItem] {
+        // 1) Hot in-memory cache (1h)
         if let cached = listCache[section],
            Date().timeIntervalSince(cached.fetchedAt) < listCacheTTL {
+            return cached.items
+        }
+
+        // 2) Warm disk cache (1h): same TTL but survives launches
+        if let cached = loadListFromDisk(section: section, maxAge: listCacheTTL) {
+            listCache[section] = ListCacheEntry(fetchedAt: cached.savedAt, items: cached.items)
             return cached.items
         }
 
@@ -50,7 +61,14 @@ actor TMDBDiscoverService {
             let results: [TMDBListItem]
         }
 
-        guard let data = try? await fetchData(endpoint: endpoint, queryItems: queryItems) else {
+        let data: Data
+        do {
+            data = try await fetchData(endpoint: endpoint, queryItems: queryItems)
+        } catch {
+            // 3) Cold disk fallback (up to 1 week stale): better than nothing
+            if let cached = loadListFromDisk(section: section, maxAge: listDiskFallbackTTL) {
+                return cached.items
+            }
             return []
         }
 
@@ -70,8 +88,12 @@ actor TMDBDiscoverService {
                 )
             }
             listCache[section] = ListCacheEntry(fetchedAt: Date(), items: stamped)
+            saveListToDisk(stamped, section: section)
             return stamped
         } catch {
+            if let cached = loadListFromDisk(section: section, maxAge: listDiskFallbackTTL) {
+                return cached.items
+            }
             return []
         }
     }
@@ -156,6 +178,31 @@ actor TMDBDiscoverService {
             throw URLError(.badServerResponse)
         }
         return data
+    }
+
+    // MARK: - Disk Cache (List)
+
+    private struct CachedList: Codable {
+        let savedAt: Date
+        let items: [TMDBListItem]
+    }
+
+    private func listCacheURL(section: TMDBDiscoverSection) -> URL {
+        listCacheDirectory.appendingPathComponent("\(section.rawValue).json")
+    }
+
+    private func loadListFromDisk(section: TMDBDiscoverSection, maxAge: TimeInterval) -> CachedList? {
+        let url = listCacheURL(section: section)
+        guard let data = try? Data(contentsOf: url),
+              let cached = try? JSONDecoder().decode(CachedList.self, from: data),
+              Date().timeIntervalSince(cached.savedAt) < maxAge else { return nil }
+        return cached
+    }
+
+    private func saveListToDisk(_ items: [TMDBListItem], section: TMDBDiscoverSection) {
+        let cached = CachedList(savedAt: Date(), items: items)
+        guard let data = try? JSONEncoder().encode(cached) else { return }
+        try? data.write(to: listCacheURL(section: section), options: [.atomic])
     }
 
     // MARK: - Disk Cache (Detail)

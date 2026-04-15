@@ -13,6 +13,7 @@ struct WatchlistHubRow: View {
 
     let onSelectPlex: (PlexMetadata) -> Void
     let onSelectTMDB: (TMDBListItem) -> Void
+    var onRowFocused: (() -> Void)?
 
     @Environment(\.uiScale) private var scale
 
@@ -50,6 +51,13 @@ struct WatchlistHubRow: View {
             }
             .focusSection()
             .defaultFocus($focusedItemId, watchlist.watchlistItems.first?.id)
+            .onChange(of: focusedItemId) { oldValue, newValue in
+                // Mirror InfiniteContentRow: notify parent when this row first
+                // takes focus so it can scroll itself to vertical center.
+                if oldValue == nil && newValue != nil {
+                    onRowFocused?()
+                }
+            }
         }
     }
 
