@@ -2,7 +2,19 @@
 //  PlexWatchlistAPI.swift
 //  Rivulet
 //
-//  HTTP layer for metadata.provider.plex.tv watchlist endpoints.
+//  HTTP layer for the Plex Discover Watchlist.
+//
+//  Two host families are involved:
+//
+//  - `discover.provider.plex.tv` serves the watchlist itself
+//    (`/library/sections/watchlist/all`) AND the actions
+//    (`/actions/addToWatchlist`, `/actions/removeFromWatchlist`).
+//    Container pagination headers are NOT accepted on the watchlist endpoint.
+//
+//  - `metadata.provider.plex.tv` serves the discover-side metadata, including
+//    the matches lookup needed to resolve an external GUID (tmdb://, imdb://,
+//    tvdb://) to a Plex Discover ratingKey. The action endpoints want THAT
+//    ratingKey, not the external GUID.
 //
 
 import Foundation
@@ -36,19 +48,21 @@ protocol WatchlistCacheProtocol: Sendable {
 
 final class PlexWatchlistAPI: PlexWatchlistAPIProtocol, Sendable {
     private let session: URLSession
-    private let baseURL = URL(string: "https://metadata.provider.plex.tv")!
+    private let discoverHost = URL(string: "https://discover.provider.plex.tv")!
+    private let metadataHost = URL(string: "https://metadata.provider.plex.tv")!
 
     init(session: URLSession = .shared) {
         self.session = session
     }
 
     func fetchAll(token: String) async throws -> [PlexWatchlistItem] {
-        let url = baseURL.appendingPathComponent("library/sections/watchlist/all")
+        let url = discoverHost.appendingPathComponent("library/sections/watchlist/all")
         var components = URLComponents(url: url, resolvingAgainstBaseURL: true)!
+        // Plex Discover rejects X-Plex-Container-Size on this endpoint with a
+        // 400 ("Invalid value provided for x-plex-container-size!"). The
+        // watchlist is small in practice, so the default response is fine.
         components.queryItems = [
-            URLQueryItem(name: "X-Plex-Token", value: token),
-            URLQueryItem(name: "X-Plex-Container-Start", value: "0"),
-            URLQueryItem(name: "X-Plex-Container-Size", value: "200")
+            URLQueryItem(name: "X-Plex-Token", value: token)
         ]
 
         var request = URLRequest(url: components.url!)
@@ -93,8 +107,11 @@ final class PlexWatchlistAPI: PlexWatchlistAPIProtocol, Sendable {
             default: return nil
             }
             let guids = (raw.Guid ?? []).map(\.id)
+            // Posters live on metadata-static.plex.tv (CDN) and are referenced
+            // by the API as relative paths. Build the URL against the discover
+            // host so the token is accepted.
             let posterURL: URL? = raw.thumb.flatMap {
-                URL(string: "\(baseURL.absoluteString)\($0)?X-Plex-Token=\(token)")
+                URL(string: "\(self.discoverHost.absoluteString)\($0)?X-Plex-Token=\(token)")
             }
             return PlexWatchlistItem(
                 id: id,
@@ -109,19 +126,23 @@ final class PlexWatchlistAPI: PlexWatchlistAPIProtocol, Sendable {
 
     func add(guids: [String], token: String) async throws {
         for guid in guids {
-            try await mutate(guid: guid, action: "addToWatchlist", token: token)
+            try await mutate(externalGuid: guid, action: "addToWatchlist", token: token)
         }
     }
 
     func remove(guid: String, token: String) async throws {
-        try await mutate(guid: guid, action: "removeFromWatchlist", token: token)
+        try await mutate(externalGuid: guid, action: "removeFromWatchlist", token: token)
     }
 
-    private func mutate(guid: String, action: String, token: String) async throws {
-        let url = baseURL.appendingPathComponent("actions/\(action)")
+    /// Resolve an external GUID (tmdb://, imdb://, tvdb://) to the Plex Discover
+    /// ratingKey, then issue the action.
+    private func mutate(externalGuid: String, action: String, token: String) async throws {
+        let plexRatingKey = try await resolveDiscoverRatingKey(forGuid: externalGuid, token: token)
+
+        let url = discoverHost.appendingPathComponent("actions/\(action)")
         var components = URLComponents(url: url, resolvingAgainstBaseURL: true)!
         components.queryItems = [
-            URLQueryItem(name: "guid", value: guid),
+            URLQueryItem(name: "ratingKey", value: plexRatingKey),
             URLQueryItem(name: "X-Plex-Token", value: token)
         ]
         var request = URLRequest(url: components.url!)
@@ -137,6 +158,61 @@ final class PlexWatchlistAPI: PlexWatchlistAPIProtocol, Sendable {
             watchlistAPILog.error("mutate \(action, privacy: .public) HTTP \(http.statusCode) body=\(snippet ?? "(non-utf8)", privacy: .public)")
             throw PlexWatchlistHTTPError(statusCode: http.statusCode, bodySnippet: snippet)
         }
+    }
+
+    /// Hits Plex's metadata matches endpoint and returns the discover ratingKey
+    /// (e.g. "5d7768daad5437001f75108e") for an external GUID.
+    private func resolveDiscoverRatingKey(forGuid externalGuid: String, token: String) async throws -> String {
+        // The matches endpoint expects a Plex media `type` integer:
+        //   1 = movie, 2 = show. We infer from the guid prefix when possible.
+        // For tmdb://, both could apply; the Plex matcher accepts the wrong
+        // type as a 0-result response, so we let the caller pre-classify if
+        // needed. Default to movie and fall back to show on empty result.
+        if let ratingKey = try await matches(type: 1, externalGuid: externalGuid, token: token) {
+            return ratingKey
+        }
+        if let ratingKey = try await matches(type: 2, externalGuid: externalGuid, token: token) {
+            return ratingKey
+        }
+        watchlistAPILog.error("resolveDiscoverRatingKey: no match for \(externalGuid, privacy: .public)")
+        throw PlexWatchlistHTTPError(
+            statusCode: 404,
+            bodySnippet: "No Plex Discover match for \(externalGuid)"
+        )
+    }
+
+    private func matches(type: Int, externalGuid: String, token: String) async throws -> String? {
+        let url = metadataHost.appendingPathComponent("library/metadata/matches")
+        var components = URLComponents(url: url, resolvingAgainstBaseURL: true)!
+        components.queryItems = [
+            URLQueryItem(name: "type", value: "\(type)"),
+            URLQueryItem(name: "guid", value: externalGuid),
+            URLQueryItem(name: "X-Plex-Token", value: token)
+        ]
+
+        var request = URLRequest(url: components.url!)
+        addPlexHeaders(to: &request)
+        request.addValue("application/json", forHTTPHeaderField: "Accept")
+        watchlistAPILog.info("matches type=\(type) URL=\(request.url?.absoluteString ?? "?", privacy: .public)")
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw URLError(.badServerResponse)
+        }
+        guard (200...299).contains(http.statusCode) else {
+            let snippet = String(data: data.prefix(256), encoding: .utf8)
+            throw PlexWatchlistHTTPError(statusCode: http.statusCode, bodySnippet: snippet)
+        }
+
+        struct Container: Decodable {
+            struct MediaContainer: Decodable {
+                let Metadata: [Raw]?
+            }
+            let MediaContainer: MediaContainer
+        }
+        struct Raw: Decodable { let ratingKey: String? }
+
+        let decoded = try JSONDecoder().decode(Container.self, from: data)
+        return decoded.MediaContainer.Metadata?.first?.ratingKey
     }
 
     private func addPlexHeaders(to request: inout URLRequest) {
