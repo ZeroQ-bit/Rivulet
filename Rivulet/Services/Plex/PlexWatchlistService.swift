@@ -16,7 +16,10 @@ final class PlexWatchlistService: ObservableObject {
     static let shared = PlexWatchlistService(
         api: PlexWatchlistAPI(),
         cache: FileWatchlistCache(),
-        tokenProvider: { PlexAuthManager.shared.selectedServerToken }
+        // Watchlist lives on metadata.provider.plex.tv (the account-wide
+        // Discover API), so it requires the owner's authToken — NOT the
+        // server-specific selectedServerToken.
+        tokenProvider: { PlexAuthManager.shared.authToken }
     )
 
     @Published private(set) var watchlistItems: [PlexWatchlistItem] = []
