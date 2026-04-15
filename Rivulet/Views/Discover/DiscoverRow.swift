@@ -2,7 +2,8 @@
 //  DiscoverRow.swift
 //  Rivulet
 //
-//  Horizontal row of DiscoverTiles for one TMDB section.
+//  Horizontal row of DiscoverTiles. Mirrors MediaRow's layout, padding,
+//  spacing, focus, and onPress behavior so Discover blends with Home/Library.
 //
 
 import SwiftUI
@@ -14,31 +15,42 @@ struct DiscoverRow: View {
     let isOnWatchlist: (TMDBListItem) -> Bool
     let onSelect: (TMDBListItem) -> Void
 
+    @Environment(\.uiScale) private var scale
+
+    private var titleSize: CGFloat { ScaledDimensions.sectionTitleSize * scale }
+    private var horizontalPadding: CGFloat { ScaledDimensions.rowHorizontalPadding }
+    private var itemSpacing: CGFloat { ScaledDimensions.rowItemSpacing * scale }
+
     @FocusState private var focusedItemId: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text(title)
-                .font(.system(size: 28, weight: .semibold))
-                .padding(.horizontal, 60)
+                .font(.system(size: titleSize, weight: .bold))
+                .padding(.horizontal, horizontalPadding)
 
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 24) {
+                LazyHStack(spacing: itemSpacing) {
                     ForEach(items) { item in
-                        DiscoverTile(
-                            item: item,
-                            isInLibrary: isInLibrary(item),
-                            isOnWatchlist: isOnWatchlist(item),
-                            onTap: { onSelect(item) }
-                        )
+                        Button {
+                            onSelect(item)
+                        } label: {
+                            DiscoverTile(
+                                item: item,
+                                isInLibrary: isInLibrary(item),
+                                isOnWatchlist: isOnWatchlist(item)
+                            )
+                        }
+                        .buttonStyle(CardButtonStyle())
                         .focused($focusedItemId, equals: String(item.id))
                     }
                 }
-                .padding(.horizontal, 60)
-                .padding(.vertical, 12)
+                .padding(.horizontal, horizontalPadding)
+                .padding(.vertical, 32)
             }
+            .scrollClipDisabled()
         }
         .focusSection()
-        .remembersFocus(key: "discoverRow:\(title)", focusedId: $focusedItemId)
+        .defaultFocus($focusedItemId, items.first.map { String($0.id) })
     }
 }

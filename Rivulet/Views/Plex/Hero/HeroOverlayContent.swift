@@ -26,6 +26,10 @@ struct HeroOverlayContent: View {
     @ObservedObject private var watchlistService = PlexWatchlistService.shared
 
     @State private var resolvedPlayTargets: [String: PlexMetadata] = [:]
+    /// Cache of full-metadata resolutions keyed by ratingKey. Populated lazily
+    /// by Watchlist toggles when the hub item lacked a Guid array; lets the
+    /// bookmark icon reflect reality after a successful add.
+    @State private var resolvedForWatchlistCache: [String: PlexMetadata] = [:]
     @State private var isResolvingPlay: Bool = false
     /// Lags behind `currentIndex` by `slideSwapDelay` so the backdrop has
     /// time to crossfade before the logo/metadata/buttons swap in.
@@ -77,7 +81,7 @@ struct HeroOverlayContent: View {
 
                         HeroButtonRow(
                             isResolvingPlay: isResolvingPlay,
-                            isOnWatchlist: item.tmdbId.map { watchlistService.contains(tmdbId: $0) } ?? false,
+                            isOnWatchlist: resolvedTmdbId(for: item).map { watchlistService.contains(tmdbId: $0) } ?? false,
                             canAdvance: canAdvance,
                             focusedButton: $focusedButton,
                             onPlay: { handlePlay(item) },
@@ -194,27 +198,65 @@ struct HeroOverlayContent: View {
     // MARK: - Watchlist Toggle
 
     private func toggleWatchlist(for item: PlexMetadata) async {
-        guard let tmdbId = item.tmdbId else { return }
+        // Hub items often ship without the Guid array, so resolve full metadata
+        // (which includes external IDs) before deriving a TMDB guid.
+        let resolved = await resolvedForWatchlist(item)
+        guard let tmdbId = resolved.tmdbId else {
+            overlayLog.warning("Watchlist toggle aborted: no tmdbId on item \(resolved.ratingKey ?? "?", privacy: .public) title=\(resolved.title ?? "?", privacy: .public)")
+            return
+        }
         let guid = "tmdb://\(tmdbId)"
         let service = PlexWatchlistService.shared
         if service.contains(guid: guid) {
+            overlayLog.info("Watchlist remove \(guid, privacy: .public)")
             await service.remove(guid: guid)
         } else {
-            let watchType: PlexWatchlistItem.WatchlistType = (item.type == "show") ? .show : .movie
+            let watchType: PlexWatchlistItem.WatchlistType = (resolved.type == "show") ? .show : .movie
             let posterURL: URL? = {
-                guard let thumbPath = item.thumb, !thumbPath.isEmpty else { return nil }
+                guard let thumbPath = resolved.thumb, !thumbPath.isEmpty else { return nil }
                 return URL(string: "\(serverURL)\(thumbPath)?X-Plex-Token=\(authToken)")
             }()
             let watchlistItem = PlexWatchlistItem(
                 id: guid,
-                title: item.title ?? "",
-                year: item.year,
+                title: resolved.title ?? "",
+                year: resolved.year,
                 type: watchType,
                 posterURL: posterURL,
                 guids: [guid]
             )
+            overlayLog.info("Watchlist add \(guid, privacy: .public)")
             await service.add(guid: guid, item: watchlistItem)
         }
+    }
+
+    private func resolvedForWatchlist(_ item: PlexMetadata) async -> PlexMetadata {
+        if item.tmdbId != nil { return item }
+        if let ratingKey = item.ratingKey, let cached = resolvedForWatchlistCache[ratingKey] {
+            return cached
+        }
+        guard let ratingKey = item.ratingKey else { return item }
+        do {
+            let full = try await PlexNetworkManager.shared.getMetadata(
+                serverURL: serverURL,
+                authToken: authToken,
+                ratingKey: ratingKey
+            )
+            resolvedForWatchlistCache[ratingKey] = full
+            return full
+        } catch {
+            overlayLog.warning("Watchlist metadata resolve failed for \(ratingKey, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            return item
+        }
+    }
+
+    /// Returns the TMDB id for an item using the watchlist resolution cache when
+    /// the raw hub item lacked a Guid array.
+    private func resolvedTmdbId(for item: PlexMetadata) -> Int? {
+        if let id = item.tmdbId { return id }
+        if let key = item.ratingKey, let cached = resolvedForWatchlistCache[key] {
+            return cached.tmdbId
+        }
+        return nil
     }
 
 }

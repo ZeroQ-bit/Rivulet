@@ -7,6 +7,9 @@
 
 import Foundation
 import Combine
+import os.log
+
+private let watchlistLog = Logger(subsystem: "com.rivulet.app", category: "PlexWatchlist")
 
 @MainActor
 final class PlexWatchlistService: ObservableObject {
@@ -53,9 +56,13 @@ final class PlexWatchlistService: ObservableObject {
 
     func fetchWatchlist(force: Bool = false) async {
         if !force, let lastFetched, Date().timeIntervalSince(lastFetched) < staleAfter {
+            watchlistLog.debug("fetchWatchlist skipped: cache age <\(self.staleAfter)s")
             return
         }
-        guard let token = tokenProvider() else { return }
+        guard let token = tokenProvider() else {
+            watchlistLog.warning("fetchWatchlist aborted: no Plex token")
+            return
+        }
         do {
             let items = try await api.fetchAll(token: token)
             watchlistItems = items
@@ -63,8 +70,10 @@ final class PlexWatchlistService: ObservableObject {
             cache.save(items)
             lastFetched = Date()
             lastFetchError = nil
+            watchlistLog.info("fetchWatchlist success: \(items.count) items")
         } catch {
             lastFetchError = error
+            watchlistLog.error("fetchWatchlist failed: \(error.localizedDescription, privacy: .public)")
         }
     }
 
@@ -84,10 +93,12 @@ final class PlexWatchlistService: ObservableObject {
         do {
             try await api.add(guids: [guid], token: token)
             cache.save(watchlistItems)
+            watchlistLog.info("add succeeded: \(guid, privacy: .public)")
         } catch {
             watchlistItems = snapshotItems
             watchlistGUIDs = snapshotGUIDs
             lastFetchError = error
+            watchlistLog.error("add failed for \(guid, privacy: .public): \(error.localizedDescription, privacy: .public)")
             surface("Couldn't update Watchlist")
         }
     }
@@ -110,10 +121,12 @@ final class PlexWatchlistService: ObservableObject {
         do {
             try await api.remove(guid: guid, token: token)
             cache.save(watchlistItems)
+            watchlistLog.info("remove succeeded: \(guid, privacy: .public)")
         } catch {
             watchlistItems = snapshotItems
             watchlistGUIDs = snapshotGUIDs
             lastFetchError = error
+            watchlistLog.error("remove failed for \(guid, privacy: .public): \(error.localizedDescription, privacy: .public)")
             surface("Couldn't update Watchlist")
         }
     }

@@ -2,90 +2,96 @@
 //  DiscoverTile.swift
 //  Rivulet
 //
-//  Single tile in a Discover row showing a TMDB item. Status overlay reflects
-//  whether the item is in the user's library and/or on their Plex Watchlist.
+//  Single tile in a Discover row showing a TMDB item. Visually matches
+//  MediaPosterCard so Discover blends with library/home rows.
 //
 
 import SwiftUI
 
-struct DiscoverTile: View {
+struct DiscoverTile: View, Equatable {
     let item: TMDBListItem
     let isInLibrary: Bool
     let isOnWatchlist: Bool
-    let onTap: () -> Void
+
+    @Environment(\.uiScale) private var scale
+
+    static func == (lhs: DiscoverTile, rhs: DiscoverTile) -> Bool {
+        lhs.item.id == rhs.item.id &&
+        lhs.isInLibrary == rhs.isInLibrary &&
+        lhs.isOnWatchlist == rhs.isOnWatchlist
+    }
 
     private static let imageBase = "https://image.tmdb.org/t/p/w500"
 
-    @FocusState private var focused: Bool
+    private var posterWidth: CGFloat { ScaledDimensions.posterWidth * scale }
+    private var posterHeight: CGFloat { ScaledDimensions.posterHeight * scale }
+    private var cornerRadius: CGFloat { ScaledDimensions.posterCornerRadius }
 
     var body: some View {
-        Button(action: onTap) {
-            VStack(alignment: .leading, spacing: 8) {
-                ZStack(alignment: .topTrailing) {
-                    posterImage
-                    statusBadge
-                        .padding(8)
-                        .opacity(focused ? 1 : 0.85)
-                }
-                Text(item.title)
-                    .font(.system(size: 18, weight: .semibold))
-                    .lineLimit(1)
-                    .foregroundStyle(.white.opacity(0.9))
-            }
-            .frame(width: 200)
-        }
-        .buttonStyle(.plain)
-        .focused($focused)
-        .scaleEffect(focused ? 1.05 : 1.0)
-        .animation(.spring(response: 0.3, dampingFraction: 0.7), value: focused)
+        posterImage
+            .frame(width: posterWidth, height: posterHeight)
+            .overlay(alignment: .topTrailing) { statusBadge }
+            .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+            .hoverEffect(.highlight)
+            .shadow(color: .black.opacity(0.35), radius: 8, x: 0, y: 6)
     }
 
+    @ViewBuilder
     private var posterImage: some View {
-        Group {
-            if let path = item.posterPath, let url = URL(string: "\(Self.imageBase)\(path)") {
-                CachedAsyncImage(url: url) { phase in
-                    switch phase {
-                    case .success(let image): image.resizable().aspectRatio(2/3, contentMode: .fit)
-                    case .empty: placeholder
-                    case .failure: placeholder
-                    @unknown default: placeholder
-                    }
+        if let path = item.posterPath, let url = URL(string: "\(Self.imageBase)\(path)") {
+            CachedAsyncImage(url: url) { phase in
+                switch phase {
+                case .empty:
+                    Rectangle()
+                        .fill(Color(white: 0.15))
+                        .overlay { ProgressView().tint(.white.opacity(0.3)) }
+                case .success(let image):
+                    image.resizable().aspectRatio(contentMode: .fill)
+                case .failure:
+                    placeholder
+                @unknown default:
+                    placeholder
                 }
-            } else {
-                placeholder
             }
+        } else {
+            placeholder
         }
-        .frame(width: 200, height: 300)
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(focused ? .white.opacity(0.3) : .white.opacity(0.08), lineWidth: 1)
-        )
     }
 
     private var placeholder: some View {
-        ZStack {
-            Color.white.opacity(0.06)
-            Image(systemName: item.mediaType == .movie ? "film" : "tv")
-                .font(.system(size: 36))
-                .foregroundStyle(.white.opacity(0.3))
-        }
+        Rectangle()
+            .fill(
+                LinearGradient(
+                    colors: [Color(white: 0.18), Color(white: 0.12)],
+                    startPoint: .top, endPoint: .bottom
+                )
+            )
+            .overlay {
+                Image(systemName: item.mediaType == .movie ? "film" : "tv")
+                    .font(.system(size: 32, weight: .light))
+                    .foregroundStyle(.white.opacity(0.3))
+            }
     }
 
     @ViewBuilder
     private var statusBadge: some View {
         if isInLibrary {
-            badge(symbol: "play.circle.fill", color: .green)
+            badge(symbol: "checkmark", color: .green)
         } else if isOnWatchlist {
-            badge(symbol: "bookmark.fill", color: .white)
+            badge(symbol: "bookmark.fill", color: .white.opacity(0.95))
         }
     }
 
     private func badge(symbol: String, color: Color) -> some View {
         Image(systemName: symbol)
-            .font(.system(size: 22, weight: .semibold))
-            .foregroundStyle(color)
-            .padding(6)
-            .background(Circle().fill(.black.opacity(0.55)))
+            .font(.system(size: 14, weight: .bold))
+            .foregroundStyle(.black)
+            .padding(8)
+            .background(
+                Circle()
+                    .fill(color)
+                    .shadow(color: .black.opacity(0.3), radius: 4, y: 2)
+            )
+            .padding(10)
     }
 }

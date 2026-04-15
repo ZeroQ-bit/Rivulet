@@ -390,12 +390,24 @@ struct PlexHomeView: View {
 
     /// Pure helper so the selection logic can be unit-tested or reused elsewhere.
     private func computeHeroItems(from hubs: [PlexHub]) -> [PlexMetadata] {
-        let promoted = hubs.first { hub in
-            (hub.hubIdentifier?.lowercased().contains("promoted") == true)
-                && (hub.Metadata?.isEmpty == false)
+        // Log every hub identifier once per selection so we can see what Plex is
+        // sending. The "spotlight" content lives in `home.*.recommended` /
+        // `*.promoted` / `*.featured` depending on the server's plugins.
+        let allIdentifiers = hubs.compactMap { $0.hubIdentifier }.joined(separator: ", ")
+        homeLog.debug("[Hero] available hubs: \(allIdentifiers, privacy: .public)")
+
+        // Prefer Plex's curated/recommended hubs over Recently Added. Most Plex
+        // servers expose this as `home.movies.recommended` / `home.shows.recommended`
+        // (or `*.promoted` / `*.featured` when plugins are configured). Match on
+        // any of those names rather than only "promoted".
+        let curatedKeywords = ["recommended", "promoted", "featured", "spotlight"]
+        let curated = hubs.first { hub in
+            guard let id = hub.hubIdentifier?.lowercased(),
+                  hub.Metadata?.isEmpty == false else { return false }
+            return curatedKeywords.contains(where: id.contains)
         }
-        if let items = promoted?.Metadata, !items.isEmpty {
-            homeLog.info("[Hero] Using promoted hub \(promoted?.hubIdentifier ?? "?", privacy: .public) with \(items.count) items")
+        if let items = curated?.Metadata, !items.isEmpty {
+            homeLog.info("[Hero] Using curated hub \(curated?.hubIdentifier ?? "?", privacy: .public) with \(items.count) items")
             return Array(items.prefix(Self.heroItemCap))
                 .filter { $0.ratingKey != nil }
         }
@@ -535,11 +547,6 @@ struct PlexHomeView: View {
                         Color.clear
                             .frame(height: 0)
                             .id("contentRowsAnchor")
-                        WatchlistHubRow(
-                            watchlist: watchlistService,
-                            onSelectPlex: { presentedPlexItem = $0 },
-                            onSelectTMDB: { presentedTMDBItem = $0 }
-                        )
 
                         ForEach(Array(cachedProcessedHubs.enumerated()), id: \.element.id) { index, hub in
                             if let items = hub.Metadata, !items.isEmpty {
@@ -585,6 +592,13 @@ struct PlexHomeView: View {
                                 .id(homeRowID(for: hub, index: index))
                             }
                         }
+
+                        // Watchlist sits between Recently Added rows and Suggestions
+                        WatchlistHubRow(
+                            watchlist: watchlistService,
+                            onSelectPlex: { presentedPlexItem = $0 },
+                            onSelectTMDB: { presentedTMDBItem = $0 }
+                        )
 
                         // Recommendations at the end of all library hubs
                         if enablePersonalizedRecommendations {
