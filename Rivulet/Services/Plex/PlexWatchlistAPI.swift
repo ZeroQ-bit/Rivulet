@@ -107,11 +107,15 @@ final class PlexWatchlistAPI: PlexWatchlistAPIProtocol, Sendable {
             default: return nil
             }
             let guids = (raw.Guid ?? []).map(\.id)
-            // Posters live on metadata-static.plex.tv (CDN) and are referenced
-            // by the API as relative paths. Build the URL against the discover
-            // host so the token is accepted.
-            let posterURL: URL? = raw.thumb.flatMap {
-                URL(string: "\(self.discoverHost.absoluteString)\($0)?X-Plex-Token=\(token)")
+            // Discover serves thumbs as fully-qualified URLs to public CDNs
+            // (metadata-static.plex.tv, image.tmdb.org). Use them as-is; only
+            // build a host-relative URL with the token when the thumb is a
+            // relative path.
+            let posterURL: URL? = raw.thumb.flatMap { thumb in
+                if thumb.hasPrefix("http://") || thumb.hasPrefix("https://") {
+                    return URL(string: thumb)
+                }
+                return URL(string: "\(self.discoverHost.absoluteString)\(thumb)?X-Plex-Token=\(token)")
             }
             return PlexWatchlistItem(
                 id: id,
@@ -228,7 +232,12 @@ final class FileWatchlistCache: WatchlistCacheProtocol, @unchecked Sendable {
     init() {
         let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSTemporaryDirectory())
-        url = caches.appendingPathComponent("PlexWatchlist.json")
+        // Bump filename when the on-disk schema changes (e.g. poster URL fix
+        // 2026-04-15) so stale cached items don't persist after an update.
+        url = caches.appendingPathComponent("PlexWatchlist.v2.json")
+        // Best-effort cleanup of older versions.
+        let stale = caches.appendingPathComponent("PlexWatchlist.json")
+        try? FileManager.default.removeItem(at: stale)
     }
 
     func load() -> [PlexWatchlistItem]? {
