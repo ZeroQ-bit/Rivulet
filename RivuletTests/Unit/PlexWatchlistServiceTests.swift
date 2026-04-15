@@ -110,17 +110,17 @@ final class PlexWatchlistServiceTests: XCTestCase {
 
 // MARK: - Stubs
 
-final class StubWatchlistAPI: PlexWatchlistAPIProtocol {
+final class StubWatchlistAPI: PlexWatchlistAPIProtocol, @unchecked Sendable {
     var shouldFailWrites = false
     var fetchResult: [PlexWatchlistItem] = []
 
-    func fetchAll() async throws -> [PlexWatchlistItem] { fetchResult }
+    func fetchAll(token: String) async throws -> [PlexWatchlistItem] { fetchResult }
 
-    func add(guids: [String]) async throws {
+    func add(guids: [String], token: String) async throws {
         if shouldFailWrites { throw URLError(.notConnectedToInternet) }
     }
 
-    func remove(guid: String) async throws {
+    func remove(guid: String, token: String) async throws {
         if shouldFailWrites { throw URLError(.notConnectedToInternet) }
     }
 }

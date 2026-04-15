@@ -29,6 +29,7 @@ struct TMDBItemDetailView: View {
         .background(Color.black.ignoresSafeArea())
         .task { await load() }
         .onExitCommand { dismiss() }
+        .watchlistToast(message: watchlist.transientWriteError)
     }
 
     // MARK: - Backdrop

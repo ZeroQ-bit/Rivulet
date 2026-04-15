@@ -11,22 +11,39 @@ import Combine
 @MainActor
 final class PlexWatchlistService: ObservableObject {
     static let shared = PlexWatchlistService(
-        api: PlexWatchlistAPI(tokenProvider: { PlexAuthManager.shared.selectedServerToken }),
-        cache: FileWatchlistCache()
+        api: PlexWatchlistAPI(),
+        cache: FileWatchlistCache(),
+        tokenProvider: { PlexAuthManager.shared.selectedServerToken }
     )
 
     @Published private(set) var watchlistItems: [PlexWatchlistItem] = []
     @Published private(set) var watchlistGUIDs: Set<String> = []
     @Published private(set) var lastFetchError: Error?
 
+    /// A user-facing message surfaced when the most recent write optimistically
+    /// reverted. Views observe this to show a transient toast; setter auto-clears
+    /// after a short delay so consumers don't need to manage the lifecycle.
+    @Published private(set) var transientWriteError: String?
+
     private let api: PlexWatchlistAPIProtocol
     private let cache: WatchlistCacheProtocol
+    private let tokenProvider: @MainActor () -> String?
     private var lastFetched: Date?
-    private let staleAfter: TimeInterval = 60
 
-    init(api: PlexWatchlistAPIProtocol, cache: WatchlistCacheProtocol) {
+    // 60s balances responsiveness with network traffic — fresh enough that
+    // changes made on another Plex client appear quickly on Home, but not so
+    // aggressive that idle screens hammer the API.
+    private let staleAfter: TimeInterval = 60
+    private let transientErrorDuration: TimeInterval = 3
+
+    init(
+        api: PlexWatchlistAPIProtocol,
+        cache: WatchlistCacheProtocol,
+        tokenProvider: @escaping @MainActor () -> String? = { "test-token" }
+    ) {
         self.api = api
         self.cache = cache
+        self.tokenProvider = tokenProvider
 
         if let cached = cache.load() {
             watchlistItems = cached
@@ -38,8 +55,9 @@ final class PlexWatchlistService: ObservableObject {
         if !force, let lastFetched, Date().timeIntervalSince(lastFetched) < staleAfter {
             return
         }
+        guard let token = tokenProvider() else { return }
         do {
-            let items = try await api.fetchAll()
+            let items = try await api.fetchAll(token: token)
             watchlistItems = items
             watchlistGUIDs = Set(items.flatMap(\.guids))
             cache.save(items)
@@ -51,6 +69,11 @@ final class PlexWatchlistService: ObservableObject {
     }
 
     func add(guid: String, item: PlexWatchlistItem) async {
+        guard let token = tokenProvider() else {
+            surface("Sign in to use Watchlist")
+            return
+        }
+
         let snapshotItems = watchlistItems
         let snapshotGUIDs = watchlistGUIDs
 
@@ -59,17 +82,22 @@ final class PlexWatchlistService: ObservableObject {
         watchlistGUIDs.formUnion(item.guids)
 
         do {
-            try await api.add(guids: [guid])
+            try await api.add(guids: [guid], token: token)
             cache.save(watchlistItems)
         } catch {
-            // Revert
             watchlistItems = snapshotItems
             watchlistGUIDs = snapshotGUIDs
             lastFetchError = error
+            surface("Couldn't update Watchlist")
         }
     }
 
     func remove(guid: String) async {
+        guard let token = tokenProvider() else {
+            surface("Sign in to use Watchlist")
+            return
+        }
+
         let snapshotItems = watchlistItems
         let snapshotGUIDs = watchlistGUIDs
 
@@ -80,12 +108,13 @@ final class PlexWatchlistService: ObservableObject {
         watchlistGUIDs.subtract(removedGuids)
 
         do {
-            try await api.remove(guid: guid)
+            try await api.remove(guid: guid, token: token)
             cache.save(watchlistItems)
         } catch {
             watchlistItems = snapshotItems
             watchlistGUIDs = snapshotGUIDs
             lastFetchError = error
+            surface("Couldn't update Watchlist")
         }
     }
 
@@ -102,5 +131,16 @@ final class PlexWatchlistService: ObservableObject {
         watchlistGUIDs = []
         lastFetched = nil
         cache.clear()
+    }
+
+    private func surface(_ message: String) {
+        transientWriteError = message
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(transientErrorDuration))
+            guard let self else { return }
+            if self.transientWriteError == message {
+                self.transientWriteError = nil
+            }
+        }
     }
 }

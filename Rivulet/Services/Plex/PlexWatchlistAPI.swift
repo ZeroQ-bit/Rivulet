@@ -8,9 +8,9 @@
 import Foundation
 
 protocol PlexWatchlistAPIProtocol: Sendable {
-    func fetchAll() async throws -> [PlexWatchlistItem]
-    func add(guids: [String]) async throws
-    func remove(guid: String) async throws
+    func fetchAll(token: String) async throws -> [PlexWatchlistItem]
+    func add(guids: [String], token: String) async throws
+    func remove(guid: String, token: String) async throws
 }
 
 protocol WatchlistCacheProtocol: Sendable {
@@ -23,15 +23,11 @@ final class PlexWatchlistAPI: PlexWatchlistAPIProtocol, Sendable {
     private let session: URLSession
     private let baseURL = URL(string: "https://metadata.provider.plex.tv")!
 
-    private let tokenProvider: @Sendable () -> String?
-
-    init(session: URLSession = .shared, tokenProvider: @escaping @Sendable () -> String?) {
+    init(session: URLSession = .shared) {
         self.session = session
-        self.tokenProvider = tokenProvider
     }
 
-    func fetchAll() async throws -> [PlexWatchlistItem] {
-        guard let token = tokenProvider() else { return [] }
+    func fetchAll(token: String) async throws -> [PlexWatchlistItem] {
         let url = baseURL.appendingPathComponent("library/sections/watchlist/all")
         var components = URLComponents(url: url, resolvingAgainstBaseURL: true)!
         components.queryItems = [
@@ -41,6 +37,7 @@ final class PlexWatchlistAPI: PlexWatchlistAPIProtocol, Sendable {
         ]
 
         var request = URLRequest(url: components.url!)
+        addPlexHeaders(to: &request)
         request.addValue("application/json", forHTTPHeaderField: "Accept")
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
@@ -89,15 +86,13 @@ final class PlexWatchlistAPI: PlexWatchlistAPIProtocol, Sendable {
         }
     }
 
-    func add(guids: [String]) async throws {
-        guard let token = tokenProvider() else { throw URLError(.userAuthenticationRequired) }
+    func add(guids: [String], token: String) async throws {
         for guid in guids {
             try await mutate(guid: guid, action: "addToWatchlist", token: token)
         }
     }
 
-    func remove(guid: String) async throws {
-        guard let token = tokenProvider() else { throw URLError(.userAuthenticationRequired) }
+    func remove(guid: String, token: String) async throws {
         try await mutate(guid: guid, action: "removeFromWatchlist", token: token)
     }
 
@@ -110,10 +105,17 @@ final class PlexWatchlistAPI: PlexWatchlistAPIProtocol, Sendable {
         ]
         var request = URLRequest(url: components.url!)
         request.httpMethod = "PUT"
+        addPlexHeaders(to: &request)
         let (_, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
             throw URLError(.badServerResponse)
         }
+    }
+
+    private func addPlexHeaders(to request: inout URLRequest) {
+        request.addValue(PlexAPI.clientIdentifier, forHTTPHeaderField: "X-Plex-Client-Identifier")
+        request.addValue(PlexAPI.productName, forHTTPHeaderField: "X-Plex-Product")
+        request.addValue(PlexAPI.platform, forHTTPHeaderField: "X-Plex-Platform")
     }
 }
 

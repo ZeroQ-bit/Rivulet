@@ -13,10 +13,17 @@ struct DiscoverView: View {
     @StateObject private var viewModel = DiscoverViewModel()
     @StateObject private var watchlist = PlexWatchlistService.shared
 
+    @AppStorage("showForYouOnDiscover") private var showForYouOnDiscover = true
+
     @State private var presentedPlexItem: PlexMetadata?
     @State private var presentedTMDBItem: TMDBListItem?
 
     var body: some View {
+        mainBody
+            .watchlistToast(message: watchlist.transientWriteError)
+    }
+
+    private var mainBody: some View {
         ScrollView(.vertical, showsIndicators: false) {
             VStack(alignment: .leading, spacing: 40) {
                 if !viewModel.forYou.isEmpty {
@@ -44,7 +51,7 @@ struct DiscoverView: View {
             }
             .padding(.vertical, 40)
         }
-        .task { await viewModel.load() }
+        .task(id: showForYouOnDiscover) { await viewModel.load(showForYou: showForYouOnDiscover) }
         .fullScreenCover(item: $presentedPlexItem) { metadata in
             PlexDetailView(item: metadata)
                 .presentationBackground(.black)
@@ -79,7 +86,11 @@ final class DiscoverViewModel: ObservableObject {
     private let recommendationService = DiscoverRecommendationService.shared
     private let libraryIndex = LibraryGUIDIndex.shared
 
-    func load() async {
+    /// Minimum watched items required before we try to personalize the "For You"
+    /// row. Fewer watches produce noisy recommendations that feel random.
+    private let forYouColdStartMinWatched = 5
+
+    func load(showForYou: Bool = true) async {
         loading = true
         defer { loading = false }
 
@@ -99,13 +110,13 @@ final class DiscoverViewModel: ObservableObject {
         // Precompute the in-library TMDB id set for sync lookup from row closures.
         await recomputeInLibrarySet()
 
-        // For You row (cold-start-safe). Respect the user's Discover For You preference. Default is on.
-        let showForYou = UserDefaults.standard.object(forKey: "showForYouOnDiscover") as? Bool ?? true
         if showForYou {
             let watchedItems = await collectWatchHistory()
-            if !watchedItems.isEmpty {
+            if watchedItems.count >= forYouColdStartMinWatched {
                 let profile = await WatchProfileBuilder.build(from: watchedItems)
                 forYou = await recommendationService.forYouRow(profile: profile)
+            } else {
+                forYou = []
             }
         } else {
             forYou = []

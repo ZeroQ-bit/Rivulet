@@ -156,6 +156,7 @@ struct PlexHomeView: View {
             .task {
                 await watchlistService.fetchWatchlist()
             }
+            .watchlistToast(message: watchlistService.transientWriteError)
             .onChange(of: dataStore.hubsVersion) { _, _ in
                 // Recompute cached hubs when global hub data changes (for Continue Watching)
                 cachedProcessedHubs = computeProcessedHubs(from: dataStore.hubs)
