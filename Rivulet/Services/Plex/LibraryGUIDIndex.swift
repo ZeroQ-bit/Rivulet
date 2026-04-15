@@ -8,6 +8,12 @@
 
 import Foundation
 
+extension Notification.Name {
+    /// Posted on the main thread after `LibraryGUIDIndex.shared.replace(with:)`
+    /// completes. Views observing this can re-run library-match queries.
+    static let libraryGUIDIndexDidUpdate = Notification.Name("LibraryGUIDIndexDidUpdate")
+}
+
 actor LibraryGUIDIndex {
     static let shared = LibraryGUIDIndex()
 
@@ -30,6 +36,16 @@ actor LibraryGUIDIndex {
 
         for item in items {
             ingest(item)
+        }
+
+        let typedCount = byTypedTmdbId.count
+        let guidCount = byGuid.count
+        Task { @MainActor in
+            NotificationCenter.default.post(
+                name: .libraryGUIDIndexDidUpdate,
+                object: nil,
+                userInfo: ["typedTmdbCount": typedCount, "guidCount": guidCount]
+            )
         }
     }
 

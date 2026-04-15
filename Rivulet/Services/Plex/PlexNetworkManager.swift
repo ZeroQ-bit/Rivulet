@@ -372,7 +372,8 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
         start: Int = 0,
         size: Int = 100,
         sort: String? = nil,
-        type: Int? = nil
+        type: Int? = nil,
+        includeGuids: Bool = false
     ) async throws -> (items: [PlexMetadata], totalSize: Int?) {
         guard var components = URLComponents(string: "\(serverURL)/library/sections/\(sectionId)/all") else {
             throw PlexAPIError.invalidURL
@@ -391,6 +392,13 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
         // Add type filter (e.g., 8=artist, 9=album, 10=track for music)
         if let type {
             queryItems.append(URLQueryItem(name: "type", value: "\(type)"))
+        }
+
+        // Plex omits the `Guid` array (external IDs like tmdb://, imdb://) from
+        // the default summary response. Callers that need it for matching must
+        // opt in.
+        if includeGuids {
+            queryItems.append(URLQueryItem(name: "includeGuids", value: "1"))
         }
 
         components.queryItems = queryItems

@@ -159,7 +159,9 @@ struct TVSidebarView: View {
                 dataStore.startBackgroundPrefetch(libraries: dataStore.visibleVideoLibraries)
 
                 // Rebuild the library GUID index in the background. Used by Discover and
-                // Watchlist surfaces to answer "do I own this?" in O(1).
+                // Watchlist surfaces to answer "do I own this?" in O(1). The index
+                // matches by external GUID, so the fetch must include them
+                // (Plex omits them from the default summary response).
                 Task.detached(priority: .background) {
                     let (serverURL, token) = await MainActor.run {
                         (PlexAuthManager.shared.selectedServerURL, PlexAuthManager.shared.selectedServerToken)
@@ -175,11 +177,15 @@ struct TVSidebarView: View {
                             authToken: token,
                             sectionId: library.key,
                             start: 0,
-                            size: 5000
+                            size: 5000,
+                            includeGuids: true
                         ) {
                             allItems.append(contentsOf: result.items)
                         }
                     }
+                    let withGuids = allItems.filter { ($0.Guid ?? []).isEmpty == false }
+                    let sample = withGuids.first.flatMap { $0.Guid?.first?.id } ?? "(none)"
+                    sidebarFocusLog.info("[GUIDIndex] populated: \(allItems.count) items total, \(withGuids.count) with external GUIDs, sample=\(sample, privacy: .public)")
                     await LibraryGUIDIndex.shared.replace(with: allItems)
                 }
             }

@@ -157,6 +157,11 @@ struct PlexHomeView: View {
                 await watchlistService.fetchWatchlist()
             }
             .watchlistToast(message: watchlistService.transientWriteError)
+            .onReceive(NotificationCenter.default.publisher(for: .libraryGUIDIndexDidUpdate)) { _ in
+                // Index just (re)built; try to upgrade the hero now that we can
+                // resolve TMDB ids against library content.
+                Task { await upgradeHeroFromTMDB() }
+            }
             .onChange(of: dataStore.hubsVersion) { _, _ in
                 // Recompute cached hubs when global hub data changes (for Continue Watching)
                 cachedProcessedHubs = computeProcessedHubs(from: dataStore.hubs)

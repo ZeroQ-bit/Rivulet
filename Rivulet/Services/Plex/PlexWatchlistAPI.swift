@@ -6,6 +6,21 @@
 //
 
 import Foundation
+import os.log
+
+private let watchlistAPILog = Logger(subsystem: "com.rivulet.app", category: "PlexWatchlistAPI")
+
+/// Custom error so the caller can tell why a watchlist request failed.
+struct PlexWatchlistHTTPError: Error, LocalizedError {
+    let statusCode: Int
+    let bodySnippet: String?
+    var errorDescription: String? {
+        if let bodySnippet, !bodySnippet.isEmpty {
+            return "HTTP \(statusCode): \(bodySnippet)"
+        }
+        return "HTTP \(statusCode)"
+    }
+}
 
 protocol PlexWatchlistAPIProtocol: Sendable {
     func fetchAll(token: String) async throws -> [PlexWatchlistItem]
@@ -39,9 +54,15 @@ final class PlexWatchlistAPI: PlexWatchlistAPIProtocol, Sendable {
         var request = URLRequest(url: components.url!)
         addPlexHeaders(to: &request)
         request.addValue("application/json", forHTTPHeaderField: "Accept")
+        watchlistAPILog.info("fetchAll URL=\(request.url?.absoluteString ?? "?", privacy: .public)")
         let (data, response) = try await session.data(for: request)
-        guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+        guard let http = response as? HTTPURLResponse else {
             throw URLError(.badServerResponse)
+        }
+        guard (200...299).contains(http.statusCode) else {
+            let snippet = String(data: data.prefix(256), encoding: .utf8)
+            watchlistAPILog.error("fetchAll HTTP \(http.statusCode) body=\(snippet ?? "(non-utf8)", privacy: .public)")
+            throw PlexWatchlistHTTPError(statusCode: http.statusCode, bodySnippet: snippet)
         }
 
         struct Container: Decodable {
@@ -106,9 +127,15 @@ final class PlexWatchlistAPI: PlexWatchlistAPIProtocol, Sendable {
         var request = URLRequest(url: components.url!)
         request.httpMethod = "PUT"
         addPlexHeaders(to: &request)
-        let (_, response) = try await session.data(for: request)
-        guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+        watchlistAPILog.info("mutate \(action, privacy: .public) URL=\(request.url?.absoluteString ?? "?", privacy: .public)")
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
             throw URLError(.badServerResponse)
+        }
+        guard (200...299).contains(http.statusCode) else {
+            let snippet = String(data: data.prefix(256), encoding: .utf8)
+            watchlistAPILog.error("mutate \(action, privacy: .public) HTTP \(http.statusCode) body=\(snippet ?? "(non-utf8)", privacy: .public)")
+            throw PlexWatchlistHTTPError(statusCode: http.statusCode, bodySnippet: snippet)
         }
     }
 
