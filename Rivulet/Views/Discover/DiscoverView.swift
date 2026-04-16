@@ -26,16 +26,6 @@ struct DiscoverView: View {
     private var mainBody: some View {
         ScrollView(.vertical, showsIndicators: false) {
             VStack(alignment: .leading, spacing: 40) {
-                if !viewModel.forYou.isEmpty {
-                    DiscoverRow(
-                        title: "For You",
-                        items: viewModel.forYou,
-                        isInLibrary: { _ in false },  // For You is always not-in-library (filtered upstream)
-                        isOnWatchlist: { watchlist.contains(tmdbId: $0.id) },
-                        onSelect: { handleSelection($0) }
-                    )
-                }
-
                 ForEach(TMDBDiscoverSection.allCases) { section in
                     let items = viewModel.items(for: section)
                     if !items.isEmpty {
@@ -47,6 +37,19 @@ struct DiscoverView: View {
                             onSelect: { handleSelection($0) }
                         )
                     }
+                }
+
+                // "For You" trails the curated sections so its async load
+                // (watch-history profile build + TMDB discover call) doesn't
+                // push other rows down when it resolves.
+                if !viewModel.forYou.isEmpty {
+                    DiscoverRow(
+                        title: "For You",
+                        items: viewModel.forYou,
+                        isInLibrary: { _ in false },  // For You is always not-in-library (filtered upstream)
+                        isOnWatchlist: { watchlist.contains(tmdbId: $0.id) },
+                        onSelect: { handleSelection($0) }
+                    )
                 }
             }
             .padding(.vertical, 40)
