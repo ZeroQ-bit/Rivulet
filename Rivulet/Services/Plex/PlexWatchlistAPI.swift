@@ -61,7 +61,12 @@ final class PlexWatchlistAPI: PlexWatchlistAPIProtocol, Sendable {
         // Plex Discover rejects X-Plex-Container-Size on this endpoint with a
         // 400 ("Invalid value provided for x-plex-container-size!"). The
         // watchlist is small in practice, so the default response is fine.
+        //
+        // includeGuids=1 is required — without it, the `Guid` array is
+        // omitted from the response and we can't resolve items to tmdb:// for
+        // library matching or context-menu navigation.
         components.queryItems = [
+            URLQueryItem(name: "includeGuids", value: "1"),
             URLQueryItem(name: "X-Plex-Token", value: token)
         ]
 
@@ -232,12 +237,14 @@ final class FileWatchlistCache: WatchlistCacheProtocol, @unchecked Sendable {
     init() {
         let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSTemporaryDirectory())
-        // Bump filename when the on-disk schema changes (e.g. poster URL fix
-        // 2026-04-15) so stale cached items don't persist after an update.
-        url = caches.appendingPathComponent("PlexWatchlist.v2.json")
+        // Bump filename when the on-disk schema changes (e.g. 2026-04-15 poster
+        // URL fix, 2026-04-16 guids-missing fix) so stale cached items don't
+        // persist after an update.
+        url = caches.appendingPathComponent("PlexWatchlist.v3.json")
         // Best-effort cleanup of older versions.
-        let stale = caches.appendingPathComponent("PlexWatchlist.json")
-        try? FileManager.default.removeItem(at: stale)
+        for stale in ["PlexWatchlist.json", "PlexWatchlist.v2.json"] {
+            try? FileManager.default.removeItem(at: caches.appendingPathComponent(stale))
+        }
     }
 
     func load() -> [PlexWatchlistItem]? {
