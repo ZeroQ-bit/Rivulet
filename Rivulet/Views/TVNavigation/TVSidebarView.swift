@@ -295,13 +295,11 @@ struct TVSidebarView: View {
                 tabContent(for: .home)
             }
 
-            // Discover above libraries (and above Live TV when Live TV is
-            // also above libraries). Wrapped in a TabSection so SwiftUI treats
-            // the branch swap as a structural change and re-orders the sidebar
-            // — a bare `Tab` in an `if` branch inside `TabView(sidebarAdaptable)`
-            // doesn't reliably move when the condition flips.
+            // Discover above libraries.
             if showDiscoverTab && discoverAboveLibraries {
-                discoverTabSection
+                Tab("Discover", systemImage: "sparkles", value: SidebarTab.discover) {
+                    tabContent(for: .discover)
+                }
             }
 
             if liveTVAboveLibraries {
@@ -320,10 +318,12 @@ struct TVSidebarView: View {
                 }
             }
 
-            // Discover below libraries (and below Live TV when Live TV is
-            // above libraries — keeps Discover last in either ordering).
+            // Discover below libraries (last in either library/liveTV
+            // ordering when positioned below).
             if showDiscoverTab && !discoverAboveLibraries {
-                discoverTabSection
+                Tab("Discover", systemImage: "sparkles", value: SidebarTab.discover) {
+                    tabContent(for: .discover)
+                }
             }
 
             TabSection("") {
@@ -333,6 +333,11 @@ struct TVSidebarView: View {
             }
         }
         .tabViewStyle(.sidebarAdaptable)
+        // Force a full rebuild when sidebar layout toggles change. Without
+        // this, a bare `Tab` declared in an if-branch of TabView(sidebarAdaptable)
+        // doesn't move when the condition flips. Wrapping in TabSection would
+        // also work but introduces a visible header gap we don't want.
+        .id("sidebar-\(showDiscoverTab)-\(discoverAboveLibraries)-\(liveTVAboveLibraries)")
         .toolbarVisibility((nestedNavState.isNested || isMusicLibrarySelected || nestedNavState.isSettingsSubPage) ? .hidden : .automatic, for: .tabBar)
         .animation(.easeInOut(duration: 0.18), value: nestedNavState.isNested)
         .onChange(of: nestedNavState.isNested) { _, isNested in
@@ -348,14 +353,6 @@ struct TVSidebarView: View {
                     value: SidebarTab.library(key: library.key)) {
                     tabContent(for: .library(key: library.key))
                 }
-            }
-        }
-    }
-
-    private var discoverTabSection: some TabContent<SidebarTab> {
-        TabSection("") {
-            Tab("Discover", systemImage: "sparkles", value: SidebarTab.discover) {
-                tabContent(for: .discover)
             }
         }
     }
