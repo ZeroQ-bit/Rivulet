@@ -2,8 +2,9 @@
 //  DiscoverView.swift
 //  Rivulet
 //
-//  Top-level Discover page. Renders 8 TMDB sections plus an optional For You
-//  row driven by the user's watch history.
+//  Top-level Discover page. Fixed TMDB hero backdrop behind a scroll view
+//  containing the hero overlay (Add to Watchlist / Play for in-library items)
+//  and 8 TMDB curated sections plus For You.
 //
 
 import SwiftUI
@@ -16,41 +17,104 @@ struct DiscoverView: View {
     @State private var presentedPlexItem: PlexMetadata?
     @State private var presentedTMDBItem: TMDBListItem?
 
+    @State private var heroCurrentIndex: Int = 0
+    @State private var heroScrollOffset: CGFloat = 0
+
     var body: some View {
         mainBody
             .watchlistToast(message: watchlist.transientWriteError)
     }
 
     private var mainBody: some View {
-        ScrollView(.vertical, showsIndicators: false) {
-            VStack(alignment: .leading, spacing: 40) {
-                ForEach(TMDBDiscoverSection.allCases) { section in
-                    let items = viewModel.items(for: section)
-                    if !items.isEmpty {
-                        DiscoverRow(
-                            title: section.title,
-                            items: items,
-                            isInLibrary: { viewModel.inLibraryTMDBIds.contains($0.id) },
-                            isOnWatchlist: { watchlist.contains(tmdbId: $0.id) },
-                            onSelect: { handleSelection($0) }
-                        )
+        let screenHeight = UIScreen.main.bounds.height
+        let heroSectionHeight = screenHeight - 200
+        let heroActive = !viewModel.heroItems.isEmpty
+        let currentHeroItem: TMDBListItem? = {
+            guard heroActive else { return nil }
+            let clamped = max(0, min(heroCurrentIndex, viewModel.heroItems.count - 1))
+            return viewModel.heroItems[clamped]
+        }()
+
+        return ZStack(alignment: .top) {
+            // Fixed backdrop — fills the screen, parallaxes with scroll.
+            if heroActive {
+                DiscoverHeroBackdrop(currentItem: currentHeroItem)
+                    .ignoresSafeArea()
+                    .offset(y: -heroScrollOffset * 1.3 - min(72, heroScrollOffset * 0.72))
+                    .allowsHitTesting(false)
+            }
+
+            ScrollViewReader { scrollProxy in
+                ScrollView(.vertical, showsIndicators: false) {
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        if heroActive {
+                            DiscoverHeroOverlay(
+                                items: viewModel.heroItems,
+                                currentIndex: $heroCurrentIndex,
+                                inLibraryTMDBIds: viewModel.inLibraryTMDBIds,
+                                libraryMatch: { item in
+                                    await viewModel.libraryMatch(for: item)
+                                },
+                                onPlay: { metadata in
+                                    presentedPlexItem = metadata
+                                },
+                                onInfo: { item in
+                                    Task { await handleSelection(item) }
+                                },
+                                onHeroFocused: {
+                                    withAnimation(.smooth(duration: 0.8)) {
+                                        scrollProxy.scrollTo("discoverHero", anchor: .top)
+                                    }
+                                }
+                            )
+                            .frame(height: heroSectionHeight)
+                            .focusSection()
+                            .id("discoverHero")
+                        }
+
+                        VStack(alignment: .leading, spacing: 40) {
+                            ForEach(TMDBDiscoverSection.allCases) { section in
+                                let items = viewModel.items(for: section)
+                                if !items.isEmpty {
+                                    DiscoverRow(
+                                        title: section.title,
+                                        items: items,
+                                        isInLibrary: { viewModel.inLibraryTMDBIds.contains($0.id) },
+                                        isOnWatchlist: { watchlist.contains(tmdbId: $0.id) },
+                                        onSelect: { item in
+                                            Task { await handleSelection(item) }
+                                        },
+                                        libraryMatch: { await viewModel.libraryMatch(for: $0) }
+                                    )
+                                }
+                            }
+
+                            // "For You" trails the curated sections.
+                            if !viewModel.forYou.isEmpty {
+                                DiscoverRow(
+                                    title: "For You",
+                                    items: viewModel.forYou,
+                                    isInLibrary: { _ in false },
+                                    isOnWatchlist: { watchlist.contains(tmdbId: $0.id) },
+                                    onSelect: { item in
+                                        Task { await handleSelection(item) }
+                                    },
+                                    libraryMatch: { _ in nil }
+                                )
+                            }
+                        }
+                        .padding(.top, heroActive ? 0 : 48)
+                        .padding(.bottom, 40)
                     }
                 }
-
-                // "For You" trails the curated sections so its async load
-                // (watch-history profile build + TMDB discover call) doesn't
-                // push other rows down when it resolves.
-                if !viewModel.forYou.isEmpty {
-                    DiscoverRow(
-                        title: "For You",
-                        items: viewModel.forYou,
-                        isInLibrary: { _ in false },  // For You is always not-in-library (filtered upstream)
-                        isOnWatchlist: { watchlist.contains(tmdbId: $0.id) },
-                        onSelect: { handleSelection($0) }
-                    )
+                .onScrollGeometryChange(for: CGFloat.self) { geometry in
+                    geometry.contentOffset.y
+                } action: { _, offset in
+                    heroScrollOffset = max(0, offset)
                 }
+                .scrollClipDisabled()
+                .ignoresSafeArea(.container, edges: heroActive ? [.top, .horizontal] : [])
             }
-            .padding(.vertical, 40)
         }
         .task { await viewModel.load() }
         .fullScreenCover(item: $presentedPlexItem) { metadata in
@@ -63,13 +127,11 @@ struct DiscoverView: View {
         }
     }
 
-    private func handleSelection(_ item: TMDBListItem) {
-        Task {
-            if let plex = await viewModel.libraryMatch(for: item) {
-                presentedPlexItem = plex
-            } else {
-                presentedTMDBItem = item
-            }
+    private func handleSelection(_ item: TMDBListItem) async {
+        if let plex = await viewModel.libraryMatch(for: item) {
+            presentedPlexItem = plex
+        } else {
+            presentedTMDBItem = item
         }
     }
 }
@@ -81,6 +143,7 @@ final class DiscoverViewModel: ObservableObject {
     @Published private(set) var sectionItems: [TMDBDiscoverSection: [TMDBListItem]] = [:]
     @Published private(set) var forYou: [TMDBListItem] = []
     @Published private(set) var inLibraryTMDBIds: Set<Int> = []
+    @Published private(set) var heroItems: [TMDBListItem] = []
     @Published private(set) var loading = false
 
     private let discoverService = TMDBDiscoverService.shared
@@ -90,6 +153,9 @@ final class DiscoverViewModel: ObservableObject {
     /// Minimum watched items required before we try to personalize the "For You"
     /// row. Fewer watches produce noisy recommendations that feel random.
     private let forYouColdStartMinWatched = 5
+
+    /// Cap on hero carousel items. Matches the home page's cap.
+    private let heroItemCap = 9
 
     func load() async {
         loading = true
@@ -111,6 +177,9 @@ final class DiscoverViewModel: ObservableObject {
         // Precompute the in-library TMDB id set for sync lookup from row closures.
         await recomputeInLibrarySet()
 
+        // Pick hero items from the same popular sources the home page uses.
+        heroItems = computeHeroItems(cap: heroItemCap)
+
         // "For You" appends below the curated sections once watch-history
         // features resolve, so it doesn't shift the layout out from under
         // the user. Hides itself on cold-start (too few watched items to
@@ -130,6 +199,30 @@ final class DiscoverViewModel: ObservableObject {
 
     func libraryMatch(for item: TMDBListItem) async -> PlexMetadata? {
         await libraryIndex.lookup(tmdbId: item.id, type: item.mediaType)
+    }
+
+    /// Interleave Popular Movies + Popular TV (which we've already fetched for
+    /// the curated rows) to seed the hero carousel. Prefers items with backdrops.
+    private func computeHeroItems(cap: Int) -> [TMDBListItem] {
+        let movies = sectionItems[.moviePopular] ?? []
+        let shows = sectionItems[.tvPopular] ?? []
+
+        var interleaved: [TMDBListItem] = []
+        let count = max(movies.count, shows.count)
+        for i in 0..<count {
+            if i < movies.count { interleaved.append(movies[i]) }
+            if i < shows.count { interleaved.append(shows[i]) }
+            if interleaved.count >= cap * 2 { break }
+        }
+
+        // Prefer items with a backdrop so the hero never shows the fallback gradient.
+        let ranked = interleaved.sorted { (a, b) in
+            let aHas = (a.backdropPath?.isEmpty == false) ? 1 : 0
+            let bHas = (b.backdropPath?.isEmpty == false) ? 1 : 0
+            return aHas > bHas
+        }
+
+        return Array(ranked.prefix(cap))
     }
 
     /// Rebuild `inLibraryTMDBIds` by asking the library index for each fetched item.

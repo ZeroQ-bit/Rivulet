@@ -5,6 +5,9 @@
 //  Horizontal row of DiscoverTiles. Mirrors MediaRow's layout, padding,
 //  spacing, focus, and onPress behavior so Discover blends with Home/Library.
 //
+//  Each tile has a long-press context menu: if the item is in library, Play
+//  appears alongside Add/Remove Watchlist; otherwise only Add/Remove Watchlist.
+//
 
 import SwiftUI
 
@@ -14,6 +17,9 @@ struct DiscoverRow: View {
     let isInLibrary: (TMDBListItem) -> Bool
     let isOnWatchlist: (TMDBListItem) -> Bool
     let onSelect: (TMDBListItem) -> Void
+    /// Async-resolves a TMDB item to the matched `PlexMetadata` for
+    /// context-menu playback. Returns nil for non-library items.
+    let libraryMatch: (TMDBListItem) async -> PlexMetadata?
 
     @Environment(\.uiScale) private var scale
 
@@ -43,6 +49,12 @@ struct DiscoverRow: View {
                         }
                         .buttonStyle(CardButtonStyle())
                         .focused($focusedItemId, equals: String(item.id))
+                        .tmdbContextMenu(
+                            item: item,
+                            isInLibrary: isInLibrary(item),
+                            libraryMatch: libraryMatch,
+                            onInfo: { onSelect(item) }
+                        )
                     }
                 }
                 .padding(.horizontal, horizontalPadding)
