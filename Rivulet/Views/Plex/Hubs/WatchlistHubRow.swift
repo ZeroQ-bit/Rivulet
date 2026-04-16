@@ -7,6 +7,9 @@
 //
 
 import SwiftUI
+import os.log
+
+private let watchlistRowLog = Logger(subsystem: "com.rivulet.app", category: "WatchlistHubRow")
 
 struct WatchlistHubRow: View {
     @ObservedObject var watchlist: PlexWatchlistService
@@ -36,6 +39,7 @@ struct WatchlistHubRow: View {
                     LazyHStack(spacing: itemSpacing) {
                         ForEach(watchlist.watchlistItems.prefix(20)) { item in
                             Button {
+                                watchlistRowLog.info("[Tap] \(item.title, privacy: .public) (id=\(item.id, privacy: .public), tmdb=\(item.tmdbId ?? -1))")
                                 Task { await select(item) }
                             } label: {
                                 WatchlistTile(item: item)
@@ -62,25 +66,28 @@ struct WatchlistHubRow: View {
     }
 
     private func select(_ item: PlexWatchlistItem) async {
-        if let tmdbId = item.tmdbId {
-            let mediaType: TMDBMediaType = item.type == .movie ? .movie : .tv
-            if let match = await LibraryGUIDIndex.shared.lookup(tmdbId: tmdbId, type: mediaType) {
-                onSelectPlex(match)
-                return
-            }
-            let stub = TMDBListItem(
-                id: tmdbId,
-                title: item.title,
-                overview: nil,
-                posterPath: nil,
-                backdropPath: nil,
-                releaseDate: item.year.map { "\($0)" },
-                voteAverage: nil,
-                mediaType: mediaType
-            )
-            onSelectTMDB(stub)
+        guard let tmdbId = item.tmdbId else {
+            watchlistRowLog.warning("[Select] no tmdbId on \(item.title, privacy: .public), guids=\(item.guids.joined(separator: ","), privacy: .public)")
+            return
         }
-        // If no tmdb id, no-op for v1 (would need IMDB/TVDB resolution)
+        let mediaType: TMDBMediaType = item.type == .movie ? .movie : .tv
+        if let match = await LibraryGUIDIndex.shared.lookup(tmdbId: tmdbId, type: mediaType) {
+            watchlistRowLog.info("[Select] matched library ratingKey=\(match.ratingKey ?? "?", privacy: .public)")
+            onSelectPlex(match)
+            return
+        }
+        watchlistRowLog.info("[Select] no library match, presenting TMDB detail for tmdb://\(tmdbId)")
+        let stub = TMDBListItem(
+            id: tmdbId,
+            title: item.title,
+            overview: nil,
+            posterPath: nil,
+            backdropPath: nil,
+            releaseDate: item.year.map { "\($0)" },
+            voteAverage: nil,
+            mediaType: mediaType
+        )
+        onSelectTMDB(stub)
     }
 }
 
