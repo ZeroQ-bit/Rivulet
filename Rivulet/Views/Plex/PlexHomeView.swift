@@ -19,7 +19,6 @@ struct PlexHomeView: View {
     @AppStorage("enablePersonalizedRecommendations") private var enablePersonalizedRecommendations = false
     @Environment(\.nestedNavigationState) private var nestedNavState
     @State private var selectedItem: PlexMetadata?
-    @State private var presentedPlexItem: PlexMetadata?
     @State private var presentedTMDBItem: TMDBListItem?
     @State private var heroItems: [PlexMetadata] = []
     @State private var heroCurrentIndex: Int = 0
@@ -213,10 +212,6 @@ struct PlexHomeView: View {
                     presentPreview(request: request)
                 }
             }
-        }
-        .fullScreenCover(item: $presentedPlexItem) { metadata in
-            PlexDetailView(item: metadata)
-                .presentationBackground(.black)
         }
         .fullScreenCover(item: $presentedTMDBItem) { item in
             TMDBItemDetailView(item: item)
@@ -692,7 +687,10 @@ struct PlexHomeView: View {
                         // Watchlist sits between Recently Added rows and Suggestions
                         WatchlistHubRow(
                             watchlist: watchlistService,
-                            onSelectPlex: { presentedPlexItem = $0 },
+                            // In-library items go through the standard
+                            // selectedItem → navigationDestination path so
+                            // they behave identically to other hub rows.
+                            onSelectPlex: { selectedItem = $0 },
                             onSelectTMDB: { presentedTMDBItem = $0 },
                             onRowFocused: {
                                 withAnimation(.smooth(duration: 0.8)) {
