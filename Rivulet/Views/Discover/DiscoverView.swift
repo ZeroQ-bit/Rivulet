@@ -182,6 +182,10 @@ final class DiscoverViewModel: ObservableObject {
         // Pick hero items from the same popular sources the home page uses.
         heroItems = computeHeroItems(cap: heroItemCap)
 
+        // Warm the image cache for every hero backdrop/poster so paging the
+        // carousel doesn't flash a blank frame while the image downloads.
+        prefetchHeroAssets(heroItems)
+
         // "For You" appends below the curated sections once watch-history
         // features resolve, so it doesn't shift the layout out from under
         // the user. Hides itself on cold-start (too few watched items to
@@ -201,6 +205,28 @@ final class DiscoverViewModel: ObservableObject {
 
     func libraryMatch(for item: TMDBListItem) async -> PlexMetadata? {
         await libraryIndex.lookup(tmdbId: item.id, type: item.mediaType)
+    }
+
+    /// Warm the image cache for the full hero carousel so paging doesn't
+    /// trigger a blank flash. Larger `w1280` size is what `HeroBackdropImage`
+    /// will resolve from the `original` URL — using `original` for prefetch
+    /// matches what the view requests.
+    private func prefetchHeroAssets(_ items: [TMDBListItem]) {
+        let backdropBase = "https://image.tmdb.org/t/p/original"
+        let posterBase = "https://image.tmdb.org/t/p/w500"
+        var urls: [URL] = []
+        for item in items {
+            if let path = item.backdropPath,
+               let url = URL(string: "\(backdropBase)\(path)") {
+                urls.append(url)
+            }
+            if let path = item.posterPath,
+               let url = URL(string: "\(posterBase)\(path)") {
+                urls.append(url)
+            }
+        }
+        guard !urls.isEmpty else { return }
+        Task { await ImageCacheManager.shared.prefetch(urls: urls) }
     }
 
     /// Interleave Popular Movies + Popular TV (which we've already fetched for

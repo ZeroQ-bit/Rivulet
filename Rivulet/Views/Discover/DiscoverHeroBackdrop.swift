@@ -3,8 +3,9 @@
 //  Rivulet
 //
 //  Pure-decoration backdrop behind the Discover page hero. Loads the current
-//  item's backdrop from the TMDB image CDN and applies the same left + bottom
-//  scrims the Plex hero uses so the overlay text stays legible.
+//  item's backdrop from the TMDB image CDN using `HeroBackdropImage` so the
+//  previous image stays visible during cross-fade (no white/blank flash when
+//  paging through the carousel).
 //
 
 import SwiftUI
@@ -21,16 +22,7 @@ struct DiscoverHeroBackdrop: View {
 
     var body: some View {
         ZStack {
-            if let url = backdropURL {
-                CachedAsyncImage(url: url) { phase in
-                    switch phase {
-                    case .success(let image):
-                        image.resizable().aspectRatio(contentMode: .fill)
-                    default:
-                        fallback
-                    }
-                }
-            } else {
+            HeroBackdropImage(url: backdropURL) {
                 fallback
             }
 
