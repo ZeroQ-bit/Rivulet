@@ -295,7 +295,8 @@ struct TVSidebarView: View {
                 tabContent(for: .home)
             }
 
-            // Discover above libraries.
+            // Discover above libraries — bare Tab so it sits flush under Home
+            // without a section header.
             if showDiscoverTab && discoverAboveLibraries {
                 Tab("Discover", systemImage: "sparkles", value: SidebarTab.discover) {
                     tabContent(for: .discover)
@@ -318,12 +319,10 @@ struct TVSidebarView: View {
                 }
             }
 
-            // Discover below libraries (last in either library/liveTV
-            // ordering when positioned below).
+            // Discover below libraries — wrapped in a TabSection so it reads
+            // as a separate group from the library/liveTV blocks above.
             if showDiscoverTab && !discoverAboveLibraries {
-                Tab("Discover", systemImage: "sparkles", value: SidebarTab.discover) {
-                    tabContent(for: .discover)
-                }
+                discoverTabSection
             }
 
             TabSection("") {
@@ -353,6 +352,14 @@ struct TVSidebarView: View {
                     value: SidebarTab.library(key: library.key)) {
                     tabContent(for: .library(key: library.key))
                 }
+            }
+        }
+    }
+
+    private var discoverTabSection: some TabContent<SidebarTab> {
+        TabSection("") {
+            Tab("Discover", systemImage: "sparkles", value: SidebarTab.discover) {
+                tabContent(for: .discover)
             }
         }
     }
