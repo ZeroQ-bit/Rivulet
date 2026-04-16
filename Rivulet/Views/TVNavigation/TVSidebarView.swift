@@ -295,8 +295,7 @@ struct TVSidebarView: View {
                 tabContent(for: .home)
             }
 
-            // Discover above libraries — bare Tab so it sits flush under Home
-            // without a section header.
+            // Discover above libraries — bare Tab, flush under Home.
             if showDiscoverTab && discoverAboveLibraries {
                 Tab("Discover", systemImage: "sparkles", value: SidebarTab.discover) {
                     tabContent(for: .discover)
@@ -319,8 +318,8 @@ struct TVSidebarView: View {
                 }
             }
 
-            // Discover below libraries — wrapped in a TabSection so it reads
-            // as a separate group from the library/liveTV blocks above.
+            // Discover below libraries — TabSection so it separates from the
+            // library/liveTV group above it.
             if showDiscoverTab && !discoverAboveLibraries {
                 discoverTabSection
             }
@@ -332,11 +331,6 @@ struct TVSidebarView: View {
             }
         }
         .tabViewStyle(.sidebarAdaptable)
-        // Force a full rebuild when sidebar layout toggles change. Without
-        // this, a bare `Tab` declared in an if-branch of TabView(sidebarAdaptable)
-        // doesn't move when the condition flips. Wrapping in TabSection would
-        // also work but introduces a visible header gap we don't want.
-        .id("sidebar-\(showDiscoverTab)-\(discoverAboveLibraries)-\(liveTVAboveLibraries)")
         .toolbarVisibility((nestedNavState.isNested || isMusicLibrarySelected || nestedNavState.isSettingsSubPage) ? .hidden : .automatic, for: .tabBar)
         .animation(.easeInOut(duration: 0.18), value: nestedNavState.isNested)
         .onChange(of: nestedNavState.isNested) { _, isNested in
