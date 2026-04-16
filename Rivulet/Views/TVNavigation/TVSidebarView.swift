@@ -296,11 +296,12 @@ struct TVSidebarView: View {
             }
 
             // Discover above libraries (and above Live TV when Live TV is
-            // also above libraries).
+            // also above libraries). Wrapped in a TabSection so SwiftUI treats
+            // the branch swap as a structural change and re-orders the sidebar
+            // — a bare `Tab` in an `if` branch inside `TabView(sidebarAdaptable)`
+            // doesn't reliably move when the condition flips.
             if showDiscoverTab && discoverAboveLibraries {
-                Tab("Discover", systemImage: "sparkles", value: SidebarTab.discover) {
-                    tabContent(for: .discover)
-                }
+                discoverTabSection
             }
 
             if liveTVAboveLibraries {
@@ -322,9 +323,7 @@ struct TVSidebarView: View {
             // Discover below libraries (and below Live TV when Live TV is
             // above libraries — keeps Discover last in either ordering).
             if showDiscoverTab && !discoverAboveLibraries {
-                Tab("Discover", systemImage: "sparkles", value: SidebarTab.discover) {
-                    tabContent(for: .discover)
-                }
+                discoverTabSection
             }
 
             TabSection("") {
@@ -349,6 +348,14 @@ struct TVSidebarView: View {
                     value: SidebarTab.library(key: library.key)) {
                     tabContent(for: .library(key: library.key))
                 }
+            }
+        }
+    }
+
+    private var discoverTabSection: some TabContent<SidebarTab> {
+        TabSection("") {
+            Tab("Discover", systemImage: "sparkles", value: SidebarTab.discover) {
+                tabContent(for: .discover)
             }
         }
     }

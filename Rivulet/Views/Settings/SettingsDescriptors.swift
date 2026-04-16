@@ -97,11 +97,6 @@ enum SettingsDescriptorStore {
             iconColor: .mint,
             description: "Uses TMDB metadata and your watch history to surface personalized recommendations of unwatched content."
         ),
-        "showForYouOnDiscover": SettingDescriptor(
-            icon: "sparkles",
-            iconColor: .pink,
-            description: "Adds a personalized \"For You\" row on Discover based on titles you've watched. Disable to hide it entirely."
-        ),
         "showDiscoverTab": SettingDescriptor(
             icon: "safari",
             iconColor: .blue,

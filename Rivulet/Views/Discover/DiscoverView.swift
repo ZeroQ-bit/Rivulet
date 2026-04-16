@@ -13,8 +13,6 @@ struct DiscoverView: View {
     @StateObject private var viewModel = DiscoverViewModel()
     @StateObject private var watchlist = PlexWatchlistService.shared
 
-    @AppStorage("showForYouOnDiscover") private var showForYouOnDiscover = true
-
     @State private var presentedPlexItem: PlexMetadata?
     @State private var presentedTMDBItem: TMDBListItem?
 
@@ -54,7 +52,7 @@ struct DiscoverView: View {
             }
             .padding(.vertical, 40)
         }
-        .task(id: showForYouOnDiscover) { await viewModel.load(showForYou: showForYouOnDiscover) }
+        .task { await viewModel.load() }
         .fullScreenCover(item: $presentedPlexItem) { metadata in
             PlexDetailView(item: metadata)
                 .presentationBackground(.black)
@@ -93,7 +91,7 @@ final class DiscoverViewModel: ObservableObject {
     /// row. Fewer watches produce noisy recommendations that feel random.
     private let forYouColdStartMinWatched = 5
 
-    func load(showForYou: Bool = true) async {
+    func load() async {
         loading = true
         defer { loading = false }
 
@@ -113,14 +111,14 @@ final class DiscoverViewModel: ObservableObject {
         // Precompute the in-library TMDB id set for sync lookup from row closures.
         await recomputeInLibrarySet()
 
-        if showForYou {
-            let watchedItems = await collectWatchHistory()
-            if watchedItems.count >= forYouColdStartMinWatched {
-                let profile = await WatchProfileBuilder.build(from: watchedItems)
-                forYou = await recommendationService.forYouRow(profile: profile)
-            } else {
-                forYou = []
-            }
+        // "For You" appends below the curated sections once watch-history
+        // features resolve, so it doesn't shift the layout out from under
+        // the user. Hides itself on cold-start (too few watched items to
+        // produce a meaningful profile).
+        let watchedItems = await collectWatchHistory()
+        if watchedItems.count >= forYouColdStartMinWatched {
+            let profile = await WatchProfileBuilder.build(from: watchedItems)
+            forYou = await recommendationService.forYouRow(profile: profile)
         } else {
             forYou = []
         }

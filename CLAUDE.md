@@ -140,6 +140,13 @@ Use components from `SettingsComponents.swift`:
 - `SettingsPickerRow` - Cycles through options
 - `SettingsActionRow` - Action button (supports destructive)
 
+**Never put a subtitle/description inside a settings row.** Rows are title-only
+so the list stays scannable and the focus target stays compact. Any descriptive
+copy lives in the **left-side description panel**, which is driven by
+`SettingsDescriptors.swift`. Register a descriptor keyed by the row's
+`focusedSettingId` with an icon, color, and a clear description. The panel
+updates as the user moves focus between rows.
+
 ### Image Loading
 
 Always use `CachedAsyncImage` for remote images:
