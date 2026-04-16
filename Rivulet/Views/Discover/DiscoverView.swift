@@ -40,7 +40,9 @@ struct DiscoverView: View {
             if heroActive {
                 DiscoverHeroBackdrop(currentItem: currentHeroItem)
                     .ignoresSafeArea()
-                    .offset(y: -heroScrollOffset * 1.3 - min(72, heroScrollOffset * 0.72))
+                    // Matches the library view's hero parallax — pulls up further
+                    // than the home page so the first row seats higher on scroll.
+                    .offset(y: -heroScrollOffset * 1.3 - min(122, heroScrollOffset * 1.22))
                     .allowsHitTesting(false)
             }
 
@@ -55,7 +57,7 @@ struct DiscoverView: View {
                                 libraryMatch: { item in
                                     await viewModel.libraryMatch(for: item)
                                 },
-                                onPlay: { metadata in
+                                onPresentPlex: { metadata in
                                     presentedPlexItem = metadata
                                 },
                                 onInfo: { item in

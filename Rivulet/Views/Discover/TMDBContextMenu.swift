@@ -24,9 +24,9 @@ struct TMDBContextMenu: ViewModifier {
         content.contextMenu {
             if isInLibrary {
                 Button {
-                    Task { await playMatched() }
+                    Task { await presentDetailsMatched() }
                 } label: {
-                    Label("Play", systemImage: "play.fill")
+                    Label("Details", systemImage: "info.circle")
                 }
             }
 
@@ -40,7 +40,7 @@ struct TMDBContextMenu: ViewModifier {
                 }
             }
 
-            if let onInfo {
+            if let onInfo, !isInLibrary {
                 Button {
                     onInfo()
                 } label: {
@@ -81,13 +81,13 @@ struct TMDBContextMenu: ViewModifier {
         }
     }
 
-    private func playMatched() async {
+    private func presentDetailsMatched() async {
         guard let plex = await libraryMatch(item),
               let ratingKey = plex.ratingKey else {
-            tmdbMenuLog.warning("Play requested but no library match for tmdb://\(item.id, privacy: .public)")
+            tmdbMenuLog.warning("Details requested but no library match for tmdb://\(item.id, privacy: .public)")
             return
         }
-        await DiscoverPlaybackRouter.shared.play(ratingKey: ratingKey)
+        await DiscoverPlaybackRouter.shared.presentDetails(ratingKey: ratingKey)
     }
 }
 
@@ -108,18 +108,14 @@ extension View {
     }
 }
 
-/// Centralised "start playback for a Plex ratingKey" so the Discover context
-/// menu can reach the same player path the rest of the app uses without
-/// coupling the menu to any one view's presentation state.
-///
-/// Current implementation: presents the matched item's detail via the top VC
-/// modally, which gives the user a one-tap path to Play. A future iteration
-/// can launch the player directly.
+/// Centralised "present PlexDetailView for a ratingKey" so the Discover
+/// context menu can reach the detail path without coupling to any one view's
+/// presentation state.
 @MainActor
 final class DiscoverPlaybackRouter {
     static let shared = DiscoverPlaybackRouter()
 
-    func play(ratingKey: String) async {
+    func presentDetails(ratingKey: String) async {
         let auth = PlexAuthManager.shared
         guard let serverURL = auth.selectedServerURL,
               let token = auth.selectedServerToken else { return }
