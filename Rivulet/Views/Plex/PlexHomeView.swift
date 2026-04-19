@@ -1117,6 +1117,14 @@ struct InfiniteContentRow: View {
     private let networkManager = PlexNetworkManager.shared
     private let pageSize = 24
 
+    /// Carousel-bound projection of the row's items as MediaItem. Computed on
+    /// access (not stored) so it stays in sync with infinite-scroll
+    /// appends. Plex hub rows are the only callers that need this conversion;
+    /// Watchlist and Discover entries already operate on MediaItem natively.
+    private var previewMediaItems: [MediaItem] {
+        items.map(MediaItem.from(plex:))
+    }
+
     /// Check if this row contains music items (uses square posters)
     private var isMusicRow: Bool {
         guard let firstItem = items.first ?? initialItems.first else { return false }
@@ -1164,9 +1172,12 @@ struct InfiniteContentRow: View {
                             if isContinueWatching {
                                 onPlayItem?(item)
                             } else if let onPreviewRequested {
+                                // Wrap the row's [PlexMetadata] into [MediaItem]
+                                // at the carousel-entry boundary; the unified
+                                // detail view operates on MediaItem.
                                 onPreviewRequested(
                                     PreviewRequest(
-                                        items: items.map(MediaItem.from(plex:)),
+                                        items: previewMediaItems,
                                         selectedIndex: index,
                                         sourceRowID: rowID,
                                         sourceItemID: sourceItemID(for: item, index: index)
