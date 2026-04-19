@@ -3,21 +3,18 @@
 //  Rivulet
 //
 //  Pure-decoration backdrop behind the Discover page hero. Loads the current
-//  item's backdrop from the TMDB image CDN using `HeroBackdropImage` so the
-//  previous image stays visible during cross-fade (no white/blank flash when
-//  paging through the carousel).
+//  item's backdrop URL via `HeroBackdropImage` so the previous image stays
+//  visible during cross-fade (no white/blank flash when paging through the
+//  carousel).
 //
 
 import SwiftUI
 
 struct DiscoverHeroBackdrop: View {
-    let currentItem: TMDBListItem?
-
-    private static let backdropBase = "https://image.tmdb.org/t/p/original"
+    let currentItem: MediaItem?
 
     private var backdropURL: URL? {
-        guard let path = currentItem?.backdropPath, !path.isEmpty else { return nil }
-        return URL(string: "\(Self.backdropBase)\(path)")
+        currentItem?.backdropURL
     }
 
     var body: some View {

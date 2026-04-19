@@ -9,7 +9,7 @@
 import SwiftUI
 
 struct DiscoverTile: View, Equatable {
-    let item: TMDBListItem
+    let item: MediaItem
     let isInLibrary: Bool
     let isOnWatchlist: Bool
 
@@ -20,8 +20,6 @@ struct DiscoverTile: View, Equatable {
         lhs.isInLibrary == rhs.isInLibrary &&
         lhs.isOnWatchlist == rhs.isOnWatchlist
     }
-
-    private static let imageBase = "https://image.tmdb.org/t/p/w500"
 
     private var posterWidth: CGFloat { ScaledDimensions.posterWidth * scale }
     private var posterHeight: CGFloat { ScaledDimensions.posterHeight * scale }
@@ -38,7 +36,7 @@ struct DiscoverTile: View, Equatable {
 
     @ViewBuilder
     private var posterImage: some View {
-        if let path = item.posterPath, let url = URL(string: "\(Self.imageBase)\(path)") {
+        if let url = item.posterURL {
             CachedAsyncImage(url: url) { phase in
                 switch phase {
                 case .empty:
@@ -67,7 +65,7 @@ struct DiscoverTile: View, Equatable {
                 )
             )
             .overlay {
-                Image(systemName: item.mediaType == .movie ? "film" : "tv")
+                Image(systemName: item.kind == .movie ? "film" : "tv")
                     .font(.system(size: 32, weight: .light))
                     .foregroundStyle(.white.opacity(0.3))
             }

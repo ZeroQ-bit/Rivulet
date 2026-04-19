@@ -19,7 +19,6 @@ struct PlexHomeView: View {
     @AppStorage("enablePersonalizedRecommendations") private var enablePersonalizedRecommendations = false
     @Environment(\.nestedNavigationState) private var nestedNavState
     @State private var selectedItem: PlexMetadata?
-    @State private var presentedTMDBItem: TMDBListItem?
     @State private var heroItems: [PlexMetadata] = []
     @State private var heroCurrentIndex: Int = 0
     @State private var cachedProcessedHubs: [PlexHub] = []  // Memoized to avoid recalculation on every render
@@ -212,10 +211,6 @@ struct PlexHomeView: View {
                     presentPreview(request: request)
                 }
             }
-        }
-        .fullScreenCover(item: $presentedTMDBItem) { item in
-            TMDBItemDetailView(item: item)
-                .presentationBackground(.black)
         }
         .onChange(of: selectedItem) { _, newValue in
             print("[PlexHome] selectedItem changed: \(newValue?.title ?? "nil") (ratingKey: \(newValue?.ratingKey ?? "nil"))")
@@ -687,11 +682,16 @@ struct PlexHomeView: View {
                         // Watchlist sits between Recently Added rows and Suggestions
                         WatchlistHubRow(
                             watchlist: watchlistService,
-                            // In-library items go through the standard
-                            // selectedItem → navigationDestination path so
-                            // they behave identically to other hub rows.
-                            onSelectPlex: { selectedItem = $0 },
-                            onSelectTMDB: { presentedTMDBItem = $0 },
+                            // Watchlist tiles emit PreviewRequest just like
+                            // other hubs — opens the unified carousel rooted
+                            // at the tapped item, with the rest of the
+                            // watchlist as side cards.
+                            onSelect: { request in
+                                withAnimation(previewEntryAnimation) {
+                                    rowPreviewRequest = request
+                                    showPreviewCover = true
+                                }
+                            },
                             onRowFocused: {
                                 withAnimation(.smooth(duration: 0.8)) {
                                     scrollProxy.scrollTo("watchlistHubRow", anchor: UnitPoint(x: 0.5, y: 0.5))

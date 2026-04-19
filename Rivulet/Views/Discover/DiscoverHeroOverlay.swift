@@ -3,9 +3,9 @@
 //  Rivulet
 //
 //  Discover-page hero overlay. Layout mirrors HeroOverlayContent (title/meta/
-//  tagline + button row + paging dots pinned to bottom), but items are
-//  TMDBListItem and the primary action becomes Add/Remove Watchlist (or Play
-//  when the item is already in the user's library).
+//  tagline + button row + paging dots pinned to bottom). Items are MediaItem;
+//  the primary action becomes Add/Remove Watchlist (or Details when the item
+//  is already in the user's library — which opens the unified carousel).
 //
 
 import SwiftUI
@@ -20,15 +20,12 @@ enum DiscoverHeroButton: Hashable {
 }
 
 struct DiscoverHeroOverlay: View {
-    let items: [TMDBListItem]
+    let items: [MediaItem]
     @Binding var currentIndex: Int
-    let inLibraryTMDBIds: Set<Int>
-    let libraryMatch: (TMDBListItem) async -> PlexMetadata?
 
-    /// Callback when the user activates the primary button for an item that
-    /// matches their library. Parent presents `PlexDetailView` for the match.
-    let onPresentPlex: (PlexMetadata) -> Void
-    let onInfo: (TMDBListItem) -> Void
+    /// Emits a PreviewRequest when the user activates the Info or "Details"
+    /// button — opens the unified carousel rooted at the current hero item.
+    let onSelect: (PreviewRequest) -> Void
     var onHeroFocused: (() -> Void)? = nil
 
     @ObservedObject private var watchlistService = PlexWatchlistService.shared
@@ -39,7 +36,9 @@ struct DiscoverHeroOverlay: View {
     private let pillButtonHeight: CGFloat = 66
     private let circleButtonSize: CGFloat = 66
 
-    private var displayedItem: TMDBListItem? {
+    private static let rowID = "discoverHero"
+
+    private var displayedItem: MediaItem? {
         guard !items.isEmpty else { return nil }
         let clamped = max(0, min(displayedIndex, items.count - 1))
         return items[clamped]
@@ -55,7 +54,7 @@ struct DiscoverHeroOverlay: View {
                 if let item = displayedItem {
                     VStack(alignment: .leading, spacing: 28) {
                         DiscoverHeroSlide(item: item)
-                            .id("\(item.id)")
+                            .id(item.id)
                             .transition(.opacity)
 
                         buttonRow(for: item)
@@ -95,7 +94,7 @@ struct DiscoverHeroOverlay: View {
     // MARK: - Button row
 
     @ViewBuilder
-    private func buttonRow(for item: TMDBListItem) -> some View {
+    private func buttonRow(for item: MediaItem) -> some View {
         HStack(spacing: 16) {
             primaryButton(for: item)
             infoButton(for: item)
@@ -105,12 +104,12 @@ struct DiscoverHeroOverlay: View {
         }
     }
 
-    /// When the item is in library: "Details" pill (opens PlexDetailView).
-    /// Otherwise: "Add/Remove from Watchlist".
+    /// In-library items: "Details" pill (opens the unified carousel rooted at
+    /// the hero item). Otherwise: "Add/Remove from Watchlist".
     @ViewBuilder
-    private func primaryButton(for item: TMDBListItem) -> some View {
-        if inLibraryTMDBIds.contains(item.id) {
-            Button(action: { Task { await presentDetailsIfMatched(item) } }) {
+    private func primaryButton(for item: MediaItem) -> some View {
+        if item.plexMatch != nil {
+            Button(action: { emitPreview(for: item) }) {
                 HStack(spacing: 10) {
                     Image(systemName: "info.circle")
                     Text("Details")
@@ -124,9 +123,9 @@ struct DiscoverHeroOverlay: View {
                 cornerRadius: pillButtonHeight / 2
             ))
             .focused($focusedButton, equals: .primary)
-        } else {
-            let onList = watchlistService.contains(tmdbId: item.id)
-            Button(action: { Task { await toggleWatchlist(item) } }) {
+        } else if let tmdbId = item.tmdbId {
+            let onList = watchlistService.contains(tmdbId: tmdbId)
+            Button(action: { Task { await toggleWatchlist(item: item, tmdbId: tmdbId) } }) {
                 HStack(spacing: 10) {
                     Image(systemName: onList ? "bookmark.fill" : "bookmark")
                     Text(onList ? "Remove from Watchlist" : "Add to Watchlist")
@@ -143,8 +142,8 @@ struct DiscoverHeroOverlay: View {
         }
     }
 
-    private func infoButton(for item: TMDBListItem) -> some View {
-        Button(action: { onInfo(item) }) {
+    private func infoButton(for item: MediaItem) -> some View {
+        Button(action: { emitPreview(for: item) }) {
             Image(systemName: "info.circle")
                 .font(.system(size: 24, weight: .semibold))
                 .frame(width: circleButtonSize, height: circleButtonSize)
@@ -193,36 +192,33 @@ struct DiscoverHeroOverlay: View {
         currentIndex = next
     }
 
-    private func toggleWatchlist(_ item: TMDBListItem) async {
-        let guid = "tmdb://\(item.id)"
+    private func emitPreview(for item: MediaItem) {
+        guard let idx = items.firstIndex(where: { $0.id == item.id }) else { return }
+        onSelect(PreviewRequest(
+            items: items,
+            selectedIndex: idx,
+            sourceRowID: Self.rowID,
+            sourceItemID: item.id
+        ))
+    }
+
+    private func toggleWatchlist(item: MediaItem, tmdbId: Int) async {
+        let guid = "tmdb://\(tmdbId)"
         if watchlistService.contains(guid: guid) {
             discoverHeroLog.info("Watchlist remove \(guid, privacy: .public)")
             await watchlistService.remove(guid: guid)
         } else {
-            let watchType: PlexWatchlistItem.WatchlistType = item.mediaType == .movie ? .movie : .show
-            let yearInt: Int? = {
-                guard let raw = item.releaseDate?.prefix(4), !raw.isEmpty else { return nil }
-                return Int(raw)
-            }()
-            let posterURL: URL? = item.posterPath.flatMap {
-                URL(string: "https://image.tmdb.org/t/p/w500\($0)")
-            }
+            let watchType: PlexWatchlistItem.WatchlistType = item.kind == .movie ? .movie : .show
             let wli = PlexWatchlistItem(
                 id: guid,
                 title: item.title,
-                year: yearInt,
+                year: item.year,
                 type: watchType,
-                posterURL: posterURL,
+                posterURL: item.posterURL,
                 guids: [guid]
             )
             discoverHeroLog.info("Watchlist add \(guid, privacy: .public)")
             await watchlistService.add(guid: guid, item: wli)
-        }
-    }
-
-    private func presentDetailsIfMatched(_ item: TMDBListItem) async {
-        if let match = await libraryMatch(item) {
-            onPresentPlex(match)
         }
     }
 }
@@ -230,13 +226,13 @@ struct DiscoverHeroOverlay: View {
 // MARK: - Per-slide content
 
 private struct DiscoverHeroSlide: View {
-    let item: TMDBListItem
+    let item: MediaItem
 
     private var meta: String {
         var parts: [String] = []
-        parts.append(item.mediaType == .movie ? "Movie" : "TV Show")
-        if let yearText = item.releaseDate?.prefix(4), !yearText.isEmpty {
-            parts.append(String(yearText))
+        parts.append(item.kind == .movie ? "Movie" : "TV Show")
+        if let year = item.year {
+            parts.append("\(year)")
         }
         return parts.joined(separator: " · ")
     }
