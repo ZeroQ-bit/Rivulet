@@ -1495,32 +1495,48 @@ struct MediaDetailView: View {
 
     @ViewBuilder
     private func tmdbRecommendationTile(_ rec: MediaItem) -> some View {
-        // Lightweight poster card. Reuses CachedAsyncImage with TMDB poster URL.
-        // No tap handling at this level — Task 8/10 wires the carousel route.
-        VStack(spacing: 8) {
-            CachedAsyncImage(url: rec.posterURL) { phase in
-                switch phase {
-                case .success(let image):
-                    image.resizable().aspectRatio(2/3, contentMode: .fill)
-                case .empty:
-                    Color(white: 0.12)
-                case .failure:
-                    Color(white: 0.10).overlay {
-                        Image(systemName: "photo")
-                            .foregroundStyle(.white.opacity(0.35))
-                    }
-                @unknown default:
-                    Color(white: 0.12)
+        // For in-library recs, use the existing in-place swap pattern
+        // (collection / recommendation navigation already swaps `displayedItem`
+        // to a Plex `PlexMetadata`). For TMDB-only recs we'd need to nest a new
+        // carousel inside the already-presented overlay, which risks focus-
+        // stack confusion — punted to a later iteration.
+        Button {
+            if let plexMatch = rec.plexMatch {
+                withAnimation(.easeInOut(duration: 0.25)) {
+                    displayedItem = plexMatch
                 }
             }
-            .frame(width: 220, height: 330)
-            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-            Text(rec.title)
-                .font(.system(size: 16, weight: .semibold))
-                .foregroundStyle(.white)
-                .lineLimit(1)
-                .frame(width: 220, alignment: .leading)
+            // TODO: TMDB-only recommendations — present a nested carousel
+            // rooted at `rec` (e.g. via PreviewContainerViewController), or
+            // route through a parent-owned PreviewRequest binding. Skipped
+            // for now to avoid focus-stack issues inside the expanded card.
+        } label: {
+            VStack(spacing: 8) {
+                CachedAsyncImage(url: rec.posterURL) { phase in
+                    switch phase {
+                    case .success(let image):
+                        image.resizable().aspectRatio(2/3, contentMode: .fill)
+                    case .empty:
+                        Color(white: 0.12)
+                    case .failure:
+                        Color(white: 0.10).overlay {
+                            Image(systemName: "photo")
+                                .foregroundStyle(.white.opacity(0.35))
+                        }
+                    @unknown default:
+                        Color(white: 0.12)
+                    }
+                }
+                .frame(width: 220, height: 330)
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                Text(rec.title)
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+                    .frame(width: 220, alignment: .leading)
+            }
         }
+        .buttonStyle(CardButtonStyle())
     }
 
     // MARK: - TMDB Detail Loader (cast / runtime / genres / recommendations)
@@ -2253,6 +2269,19 @@ struct MediaDetailView: View {
     }
 
     private func currentHeroBackdropRequest() -> HeroBackdropRequest? {
+        // TMDB-only items have no Plex metadata to source backdrop/logo paths
+        // from. Build a minimal request directly from the MediaItem's absolute
+        // TMDB CDN URLs (the `plexBackdropURL` field name is historical — it
+        // is just the displayed backdrop URL, not Plex-specific).
+        if currentPlexItem == nil {
+            return HeroBackdropRequest(
+                cacheKey: item.id,
+                plexBackdropURL: item.backdropURL,
+                plexThumbnailURL: item.posterURL,
+                plexLogoURL: nil
+            )
+        }
+
         guard let serverURL = authManager.selectedServerURL,
               let token = authManager.selectedServerToken else { return nil }
 

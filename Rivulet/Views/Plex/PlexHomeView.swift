@@ -1166,7 +1166,7 @@ struct InfiniteContentRow: View {
                             } else if let onPreviewRequested {
                                 onPreviewRequested(
                                     PreviewRequest(
-                                        items: items,
+                                        items: items.map(MediaItem.from(plex:)),
                                         selectedIndex: index,
                                         sourceRowID: rowID,
                                         sourceItemID: sourceItemID(for: item, index: index)
