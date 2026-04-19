@@ -120,7 +120,7 @@ struct DiscoverView: View {
         }
         .task { await viewModel.load() }
         .fullScreenCover(item: $presentedPlexItem) { metadata in
-            PlexDetailView(item: metadata)
+            MediaDetailView(item: metadata)
                 .presentationBackground(.black)
         }
         .fullScreenCover(item: $presentedTMDBItem) { item in

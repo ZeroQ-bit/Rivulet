@@ -136,7 +136,7 @@ final class DiscoverPlaybackRouter {
             topVC = presented
         }
 
-        let detail = PlexDetailView(item: metadata)
+        let detail = MediaDetailView(item: metadata)
             .presentationBackground(.black)
         let host = UIHostingController(rootView: detail)
         host.modalPresentationStyle = .fullScreen

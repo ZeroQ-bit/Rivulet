@@ -747,7 +747,7 @@ private struct PreviewHeroSurface: View {
     let previewAnimationSettled: Bool
 
     var body: some View {
-        PlexDetailView(
+        MediaDetailView(
             item: item,
             presentationMode: isExpanded ? .expandedDetail : .previewCarousel,
             backgroundParallaxOffset: backgroundParallaxOffset,
