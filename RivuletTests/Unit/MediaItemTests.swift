@@ -58,3 +58,56 @@ final class MediaItemTests: XCTestCase {
         XCTAssertEqual(item.imdbId, "tt0133093")
     }
 }
+
+extension MediaItemTests {
+    func test_fromTmdb_movie_noLibraryMatch() async {
+        let tmdb = TMDBListItem(
+            id: 603, title: "The Matrix",
+            overview: "Neo learns the truth.",
+            posterPath: "/p.jpg", backdropPath: "/b.jpg",
+            releaseDate: "1999-03-31",
+            voteAverage: 8.7, mediaType: .movie
+        )
+        // LibraryGUIDIndex is a singleton actor populated from libraries; in
+        // a test environment with no libraries loaded, lookup returns nil.
+        let item = await MediaItem.from(tmdb: tmdb)
+
+        XCTAssertEqual(item.id, "tmdb:603")
+        XCTAssertEqual(item.kind, .movie)
+        XCTAssertEqual(item.source, .tmdb)
+        XCTAssertEqual(item.title, "The Matrix")
+        XCTAssertEqual(item.year, 1999)
+        XCTAssertEqual(item.overview, "Neo learns the truth.")
+        XCTAssertEqual(item.tmdbId, 603)
+        XCTAssertNil(item.plexMatch)             // No library match in test env
+        XCTAssertNil(item.plexMetadata)
+        XCTAssertEqual(item.tmdbListItem?.id, 603)
+        XCTAssertEqual(item.backdropURL?.absoluteString,
+                       "https://image.tmdb.org/t/p/original/b.jpg")
+        XCTAssertEqual(item.posterURL?.absoluteString,
+                       "https://image.tmdb.org/t/p/w500/p.jpg")
+    }
+
+    func test_fromTmdb_tv_yearParsing() async {
+        let tmdb = TMDBListItem(
+            id: 1, title: "Show",
+            overview: nil, posterPath: nil, backdropPath: nil,
+            releaseDate: "2024-01-15",
+            voteAverage: nil, mediaType: .tv
+        )
+        let item = await MediaItem.from(tmdb: tmdb)
+        XCTAssertEqual(item.kind, .show)
+        XCTAssertEqual(item.year, 2024)
+    }
+
+    func test_fromTmdb_emptyReleaseDateYieldsNilYear() async {
+        let tmdb = TMDBListItem(
+            id: 2, title: "x",
+            overview: nil, posterPath: nil, backdropPath: nil,
+            releaseDate: "",
+            voteAverage: nil, mediaType: .movie
+        )
+        let item = await MediaItem.from(tmdb: tmdb)
+        XCTAssertNil(item.year)
+    }
+}
