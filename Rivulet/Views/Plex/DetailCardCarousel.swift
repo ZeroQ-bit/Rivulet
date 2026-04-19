@@ -109,7 +109,7 @@ struct DetailCardCarousel: View {
                             Group {
                                 if inRenderRange {
                                     MediaDetailView(
-                                        item: item,
+                                        item: MediaItem.from(plex: item),
                                         presentationMode: isExpanded && isCurrent ? .expandedDetail : .previewCarousel,
                                         backgroundParallaxOffset: isExpanded ? 0 : innerOffset,
                                         showMetadata: isCurrent && metadataVisible,

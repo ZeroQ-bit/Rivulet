@@ -13,7 +13,7 @@ enum MediaDetailPresentationMode: Equatable {
 }
 
 struct MediaDetailView: View {
-    let item: PlexMetadata
+    let item: MediaItem
     var presentationMode: MediaDetailPresentationMode = .expandedDetail
     var backgroundParallaxOffset: CGFloat = 0
     var showVignette: Bool = true
@@ -36,12 +36,38 @@ struct MediaDetailView: View {
 
     /// Tracks the currently displayed item - allows swapping content in place
     /// When set, this overrides `item` so collection/recommended navigation
-    /// replaces content rather than pushing a new view
+    /// replaces content rather than pushing a new view. The collection /
+    /// recommendation paths swap in `PlexMetadata` directly, so this stays
+    /// typed as Plex metadata; the unified MediaItem accessor resolves it.
     @State private var displayedItem: PlexMetadata?
 
-    /// The item currently being shown - either displayedItem or the original item
+    /// The item currently being shown - either displayedItem or the original
+    /// item's Plex metadata. For TMDB-only items with no Plex match, this
+    /// returns an empty `PlexMetadata()` so legacy Plex code paths still
+    /// compile; those paths are dead-code at runtime because `currentPlexItem`
+    /// is nil and the guards in `loadDetailData()` / the action-button +
+    /// below-fold branches early-return / divert to the TMDB-only flow.
     private var currentItem: PlexMetadata {
-        displayedItem ?? item
+        displayedItem ?? item.plexMetadata ?? PlexMetadata()
+    }
+
+    /// Plex-backed metadata when available, nil for TMDB-only items.
+    /// Used to gate the action button, below-fold composition, and the
+    /// Plex-cascade in `loadDetailData()`.
+    private var currentPlexItem: PlexMetadata? {
+        displayedItem ?? item.plexMetadata
+    }
+
+    /// Effective MediaItem for hero-rendering helpers that prefer the
+    /// unified MediaItem fields. When `displayedItem` is set (collection /
+    /// recommendation navigation), wraps the displayed Plex metadata back
+    /// into a MediaItem so MediaItem-shaped readers stay correct after a
+    /// content swap.
+    private var currentMediaItem: MediaItem {
+        if let displayed = displayedItem {
+            return MediaItem.from(plex: displayed)
+        }
+        return item
     }
 
     @Environment(\.dismiss) private var dismiss
@@ -115,6 +141,11 @@ struct MediaDetailView: View {
     @State private var episodeScrollTarget: String? = nil
     @State private var scrollToTopTrigger = false
     @State private var browseActivity: NSUserActivity?
+
+    // TMDB-only path state (active when `currentPlexItem == nil`).
+    @StateObject private var watchlistService = PlexWatchlistService.shared
+    @State private var tmdbCachedDetail: MediaItemDetailCache.Detail?
+    @State private var tmdbRecommendations: [MediaItem] = []
 
     private let networkManager = PlexNetworkManager.shared
     private let recommendationService = PersonalizedRecommendationService.shared
@@ -439,6 +470,15 @@ struct MediaDetailView: View {
                                         authToken: authManager.selectedServerToken ?? ""
                                     )
                                     .padding(.top, 32)
+                                }
+
+                                // TMDB-only below-fold (Cast + Recommended for You).
+                                // Only renders when there's no Plex match — for in-library
+                                // items the Plex sections above already cover this.
+                                if currentPlexItem == nil {
+                                    tmdbBelowFold
+                                        .padding(.horizontal, 48)
+                                        .padding(.top, 32)
                                 }
                             }
                             .fixedSize(horizontal: false, vertical: true)
@@ -1179,7 +1219,16 @@ struct MediaDetailView: View {
     private let pillButtonHeight: CGFloat = 66
     private let circleButtonSize: CGFloat = 66
 
+    @ViewBuilder
     private var actionButtons: some View {
+        if currentPlexItem == nil {
+            tmdbWatchlistActionRow
+        } else {
+            plexActionButtons
+        }
+    }
+
+    private var plexActionButtons: some View {
         HStack(spacing: 18) {
             // Primary play button with inline progress + time remaining
             if currentItem.type == "artist" {
@@ -1320,6 +1369,226 @@ struct MediaDetailView: View {
             }
         }
         .disabled(!allowActionRowInteraction)
+    }
+
+    /// Action row for TMDB-only items: a single Add/Remove Watchlist pill.
+    /// Mirrors the visual treatment of the Plex Play button.
+    private var tmdbWatchlistActionRow: some View {
+        let isOnWatchlist = item.tmdbId.map { watchlistService.contains(tmdbId: $0) } ?? false
+        return HStack(spacing: 18) {
+            Button {
+                Task { await toggleWatchlist() }
+            } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: isOnWatchlist ? "bookmark.fill" : "bookmark")
+                    Text(isOnWatchlist ? "Remove from Watchlist" : "Add to Watchlist")
+                }
+                .font(.system(size: 22, weight: .semibold))
+                .padding(.horizontal, 32)
+                .frame(height: pillButtonHeight)
+            }
+            .buttonStyle(AppStoreActionButtonStyle(
+                isFocused: focusedActionButton == "watchlist",
+                cornerRadius: pillButtonHeight / 2
+            ))
+            .focused($focusedActionButton, equals: "watchlist")
+            .disabled(item.tmdbId == nil)
+        }
+        .disabled(!allowActionRowInteraction)
+    }
+
+    private func toggleWatchlist() async {
+        guard let tmdbId = item.tmdbId else { return }
+        let guid = "tmdb://\(tmdbId)"
+        if watchlistService.contains(tmdbId: tmdbId) {
+            await watchlistService.remove(guid: guid)
+        } else {
+            let watchType: PlexWatchlistItem.WatchlistType = (item.kind == .movie) ? .movie : .show
+            let stub = PlexWatchlistItem(
+                id: guid,
+                title: item.title,
+                year: item.year,
+                type: watchType,
+                posterURL: item.posterURL,
+                guids: [guid]
+            )
+            await watchlistService.add(guid: guid, item: stub)
+        }
+    }
+
+    // MARK: - TMDB-only Below-fold (Cast + Recommended for You)
+
+    @ViewBuilder
+    private var tmdbBelowFold: some View {
+        VStack(alignment: .leading, spacing: 32) {
+            if let cast = tmdbCachedDetail?.cast, !cast.isEmpty {
+                tmdbCastSection(cast)
+            }
+            if !tmdbRecommendations.isEmpty {
+                tmdbRecommendationsSection(tmdbRecommendations)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func tmdbCastSection(_ cast: [CastMember]) -> some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Cast")
+                .font(.system(size: 28, weight: .semibold))
+                .foregroundStyle(.white)
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 24) {
+                    ForEach(Array(cast.enumerated()), id: \.offset) { _, member in
+                        tmdbCastCard(member)
+                    }
+                }
+                .padding(.vertical, 12)
+            }
+            .scrollClipDisabled()
+        }
+    }
+
+    private func tmdbCastCard(_ member: CastMember) -> some View {
+        VStack(spacing: 8) {
+            Circle()
+                .fill(LinearGradient(
+                    colors: [Color(white: 0.18), Color(white: 0.10)],
+                    startPoint: .top, endPoint: .bottom
+                ))
+                .frame(width: 140, height: 140)
+                .overlay {
+                    Image(systemName: "person.fill")
+                        .font(.system(size: 56, weight: .light))
+                        .foregroundStyle(.white.opacity(0.35))
+                }
+            Text(member.name)
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundStyle(.white)
+                .lineLimit(1)
+            if let role = member.role {
+                Text(role)
+                    .font(.system(size: 16))
+                    .foregroundStyle(.white.opacity(0.6))
+                    .lineLimit(1)
+            }
+        }
+        .frame(width: 160)
+    }
+
+    @ViewBuilder
+    private func tmdbRecommendationsSection(_ items: [MediaItem]) -> some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Recommended for You")
+                .font(.system(size: 28, weight: .semibold))
+                .foregroundStyle(.white)
+            ScrollView(.horizontal, showsIndicators: false) {
+                LazyHStack(spacing: 24) {
+                    ForEach(items) { rec in
+                        tmdbRecommendationTile(rec)
+                    }
+                }
+                .padding(.vertical, 12)
+            }
+            .scrollClipDisabled()
+        }
+    }
+
+    @ViewBuilder
+    private func tmdbRecommendationTile(_ rec: MediaItem) -> some View {
+        // Lightweight poster card. Reuses CachedAsyncImage with TMDB poster URL.
+        // No tap handling at this level — Task 8/10 wires the carousel route.
+        VStack(spacing: 8) {
+            CachedAsyncImage(url: rec.posterURL) { phase in
+                switch phase {
+                case .success(let image):
+                    image.resizable().aspectRatio(2/3, contentMode: .fill)
+                case .empty:
+                    Color(white: 0.12)
+                case .failure:
+                    Color(white: 0.10).overlay {
+                        Image(systemName: "photo")
+                            .foregroundStyle(.white.opacity(0.35))
+                    }
+                @unknown default:
+                    Color(white: 0.12)
+                }
+            }
+            .frame(width: 220, height: 330)
+            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            Text(rec.title)
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(.white)
+                .lineLimit(1)
+                .frame(width: 220, alignment: .leading)
+        }
+    }
+
+    // MARK: - TMDB Detail Loader (cast / runtime / genres / recommendations)
+
+    /// Hydrates the TMDB-only below-fold for an item with no Plex match.
+    /// Reads from `MediaItemDetailCache` first (the prefetch ring writes
+    /// here), then falls back to a network fetch on miss. Recommendations
+    /// fan out after detail lands so genres are populated.
+    private func loadTMDBDetail() async {
+        guard let tmdbId = item.tmdbId else { return }
+        let mediaType: TMDBMediaType = (item.kind == .movie) ? .movie : .tv
+
+        if let cached = await MediaItemDetailCache.shared.detail(for: item.id) {
+            await MainActor.run {
+                self.tmdbCachedDetail = cached
+            }
+            // Still fetch recommendations on cache hit — they're not in the cache.
+            await loadTMDBRecommendations(genres: cached.genres, runtimeMinutes: cached.runtimeMinutes)
+            await MainActor.run {
+                self.belowFoldLoaded = true
+            }
+            return
+        }
+
+        guard let detail = await TMDBDiscoverService.shared.fetchDetail(
+            tmdbId: tmdbId, type: mediaType
+        ) else {
+            await MainActor.run { self.belowFoldLoaded = true }
+            return
+        }
+
+        let cast: [CastMember] = detail.cast.map { credit in
+            CastMember(
+                name: credit.name ?? "",
+                role: credit.character,
+                profileImageURL: nil   // TMDBCredit doesn't expose profile_path here
+            )
+        }
+        let genres = detail.genres.compactMap(\.name)
+
+        await MediaItemDetailCache.shared.store(
+            id: item.id,
+            cast: cast,
+            runtimeMinutes: detail.runtime,
+            genres: genres
+        )
+        await MainActor.run {
+            self.tmdbCachedDetail = MediaItemDetailCache.Detail(
+                cast: cast,
+                runtimeMinutes: detail.runtime,
+                genres: genres
+            )
+        }
+
+        await loadTMDBRecommendations(genres: genres, runtimeMinutes: detail.runtime)
+        await MainActor.run {
+            self.belowFoldLoaded = true
+        }
+    }
+
+    private func loadTMDBRecommendations(genres: [String], runtimeMinutes: Int?) async {
+        let seed = item.with(runtimeMinutes: runtimeMinutes, genres: genres)
+        let recs = await DiscoverRecommendationService.shared.recommendationsForItem(
+            seed, limit: 12
+        )
+        await MainActor.run {
+            self.tmdbRecommendations = recs
+        }
     }
 
     /// Play button label with inline progress bar + time remaining (Apple TV+ style)
@@ -1614,7 +1883,7 @@ struct MediaDetailView: View {
                     playItem = fm
                 } else if let serverURL = authManager.selectedServerURL,
                           let token = authManager.selectedServerToken,
-                          let ratingKey = item.ratingKey {
+                          let ratingKey = currentItem.ratingKey {
                     do {
                         let metadata = try await networkManager.getFullMetadata(
                             serverURL: serverURL,
@@ -1624,10 +1893,10 @@ struct MediaDetailView: View {
                         fullMetadata = metadata
                         playItem = metadata
                     } catch {
-                        playItem = fullMetadata ?? item
+                        playItem = fullMetadata ?? currentItem
                     }
                 } else {
-                    playItem = fullMetadata ?? item
+                    playItem = fullMetadata ?? currentItem
                 }
             }
 
@@ -1729,6 +1998,20 @@ struct MediaDetailView: View {
         // re-invoke this method once `previewAnimationSettled` flips to true.
         guard previewAnimationSettled else {
             syncHeroBackdrop()
+            return
+        }
+
+        // TMDB-only items have no Plex metadata to drive the cascade
+        // (seasons, episodes, related, collection, etc. are all Plex-rooted).
+        // Divert to the TMDB-only loader, which hydrates cast/recommendations.
+        guard currentPlexItem != nil else {
+            belowFoldLoaded = false
+            tmdbCachedDetail = nil
+            tmdbRecommendations = []
+            scrollProgress = 0
+            belowFoldTitleOpacity = 0
+            syncHeroBackdrop()
+            await loadTMDBDetail()
             return
         }
 
@@ -3795,7 +4078,7 @@ private struct BioDoneButton: View {
         duration: 7200000 // 2 hours
     )
 
-    MediaDetailView(item: sampleMovie)
+    MediaDetailView(item: MediaItem.from(plex: sampleMovie))
 }
 
 // MARK: - Navigation Destinations Modifier
@@ -3813,16 +4096,16 @@ private struct NavigationDestinationsModifier: ViewModifier {
         if isEnabled {
             content
                 .navigationDestination(item: $navigateToAlbum) { album in
-                    MediaDetailView(item: album)
+                    MediaDetailView(item: MediaItem.from(plex: album))
                 }
                 .navigationDestination(item: $navigateToSeason) { season in
-                    MediaDetailView(item: season)
+                    MediaDetailView(item: MediaItem.from(plex: season))
                 }
                 .navigationDestination(item: $navigateToShow) { show in
-                    MediaDetailView(item: show)
+                    MediaDetailView(item: MediaItem.from(plex: show))
                 }
                 .navigationDestination(item: $navigateToEpisode) { episode in
-                    MediaDetailView(item: episode)
+                    MediaDetailView(item: MediaItem.from(plex: episode))
                 }
         } else {
             content
