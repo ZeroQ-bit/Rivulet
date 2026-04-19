@@ -255,6 +255,20 @@ dither = no
 deband = no
 ```
 
+## Plex Discover API
+
+The Plex Discover API uses three different hosts:
+- `discover.provider.plex.tv` — watchlist CRUD (`/library/sections/watchlist/all`, `/actions/addToWatchlist`, `/actions/removeFromWatchlist`)
+- `metadata.provider.plex.tv` — metadata matches (`/library/metadata/matches?type={1|2}&guid=tmdb://X`)
+- `metadata-static.plex.tv` — image CDN (fully-qualified URLs, no auth needed)
+
+| Requirement | Notes |
+|------------|-------|
+| Token | Must use `authToken` (account-level), NOT `selectedServerToken` |
+| GUIDs | Pass `includeGuids=1` — Plex omits the `Guid` array by default |
+| Pagination | `X-Plex-Container-Size` is rejected on the watchlist endpoint |
+| Mutations | Resolve external GUID → discover `ratingKey` via matches endpoint first, then PUT actions |
+
 ## Plex Live TV
 
 ### Stream URL Types
