@@ -111,3 +111,33 @@ extension MediaItemTests {
         XCTAssertNil(item.year)
     }
 }
+
+extension MediaItemTests {
+    func test_withCast_replacesCastPreservingOtherFields() async {
+        let tmdb = TMDBListItem(
+            id: 7, title: "Inception",
+            overview: "Dream", posterPath: nil, backdropPath: nil,
+            releaseDate: "2010-07-16", voteAverage: 8.4, mediaType: .movie
+        )
+        let item = await MediaItem.from(tmdb: tmdb)
+        let cast = [CastMember(name: "Leo", role: "Cobb", profileImageURL: nil)]
+        let updated = item.with(cast: cast)
+
+        XCTAssertEqual(updated.cast, cast)
+        XCTAssertEqual(updated.id, item.id)
+        XCTAssertEqual(updated.title, item.title)
+        XCTAssertEqual(updated.year, item.year)
+    }
+
+    func test_withTmdbDetail_fillsRuntimeAndGenres() async {
+        let tmdb = TMDBListItem(
+            id: 8, title: "x",
+            overview: nil, posterPath: nil, backdropPath: nil,
+            releaseDate: nil, voteAverage: nil, mediaType: .movie
+        )
+        let item = await MediaItem.from(tmdb: tmdb)
+        let updated = item.with(runtimeMinutes: 120, genres: ["Drama", "Sci-Fi"])
+        XCTAssertEqual(updated.runtimeMinutes, 120)
+        XCTAssertEqual(updated.genres, ["Drama", "Sci-Fi"])
+    }
+}

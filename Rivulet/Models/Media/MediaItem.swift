@@ -126,3 +126,31 @@ extension MediaItem {
         )
     }
 }
+
+extension MediaItem {
+    func with(cast: [CastMember]) -> MediaItem {
+        MediaItem(
+            id: id, kind: kind, source: source,
+            title: title, year: year, overview: overview,
+            runtimeMinutes: runtimeMinutes, genres: genres, rating: rating,
+            backdropURL: backdropURL, posterURL: posterURL, logoURL: logoURL,
+            tmdbId: tmdbId, imdbId: imdbId,
+            plexMatch: plexMatch, plexMetadata: plexMetadata,
+            tmdbListItem: tmdbListItem,
+            cast: cast
+        )
+    }
+
+    func with(runtimeMinutes: Int?, genres: [String]) -> MediaItem {
+        MediaItem(
+            id: id, kind: kind, source: source,
+            title: title, year: year, overview: overview,
+            runtimeMinutes: runtimeMinutes, genres: genres, rating: rating,
+            backdropURL: backdropURL, posterURL: posterURL, logoURL: logoURL,
+            tmdbId: tmdbId, imdbId: imdbId,
+            plexMatch: plexMatch, plexMetadata: plexMetadata,
+            tmdbListItem: tmdbListItem,
+            cast: cast
+        )
+    }
+}
