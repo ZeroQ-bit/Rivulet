@@ -255,7 +255,7 @@ struct PlexLibraryView: View {
                 }
             }
             .navigationDestination(item: $selectedItem) { item in
-                MediaDetailView(item: item)
+                PlexDetailView(item: item)
             }
             .overlayPreferenceValue(PreviewSourceFramePreferenceKey.self) { anchors in
                 GeometryReader { proxy in

@@ -215,7 +215,7 @@ struct TVSidebarView: View {
             deepLinkHandler.pendingDetail = nil
         }
         .fullScreenCover(item: $deepLinkDetailItem) { metadata in
-            MediaDetailView(item: metadata)
+            PlexDetailView(item: metadata)
                 .presentationBackground(.black)
         }
         // What's New overlay

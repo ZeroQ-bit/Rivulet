@@ -76,7 +76,7 @@ struct PlexSearchView: View {
                     .scrollClipDisabled()
                 }
                 .navigationDestination(item: $selectedItem) { item in
-                    MediaDetailView(item: item)
+                    PlexDetailView(item: item)
                 }
             }
         }
