@@ -89,55 +89,10 @@ final class DiscoverRecommendationServiceTests: XCTestCase {
     }
 }
 
-final class StubDiscoverFetcher: DiscoverFetching, @unchecked Sendable {
+final class StubDiscoverFetcher: DiscoverFetching {
     var movies: [TMDBListItem] = []
     var shows: [TMDBListItem] = []
     func discover(type: TMDBMediaType, withGenres: [Int], withKeywords: [Int]) async -> [TMDBListItem] {
         type == .movie ? movies : shows
-    }
-}
-
-extension DiscoverRecommendationServiceTests {
-    func test_recommendationsForItem_tmdbItem_usesGenresFromCache() async {
-        let stub = StubDiscoverFetcher()
-        stub.movies = [
-            TMDBListItem(id: 200, title: "Rec1", overview: nil,
-                         posterPath: nil, backdropPath: nil,
-                         releaseDate: "2024", voteAverage: nil, mediaType: .movie)
-        ]
-        let service = DiscoverRecommendationService(
-            fetcher: stub,
-            libraryIndex: LibraryGUIDIndex.shared
-        )
-
-        let tmdb = TMDBListItem(
-            id: 1, title: "Inception",
-            overview: nil, posterPath: nil, backdropPath: nil,
-            releaseDate: "2010", voteAverage: nil, mediaType: .movie
-        )
-        var seed = await MediaItem.from(tmdb: tmdb)
-        seed = seed.with(runtimeMinutes: nil, genres: ["Sci-Fi", "Action"])
-
-        let recs = await service.recommendationsForItem(seed, limit: 5)
-        XCTAssertEqual(recs.count, 1)
-        XCTAssertEqual(recs.first?.id, "tmdb:200")
-        XCTAssertEqual(recs.first?.source, .tmdb)
-    }
-
-    func test_recommendationsForItem_emptyGenresReturnsEmpty() async {
-        let stub = StubDiscoverFetcher()
-        let service = DiscoverRecommendationService(
-            fetcher: stub,
-            libraryIndex: LibraryGUIDIndex.shared
-        )
-        let tmdb = TMDBListItem(
-            id: 1, title: "x", overview: nil,
-            posterPath: nil, backdropPath: nil,
-            releaseDate: nil, voteAverage: nil, mediaType: .movie
-        )
-        let seed = await MediaItem.from(tmdb: tmdb)   // genres == []
-
-        let recs = await service.recommendationsForItem(seed, limit: 5)
-        XCTAssertEqual(recs, [])
     }
 }

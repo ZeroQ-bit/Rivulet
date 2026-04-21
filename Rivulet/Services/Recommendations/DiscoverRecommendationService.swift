@@ -69,30 +69,3 @@ actor DiscoverRecommendationService {
         return filtered
     }
 }
-
-extension DiscoverRecommendationService {
-    /// Returns `MediaItem` recommendations seeded from a single item's genres.
-    /// For TMDB-only items, used in MediaDetailView's "Recommended for You" row.
-    /// For Plex items, callers should prefer the Plex-backed recommendation
-    /// service which uses richer per-item signals.
-    func recommendationsForItem(_ seed: MediaItem, limit: Int = 12) async -> [MediaItem] {
-        let genreIds = seed.genres
-            .compactMap { Self.genreNameToId[$0.lowercased()] }
-        guard !genreIds.isEmpty else { return [] }
-
-        let mediaType: TMDBMediaType = (seed.kind == .movie) ? .movie : .tv
-        let raw = await fetcher.discover(
-            type: mediaType,
-            withGenres: genreIds,
-            withKeywords: []
-        )
-
-        var results: [MediaItem] = []
-        for tmdb in raw where tmdb.id != seed.tmdbId {
-            let item = await MediaItem.from(tmdb: tmdb)
-            results.append(item)
-            if results.count >= limit { break }
-        }
-        return results
-    }
-}
