@@ -194,7 +194,7 @@ struct PlexHomeView: View {
                 }
             }
             .navigationDestination(item: $selectedItem) { item in
-                MediaDetailView(item: MediaItem.from(plex: item))
+                MediaDetailView(item: item)
             }
             .overlayPreferenceValue(PreviewSourceFramePreferenceKey.self) { anchors in
                 // Resolve anchor frames into CGRects

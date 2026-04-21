@@ -747,11 +747,8 @@ private struct PreviewHeroSurface: View {
     let previewAnimationSettled: Bool
 
     var body: some View {
-        // TEMPORARY: PreviewOverlayHost still types its carousel as
-        // [PlexMetadata] (Task 8 lifts that). Wrap here so MediaDetailView
-        // sees the unified MediaItem; Task 8 removes this bridge.
         MediaDetailView(
-            item: MediaItem.from(plex: item),
+            item: item,
             presentationMode: isExpanded ? .expandedDetail : .previewCarousel,
             backgroundParallaxOffset: backgroundParallaxOffset,
             showVignette: vignetteVisible,
