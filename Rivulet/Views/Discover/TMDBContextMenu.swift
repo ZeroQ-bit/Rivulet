@@ -3,8 +3,8 @@
 //  Rivulet
 //
 //  Long-press context menu for tiles in Discover. Offers Watchlist add/remove
-//  for every item; "Details" opens the unified carousel rooted at the tapped
-//  item with the rest of the row as side cards.
+//  for every item; when the item is in the user's library, also surfaces a
+//  Play action that jumps straight into the matched Plex item's player.
 //
 
 import SwiftUI
@@ -13,91 +13,104 @@ import os.log
 private let tmdbMenuLog = Logger(subsystem: "com.rivulet.app", category: "TMDBContextMenu")
 
 struct TMDBContextMenu: ViewModifier {
-    let item: MediaItem
-    /// Full row context — passed in so the "Details" action can build a
-    /// PreviewRequest with paging intact (single-item carousels feel broken).
-    let rowItems: [MediaItem]
-    let rowID: String
-    /// Emits a PreviewRequest when the user picks "Details".
-    let onSelect: (PreviewRequest) -> Void
+    let item: TMDBListItem
+    let isInLibrary: Bool
+    let libraryMatch: (TMDBListItem) async -> PlexMetadata?
+    var onInfo: (() -> Void)?
 
     @ObservedObject private var watchlist = PlexWatchlistService.shared
 
     func body(content: Content) -> some View {
         content.contextMenu {
-            Button {
-                emitDetails()
-            } label: {
-                Label("Details", systemImage: "info.circle")
+            if isInLibrary {
+                Button {
+                    Task { await presentDetailsMatched() }
+                } label: {
+                    Label("Details", systemImage: "info.circle")
+                }
             }
 
-            if let tmdbId = item.tmdbId {
+            Button {
+                Task { await toggleWatchlist() }
+            } label: {
+                if isOnWatchlist {
+                    Label("Remove from Watchlist", systemImage: "bookmark.slash")
+                } else {
+                    Label("Add to Watchlist", systemImage: "bookmark")
+                }
+            }
+
+            if let onInfo, !isInLibrary {
                 Button {
-                    Task { await toggleWatchlist(tmdbId: tmdbId) }
+                    onInfo()
                 } label: {
-                    if watchlist.contains(tmdbId: tmdbId) {
-                        Label("Remove from Watchlist", systemImage: "bookmark.slash")
-                    } else {
-                        Label("Add to Watchlist", systemImage: "bookmark")
-                    }
+                    Label("More Info", systemImage: "info.circle")
                 }
             }
         }
     }
 
-    private func emitDetails() {
-        let idx = rowItems.firstIndex(where: { $0.id == item.id }) ?? 0
-        onSelect(PreviewRequest(
-            items: rowItems,
-            selectedIndex: idx,
-            sourceRowID: rowID,
-            sourceItemID: item.id
-        ))
+    private var isOnWatchlist: Bool {
+        watchlist.contains(tmdbId: item.id)
     }
 
-    private func toggleWatchlist(tmdbId: Int) async {
-        let guid = "tmdb://\(tmdbId)"
+    private func toggleWatchlist() async {
+        let guid = "tmdb://\(item.id)"
         if watchlist.contains(guid: guid) {
             tmdbMenuLog.info("Watchlist remove \(guid, privacy: .public)")
             await watchlist.remove(guid: guid)
         } else {
-            let watchType: PlexWatchlistItem.WatchlistType = item.kind == .movie ? .movie : .show
+            let watchType: PlexWatchlistItem.WatchlistType = item.mediaType == .movie ? .movie : .show
+            let yearInt: Int? = {
+                guard let raw = item.releaseDate?.prefix(4), !raw.isEmpty else { return nil }
+                return Int(raw)
+            }()
+            let posterURL: URL? = item.posterPath.flatMap {
+                URL(string: "https://image.tmdb.org/t/p/w500\($0)")
+            }
             let wli = PlexWatchlistItem(
                 id: guid,
                 title: item.title,
-                year: item.year,
+                year: yearInt,
                 type: watchType,
-                posterURL: item.posterURL,
+                posterURL: posterURL,
                 guids: [guid]
             )
             tmdbMenuLog.info("Watchlist add \(guid, privacy: .public)")
             await watchlist.add(guid: guid, item: wli)
         }
     }
+
+    private func presentDetailsMatched() async {
+        guard let plex = await libraryMatch(item),
+              let ratingKey = plex.ratingKey else {
+            tmdbMenuLog.warning("Details requested but no library match for tmdb://\(item.id, privacy: .public)")
+            return
+        }
+        await DiscoverPlaybackRouter.shared.presentDetails(ratingKey: ratingKey)
+    }
 }
 
 extension View {
     /// Attach a Discover-flavored long-press context menu to a TMDB tile.
     func tmdbContextMenu(
-        item: MediaItem,
-        rowItems: [MediaItem],
-        rowID: String,
-        onSelect: @escaping (PreviewRequest) -> Void
+        item: TMDBListItem,
+        isInLibrary: Bool,
+        libraryMatch: @escaping (TMDBListItem) async -> PlexMetadata?,
+        onInfo: (() -> Void)? = nil
     ) -> some View {
         modifier(TMDBContextMenu(
             item: item,
-            rowItems: rowItems,
-            rowID: rowID,
-            onSelect: onSelect
+            isInLibrary: isInLibrary,
+            libraryMatch: libraryMatch,
+            onInfo: onInfo
         ))
     }
 }
 
-/// Centralised "present MediaDetailView for a ratingKey" so the Discover
+/// Centralised "present PlexDetailView for a ratingKey" so the Discover
 /// context menu can reach the detail path without coupling to any one view's
-/// presentation state. (Retained for code paths that resolve a ratingKey
-/// asynchronously after a context-menu action; the row-tile flow now goes
-/// through the unified carousel via `onSelect` above.)
+/// presentation state.
 @MainActor
 final class DiscoverPlaybackRouter {
     static let shared = DiscoverPlaybackRouter()
@@ -107,6 +120,8 @@ final class DiscoverPlaybackRouter {
         guard let serverURL = auth.selectedServerURL,
               let token = auth.selectedServerToken else { return }
 
+        // Resolve the Plex metadata (context menu only had a ratingKey) so we
+        // can present `PlexDetailView`.
         guard let metadata = try? await PlexNetworkManager.shared.getMetadata(
             serverURL: serverURL,
             authToken: token,

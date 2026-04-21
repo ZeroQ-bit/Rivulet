@@ -153,22 +153,4 @@ extension MediaItem {
             cast: cast
         )
     }
-
-    /// Builder used by Watchlist projection: TMDB stubs synthesized from
-    /// PlexWatchlistItem don't carry a backdropPath/posterPath, but the
-    /// PlexWatchlistItem already has an absolute posterURL. This preserves it
-    /// so watchlist tiles render their poster art.
-    func with(posterOverride: URL?) -> MediaItem {
-        guard let posterOverride else { return self }
-        return MediaItem(
-            id: id, kind: kind, source: source,
-            title: title, year: year, overview: overview,
-            runtimeMinutes: runtimeMinutes, genres: genres, rating: rating,
-            backdropURL: backdropURL, posterURL: posterOverride, logoURL: logoURL,
-            tmdbId: tmdbId, imdbId: imdbId,
-            plexMatch: plexMatch, plexMetadata: plexMetadata,
-            tmdbListItem: tmdbListItem,
-            cast: cast
-        )
-    }
 }

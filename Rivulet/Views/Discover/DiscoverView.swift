@@ -3,9 +3,8 @@
 //  Rivulet
 //
 //  Top-level Discover page. Fixed TMDB hero backdrop behind a scroll view
-//  containing the hero overlay (Add to Watchlist / Details for in-library
-//  items) and 8 TMDB curated sections plus For You. All entry points route
-//  into the unified preview carousel.
+//  containing the hero overlay (Add to Watchlist / Play for in-library items)
+//  and 8 TMDB curated sections plus For You.
 //
 
 import SwiftUI
@@ -15,10 +14,8 @@ struct DiscoverView: View {
     @StateObject private var viewModel = DiscoverViewModel()
     @StateObject private var watchlist = PlexWatchlistService.shared
 
-    @State private var rowPreviewRequest: PreviewRequest?
-    @State private var showPreviewCover = false
-    @State private var capturedSourceFrames: [PreviewSourceTarget: CGRect] = [:]
-    @State private var previewRestoreTarget: PreviewSourceTarget?
+    @State private var presentedPlexItem: PlexMetadata?
+    @State private var presentedTMDBItem: TMDBListItem?
 
     @State private var heroCurrentIndex: Int = 0
     @State private var heroScrollOffset: CGFloat = 0
@@ -32,7 +29,7 @@ struct DiscoverView: View {
         let screenHeight = UIScreen.main.bounds.height
         let heroSectionHeight = screenHeight - 200
         let heroActive = !viewModel.heroItems.isEmpty
-        let currentHeroItem: MediaItem? = {
+        let currentHeroItem: TMDBListItem? = {
             guard heroActive else { return nil }
             let clamped = max(0, min(heroCurrentIndex, viewModel.heroItems.count - 1))
             return viewModel.heroItems[clamped]
@@ -43,6 +40,8 @@ struct DiscoverView: View {
             if heroActive {
                 DiscoverHeroBackdrop(currentItem: currentHeroItem)
                     .ignoresSafeArea()
+                    // Matches the library view's hero parallax — pulls up further
+                    // than the home page so the first row seats higher on scroll.
                     .offset(y: -heroScrollOffset * 1.3 - min(122, heroScrollOffset * 1.22))
                     .allowsHitTesting(false)
             }
@@ -54,7 +53,16 @@ struct DiscoverView: View {
                             DiscoverHeroOverlay(
                                 items: viewModel.heroItems,
                                 currentIndex: $heroCurrentIndex,
-                                onSelect: emitPreviewRequest,
+                                inLibraryTMDBIds: viewModel.inLibraryTMDBIds,
+                                libraryMatch: { item in
+                                    await viewModel.libraryMatch(for: item)
+                                },
+                                onPresentPlex: { metadata in
+                                    presentedPlexItem = metadata
+                                },
+                                onInfo: { item in
+                                    Task { await handleSelection(item) }
+                                },
                                 onHeroFocused: {
                                     withAnimation(.smooth(duration: 0.8)) {
                                         scrollProxy.scrollTo("discoverHero", anchor: .top)
@@ -73,12 +81,12 @@ struct DiscoverView: View {
                                     DiscoverRow(
                                         title: section.title,
                                         items: items,
-                                        isInLibrary: { $0.plexMatch != nil },
-                                        isOnWatchlist: { item in
-                                            guard let tmdbId = item.tmdbId else { return false }
-                                            return watchlist.contains(tmdbId: tmdbId)
+                                        isInLibrary: { viewModel.inLibraryTMDBIds.contains($0.id) },
+                                        isOnWatchlist: { watchlist.contains(tmdbId: $0.id) },
+                                        onSelect: { item in
+                                            Task { await handleSelection(item) }
                                         },
-                                        onSelect: emitPreviewRequest
+                                        libraryMatch: { await viewModel.libraryMatch(for: $0) }
                                     )
                                 }
                             }
@@ -88,12 +96,12 @@ struct DiscoverView: View {
                                 DiscoverRow(
                                     title: "For You",
                                     items: viewModel.forYou,
-                                    isInLibrary: { $0.plexMatch != nil },
-                                    isOnWatchlist: { item in
-                                        guard let tmdbId = item.tmdbId else { return false }
-                                        return watchlist.contains(tmdbId: tmdbId)
+                                    isInLibrary: { _ in false },
+                                    isOnWatchlist: { watchlist.contains(tmdbId: $0.id) },
+                                    onSelect: { item in
+                                        Task { await handleSelection(item) }
                                     },
-                                    onSelect: emitPreviewRequest
+                                    libraryMatch: { _ in nil }
                                 )
                             }
                         }
@@ -111,76 +119,21 @@ struct DiscoverView: View {
             }
         }
         .task { await viewModel.load() }
-        .overlayPreferenceValue(PreviewSourceFramePreferenceKey.self) { anchors in
-            GeometryReader { proxy in
-                Color.clear
-                    .hidden()
-                    .task(id: anchors.count) {
-                        capturedSourceFrames = Dictionary(
-                            uniqueKeysWithValues: anchors.map { ($0.key, proxy[$0.value]) }
-                        )
-                    }
-            }
-            .allowsHitTesting(false)
+        .fullScreenCover(item: $presentedPlexItem) { metadata in
+            MediaDetailView(item: MediaItem.from(plex: metadata))
+                .presentationBackground(.black)
         }
-        .onChange(of: showPreviewCover) { _, isShowing in
-            if isShowing, let request = rowPreviewRequest {
-                presentPreview(request: request)
-            }
+        .fullScreenCover(item: $presentedTMDBItem) { item in
+            TMDBItemDetailView(item: item)
+                .presentationBackground(.black)
         }
     }
 
-    private func emitPreviewRequest(_ request: PreviewRequest) {
-        withAnimation(previewEntryAnimation) {
-            rowPreviewRequest = request
-            showPreviewCover = true
-        }
-    }
-
-    // MARK: - Preview Presentation (UIKit Modal — mirrors PlexHomeView)
-
-    private func presentPreview(request: PreviewRequest) {
-        let menuBridge = PreviewMenuBridge()
-        let auth = PlexAuthManager.shared
-
-        let previewContent = PreviewOverlayHost(
-            request: request,
-            sourceFrames: capturedSourceFrames,
-            serverURL: auth.selectedServerURL ?? "",
-            authToken: auth.selectedServerToken ?? "",
-            onDismiss: { [weak menuBridge] sourceTarget in
-                _ = menuBridge
-                previewRestoreTarget = sourceTarget
-                if let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-                   let rootVC = scene.windows.first?.rootViewController {
-                    var topVC = rootVC
-                    while let presented = topVC.presentedViewController {
-                        topVC = presented
-                    }
-                    if let previewVC = topVC as? PreviewContainerViewController {
-                        previewVC.dismissPreview()
-                    }
-                }
-            },
-            menuBridge: menuBridge
-        )
-
-        let container = PreviewContainerViewController(
-            content: previewContent,
-            menuHandler: { menuBridge.triggerMenu() }
-        )
-        container.onDismiss = {
-            showPreviewCover = false
-            rowPreviewRequest = nil
-        }
-
-        if let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-           let rootVC = scene.windows.first?.rootViewController {
-            var topVC = rootVC
-            while let presented = topVC.presentedViewController {
-                topVC = presented
-            }
-            topVC.present(container, animated: false)
+    private func handleSelection(_ item: TMDBListItem) async {
+        if let plex = await viewModel.libraryMatch(for: item) {
+            presentedPlexItem = plex
+        } else {
+            presentedTMDBItem = item
         }
     }
 }
@@ -189,9 +142,10 @@ struct DiscoverView: View {
 
 @MainActor
 final class DiscoverViewModel: ObservableObject {
-    @Published private(set) var sectionItems: [TMDBDiscoverSection: [MediaItem]] = [:]
-    @Published private(set) var forYou: [MediaItem] = []
-    @Published private(set) var heroItems: [MediaItem] = []
+    @Published private(set) var sectionItems: [TMDBDiscoverSection: [TMDBListItem]] = [:]
+    @Published private(set) var forYou: [TMDBListItem] = []
+    @Published private(set) var inLibraryTMDBIds: Set<Int> = []
+    @Published private(set) var heroItems: [TMDBListItem] = []
     @Published private(set) var loading = false
 
     private let discoverService = TMDBDiscoverService.shared
@@ -209,23 +163,21 @@ final class DiscoverViewModel: ObservableObject {
         loading = true
         defer { loading = false }
 
-        // Fetch all 8 sections in parallel, then convert each TMDB list into
-        // MediaItem (which resolves any in-library Plex match per item).
-        await withTaskGroup(of: (TMDBDiscoverSection, [MediaItem]).self) { group in
+        // Fetch all 8 sections in parallel.
+        await withTaskGroup(of: (TMDBDiscoverSection, [TMDBListItem]).self) { group in
             for section in TMDBDiscoverSection.allCases {
                 group.addTask { [discoverService] in
-                    let raw = await discoverService.fetchSection(section)
-                    var converted: [MediaItem] = []
-                    for tmdb in raw {
-                        converted.append(await MediaItem.from(tmdb: tmdb))
-                    }
-                    return (section, converted)
+                    let items = await discoverService.fetchSection(section)
+                    return (section, items)
                 }
             }
             for await (section, items) in group {
                 sectionItems[section] = items
             }
         }
+
+        // Precompute the in-library TMDB id set for sync lookup from row closures.
+        await recomputeInLibrarySet()
 
         // Pick hero items from the same popular sources the home page uses.
         heroItems = computeHeroItems(cap: heroItemCap)
@@ -236,42 +188,54 @@ final class DiscoverViewModel: ObservableObject {
 
         // "For You" appends below the curated sections once watch-history
         // features resolve, so it doesn't shift the layout out from under
-        // the user. Hides itself on cold-start (too few watched items).
+        // the user. Hides itself on cold-start (too few watched items to
+        // produce a meaningful profile).
         let watchedItems = await collectWatchHistory()
         if watchedItems.count >= forYouColdStartMinWatched {
             let profile = await WatchProfileBuilder.build(from: watchedItems)
-            let raw = await recommendationService.forYouRow(profile: profile)
-            var converted: [MediaItem] = []
-            for tmdb in raw {
-                converted.append(await MediaItem.from(tmdb: tmdb))
-            }
-            forYou = converted
+            forYou = await recommendationService.forYouRow(profile: profile)
         } else {
             forYou = []
         }
     }
 
-    func items(for section: TMDBDiscoverSection) -> [MediaItem] {
+    func items(for section: TMDBDiscoverSection) -> [TMDBListItem] {
         sectionItems[section] ?? []
     }
 
+    func libraryMatch(for item: TMDBListItem) async -> PlexMetadata? {
+        await libraryIndex.lookup(tmdbId: item.id, type: item.mediaType)
+    }
+
     /// Warm the image cache for the full hero carousel so paging doesn't
-    /// trigger a blank flash.
-    private func prefetchHeroAssets(_ items: [MediaItem]) {
-        let urls = items.flatMap { item -> [URL] in
-            [item.backdropURL, item.posterURL].compactMap { $0 }
+    /// trigger a blank flash. Larger `w1280` size is what `HeroBackdropImage`
+    /// will resolve from the `original` URL — using `original` for prefetch
+    /// matches what the view requests.
+    private func prefetchHeroAssets(_ items: [TMDBListItem]) {
+        let backdropBase = "https://image.tmdb.org/t/p/original"
+        let posterBase = "https://image.tmdb.org/t/p/w500"
+        var urls: [URL] = []
+        for item in items {
+            if let path = item.backdropPath,
+               let url = URL(string: "\(backdropBase)\(path)") {
+                urls.append(url)
+            }
+            if let path = item.posterPath,
+               let url = URL(string: "\(posterBase)\(path)") {
+                urls.append(url)
+            }
         }
         guard !urls.isEmpty else { return }
         Task { await ImageCacheManager.shared.prefetch(urls: urls) }
     }
 
-    /// Interleave Popular Movies + Popular TV (already fetched for the curated
-    /// rows) to seed the hero carousel. Prefers items with backdrops.
-    private func computeHeroItems(cap: Int) -> [MediaItem] {
+    /// Interleave Popular Movies + Popular TV (which we've already fetched for
+    /// the curated rows) to seed the hero carousel. Prefers items with backdrops.
+    private func computeHeroItems(cap: Int) -> [TMDBListItem] {
         let movies = sectionItems[.moviePopular] ?? []
         let shows = sectionItems[.tvPopular] ?? []
 
-        var interleaved: [MediaItem] = []
+        var interleaved: [TMDBListItem] = []
         let count = max(movies.count, shows.count)
         for i in 0..<count {
             if i < movies.count { interleaved.append(movies[i]) }
@@ -279,13 +243,27 @@ final class DiscoverViewModel: ObservableObject {
             if interleaved.count >= cap * 2 { break }
         }
 
+        // Prefer items with a backdrop so the hero never shows the fallback gradient.
         let ranked = interleaved.sorted { (a, b) in
-            let aHas = (a.backdropURL != nil) ? 1 : 0
-            let bHas = (b.backdropURL != nil) ? 1 : 0
+            let aHas = (a.backdropPath?.isEmpty == false) ? 1 : 0
+            let bHas = (b.backdropPath?.isEmpty == false) ? 1 : 0
             return aHas > bHas
         }
 
         return Array(ranked.prefix(cap))
+    }
+
+    /// Rebuild `inLibraryTMDBIds` by asking the library index for each fetched item.
+    /// This runs after section items load. Single pass, one actor hop per id — cheap.
+    private func recomputeInLibrarySet() async {
+        let allIds = sectionItems.values.flatMap { $0.map { ($0.id, $0.mediaType) } }
+        var newSet: Set<Int> = []
+        for (id, mediaType) in allIds {
+            if await libraryIndex.lookup(tmdbId: id, type: mediaType) != nil {
+                newSet.insert(id)
+            }
+        }
+        inLibraryTMDBIds = newSet
     }
 
     private func collectWatchHistory() async -> [PlexMetadata] {

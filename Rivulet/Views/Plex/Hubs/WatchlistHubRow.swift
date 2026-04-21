@@ -14,10 +14,8 @@ private let watchlistRowLog = Logger(subsystem: "com.rivulet.app", category: "Wa
 struct WatchlistHubRow: View {
     @ObservedObject var watchlist: PlexWatchlistService
 
-    /// Emits a `PreviewRequest` rooted at the tapped tile so the unified
-    /// carousel opens with the full watchlist as side cards. Callers route
-    /// this into their `rowPreviewRequest` state.
-    let onSelect: (PreviewRequest) -> Void
+    let onSelectPlex: (PlexMetadata) -> Void
+    let onSelectTMDB: (TMDBListItem) -> Void
     var onRowFocused: (() -> Void)?
 
     @Environment(\.uiScale) private var scale
@@ -27,15 +25,6 @@ struct WatchlistHubRow: View {
     private var itemSpacing: CGFloat { ScaledDimensions.rowItemSpacing * scale }
 
     @FocusState private var focusedItemId: String?
-
-    /// Stable per-tile identifier shared between the focus state, the source
-    /// anchor for the preview transition, and the carousel's selected index
-    /// lookup. Uses the tmdbId when present (matches the MediaItem.id format
-    /// `tmdb:<id>`) so the carousel's selectedIndex resolution succeeds.
-    private func itemMediaId(_ item: PlexWatchlistItem) -> String {
-        if let tmdbId = item.tmdbId { return "tmdb:\(tmdbId)" }
-        return "wl:\(item.id)"
-    }
 
     var body: some View {
         if watchlist.watchlistItems.isEmpty {
@@ -50,13 +39,12 @@ struct WatchlistHubRow: View {
                     LazyHStack(spacing: itemSpacing) {
                         ForEach(watchlist.watchlistItems.prefix(20)) { item in
                             Button {
-                                emitPreviewRequest(for: item)
+                                Task { await select(item) }
                             } label: {
                                 WatchlistTile(item: item)
                             }
                             .buttonStyle(CardButtonStyle())
                             .focused($focusedItemId, equals: item.id)
-                            .previewSourceAnchor(rowID: "watchlist", itemID: itemMediaId(item))
                         }
                     }
                     .padding(.horizontal, horizontalPadding)
@@ -76,21 +64,27 @@ struct WatchlistHubRow: View {
         }
     }
 
-    private func emitPreviewRequest(for item: PlexWatchlistItem) {
-        let mediaItems = watchlist.mediaItems
-        let targetID = itemMediaId(item)
-        guard let idx = mediaItems.firstIndex(where: { $0.id == targetID }) else {
-            // The mediaItems projection may briefly lag a fresh add — surface a
-            // log so the cause is visible if a tap silently no-ops.
-            watchlistRowLog.warning("[Select] no MediaItem match for \(targetID, privacy: .public)")
+    private func select(_ item: PlexWatchlistItem) async {
+        guard let tmdbId = item.tmdbId else {
+            watchlistRowLog.warning("[Select] no tmdbId on \(item.title, privacy: .public), guids=\(item.guids.joined(separator: ","), privacy: .public)")
             return
         }
-        onSelect(PreviewRequest(
-            items: mediaItems,
-            selectedIndex: idx,
-            sourceRowID: "watchlist",
-            sourceItemID: targetID
-        ))
+        let mediaType: TMDBMediaType = item.type == .movie ? .movie : .tv
+        if let match = await LibraryGUIDIndex.shared.lookup(tmdbId: tmdbId, type: mediaType) {
+            onSelectPlex(match)
+            return
+        }
+        let stub = TMDBListItem(
+            id: tmdbId,
+            title: item.title,
+            overview: nil,
+            posterPath: nil,
+            backdropPath: nil,
+            releaseDate: item.year.map { "\($0)" },
+            voteAverage: nil,
+            mediaType: mediaType
+        )
+        onSelectTMDB(stub)
     }
 }
 

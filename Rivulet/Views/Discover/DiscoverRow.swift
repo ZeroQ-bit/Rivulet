@@ -5,20 +5,21 @@
 //  Horizontal row of DiscoverTiles. Mirrors MediaRow's layout, padding,
 //  spacing, focus, and onPress behavior so Discover blends with Home/Library.
 //
-//  Each tile has a long-press context menu offering Details + Add/Remove
-//  Watchlist; tile selection emits a PreviewRequest into the unified carousel.
+//  Each tile has a long-press context menu: if the item is in library, Play
+//  appears alongside Add/Remove Watchlist; otherwise only Add/Remove Watchlist.
 //
 
 import SwiftUI
 
 struct DiscoverRow: View {
     let title: String
-    let items: [MediaItem]
-    let isInLibrary: (MediaItem) -> Bool
-    let isOnWatchlist: (MediaItem) -> Bool
-    /// Emits a `PreviewRequest` rooted at the tapped tile so the unified
-    /// carousel opens with the rest of the row as side cards.
-    let onSelect: (PreviewRequest) -> Void
+    let items: [TMDBListItem]
+    let isInLibrary: (TMDBListItem) -> Bool
+    let isOnWatchlist: (TMDBListItem) -> Bool
+    let onSelect: (TMDBListItem) -> Void
+    /// Async-resolves a TMDB item to the matched `PlexMetadata` for
+    /// context-menu playback. Returns nil for non-library items.
+    let libraryMatch: (TMDBListItem) async -> PlexMetadata?
 
     @Environment(\.uiScale) private var scale
 
@@ -28,8 +29,6 @@ struct DiscoverRow: View {
 
     @FocusState private var focusedItemId: String?
 
-    private var rowID: String { "discover:\(title)" }
-
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text(title)
@@ -38,9 +37,9 @@ struct DiscoverRow: View {
 
             ScrollView(.horizontal, showsIndicators: false) {
                 LazyHStack(spacing: itemSpacing) {
-                    ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
+                    ForEach(items) { item in
                         Button {
-                            emitPreview(for: index)
+                            onSelect(item)
                         } label: {
                             DiscoverTile(
                                 item: item,
@@ -49,13 +48,12 @@ struct DiscoverRow: View {
                             )
                         }
                         .buttonStyle(CardButtonStyle())
-                        .focused($focusedItemId, equals: item.id)
-                        .previewSourceAnchor(rowID: rowID, itemID: item.id)
+                        .focused($focusedItemId, equals: String(item.id))
                         .tmdbContextMenu(
                             item: item,
-                            rowItems: items,
-                            rowID: rowID,
-                            onSelect: onSelect
+                            isInLibrary: isInLibrary(item),
+                            libraryMatch: libraryMatch,
+                            onInfo: { onSelect(item) }
                         )
                     }
                 }
@@ -65,16 +63,6 @@ struct DiscoverRow: View {
             .scrollClipDisabled()
         }
         .focusSection()
-        .defaultFocus($focusedItemId, items.first.map(\.id))
-    }
-
-    private func emitPreview(for index: Int) {
-        guard items.indices.contains(index) else { return }
-        onSelect(PreviewRequest(
-            items: items,
-            selectedIndex: index,
-            sourceRowID: rowID,
-            sourceItemID: items[index].id
-        ))
+        .defaultFocus($focusedItemId, items.first.map { String($0.id) })
     }
 }
