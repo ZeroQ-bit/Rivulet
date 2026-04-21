@@ -161,21 +161,15 @@ struct MediaDetailView: View {
     private var canRunDetailCascade: Bool {
         shouldLoadDetailData && previewAnimationSettled
     }
-    /// Task ID keyed on the unified MediaItem id (`plex:<rk>` / `tmdb:<id>`).
-    /// Using the MediaItem id rather than `currentItem.ratingKey` matters for
-    /// TMDB-only items: their `currentItem` falls back to an empty
-    /// `PlexMetadata()` whose `ratingKey` is nil, so every TMDB-only card
-    /// would otherwise share the id `"unknown"` and `.task(id:)` would never
-    /// re-fire when paging between them.
-    ///
-    /// We deliberately do *not* include `shouldLoadDetailData` or
-    /// `previewAnimationSettled` here — those gates are checked *inside* the
-    /// task body via early-return, and a separate `.onChange` re-invokes
-    /// `loadDetailData()` when they flip. Including them in the task ID would
-    /// cause `.task(id:)` to cancel and restart mid-paging when `isCurrent`
-    /// flips, which was the dominant paging-jank source.
+    /// Task ID keyed only on the rating key. We deliberately do *not* include
+    /// `shouldLoadDetailData` or `previewAnimationSettled` here — those gates
+    /// are checked *inside* the task body via early-return, and a separate
+    /// `.onChange` re-invokes `loadDetailData()` when they flip. Including
+    /// them in the task ID would cause `.task(id:)` to cancel and restart
+    /// mid-paging when `isCurrent` flips, which was the dominant paging-jank
+    /// source.
     private var detailLoadTaskID: String {
-        currentMediaItem.id
+        currentItem.ratingKey ?? "unknown"
     }
     private var effectiveHeroLogoURL: URL? {
         heroBackdrop.session.logoURL ?? retainedLogoURL
@@ -569,7 +563,7 @@ struct MediaDetailView: View {
                 await loadDetailData()
             }
         }
-        .task(id: "kenburns-\(currentMediaItem.id)") {
+        .task(id: "kenburns-\(currentItem.ratingKey ?? "")") {
             guard !isPreviewCarousel, !isExpandedPreviewFlow else {
                 kenBurnsOffset = 0
                 return
