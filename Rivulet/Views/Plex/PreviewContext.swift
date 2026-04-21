@@ -9,7 +9,7 @@ import SwiftUI
 
 struct PreviewRequest: Identifiable {
     let id = UUID()
-    let items: [MediaItem]
+    let items: [PlexMetadata]
     let selectedIndex: Int
     let sourceRowID: String
     let sourceItemID: String

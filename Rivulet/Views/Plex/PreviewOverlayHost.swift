@@ -444,93 +444,61 @@ struct PreviewOverlayHost: View {
         let itemsToPrefetch = [index - 1, index, index + 1]
             .filter { request.items.indices.contains($0) }
             .map { request.items[$0] }
+        let requests = itemsToPrefetch.map {
+            $0.heroBackdropRequest(serverURL: serverURLValue, authToken: authTokenValue)
+        }
+        let ratingKeys = itemsToPrefetch.compactMap(\.ratingKey)
 
         Task.detached(priority: .utility) {
+            [requests, ratingKeys, itemsToPrefetch, serverURLValue, authTokenValue, networkManager] in
+            for request in requests {
+                _ = await HeroBackdropResolver.shared.resolveAssets(for: request)
+            }
+
+            guard !ratingKeys.isEmpty else { return }
+
+            // Prefetch fullMetadata + children (episodes/leaves) in parallel
+            // for each neighbor so the data cascade is instant when paged to.
             await withTaskGroup(of: Void.self) { group in
                 for item in itemsToPrefetch {
+                    guard let ratingKey = item.ratingKey else { continue }
+
+                    // fullMetadata
                     group.addTask {
-                        await Self.prefetchOne(
-                            item: item,
+                        let isFresh = await MainActor.run {
+                            PlexDataStore.shared.isFullMetadataFresh(for: ratingKey)
+                        }
+                        guard !isFresh else { return }
+                        guard let metadata = try? await networkManager.getFullMetadata(
                             serverURL: serverURLValue,
                             authToken: authTokenValue,
-                            networkManager: networkManager
-                        )
+                            ratingKey: ratingKey
+                        ) else { return }
+                        await MainActor.run {
+                            PlexDataStore.shared.cacheFullMetadata(metadata, for: ratingKey)
+                        }
                     }
-                }
-            }
-        }
-    }
 
-    /// Source-aware prefetch — Plex items hydrate fullMetadata + child leaves
-    /// + hero backdrop; TMDB-only items hydrate the backdrop image and the
-    /// MediaItemDetailCache (cast/runtime/genres).
-    private static func prefetchOne(
-        item: MediaItem,
-        serverURL: String,
-        authToken: String,
-        networkManager: PlexNetworkManager
-    ) async {
-        if let plex = item.plexMetadata {
-            let backdropRequest = plex.heroBackdropRequest(
-                serverURL: serverURL,
-                authToken: authToken
-            )
-            _ = await HeroBackdropResolver.shared.resolveAssets(for: backdropRequest)
-
-            guard let ratingKey = plex.ratingKey else { return }
-
-            let isFresh = await MainActor.run {
-                PlexDataStore.shared.isFullMetadataFresh(for: ratingKey)
-            }
-            if !isFresh,
-               let metadata = try? await networkManager.getFullMetadata(
-                serverURL: serverURL,
-                authToken: authToken,
-                ratingKey: ratingKey
-               ) {
-                await MainActor.run {
-                    PlexDataStore.shared.cacheFullMetadata(metadata, for: ratingKey)
-                }
-            }
-            if plex.type == "show",
-               let episodes = try? await networkManager.getAllLeaves(
-                serverURL: serverURL,
-                authToken: authToken,
-                ratingKey: ratingKey
-               ) {
-                let thumbURLs = episodes.prefix(8).compactMap { ep -> URL? in
-                    guard let thumb = ep.thumb else { return nil }
-                    return URL(string: "\(serverURL)\(thumb)?X-Plex-Token=\(authToken)")
-                }
-                for url in thumbURLs {
-                    _ = await ImageCacheManager.shared.image(for: url)
-                }
-            }
-        } else if let tmdbId = item.tmdbId {
-            // TMDB-only — warm the backdrop and prime the detail cache so the
-            // below-fold cascade in MediaDetailView is a cache hit when paged to.
-            if let backdrop = item.backdropURL {
-                _ = await ImageCacheManager.shared.imageFullSize(for: backdrop)
-            }
-            if await MediaItemDetailCache.shared.detail(for: item.id) == nil {
-                let mediaType: TMDBMediaType = (item.kind == .movie) ? .movie : .tv
-                if let detail = await TMDBDiscoverService.shared.fetchDetail(
-                    tmdbId: tmdbId, type: mediaType
-                ) {
-                    let cast: [CastMember] = detail.cast.map { credit in
-                        CastMember(
-                            name: credit.name ?? "",
-                            role: credit.character,
-                            profileImageURL: nil
-                        )
+                    // For shows: prefetch all-episodes (getAllLeaves) so the
+                    // episode thumbnails + data are cached before the user
+                    // pages to this card.
+                    if item.type == "show" {
+                        group.addTask {
+                            guard let episodes = try? await networkManager.getAllLeaves(
+                                serverURL: serverURLValue,
+                                authToken: authTokenValue,
+                                ratingKey: ratingKey
+                            ) else { return }
+                            // Warm the first ~8 episode thumbnails
+                            let thumbURLs = episodes.prefix(8).compactMap { ep -> URL? in
+                                guard let thumb = ep.thumb else { return nil }
+                                return URL(string: "\(serverURLValue)\(thumb)?X-Plex-Token=\(authTokenValue)")
+                            }
+                            for url in thumbURLs {
+                                _ = await ImageCacheManager.shared.image(for: url)
+                            }
+                        }
                     }
-                    let genres = detail.genres.compactMap(\.name)
-                    await MediaItemDetailCache.shared.store(
-                        id: item.id,
-                        cast: cast,
-                        runtimeMinutes: detail.runtime,
-                        genres: genres
-                    )
                 }
             }
         }
@@ -654,7 +622,7 @@ struct PreviewOverlayHost: View {
 }
 
 private struct PreviewCarouselCard: View {
-    let item: MediaItem
+    let item: PlexMetadata
     let serverURL: String
     let authToken: String
     let frame: CGRect
@@ -761,7 +729,7 @@ private struct PreviewCarouselStageWindow: View {
 }
 
 private struct PreviewHeroSurface: View {
-    let item: MediaItem
+    let item: PlexMetadata
     let isExpanded: Bool
     let vignetteVisible: Bool
     let metadataVisible: Bool
@@ -779,8 +747,11 @@ private struct PreviewHeroSurface: View {
     let previewAnimationSettled: Bool
 
     var body: some View {
+        // TEMPORARY: PreviewOverlayHost still types its carousel as
+        // [PlexMetadata] (Task 8 lifts that). Wrap here so MediaDetailView
+        // sees the unified MediaItem; Task 8 removes this bridge.
         MediaDetailView(
-            item: item,
+            item: MediaItem.from(plex: item),
             presentationMode: isExpanded ? .expandedDetail : .previewCarousel,
             backgroundParallaxOffset: backgroundParallaxOffset,
             showVignette: vignetteVisible,
@@ -810,27 +781,17 @@ private struct PreviewHeroSurface: View {
 /// over. Binding `HeroBackdropImage` directly to the resolved URL removes a
 /// `@Published` publisher and a `.task(id:)` from the entry window.
 private struct PreviewCarouselSideCard: View {
-    let item: MediaItem
+    let item: PlexMetadata
     let serverURL: String
     let authToken: String
     let motionLocked: Bool
 
-    /// Source-aware backdrop URL — Plex items resolve via the existing
-    /// hero backdrop request (which carries the server token); TMDB-only
-    /// items use the absolute TMDB CDN URL on the MediaItem directly.
-    private var backdropURL: URL? {
-        if let plex = item.plexMetadata {
-            let request = plex.heroBackdropRequest(
-                serverURL: serverURL,
-                authToken: authToken
-            )
-            return request.plexBackdropURL ?? request.plexThumbnailURL
-        }
-        return item.backdropURL
+    private var request: HeroBackdropRequest {
+        item.heroBackdropRequest(serverURL: serverURL, authToken: authToken)
     }
 
     var body: some View {
-        HeroBackdropImage(url: backdropURL) {
+        HeroBackdropImage(url: request.plexBackdropURL ?? request.plexThumbnailURL) {
             Rectangle()
                 .fill(
                     LinearGradient(
