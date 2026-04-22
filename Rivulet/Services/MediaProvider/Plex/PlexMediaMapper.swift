@@ -158,8 +158,13 @@ enum PlexMediaMapper {
             runtime: runtime,
             parentRef: parentRef,
             grandparentRef: grandparentRef,
+            episodeNumber: nil,            // populated in Task 6
+            seasonNumber: nil,             // populated in Task 6
+            childProgress: nil,            // populated in Task 6
             userState: userState(meta),
-            artwork: artwork(meta, serverURL: serverURL, authToken: authToken)
+            artwork: artwork(meta, serverURL: serverURL, authToken: authToken),
+            parentArtwork: nil,            // populated in Task 6
+            grandparentArtwork: nil        // populated in Task 6
         )
     }
 

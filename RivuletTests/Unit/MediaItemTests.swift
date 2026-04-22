@@ -19,8 +19,13 @@ final class MediaItemTests: XCTestCase {
             runtime: 8880,
             parentRef: nil,
             grandparentRef: nil,
+            episodeNumber: nil,
+            seasonNumber: nil,
+            childProgress: nil,
             userState: MediaUserState(isPlayed: false, viewOffset: 0, isFavorite: false, lastViewedAt: nil),
-            artwork: MediaArtwork(poster: nil, backdrop: nil, thumbnail: nil, logo: nil)
+            artwork: MediaArtwork(poster: nil, backdrop: nil, thumbnail: nil, logo: nil),
+            parentArtwork: nil,
+            grandparentArtwork: nil
         )
         XCTAssertEqual(item.id, ref)
     }

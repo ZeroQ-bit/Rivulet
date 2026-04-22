@@ -39,8 +39,13 @@ enum TMDBMediaMapper {
             runtime: nil,
             parentRef: nil,
             grandparentRef: nil,
+            episodeNumber: nil,
+            seasonNumber: nil,
+            childProgress: nil,
             userState: MediaUserState(isPlayed: false, viewOffset: 0, isFavorite: false, lastViewedAt: nil),
-            artwork: artwork
+            artwork: artwork,
+            parentArtwork: nil,
+            grandparentArtwork: nil
         )
     }
 
@@ -76,8 +81,13 @@ enum TMDBMediaMapper {
             runtime: runtime,
             parentRef: embedded.parentRef,
             grandparentRef: embedded.grandparentRef,
+            episodeNumber: embedded.episodeNumber,
+            seasonNumber: embedded.seasonNumber,
+            childProgress: embedded.childProgress,
             userState: embedded.userState,
-            artwork: embedded.artwork
+            artwork: embedded.artwork,
+            parentArtwork: embedded.parentArtwork,
+            grandparentArtwork: embedded.grandparentArtwork
         )
         return MediaItemDetail(
             item: embedded,

@@ -31,8 +31,10 @@ final class HomeComposerTests: XCTestCase {
             ref: MediaItemRef(providerID: "stub", itemID: id),
             kind: .movie, title: id, sortTitle: nil, overview: nil,
             year: nil, runtime: nil, parentRef: nil, grandparentRef: nil,
+            episodeNumber: nil, seasonNumber: nil, childProgress: nil,
             userState: MediaUserState(isPlayed: false, viewOffset: 0, isFavorite: false, lastViewedAt: nil),
-            artwork: MediaArtwork(poster: nil, backdrop: nil, thumbnail: nil, logo: nil)
+            artwork: MediaArtwork(poster: nil, backdrop: nil, thumbnail: nil, logo: nil),
+            parentArtwork: nil, grandparentArtwork: nil
         )
     }
 }

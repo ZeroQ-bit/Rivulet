@@ -19,10 +19,19 @@ struct MediaItem: Identifiable, Hashable, Sendable {
     let sortTitle: String?
     let overview: String?
     let year: Int?
-    let runtime: TimeInterval?     // seconds; nil for shows
-    let parentRef: MediaItemRef?   // season -> show, episode -> season
-    let grandparentRef: MediaItemRef?  // episode -> show
+    let runtime: TimeInterval?           // seconds; nil for shows
+
+    // Hierarchy
+    let parentRef: MediaItemRef?         // season → show, episode → season
+    let grandparentRef: MediaItemRef?    // episode → show
+    let episodeNumber: Int?              // episodes only — Plex `index`
+    let seasonNumber: Int?               // episodes/seasons only — Plex `parentIndex`
+    let childProgress: ChildProgress?    // shows/seasons only — for "12/24 watched"
 
     let userState: MediaUserState
+
+    // Artwork — own + hierarchy
     let artwork: MediaArtwork
+    let parentArtwork: MediaArtwork?     // episode → season art; season → show art
+    let grandparentArtwork: MediaArtwork? // episode → show art
 }
