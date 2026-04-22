@@ -38,4 +38,34 @@ final class MediaProviderRegistry {
     func unregister(providerID: String) {
         providers.removeValue(forKey: providerID)
     }
+
+    /// Reads the active Plex auth state from `PlexAuthManager.shared` and
+    /// creates/updates the corresponding `PlexProvider` entry. Called at
+    /// app launch and after auth-state changes (sign-in, sign-out, server
+    /// switch). Wave 1 single-server: at most one provider entry.
+    ///
+    /// `PlexAuthManager` doesn't currently expose a stable machineIdentifier
+    /// outside server-resolution; we derive one from the server URL hash so
+    /// the provider id stays stable across launches as long as the URL
+    /// doesn't change. A later wave that surfaces multi-server UX will
+    /// thread the real machineIdentifier through.
+    func populateFromCurrentAuth() {
+        let auth = PlexAuthManager.shared
+        guard
+            let serverURL = auth.selectedServerURL,
+            let token = auth.selectedServerToken
+        else {
+            providers.removeAll()
+            return
+        }
+        let machineID = String(serverURL.hashValue)
+        let displayName = UserDefaults.standard.string(forKey: "selectedServerName") ?? "Plex"
+        let provider = PlexProvider(
+            machineIdentifier: machineID,
+            displayName: displayName,
+            serverURL: serverURL,
+            authToken: token
+        )
+        register(provider)
+    }
 }

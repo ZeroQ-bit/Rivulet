@@ -15,6 +15,10 @@ final class MetadataSourceRegistry {
 
     private(set) var sources: [String: any MetadataSource] = [:]
 
+    init() {
+        register(TMDBMetadataSource(), id: TMDBMediaMapper.providerID)
+    }
+
     func source(for id: String) -> (any MetadataSource)? {
         sources[id]
     }
