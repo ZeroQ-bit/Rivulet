@@ -2,7 +2,7 @@
 //  DetailCardCarousel.swift
 //  Rivulet
 //
-//  Full-screen carousel of PlexDetailView cards (Apple TV+ style preview)
+//  Full-screen carousel of MediaDetailView cards (Apple TV+ style preview)
 //
 
 import SwiftUI
@@ -51,7 +51,7 @@ struct DetailCardCarousel: View {
     private let cornerRadius: CGFloat = 70
 
     /// Parallax: the backdrop image drifts at this fraction of the card travel speed.
-    /// The image is scaled 15% wider inside PlexDetailView so it can shift without gaps.
+    /// The image is scaled 15% wider inside MediaDetailView so it can shift without gaps.
     private let parallaxFactor: CGFloat = 0.04
 
     init(
@@ -108,7 +108,7 @@ struct DetailCardCarousel: View {
 
                             Group {
                                 if inRenderRange {
-                                    PlexDetailView(
+                                    MediaDetailView(
                                         item: item,
                                         presentationMode: isExpanded && isCurrent ? .expandedDetail : .previewCarousel,
                                         backgroundParallaxOffset: isExpanded ? 0 : innerOffset,
@@ -150,7 +150,7 @@ struct DetailCardCarousel: View {
         .background(.regularMaterial)
         .overlay {
             // Carousel input layer: only active when NOT expanded
-            // This prevents .onMoveCommand from eating PlexDetailView's focus events
+            // This prevents .onMoveCommand from eating MediaDetailView's focus events
             if !isExpanded {
                 Color.clear
                     .focusable(true)

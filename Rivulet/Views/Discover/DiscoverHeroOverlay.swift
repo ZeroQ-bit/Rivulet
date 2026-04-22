@@ -26,7 +26,7 @@ struct DiscoverHeroOverlay: View {
     let libraryMatch: (TMDBListItem) async -> PlexMetadata?
 
     /// Callback when the user activates the primary button for an item that
-    /// matches their library. Parent presents `PlexDetailView` for the match.
+    /// matches their library. Parent presents `MediaDetailView` for the match.
     let onPresentPlex: (PlexMetadata) -> Void
     let onInfo: (TMDBListItem) -> Void
     var onHeroFocused: (() -> Void)? = nil
@@ -105,7 +105,7 @@ struct DiscoverHeroOverlay: View {
         }
     }
 
-    /// When the item is in library: "Details" pill (opens PlexDetailView).
+    /// When the item is in library: "Details" pill (opens MediaDetailView).
     /// Otherwise: "Add/Remove from Watchlist".
     @ViewBuilder
     private func primaryButton(for item: TMDBListItem) -> some View {

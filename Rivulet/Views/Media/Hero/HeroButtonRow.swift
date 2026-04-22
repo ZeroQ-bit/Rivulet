@@ -4,7 +4,7 @@
 //
 //  The focusable action row for the hero carousel: Play, Watchlist, Info,
 //  Next. Mirrors the `AppStoreActionButtonStyle` pattern used by
-//  `PlexDetailView` for consistent focus treatment across the app.
+//  `MediaDetailView` for consistent focus treatment across the app.
 //
 
 import SwiftUI

@@ -1,5 +1,5 @@
 //
-//  PlexDetailView.swift
+//  MediaDetailView.swift
 //  Rivulet
 //
 //  Detail view for movies and TV shows with playback options
@@ -7,14 +7,14 @@
 
 import SwiftUI
 
-enum PlexDetailPresentationMode: Equatable {
+enum MediaDetailPresentationMode: Equatable {
     case previewCarousel
     case expandedDetail
 }
 
-struct PlexDetailView: View {
+struct MediaDetailView: View {
     let item: PlexMetadata
-    var presentationMode: PlexDetailPresentationMode = .expandedDetail
+    var presentationMode: MediaDetailPresentationMode = .expandedDetail
     var backgroundParallaxOffset: CGFloat = 0
     var showVignette: Bool = true
     var showMetadata: Bool = true
@@ -3795,7 +3795,7 @@ private struct BioDoneButton: View {
         duration: 7200000 // 2 hours
     )
 
-    PlexDetailView(item: sampleMovie)
+    MediaDetailView(item: sampleMovie)
 }
 
 // MARK: - Navigation Destinations Modifier
@@ -3813,16 +3813,16 @@ private struct NavigationDestinationsModifier: ViewModifier {
         if isEnabled {
             content
                 .navigationDestination(item: $navigateToAlbum) { album in
-                    PlexDetailView(item: album)
+                    MediaDetailView(item: album)
                 }
                 .navigationDestination(item: $navigateToSeason) { season in
-                    PlexDetailView(item: season)
+                    MediaDetailView(item: season)
                 }
                 .navigationDestination(item: $navigateToShow) { show in
-                    PlexDetailView(item: show)
+                    MediaDetailView(item: show)
                 }
                 .navigationDestination(item: $navigateToEpisode) { episode in
-                    PlexDetailView(item: episode)
+                    MediaDetailView(item: episode)
                 }
         } else {
             content

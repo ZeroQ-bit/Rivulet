@@ -3,7 +3,7 @@
 //  Rivulet
 //
 //  Detail page for TMDB items not in the user's library. Visually mirrors
-//  PlexDetailView's hero layout (full-bleed backdrop, left/bottom vignette,
+//  MediaDetailView's hero layout (full-bleed backdrop, left/bottom vignette,
 //  bottom-left metadata block, pill action button, scroll-up-for-more).
 //
 
@@ -125,12 +125,12 @@ struct TMDBItemDetailView: View {
         .onScrollGeometryChange(for: CGFloat.self) { geo in
             geo.contentOffset.y
         } action: { _, offset in
-            // Match PlexDetailView's blur-fade pacing: full blur after ~1 screen.
+            // Match MediaDetailView's blur-fade pacing: full blur after ~1 screen.
             scrollProgress = min(1, max(0, offset / max(size.height * 0.6, 1)))
         }
     }
 
-    // MARK: - Hero metadata block (mirrors PlexDetailView.heroMetadataOverlay)
+    // MARK: - Hero metadata block (mirrors MediaDetailView.heroMetadataOverlay)
 
     private var heroMetadataBlock: some View {
         VStack(alignment: .leading, spacing: 10) {

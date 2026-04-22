@@ -3,7 +3,7 @@
 //  Rivulet
 //
 //  Caches pre-computed stream URLs to reduce startup latency.
-//  PlexDetailView pre-warms URLs when loading fullMetadata,
+//  MediaDetailView pre-warms URLs when loading fullMetadata,
 //  and UniversalPlayerViewModel checks cache before building URLs.
 //
 
@@ -22,7 +22,7 @@ struct CachedStreamURL {
 }
 
 /// Thread-safe cache for pre-computed stream URLs
-/// Reduces startup latency by allowing PlexDetailView to pre-build URLs
+/// Reduces startup latency by allowing MediaDetailView to pre-build URLs
 /// while the user is still viewing the detail page.
 @MainActor
 final class StreamURLCache {

@@ -108,7 +108,7 @@ extension View {
     }
 }
 
-/// Centralised "present PlexDetailView for a ratingKey" so the Discover
+/// Centralised "present MediaDetailView for a ratingKey" so the Discover
 /// context menu can reach the detail path without coupling to any one view's
 /// presentation state.
 @MainActor
@@ -121,7 +121,7 @@ final class DiscoverPlaybackRouter {
               let token = auth.selectedServerToken else { return }
 
         // Resolve the Plex metadata (context menu only had a ratingKey) so we
-        // can present `PlexDetailView`.
+        // can present `MediaDetailView`.
         guard let metadata = try? await PlexNetworkManager.shared.getMetadata(
             serverURL: serverURL,
             authToken: token,
@@ -136,7 +136,7 @@ final class DiscoverPlaybackRouter {
             topVC = presented
         }
 
-        let detail = PlexDetailView(item: metadata)
+        let detail = MediaDetailView(item: metadata)
             .presentationBackground(.black)
         let host = UIHostingController(rootView: detail)
         host.modalPresentationStyle = .fullScreen

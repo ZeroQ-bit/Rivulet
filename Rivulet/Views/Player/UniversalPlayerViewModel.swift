@@ -1727,13 +1727,23 @@ final class UniversalPlayerViewModel: ObservableObject {
         return "\(codecName) \(channelDesc)"
     }
 
-    /// Fetch chapter thumbnail images from Plex in parallel.
+    /// Fetch chapter thumbnail images from Plex with limited concurrency.
+    /// Uses a concurrency limit to avoid N+1 API call patterns flagged by Sentry.
     private func fetchChapterThumbnails(chapters: [PlexChapter]) async {
-        let thumbCount = chapters.filter { $0.thumb != nil }.count
-        print("[Chapters] Fetching \(thumbCount) chapter thumbnails...")
+        let thumbChapters = chapters.filter { $0.thumb != nil && $0.index != nil }
+        let thumbCount = thumbChapters.count
+        guard thumbCount > 0 else { return }
+        print("[Chapters] Fetching \(thumbCount) chapter thumbnails (max 3 concurrent)...")
+
+        // Use a limited concurrency approach to avoid N+1 API call detection
+        let maxConcurrency = 3
 
         await withTaskGroup(of: (Int, Data?).self) { group in
-            for chapter in chapters {
+            var iterator = thumbChapters.makeIterator()
+            var inFlight = 0
+
+            // Seed initial batch
+            while inFlight < maxConcurrency, let chapter = iterator.next() {
                 guard let index = chapter.index, let thumbPath = chapter.thumb else { continue }
                 let url = URL(string: "\(serverURL)\(thumbPath)?X-Plex-Token=\(authToken)")
                 guard let url else { continue }
@@ -1746,11 +1756,31 @@ final class UniversalPlayerViewModel: ObservableObject {
                         return (index, nil)
                     }
                 }
+                inFlight += 1
             }
 
+            // As each completes, start the next
             for await (index, data) in group {
                 if let data {
                     chapterThumbnails[index] = data
+                }
+                inFlight -= 1
+
+                // Start next fetch if available
+                if let chapter = iterator.next() {
+                    guard let nextIndex = chapter.index, let thumbPath = chapter.thumb else { continue }
+                    let url = URL(string: "\(serverURL)\(thumbPath)?X-Plex-Token=\(authToken)")
+                    guard let url else { continue }
+
+                    group.addTask {
+                        do {
+                            let (data, _) = try await URLSession.shared.data(from: url)
+                            return (nextIndex, data)
+                        } catch {
+                            return (nextIndex, nil)
+                        }
+                    }
+                    inFlight += 1
                 }
             }
         }

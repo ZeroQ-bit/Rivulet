@@ -62,7 +62,7 @@ struct PreviewOverlayHost: View {
     @State private var pagingProgress: CGFloat = 0
     @State private var metadataGate = PreviewLoadGate()
     /// Flipped to `true` once the entry/paging animation cascade has fully
-    /// settled. `PreviewCarouselCard` forwards it into `PlexDetailView` so
+    /// settled. `PreviewCarouselCard` forwards it into `MediaDetailView` so
     /// the detail data cascade only runs after the spring + staged fades
     /// have finished — keeping the main thread quiet during animation.
     @State private var previewAnimationSettled = false
@@ -256,7 +256,7 @@ struct PreviewOverlayHost: View {
                 metadataVisible = true
             }
 
-            // Phase 3: Text fade finishes — unblock PlexDetailView's data
+            // Phase 3: Text fade finishes — unblock MediaDetailView's data
             // cascade. The 0.34s duration matches the withAnimation above;
             // waiting for the fade to visually complete means any view
             // invalidations the cascade causes land after the user perceives
@@ -358,7 +358,7 @@ struct PreviewOverlayHost: View {
 
             // Finish expand BEFORE showing chrome so presentationMode is
             // .expandedDetail when the showExpandedChrome onChange fires
-            // (PlexDetailView uses isExpandedPreviewFlow to set focus).
+            // (MediaDetailView uses isExpandedPreviewFlow to set focus).
             try? await Task.sleep(nanoseconds: 60_000_000)
             guard metadataGate.isCurrent(token) else { return }
             stateMachine.finishExpand()
@@ -747,7 +747,7 @@ private struct PreviewHeroSurface: View {
     let previewAnimationSettled: Bool
 
     var body: some View {
-        PlexDetailView(
+        MediaDetailView(
             item: item,
             presentationMode: isExpanded ? .expandedDetail : .previewCarousel,
             backgroundParallaxOffset: backgroundParallaxOffset,
@@ -770,7 +770,7 @@ private struct PreviewHeroSurface: View {
 
 /// Lightweight placeholder card shown only during `.entryMorph` phase (see
 /// `PreviewCarouselCard.body`). Once `carouselStable` is reached, all three
-/// visible cards route through `PlexDetailView`/`HeroBackdropCoordinator`.
+/// visible cards route through `MediaDetailView`/`HeroBackdropCoordinator`.
 ///
 /// This was previously backed by a per-card `HeroBackdropCoordinator`; the
 /// coordinator adds nothing here because the only thing the side card shows
