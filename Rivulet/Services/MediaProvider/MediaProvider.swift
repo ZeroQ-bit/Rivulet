@@ -30,6 +30,17 @@ protocol MediaProvider: Sendable, Identifiable {
     func children(of itemRef: MediaItemRef) async throws -> [MediaItem]
     func search(_ query: String) async throws -> [MediaItem]
 
+    /// Items in the same collection as the given `collectionName`. Returns
+    /// items from the provider's library matching that collection tag.
+    func collectionItems(matching collectionName: String, in library: MediaLibrary) async throws -> [MediaItem]
+
+    /// Provider-curated "related/recommended like this" items.
+    func relatedItems(for itemRef: MediaItemRef) async throws -> [MediaItem]
+
+    /// All episodes flattened across all seasons of a show. For shows only.
+    /// Plex: getAllLeaves. Jellyfin: /Shows/{id}/Episodes.
+    func allEpisodes(of showRef: MediaItemRef) async throws -> [MediaItem]
+
     // MARK: - Detail
     func fullDetail(for itemRef: MediaItemRef) async throws -> MediaItemDetail
 

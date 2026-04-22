@@ -105,6 +105,12 @@ final class PlexProvider: MediaProvider, @unchecked Sendable {
         }
     }
 
+    // Stubbed in Task 5; Task 7 implements relatedItems + allEpisodes.
+    // collectionItems remains a Wave 1 stub — see Task 7's commit message.
+    func collectionItems(matching collectionName: String, in library: MediaLibrary) async throws -> [MediaItem] { [] }
+    func relatedItems(for itemRef: MediaItemRef) async throws -> [MediaItem] { [] }
+    func allEpisodes(of showRef: MediaItemRef) async throws -> [MediaItem] { [] }
+
     // MARK: - Home rails
 
     func continueWatching(limit: Int) async throws -> [MediaItem] {
