@@ -80,3 +80,5 @@ Docs/
 # Rolling worklog + lessons — kept locally, not in the repo.
 tasks/
 .superpowers/
+SENTRY_FIXES/
+SENTRY_PATCHES/
