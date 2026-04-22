@@ -268,7 +268,9 @@ enum PlexMediaMapper {
             mediaSources: mediaSources,
             trailerURL: trailerURL,
             contentRating: meta.contentRating,
-            rating: meta.rating
+            rating: meta.rating,
+            nextEpisode: nil,            // populated in Task 6
+            collections: []              // populated in Task 6
         )
     }
 

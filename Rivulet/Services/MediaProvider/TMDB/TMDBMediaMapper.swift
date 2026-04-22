@@ -101,7 +101,9 @@ enum TMDBMediaMapper {
             mediaSources: [],
             trailerURL: nil,
             contentRating: nil,
-            rating: tmdb.voteAverage
+            rating: tmdb.voteAverage,
+            nextEpisode: nil,
+            collections: []
         )
     }
 }
