@@ -43,12 +43,6 @@ final class MediaProviderRegistry {
     /// creates/updates the corresponding `PlexProvider` entry. Called at
     /// app launch and after auth-state changes (sign-in, sign-out, server
     /// switch). Wave 1 single-server: at most one provider entry.
-    ///
-    /// `PlexAuthManager` doesn't currently expose a stable machineIdentifier
-    /// outside server-resolution; we derive one from the server URL hash so
-    /// the provider id stays stable across launches as long as the URL
-    /// doesn't change. A later wave that surfaces multi-server UX will
-    /// thread the real machineIdentifier through.
     func populateFromCurrentAuth() {
         let auth = PlexAuthManager.shared
         guard
@@ -58,8 +52,18 @@ final class MediaProviderRegistry {
             providers.removeAll()
             return
         }
-        let machineID = String(serverURL.hashValue)
-        let displayName = UserDefaults.standard.string(forKey: "selectedServerName") ?? "Plex"
+        // Prefer Plex's real machineIdentifier when the user has selected a
+        // server in this session. Fall back to a deterministic hash of the
+        // server URL when only a restored URL/token is available — this keeps
+        // providerID stable across launches (Swift's String.hashValue is
+        // randomized per process and would orphan FocusMemory / nav state).
+        let machineID: String = {
+            if let id = auth.selectedServer?.machineIdentifier { return id }
+            return Self.stableHash(of: serverURL)
+        }()
+        let displayName = auth.selectedServer?.name
+            ?? UserDefaults.standard.string(forKey: "selectedServerName")
+            ?? "Plex"
         let provider = PlexProvider(
             machineIdentifier: machineID,
             displayName: displayName,
@@ -67,5 +71,16 @@ final class MediaProviderRegistry {
             authToken: token
         )
         register(provider)
+    }
+
+    /// Process-stable hash. Avoid `String.hashValue` (per-process randomized).
+    private static func stableHash(of input: String) -> String {
+        // FNV-1a 64-bit — small, deterministic, no Crypto dependency.
+        var hash: UInt64 = 0xcbf29ce484222325
+        for byte in input.utf8 {
+            hash ^= UInt64(byte)
+            hash &*= 0x100000001b3
+        }
+        return String(hash, radix: 16)
     }
 }

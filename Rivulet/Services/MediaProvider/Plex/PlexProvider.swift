@@ -84,10 +84,13 @@ final class PlexProvider: MediaProvider, @unchecked Sendable {
         // PlexNetworkManager doesn't expose a dedicated search method as of Wave 1.
         // Plex search routes through /hubs/search via custom request shapes;
         // wiring it here without a network-layer helper would duplicate that
-        // logic. Phase 3's MediaSearchView can land an empty-results case;
-        // post-Wave-1 task adds a proper search method to PlexNetworkManager
-        // and threads it through.
-        return []
+        // logic. Throwing rather than returning empty so callers can
+        // distinguish "search not implemented" from "no results."
+        // Post-Wave-1 task adds a search method to PlexNetworkManager and
+        // wires it through.
+        throw MediaProviderError.backendSpecific(
+            underlying: "Plex search not implemented in Wave 1"
+        )
     }
 
     func fullDetail(for itemRef: MediaItemRef) async throws -> MediaItemDetail {

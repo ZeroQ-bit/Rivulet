@@ -15,6 +15,9 @@ enum TMDBMediaMapper {
     private static let posterBase = "https://image.tmdb.org/t/p/w500"
 
     static func item(_ tmdb: TMDBListItem) -> MediaItem {
+        // TMDBMediaType currently only has .movie / .tv (TMDBClient.swift).
+        // If TMDB person results are ever supported, extend both that enum
+        // and this mapping to cover .person.
         let kind: MediaKind = (tmdb.mediaType == .movie) ? .movie : .show
         let year: Int? = {
             guard let raw = tmdb.releaseDate?.prefix(4), !raw.isEmpty else { return nil }

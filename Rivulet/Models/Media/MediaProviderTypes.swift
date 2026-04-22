@@ -23,5 +23,6 @@ enum MediaProviderError: Error, Sendable {
     case unauthorized
     case notFound
     case transcodeRequired
+    case notPlayable
     case backendSpecific(underlying: String)
 }

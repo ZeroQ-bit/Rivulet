@@ -9,7 +9,7 @@
 import Foundation
 
 /// Per-playback-session progress reporter. Provider creates a value-typed
-/// concrete reporter (e.g. `PlexProgressReporter`) capturing whatever
+/// concrete reporter (e.g. `PlexTimelineReporter`) capturing whatever
 /// session state it needs.
 protocol ProgressReporter: Sendable {
     func start() async
