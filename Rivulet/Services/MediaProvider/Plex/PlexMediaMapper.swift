@@ -50,16 +50,18 @@ enum PlexMediaMapper {
 
     // MARK: - Artwork
 
+    /// Helper for building Plex artwork URLs from arbitrary paths.
+    static func artworkURL(_ path: String?, serverURL: String, authToken: String) -> URL? {
+        guard let path else { return nil }
+        return URL(string: "\(serverURL)\(path)?X-Plex-Token=\(authToken)")
+    }
+
     static func artwork(_ meta: PlexMetadata, serverURL: String, authToken: String) -> MediaArtwork {
-        func url(_ path: String?) -> URL? {
-            guard let path else { return nil }
-            return URL(string: "\(serverURL)\(path)?X-Plex-Token=\(authToken)")
-        }
-        return MediaArtwork(
-            poster: url(meta.thumb ?? meta.bestThumb),
-            backdrop: url(meta.bestArt),
-            thumbnail: url(meta.thumb),
-            logo: url(meta.clearLogoPath)
+        MediaArtwork(
+            poster: artworkURL(meta.thumb ?? meta.bestThumb, serverURL: serverURL, authToken: authToken),
+            backdrop: artworkURL(meta.bestArt, serverURL: serverURL, authToken: authToken),
+            thumbnail: artworkURL(meta.thumb, serverURL: serverURL, authToken: authToken),
+            logo: artworkURL(meta.clearLogoPath, serverURL: serverURL, authToken: authToken)
         )
     }
 
@@ -148,6 +150,39 @@ enum PlexMediaMapper {
         let grandparentRef: MediaItemRef? = meta.grandparentRatingKey.map {
             MediaItemRef(providerID: providerID, itemID: $0)
         }
+        // Hierarchy artwork — for episodes, the parent is a season and the
+        // grandparent is the show; for seasons, the parent is the show.
+        // Plex carries parentThumb / grandparentThumb / grandparentArt on
+        // the child item directly, so no extra fetch needed.
+        let parentArtwork: MediaArtwork? = {
+            guard meta.parentThumb != nil else { return nil }
+            return MediaArtwork(
+                poster: artworkURL(meta.parentThumb, serverURL: serverURL, authToken: authToken),
+                backdrop: nil,
+                thumbnail: artworkURL(meta.parentThumb, serverURL: serverURL, authToken: authToken),
+                logo: nil
+            )
+        }()
+
+        let grandparentArtwork: MediaArtwork? = {
+            guard meta.grandparentThumb != nil || meta.grandparentArt != nil else { return nil }
+            return MediaArtwork(
+                poster: artworkURL(meta.grandparentThumb, serverURL: serverURL, authToken: authToken),
+                backdrop: artworkURL(meta.grandparentArt, serverURL: serverURL, authToken: authToken),
+                thumbnail: artworkURL(meta.grandparentThumb, serverURL: serverURL, authToken: authToken),
+                logo: nil
+            )
+        }()
+
+        // Child progress — for shows / seasons, leafCount = total episodes,
+        // viewedLeafCount = watched count.
+        let childProgress: ChildProgress? = {
+            if let total = meta.leafCount {
+                return ChildProgress(played: meta.viewedLeafCount ?? 0, total: total)
+            }
+            return nil
+        }()
+
         return MediaItem(
             ref: ref,
             kind: kind(meta.type),
@@ -158,13 +193,13 @@ enum PlexMediaMapper {
             runtime: runtime,
             parentRef: parentRef,
             grandparentRef: grandparentRef,
-            episodeNumber: nil,            // populated in Task 6
-            seasonNumber: nil,             // populated in Task 6
-            childProgress: nil,            // populated in Task 6
+            episodeNumber: meta.index,           // Plex `index` is episode number on episodes
+            seasonNumber: meta.parentIndex,      // Plex `parentIndex` is season number
+            childProgress: childProgress,
             userState: userState(meta),
             artwork: artwork(meta, serverURL: serverURL, authToken: authToken),
-            parentArtwork: nil,            // populated in Task 6
-            grandparentArtwork: nil        // populated in Task 6
+            parentArtwork: parentArtwork,
+            grandparentArtwork: grandparentArtwork
         )
     }
 
@@ -256,6 +291,13 @@ enum PlexMediaMapper {
             .flatMap { $0.key }
             .flatMap { URL(string: "\(serverURL)\($0)?X-Plex-Token=\(authToken)") }
 
+        // Next episode for shows — Plex bakes this into `OnDeck` on the show's
+        // metadata. Map the first OnDeck Metadata entry to a MediaItem.
+        let nextEpisode: MediaItem? = meta.OnDeck?.Metadata?.first.map {
+            item($0, providerID: providerID, serverURL: serverURL, authToken: authToken)
+        }
+        let collections = (meta.Collection ?? []).compactMap(\.tag)
+
         return MediaItemDetail(
             item: item(meta, providerID: providerID, serverURL: serverURL, authToken: authToken),
             tagline: meta.tagline,
@@ -269,8 +311,8 @@ enum PlexMediaMapper {
             trailerURL: trailerURL,
             contentRating: meta.contentRating,
             rating: meta.rating,
-            nextEpisode: nil,            // populated in Task 6
-            collections: []              // populated in Task 6
+            nextEpisode: nextEpisode,
+            collections: collections
         )
     }
 

@@ -117,4 +117,44 @@ final class PlexMediaMapperTests: XCTestCase {
         XCTAssertEqual(item.parentRef?.itemID, "200")
         XCTAssertEqual(item.grandparentRef?.itemID, "100")
     }
+
+    func test_item_episode_carriesEpisodeAndSeasonNumbers() {
+        var meta = PlexMetadata()
+        meta.ratingKey = "9001"
+        meta.type = "episode"
+        meta.title = "Pilot"
+        meta.index = 1
+        meta.parentIndex = 1
+        let item = PlexMediaMapper.item(meta, providerID: "plex:abc",
+                                        serverURL: "https://x", authToken: "T")
+        XCTAssertEqual(item.episodeNumber, 1)
+        XCTAssertEqual(item.seasonNumber, 1)
+    }
+
+    func test_item_show_carriesChildProgress() {
+        var meta = PlexMetadata()
+        meta.ratingKey = "100"
+        meta.type = "show"
+        meta.title = "Severance"
+        meta.leafCount = 18
+        meta.viewedLeafCount = 9
+        let item = PlexMediaMapper.item(meta, providerID: "plex:abc",
+                                        serverURL: "https://x", authToken: "T")
+        XCTAssertEqual(item.childProgress?.played, 9)
+        XCTAssertEqual(item.childProgress?.total, 18)
+    }
+
+    func test_item_episode_carriesGrandparentArtwork() {
+        var meta = PlexMetadata()
+        meta.ratingKey = "9001"
+        meta.type = "episode"
+        meta.title = "Pilot"
+        meta.grandparentThumb = "/library/metadata/100/thumb/123"
+        meta.grandparentArt = "/library/metadata/100/art/123"
+        let item = PlexMediaMapper.item(meta, providerID: "plex:abc",
+                                        serverURL: "https://x", authToken: "T")
+        XCTAssertNotNil(item.grandparentArtwork)
+        XCTAssertNotNil(item.grandparentArtwork?.thumbnail)
+        XCTAssertNotNil(item.grandparentArtwork?.backdrop)
+    }
 }
