@@ -34,7 +34,7 @@ struct MusicLyricsView: View {
     private var currentLineIndex: Int? {
         guard isSynced else { return nil }
         let timed = lyrics.filter { $0.timestamp != nil }
-        for (index, line) in timed.enumerated().reversed() {
+        for (_, line) in timed.enumerated().reversed() {
             if let ts = line.timestamp, currentTime >= ts {
                 return lyrics.firstIndex(where: { $0.id == line.id })
             }

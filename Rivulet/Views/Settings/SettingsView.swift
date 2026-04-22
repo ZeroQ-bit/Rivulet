@@ -90,6 +90,7 @@ enum AutoplayCountdown: Int, CaseIterable, CustomStringConvertible {
         case .twentySeconds: return "20 seconds"
         }
     }
+
 }
 
 // Note: DisplaySize enum is now in Services/UIScale.swift for global access
@@ -98,7 +99,9 @@ enum AutoplayCountdown: Int, CaseIterable, CustomStringConvertible {
 
 enum LanguageOption: String, CaseIterable, CustomStringConvertible {
     case arabic = "ara"
+    case bosnian = "bos"
     case chinese = "zho"
+    case croatian = "hrv"
     case czech = "ces"
     case danish = "dan"
     case dutch = "nld"
@@ -119,6 +122,7 @@ enum LanguageOption: String, CaseIterable, CustomStringConvertible {
     case portuguese = "por"
     case romanian = "ron"
     case russian = "rus"
+    case serbian = "srp"
     case spanish = "spa"
     case swedish = "swe"
     case thai = "tha"
@@ -129,7 +133,9 @@ enum LanguageOption: String, CaseIterable, CustomStringConvertible {
     var description: String {
         switch self {
         case .arabic: return "Arabic"
+        case .bosnian: return "Bosnian"
         case .chinese: return "Chinese"
+        case .croatian: return "Croatian"
         case .czech: return "Czech"
         case .danish: return "Danish"
         case .dutch: return "Dutch"
@@ -150,6 +156,7 @@ enum LanguageOption: String, CaseIterable, CustomStringConvertible {
         case .portuguese: return "Portuguese"
         case .romanian: return "Romanian"
         case .russian: return "Russian"
+        case .serbian: return "Serbian"
         case .spanish: return "Spanish"
         case .swedish: return "Swedish"
         case .thai: return "Thai"
@@ -159,80 +166,177 @@ enum LanguageOption: String, CaseIterable, CustomStringConvertible {
         }
     }
 
+    nonisolated var plexSubtitleSearchCode: String {
+        switch self {
+        case .arabic: return "ar"
+        case .bosnian: return "bs"
+        case .chinese: return "zh"
+        case .croatian: return "hr"
+        case .czech: return "cs"
+        case .danish: return "da"
+        case .dutch: return "nl"
+        case .english: return "en"
+        case .finnish: return "fi"
+        case .french: return "fr"
+        case .german: return "de"
+        case .greek: return "el"
+        case .hebrew: return "he"
+        case .hindi: return "hi"
+        case .hungarian: return "hu"
+        case .indonesian: return "id"
+        case .italian: return "it"
+        case .japanese: return "ja"
+        case .korean: return "ko"
+        case .norwegian: return "no"
+        case .polish: return "pl"
+        case .portuguese: return "pt"
+        case .romanian: return "ro"
+        case .russian: return "ru"
+        case .serbian: return "sr"
+        case .spanish: return "es"
+        case .swedish: return "sv"
+        case .thai: return "th"
+        case .turkish: return "tr"
+        case .ukrainian: return "uk"
+        case .vietnamese: return "vi"
+        }
+    }
+
+    nonisolated static func canonicalCode(from languageCode: String?) -> String? {
+        guard let rawCode = languageCode?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased(),
+              !rawCode.isEmpty else { return nil }
+
+        let normalizedCode = rawCode.replacingOccurrences(of: "_", with: "-")
+        let primarySubtag = String(normalizedCode.split(separator: "-", maxSplits: 1).first ?? "")
+
+        for code in [normalizedCode, primarySubtag] where !code.isEmpty {
+            switch code {
+        case "ara", "ar", "arabic": return LanguageOption.arabic.rawValue
+        case "bos", "bs", "bosnian": return LanguageOption.bosnian.rawValue
+        case "zho", "zh", "chi", "chinese": return LanguageOption.chinese.rawValue
+        case "hrv", "hr", "scr", "cro", "croatian": return LanguageOption.croatian.rawValue
+        case "ces", "cs", "cze", "czech": return LanguageOption.czech.rawValue
+        case "dan", "da", "danish": return LanguageOption.danish.rawValue
+        case "nld", "nl", "dut", "dutch": return LanguageOption.dutch.rawValue
+        case "eng", "en", "english": return LanguageOption.english.rawValue
+        case "fin", "fi", "finnish": return LanguageOption.finnish.rawValue
+        case "fra", "fr", "fre", "french": return LanguageOption.french.rawValue
+        case "deu", "de", "ger", "german": return LanguageOption.german.rawValue
+        case "ell", "el", "gre", "greek": return LanguageOption.greek.rawValue
+        case "heb", "he", "hebrew": return LanguageOption.hebrew.rawValue
+        case "hin", "hi", "hindi": return LanguageOption.hindi.rawValue
+        case "hun", "hu", "hungarian": return LanguageOption.hungarian.rawValue
+        case "ind", "id", "indonesian": return LanguageOption.indonesian.rawValue
+        case "ita", "it", "italian": return LanguageOption.italian.rawValue
+        case "jpn", "ja", "japanese": return LanguageOption.japanese.rawValue
+        case "kor", "ko", "korean": return LanguageOption.korean.rawValue
+        case "nor", "no", "nb", "nn", "norwegian": return LanguageOption.norwegian.rawValue
+        case "pol", "pl", "polish": return LanguageOption.polish.rawValue
+        case "por", "pt", "portuguese": return LanguageOption.portuguese.rawValue
+        case "ron", "ro", "rum", "romanian": return LanguageOption.romanian.rawValue
+        case "rus", "ru", "russian": return LanguageOption.russian.rawValue
+        case "srp", "sr", "scc", "ser", "serbian": return LanguageOption.serbian.rawValue
+        case "spa", "es", "spanish": return LanguageOption.spanish.rawValue
+        case "swe", "sv", "swedish": return LanguageOption.swedish.rawValue
+        case "tha", "th", "thai": return LanguageOption.thai.rawValue
+        case "tur", "tr", "turkish": return LanguageOption.turkish.rawValue
+        case "ukr", "uk", "ukrainian": return LanguageOption.ukrainian.rawValue
+        case "vie", "vi", "vietnamese": return LanguageOption.vietnamese.rawValue
+        default:
+            continue
+        }
+        }
+        return nil
+    }
+
+    nonisolated static func plexSubtitleSearchCode(from languageCode: String?) -> String? {
+        guard let canonicalCode = canonicalCode(from: languageCode),
+              let option = Self(rawValue: canonicalCode) else {
+            return nil
+        }
+        return option.plexSubtitleSearchCode
+    }
+
     /// Initialize from a language code (handles various formats)
     init(languageCode: String?) {
-        guard let code = languageCode?.lowercased() else {
+        guard let canonicalCode = Self.canonicalCode(from: languageCode),
+              let option = Self(rawValue: canonicalCode) else {
             self = .english
             return
         }
-        switch code {
-        case "ara", "ar", "arabic": self = .arabic
-        case "zho", "zh", "chi", "chinese": self = .chinese
-        case "ces", "cs", "cze", "czech": self = .czech
-        case "dan", "da", "danish": self = .danish
-        case "nld", "nl", "dut", "dutch": self = .dutch
-        case "eng", "en", "english": self = .english
-        case "fin", "fi", "finnish": self = .finnish
-        case "fra", "fr", "fre", "french": self = .french
-        case "deu", "de", "ger", "german": self = .german
-        case "ell", "el", "gre", "greek": self = .greek
-        case "heb", "he", "hebrew": self = .hebrew
-        case "hin", "hi", "hindi": self = .hindi
-        case "hun", "hu", "hungarian": self = .hungarian
-        case "ind", "id", "indonesian": self = .indonesian
-        case "ita", "it", "italian": self = .italian
-        case "jpn", "ja", "japanese": self = .japanese
-        case "kor", "ko", "korean": self = .korean
-        case "nor", "no", "nb", "nn", "norwegian": self = .norwegian
-        case "pol", "pl", "polish": self = .polish
-        case "por", "pt", "portuguese": self = .portuguese
-        case "ron", "ro", "rum", "romanian": self = .romanian
-        case "rus", "ru", "russian": self = .russian
-        case "spa", "es", "spanish": self = .spanish
-        case "swe", "sv", "swedish": self = .swedish
-        case "tha", "th", "thai": self = .thai
-        case "tur", "tr", "turkish": self = .turkish
-        case "ukr", "uk", "ukrainian": self = .ukrainian
-        case "vie", "vi", "vietnamese": self = .vietnamese
-        default: self = .english
-        }
+        self = option
     }
 }
 
-// MARK: - Subtitle Option (includes Off)
+// MARK: - Subtitle Selection
 
-enum SubtitleOption: Hashable, CaseIterable, CustomStringConvertible {
-    case off
-    case language(LanguageOption)
+struct SubtitleLanguageSelection: Hashable, CustomStringConvertible {
+    static let maxLanguages = SubtitlePreference.maxPreferredLanguages
 
-    static var allCases: [SubtitleOption] {
-        [.off] + LanguageOption.allCases.map { .language($0) }
+    var languages: [LanguageOption]
+
+    init(languages: [LanguageOption]) {
+        var unique: [LanguageOption] = []
+        for language in languages where !unique.contains(language) {
+            unique.append(language)
+            if unique.count == Self.maxLanguages {
+                break
+            }
+        }
+        self.languages = unique
+    }
+
+    init(languageCodes: [String]) {
+        self.init(languages: languageCodes.compactMap { code in
+            guard let canonicalCode = LanguageOption.canonicalCode(from: code) else { return nil }
+            return LanguageOption(rawValue: canonicalCode)
+        })
+    }
+
+    init(preference: SubtitlePreference) {
+        self.init(languageCodes: preference.preferredLanguageCodes)
     }
 
     var description: String {
-        switch self {
-        case .off: return "Off"
-        case .language(let lang): return lang.description
+        switch languages.count {
+        case 0:
+            return "Off"
+        case 1:
+            return languages[0].description
+        case 2:
+            return languages.map(\.description).joined(separator: ", ")
+        default:
+            let lead = languages.prefix(2).map(\.description).joined(separator: ", ")
+            return "\(lead) +\(languages.count - 2)"
         }
     }
 
     var isEnabled: Bool {
-        if case .off = self { return false }
-        return true
+        !languages.isEmpty
     }
 
-    var languageCode: String? {
-        if case .language(let lang) = self { return lang.rawValue }
-        return nil
+    var languageCodes: [String] {
+        languages.map(\.rawValue)
     }
 
-    /// Initialize from subtitle preference
-    init(enabled: Bool, languageCode: String?) {
-        if !enabled {
-            self = .off
-        } else {
-            self = .language(LanguageOption(languageCode: languageCode))
+    func contains(_ option: LanguageOption) -> Bool {
+        languages.contains(option)
+    }
+
+    func selectionIndex(for option: LanguageOption) -> Int? {
+        languages.firstIndex(of: option).map { $0 + 1 }
+    }
+
+    func toggled(_ option: LanguageOption) -> SubtitleLanguageSelection {
+        var updated = languages
+        if let index = updated.firstIndex(of: option) {
+            updated.remove(at: index)
+        } else if updated.count < Self.maxLanguages {
+            updated.append(option)
         }
+        return SubtitleLanguageSelection(languages: updated)
     }
 }
 
@@ -306,9 +410,8 @@ struct SettingsView: View {
 
     // Audio/Subtitle preference state
     @State private var audioLanguage: LanguageOption = LanguageOption(languageCode: AudioPreferenceManager.current.languageCode)
-    @State private var subtitleOption: SubtitleOption = SubtitleOption(
-        enabled: SubtitlePreferenceManager.current.enabled,
-        languageCode: SubtitlePreferenceManager.current.languageCode
+    @State private var subtitleSelection: SubtitleLanguageSelection = SubtitleLanguageSelection(
+        preference: SubtitlePreferenceManager.current
     )
 
     // MARK: - Bindings
@@ -323,19 +426,12 @@ struct SettingsView: View {
         )
     }
 
-    private var subtitleOptionBinding: Binding<SubtitleOption> {
-        Binding(
-            get: { subtitleOption },
-            set: { newValue in
-                subtitleOption = newValue
-                var pref = SubtitlePreferenceManager.current
-                pref.enabled = newValue.isEnabled
-                if let code = newValue.languageCode {
-                    pref.languageCode = code
-                }
-                SubtitlePreferenceManager.current = pref
-            }
-        )
+    private func persistSubtitleSelection(_ newValue: SubtitleLanguageSelection) {
+        subtitleSelection = newValue
+        var pref = SubtitlePreferenceManager.current
+        pref.enabled = newValue.isEnabled
+        pref.preferredLanguageCodes = newValue.languageCodes
+        SubtitlePreferenceManager.current = pref
     }
 
     private var liveTVLayout: Binding<LiveTVLayout> {
@@ -684,7 +780,8 @@ struct SettingsView: View {
 
             SettingsRow(
                 title: "Subtitles",
-                value: subtitleOption.description,
+                description: "Select up to 5 preferred languages",
+                value: subtitleSelection.description,
                 action: { navigate(to: .subtitlesPicker) },
                 onFocusChange: { if $0 { focusState.focusedSettingId = "subtitles" } }
             )
@@ -871,19 +968,45 @@ struct SettingsView: View {
 
     private var subtitlesPickerPage: some View {
         Group {
-            ForEach(SubtitleOption.allCases, id: \.self) { option in
+            SettingsInfoRow(
+                title: "Selected",
+                value: "\(subtitleSelection.languages.count)/\(SubtitleLanguageSelection.maxLanguages)"
+            )
+
+            Button {
+                persistSubtitleSelection(SubtitleLanguageSelection(languages: []))
+            } label: {
+                HStack {
+                    Text("Off")
+                        .font(.system(size: 32))
+                    Spacer()
+                    if subtitleSelection.languages.isEmpty {
+                        Image(systemName: "checkmark")
+                            .font(.system(size: 24, weight: .bold))
+                            .foregroundStyle(.blue)
+                    }
+                }
+            }
+
+            ForEach(LanguageOption.allCases, id: \.self) { option in
                 Button {
-                    subtitleOptionBinding.wrappedValue = option
-                    goBack()
+                    let updatedSelection = subtitleSelection.toggled(option)
+                    guard updatedSelection != subtitleSelection else { return }
+                    persistSubtitleSelection(updatedSelection)
                 } label: {
                     HStack {
                         Text(option.description)
                             .font(.system(size: 32))
                         Spacer()
-                        if subtitleOption == option {
-                            Image(systemName: "checkmark")
-                                .font(.system(size: 24, weight: .bold))
-                                .foregroundStyle(.blue)
+                        if let selectionIndex = subtitleSelection.selectionIndex(for: option) {
+                            Text("\(selectionIndex)")
+                                .font(.system(size: 22, weight: .bold))
+                                .foregroundStyle(.white)
+                                .frame(width: 34, height: 34)
+                                .background(
+                                    Circle()
+                                        .fill(.blue)
+                                )
                         }
                     }
                 }

@@ -23,7 +23,7 @@ import Libavutil
 // MARK: - Segment Info
 
 /// Describes a single HLS media segment.
-struct RemuxSegmentInfo: Sendable {
+nonisolated struct RemuxSegmentInfo: Sendable {
     let index: Int
     /// Keyframe PTS in the source stream's timebase
     let startPTS: Int64
@@ -34,7 +34,7 @@ struct RemuxSegmentInfo: Sendable {
 }
 
 /// Information returned after opening a remux session.
-struct RemuxSessionInfo: Sendable {
+nonisolated struct RemuxSessionInfo: Sendable {
     let duration: TimeInterval
     let videoCodecName: String
     let audioCodecName: String
@@ -50,7 +50,7 @@ struct RemuxSessionInfo: Sendable {
 
 // MARK: - Errors
 
-enum RemuxError: Error, Sendable {
+nonisolated enum RemuxError: Error, Sendable {
     case notOpen
     case alreadyOpen
     case openFailed(String)
@@ -311,9 +311,6 @@ actor FFmpegRemuxSession {
 
         // Create an in-memory fMP4 muxer for the init segment.
         // We use avformat to write a proper moov with codec descriptors.
-        var outputBuffer: UnsafeMutablePointer<UInt8>? = nil
-        var outputSize: Int = 0
-
         let rawData = try writeInitSegment(sourceCtx: ctx)
         // Extract only ftyp + moov boxes (strip any moof+mdat from delay_moov output)
         let initData = extractInitBoxes(from: rawData)
@@ -323,7 +320,6 @@ actor FFmpegRemuxSession {
         cachedInitSegment = initData
 
         // Log box structure for diagnostics
-        let rawBoxes = topLevelBoxes(in: rawData).joined(separator: ", ")
         let initBoxes = topLevelBoxes(in: initData).joined(separator: ", ")
         let moovChildren = moovSubBoxes(in: initData)
         let codecTag = videoCodecTag()
@@ -1882,7 +1878,7 @@ actor FFmpegRemuxSession {
 // MARK: - AVIO Output Writer
 
 /// Wrapper for AVIO write callbacks. Accumulates bytes in memory.
-private final class OutputWriter {
+nonisolated private final class OutputWriter {
     let dataPtr: UnsafeMutablePointer<Data>
 
     init(target: UnsafeMutablePointer<Data>) {
@@ -1898,7 +1894,7 @@ private final class OutputWriter {
 
 // MARK: - Data Extension for Big-Endian Box Parsing
 
-private extension Data {
+nonisolated private extension Data {
     func loadBigEndianUInt32(at offset: Int) -> UInt32 {
         guard offset + 4 <= count else { return 0 }
         return withUnsafeBytes { buf in
@@ -1919,9 +1915,9 @@ private extension Data {
 
 // MARK: - AVSEEK_FLAG constants
 
-private let AVSEEK_FLAG_BACKWARD: Int32 = 1
-private let AVSEEK_FLAG_BYTE: Int32 = 2
-private let avNoPTSValue: Int64 = Int64.min
+nonisolated private let AVSEEK_FLAG_BACKWARD: Int32 = 1
+nonisolated private let AVSEEK_FLAG_BYTE: Int32 = 2
+nonisolated private let avNoPTSValue: Int64 = Int64.min
 
 #else
 

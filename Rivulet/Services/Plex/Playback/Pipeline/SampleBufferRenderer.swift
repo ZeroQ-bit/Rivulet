@@ -19,6 +19,7 @@ final class SampleBufferRenderer {
     // MARK: - Public: Display layer for view binding
 
     let displayLayer = AVSampleBufferDisplayLayer()
+    private var videoRenderer: AVSampleBufferVideoRenderer { displayLayer.sampleBufferRenderer }
 
     /// Audio renderer — used for compressed passthrough and sample-buffer audio.
     nonisolated(unsafe) let audioRenderer = AVSampleBufferAudioRenderer()
@@ -510,7 +511,7 @@ final class SampleBufferRenderer {
 
         guard !Task.isCancelled else { return }
 
-        if !displayLayer.isReadyForMoreMediaData {
+        if !videoRenderer.isReadyForMoreMediaData {
             // During preroll, the display layer cannot drain (rate=0). Once it's
             // full there is nowhere for new frames to go. The read loop is
             // single-threaded, so blocking here would also stall audio packet
@@ -528,10 +529,10 @@ final class SampleBufferRenderer {
             let stallPTS = sampleTime
             let stallSyncTime = currentTime
 
-            while !displayLayer.isReadyForMoreMediaData && !Task.isCancelled {
+            while !videoRenderer.isReadyForMoreMediaData && !Task.isCancelled {
                 let elapsed = CFAbsoluteTimeGetCurrent() - stallStart
                 if elapsed > maxWait {
-                    playerDebugLog("[Renderer] Video enqueue timeout after \(String(format: "%.0f", elapsed * 1000))ms — dropping frame (layer error: \(displayLayer.error?.localizedDescription ?? "none"))")
+                    playerDebugLog("[Renderer] Video enqueue timeout after \(String(format: "%.0f", elapsed * 1000))ms — dropping frame (layer error: \(videoRenderer.error?.localizedDescription ?? "none"))")
                     jitterStats.recordEnqueueStall(duration: elapsed)
                     return
                 }
@@ -548,8 +549,8 @@ final class SampleBufferRenderer {
                     stallPTS - stallSyncTime,
                     stallPTS - nowSyncTime,
                     Double(renderSynchronizer.rate),
-                    displayLayer.status.rawValue,
-                    displayLayer.error?.localizedDescription ?? "none"
+                    videoRenderer.status.rawValue,
+                    videoRenderer.error?.localizedDescription ?? "none"
                 ))
             }
             jitterStats.recordEnqueueStall(duration: stallDuration)
@@ -557,11 +558,11 @@ final class SampleBufferRenderer {
 
         guard !Task.isCancelled else { return }
 
-        if let error = displayLayer.error {
+        if let error = videoRenderer.error {
             playerDebugLog("[Renderer] Display layer error before enqueue: \(error)")
         }
 
-        displayLayer.enqueue(sampleBuffer)
+        videoRenderer.enqueue(sampleBuffer)
     }
 
     // MARK: - Enqueue Audio
@@ -776,7 +777,9 @@ final class SampleBufferRenderer {
                   "syncTime=\(String(format: "%.3f", syncTime))s, " +
                   "PTS=\(String(format: "%.3f", CMTimeGetSeconds(pts)))s")
             logAudioSampleFormat(sampleBuffer)
-            AudioRouteDiagnostics.shared.logCurrentRoute(owner: "SampleBufferRenderer", reason: "first_audio_pull")
+            Task { @MainActor in
+                AudioRouteDiagnostics.shared.logCurrentRoute(owner: "SampleBufferRenderer", reason: "first_audio_pull")
+            }
         }
 
         let sampleDuration = sampleBufferDuration(sampleBuffer)
@@ -1078,7 +1081,7 @@ final class SampleBufferRenderer {
 
     /// Flush both video and audio buffers (for seeking).
     func flush() {
-        displayLayer.flushAndRemoveImage()
+        videoRenderer.flush(removingDisplayedImage: true)
 
         if useAudioEngine {
             audioPlayerNode?.stop()
@@ -1108,7 +1111,7 @@ final class SampleBufferRenderer {
     }
 
     /// Check for errors on display layer or audio renderer.
-    var displayLayerError: Error? { displayLayer.error }
+    var displayLayerError: Error? { videoRenderer.error }
     var audioRendererError: Error? {
         useAudioEngine ? nil : audioRenderer.error
     }

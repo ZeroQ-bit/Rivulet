@@ -816,7 +816,7 @@ struct PlexDetailView: View {
                                 let title = currentItem.title ?? ""
                                 let header = epString + (title.isEmpty ? "" : " · \(title)")
                                 let desc = fullMetadata?.summary ?? currentItem.summary ?? ""
-                                (Text(header).bold() + Text(desc.isEmpty ? "" : ":  \(desc)"))
+                                Text("\(Text(header).bold())\(desc.isEmpty ? Text("") : Text(":  \(desc)"))")
                                     .font(.caption)
                                     .foregroundStyle(.white)
                                     .lineLimit(3)
@@ -1781,10 +1781,12 @@ struct PlexDetailView: View {
         switch currentItem.type {
         case "movie":
             // Collection + recommendations are independent of each other
+            let collection = fullMetadata?.Collection?.first
+            let sectionId = fullMetadata?.librarySectionID
             async let collectionTask: Void = {
-                if let collection = fullMetadata?.Collection?.first,
+                if let collection,
                    let collectionId = collection.idString,
-                   let sectionId = fullMetadata?.librarySectionID {
+                   let sectionId {
                     let name = (collection.tag ?? "Collection") + " Collection"
                     await loadCollectionItems(sectionId: String(sectionId), collectionId: collectionId, name: name)
                 }

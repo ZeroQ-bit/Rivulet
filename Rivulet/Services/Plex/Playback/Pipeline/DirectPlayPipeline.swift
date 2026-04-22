@@ -46,7 +46,7 @@ import Sentry
 /// Backpressure gate for queued audio sample buffers.
 /// Read loop increments pending count when yielding a buffer;
 /// audio enqueue task decrements after renderer enqueue completes.
-private final class AudioBufferGate: @unchecked Sendable {
+nonisolated private final class AudioBufferGate: @unchecked Sendable {
     private let lock = NSLock()
     private var pending = 0
     private var dropped = 0
@@ -98,7 +98,7 @@ private final class AudioBufferGate: @unchecked Sendable {
 /// the gate as "approaching limit" and the read loop pre-emptively sheds
 /// non-keyframes — this avoids ever filling the gate enough to require dropping
 /// a keyframe (which would cause cascading decode artifacts until the next IDR).
-private final class VideoBufferGate: @unchecked Sendable {
+nonisolated private final class VideoBufferGate: @unchecked Sendable {
     private let lock = NSLock()
     private var pending = 0
     private var dropped = 0
@@ -168,10 +168,155 @@ private final class VideoBufferGate: @unchecked Sendable {
 /// Payload yielded from the read loop to the video processing task. Wraps a
 /// raw `DemuxedPacket` plus the read-time metadata needed for ordering and
 /// timing diagnostics.
-private struct VideoTaskPayload: @unchecked Sendable {
+nonisolated private struct VideoTaskPayload: @unchecked Sendable {
     let packet: DemuxedPacket
     let videoPacketIndex: Int      // counter assigned by the read loop
     let frameWallStart: CFAbsoluteTime  // wall-clock when read loop saw the packet
+}
+
+/// Lock-protected preroll state shared across the read loop and detached
+/// audio/video tasks while startup buffering is in progress.
+nonisolated private final class PrerollState: @unchecked Sendable {
+    struct Snapshot {
+        let isWaiting: Bool
+        let waitStartWall: CFAbsoluteTime?
+        let anchorPTSSeconds: Double?
+        let anchorTime: CMTime?
+        let maxPTSSeconds: Double?
+        let maxVideoPTSSeconds: Double?
+    }
+
+    private let lock = NSLock()
+    private var isWaitingForStart = false
+    private var isStartingClock = false
+    private var waitStartWall: CFAbsoluteTime?
+    private var anchorPTSSeconds: Double?
+    private var anchorTime: CMTime?
+    private var maxPTSSeconds: Double?
+    private var maxVideoPTSSeconds: Double?
+
+    func isWaiting() -> Bool {
+        lock.withLock { isWaitingForStart }
+    }
+
+    func snapshot() -> Snapshot {
+        lock.withLock {
+            Snapshot(
+                isWaiting: isWaitingForStart,
+                waitStartWall: waitStartWall,
+                anchorPTSSeconds: anchorPTSSeconds,
+                anchorTime: anchorTime,
+                maxPTSSeconds: maxPTSSeconds,
+                maxVideoPTSSeconds: maxVideoPTSSeconds
+            )
+        }
+    }
+
+    @discardableResult
+    func begin(anchorPTSSeconds: Double, anchorTime: CMTime) -> Bool {
+        lock.withLock {
+            guard !isWaitingForStart else { return false }
+            isWaitingForStart = true
+            isStartingClock = false
+            waitStartWall = CFAbsoluteTimeGetCurrent()
+            self.anchorPTSSeconds = anchorPTSSeconds
+            self.anchorTime = anchorTime
+            maxPTSSeconds = anchorPTSSeconds
+            maxVideoPTSSeconds = nil
+            return true
+        }
+    }
+
+    func recordPacketPTS(_ ptsSeconds: Double) {
+        guard ptsSeconds.isFinite else { return }
+        lock.withLock {
+            guard isWaitingForStart else { return }
+            if let maxPTSSeconds {
+                self.maxPTSSeconds = max(maxPTSSeconds, ptsSeconds)
+            } else {
+                self.maxPTSSeconds = ptsSeconds
+            }
+        }
+    }
+
+    func recordVideoPTS(_ ptsSeconds: Double) {
+        guard ptsSeconds.isFinite else { return }
+        lock.withLock {
+            guard isWaitingForStart else { return }
+            if let maxVideoPTSSeconds {
+                self.maxVideoPTSSeconds = max(maxVideoPTSSeconds, ptsSeconds)
+            } else {
+                self.maxVideoPTSSeconds = ptsSeconds
+            }
+        }
+    }
+
+    func adjustAnchorIfEarlier(to ptsSeconds: Double, time: CMTime, tolerance: Double) -> Double? {
+        guard ptsSeconds.isFinite else { return nil }
+        return lock.withLock {
+            guard isWaitingForStart,
+                  let anchorPTSSeconds,
+                  ptsSeconds + tolerance < anchorPTSSeconds else {
+                return nil
+            }
+
+            let previousAnchor = anchorPTSSeconds
+            self.anchorPTSSeconds = ptsSeconds
+            anchorTime = time
+            if let maxPTSSeconds {
+                self.maxPTSSeconds = max(maxPTSSeconds, ptsSeconds)
+            } else {
+                self.maxPTSSeconds = ptsSeconds
+            }
+            return previousAnchor
+        }
+    }
+
+    func beginStarting(expectedAnchorPTSSeconds: Double?) -> Snapshot? {
+        lock.withLock {
+            guard isWaitingForStart,
+                  !isStartingClock,
+                  anchorPTSSeconds == expectedAnchorPTSSeconds else {
+                return nil
+            }
+
+            isStartingClock = true
+            return Snapshot(
+                isWaiting: isWaitingForStart,
+                waitStartWall: waitStartWall,
+                anchorPTSSeconds: anchorPTSSeconds,
+                anchorTime: anchorTime,
+                maxPTSSeconds: maxPTSSeconds,
+                maxVideoPTSSeconds: maxVideoPTSSeconds
+            )
+        }
+    }
+
+    func cancelStarting() {
+        lock.withLock {
+            isStartingClock = false
+        }
+    }
+
+    func finishStarting() {
+        lock.withLock {
+            isWaitingForStart = false
+            isStartingClock = false
+            waitStartWall = nil
+            anchorPTSSeconds = nil
+            anchorTime = nil
+            maxPTSSeconds = nil
+            maxVideoPTSSeconds = nil
+        }
+    }
+}
+
+nonisolated private final class WeakReference<Object: AnyObject>: @unchecked Sendable {
+    weak var value: Object?
+
+    init(_ value: Object?) {
+        self.value = value
+    }
 }
 
 /// Direct play pipeline: FFmpegDemuxer → CMSampleBuffer → SampleBufferRenderer
@@ -288,6 +433,11 @@ final class DirectPlayPipeline {
 
     private var needsInitialSync = false
     private var needsRateRestoreAfterSeek = false
+    /// Offset the current preroll/restart is targeting. We use this to
+    /// distinguish normal cold starts from remote resume/seek starts, where
+    /// URLSession-backed AVIO often needs a few extra seconds to refill after
+    /// cancelling and rebuilding its range pipeline.
+    private var currentPrerollStartOffsetSeconds: TimeInterval = 0
     /// When true, the most recent fresh start() deferred its onStateChange?(.running)
     /// emission until preroll completes. Cleared once the running state is published.
     private var deferRunningStateChange = false
@@ -320,6 +470,57 @@ final class DirectPlayPipeline {
 
     init(renderer: SampleBufferRenderer) {
         self.renderer = renderer
+    }
+
+    // MARK: - Preroll Tuning
+
+    private struct PrerollPolicy {
+        let requiredLeadSeconds: Double
+        let minimumLeadSecondsOnTimeout: Double
+        let timeoutMs: Double
+        let label: String
+    }
+
+    private var isNetworkBackedStream: Bool {
+        guard let scheme = streamURL?.scheme?.lowercased() else { return false }
+        return scheme == "http" || scheme == "https"
+    }
+
+    private func prerollPolicy() -> PrerollPolicy {
+        if requiresProfileConversion {
+            return PrerollPolicy(
+                requiredLeadSeconds: 5.0,
+                minimumLeadSecondsOnTimeout: 2.0,
+                timeoutMs: 12_000,
+                label: "conversion"
+            )
+        }
+        if demuxer.hasDolbyVision {
+            return PrerollPolicy(
+                requiredLeadSeconds: 3.0,
+                minimumLeadSecondsOnTimeout: 1.5,
+                timeoutMs: 10_000,
+                label: "dolby_vision"
+            )
+        }
+        if isNetworkBackedStream && currentPrerollStartOffsetSeconds > 0.5 {
+            // Resumed/seeked HTTP starts are the unstable case from the logs:
+            // the AVIO layer often spends 1–3 s rebuilding range fetches after a
+            // large seek, so the old 200 ms lead + 1 s timeout would start the
+            // clock while the reader was still starving.
+            return PrerollPolicy(
+                requiredLeadSeconds: 2.0,
+                minimumLeadSecondsOnTimeout: 1.0,
+                timeoutMs: 5_000,
+                label: "remote_offset"
+            )
+        }
+        return PrerollPolicy(
+            requiredLeadSeconds: 0.20,
+            minimumLeadSecondsOnTimeout: 0.20,
+            timeoutMs: 1_000,
+            label: isNetworkBackedStream ? "remote_cold" : "local"
+        )
     }
 
     // MARK: - Load
@@ -538,7 +739,10 @@ final class DirectPlayPipeline {
         if let startTime = startTime, startTime > 0 {
             try demuxer.seek(to: startTime)
             needsInitialSync = true
+            currentPrerollStartOffsetSeconds = startTime
             playerDebugLog("[DirectPlay] Seeking to start time: \(String(format: "%.1f", startTime))s")
+        } else {
+            currentPrerollStartOffsetSeconds = 0
         }
 
         state = .ready
@@ -852,6 +1056,7 @@ final class DirectPlayPipeline {
 
         // Seek in demuxer
         try demuxer.seek(to: time)
+        currentPrerollStartOffsetSeconds = time
 
         // Set synchronizer time, paused
         let targetCMTime = CMTime(seconds: time, preferredTimescale: 90000)
@@ -1002,6 +1207,7 @@ final class DirectPlayPipeline {
         // lead before resuming the clock. Without preroll, the clock runs ahead
         // of the empty buffer and every frame arrives "late".
         playerDebugLog("[DirectPlay] Audio switch complete, restarting read loop")
+        currentPrerollStartOffsetSeconds = 0
         needsRateRestoreAfterSeek = isPlaying
         startReadLoop()
     }
@@ -1516,6 +1722,7 @@ final class DirectPlayPipeline {
                     let capturedDispErr = healthDisplayErrorsSinceReport
 
                     let isClientDecode = audioDecoder != nil
+                    let previousPullDeliveries = healthLastPullDeliveries
                     let healthResult = await MainActor.run { [weak self] () -> (line: String, totalPullDel: Int)? in
                         guard let self else { return nil }
                         let jitter = self.renderer.jitterStats.healthSnapshot()
@@ -1525,7 +1732,7 @@ final class DirectPlayPipeline {
                         let audioAhead = ptsSeconds - syncTime
                         let dispErr = (self.renderer.displayLayerError != nil ? 1 : 0) + capturedDispErr
                         let totalPullDel = self.renderer.totalAudioPullDeliveries
-                        let pullDel = totalPullDel - healthLastPullDeliveries
+                        let pullDel = totalPullDel - previousPullDeliveries
                         let isAirPlay = PlaybackAudioSessionConfigurator.isAirPlayRouteActive()
                         let report = PlaybackHealthReport(
                             playbackTime: ptsSeconds,
@@ -1586,6 +1793,7 @@ final class DirectPlayPipeline {
             playerDebugLog("[PlaybackHealth] CONFIG hasDV=\(hasDV) conversion=\(requiresConversion) " +
                   "lookahead=\(String(format: "%.1f", capturedLookahead))s " +
                   "audioDecoder=\(audioDecoder != nil) container=\(capturedContainer)")
+            let pipelineRef = WeakReference(self)
 
             // The read loop is now a thin packet shuttler. Per-frame video state
             // (late counters, timing accumulators, health report, cadence tracking,
@@ -1612,17 +1820,12 @@ final class DirectPlayPipeline {
             // path hits frame 48 first triggers the auto-fallback.
             var conversionDisabled = false
 
-            var waitingForPrerollStart = false
-            var prerollWaitStartWall: CFAbsoluteTime?
-            var prerollAnchorPTSSeconds: Double?
-            var prerollAnchorTime: CMTime?
-            var prerollMaxPTSSeconds: Double?
-            var prerollMaxVideoPTSSeconds: Double?  // Video-only PTS for accurate preroll lead
+            let prerollState = PrerollState()
             let hasAudioPath = (audioDecoder != nil || audioFD != nil)
 
-            let maybePrimePrerollTimeline: @Sendable (Double, CMTime, String) async -> Void = { ptsSeconds, ptsTime, source in
+            func maybePrimePrerollTimeline(_ ptsSeconds: Double, _ ptsTime: CMTime, _ source: String) async {
                 guard ptsSeconds.isFinite, ptsSeconds >= 0 else { return }
-                guard !waitingForPrerollStart else { return }
+                guard !prerollState.isWaiting() else { return }
 
                 let decision = await MainActor.run { [weak self] () -> (shouldPreroll: Bool, label: String)? in
                     guard let self else { return nil }
@@ -1651,17 +1854,23 @@ final class DirectPlayPipeline {
                 )
 
                 if decision.shouldPreroll {
-                    waitingForPrerollStart = true
-                    prerollWaitStartWall = CFAbsoluteTimeGetCurrent()
-                    prerollAnchorPTSSeconds = ptsSeconds
-                    prerollAnchorTime = ptsTime
-                    prerollMaxPTSSeconds = ptsSeconds
+                    prerollState.begin(anchorPTSSeconds: ptsSeconds, anchorTime: ptsTime)
                 }
             }
 
-            let maybeCompletePrerollStart: @Sendable (Double?, Bool) async -> Bool = { currentPTSSeconds, audioReadyOverride in
-                guard waitingForPrerollStart else { return false }
+            @Sendable
+            func maybeCompletePrerollStart(_ currentPTSSeconds: Double?, _ audioReadyOverride: Bool) async -> Bool {
+                let prerollSnapshot = prerollState.snapshot()
+                guard prerollSnapshot.isWaiting else { return false }
 
+                let prerollPolicy = await MainActor.run {
+                    pipelineRef.value?.prerollPolicy() ?? PrerollPolicy(
+                        requiredLeadSeconds: 0.20,
+                        minimumLeadSecondsOnTimeout: 0.20,
+                        timeoutMs: 1_000,
+                        label: "fallback"
+                    )
+                }
                 let audioPrimed = await MainActor.run {
                     renderer.isAudioPrimedForPlayback
                 }
@@ -1670,60 +1879,59 @@ final class DirectPlayPipeline {
                 }
                 let audioReady = audioReadyOverride || !hasAudioPath || audioPrimed
                 let prerollLeadSeconds: Double = {
-                    guard let anchor = prerollAnchorPTSSeconds, let maxPTS = prerollMaxPTSSeconds else { return 0 }
+                    guard let anchor = prerollSnapshot.anchorPTSSeconds,
+                          let maxPTS = prerollSnapshot.maxPTSSeconds else { return 0 }
                     return max(0, maxPTS - anchor)
                 }()
                 // Use video-only PTS for videoReady check — audio PTS can race ahead
                 // and cause preroll to complete with insufficient video buffer.
                 let videoLeadSeconds: Double = {
-                    guard let anchor = prerollAnchorPTSSeconds, let maxVPTS = prerollMaxVideoPTSSeconds else { return 0 }
+                    guard let anchor = prerollSnapshot.anchorPTSSeconds,
+                          let maxVPTS = prerollSnapshot.maxVideoPTSSeconds else { return 0 }
                     return max(0, maxVPTS - anchor)
                 }()
-                // Required video lead before the clock starts. DV/HDR content from Plex
-                // takes ~10 s for the HTTP read loop to warm up; during that warmup the
-                // read loop sustains roughly 0.4–0.82× realtime, so a too-small lead is
-                // depleted before the network reaches steady state and the audio renderer
-                // underruns. Aim for enough buffer to bridge the entire warmup phase
-                // (warmup_seconds × (1 - average_warmup_rate) ≈ 3 s).
-                let requiredPrerollLeadSeconds: Double = {
-                    if requiresConversion { return 5.0 }
-                    if hasDV { return 3.0 }
-                    return 0.20
-                }()
-                let videoReady = videoLeadSeconds >= requiredPrerollLeadSeconds
+                let videoReady = videoLeadSeconds >= prerollPolicy.requiredLeadSeconds
                 let waitedMs: Double = {
-                    guard let start = prerollWaitStartWall else { return 0 }
+                    guard let start = prerollSnapshot.waitStartWall else { return 0 }
                     return (CFAbsoluteTimeGetCurrent() - start) * 1000
                 }()
-                // Timeout = enough wall time to actually buffer the requested lead at the
-                // worst-case warmup rate (~0.4×), so the lead requirement isn't bypassed
-                // by a too-aggressive timeout.
-                let prerollTimeout: Double = {
-                    if requiresConversion { return 12000 }
-                    if hasDV { return 10000 }
-                    return 1000
-                }()
-                let timedOut = hasAudioPath && waitedMs >= prerollTimeout
+                let timedOut = hasAudioPath && waitedMs >= prerollPolicy.timeoutMs
+                let timeoutVideoReady = videoLeadSeconds >= prerollPolicy.minimumLeadSecondsOnTimeout
 
                 if timedOut {
                     playerDebugLog("[DirectPlay] Preroll timeout after \(String(format: "%.0f", waitedMs))ms " +
-                          "(audioReady=\(audioReady) reliableStart=\(audioReliableStart) videoReady=\(videoReady) " +
+                          "(policy=\(prerollPolicy.label) audioReady=\(audioReady) reliableStart=\(audioReliableStart) " +
+                          "videoReady=\(videoReady) timeoutVideoReady=\(timeoutVideoReady) " +
                           "lead=\(String(format: "%.0f", prerollLeadSeconds * 1000))ms " +
-                          "need=\(String(format: "%.0f", requiredPrerollLeadSeconds * 1000))ms)")
+                          "need=\(String(format: "%.0f", prerollPolicy.requiredLeadSeconds * 1000))ms " +
+                          "timeoutNeed=\(String(format: "%.0f", prerollPolicy.minimumLeadSecondsOnTimeout * 1000))ms)")
                 }
 
-                guard (audioReady && videoReady) || timedOut else { return false }
+                guard (audioReady && videoReady) || (timedOut && audioReady && timeoutVideoReady) else { return false }
 
-                let startedRate = await MainActor.run { [weak self] () -> (Float, Double, String)? in
-                    guard let self else { return nil }
-                    let shouldStartPlayback = (self.state == .running) || self.isPlaying
-                    guard shouldStartPlayback else { return nil }
-                    let rate = self.playbackRate
-                    let anchorTime = prerollAnchorTime ?? CMTime(
-                        seconds: prerollAnchorPTSSeconds ?? renderer.currentTime,
+                guard let startSnapshot = prerollState.beginStarting(
+                    expectedAnchorPTSSeconds: prerollSnapshot.anchorPTSSeconds
+                ) else {
+                    return false
+                }
+
+                guard let pipeline = pipelineRef.value else {
+                    prerollState.cancelStarting()
+                    return false
+                }
+
+                let startedRate = await MainActor.run { () -> (Float, Double, String)? in
+                    let shouldStartPlayback = (pipeline.state == .running) || pipeline.isPlaying
+                    guard shouldStartPlayback else {
+                        prerollState.cancelStarting()
+                        return nil
+                    }
+                    let rate = pipeline.playbackRate
+                    let anchorTime = startSnapshot.anchorTime ?? CMTime(
+                        seconds: startSnapshot.anchorPTSSeconds ?? renderer.currentTime,
                         preferredTimescale: 90_000
                     )
-                    let anchorSeconds = prerollAnchorPTSSeconds ?? CMTimeGetSeconds(anchorTime)
+                    let anchorSeconds = startSnapshot.anchorPTSSeconds ?? CMTimeGetSeconds(anchorTime)
                     // Use 2-arg setRate so the synchronizer chooses its own
                     // start timing. On AirPlay the synchronizer knows the
                     // transport latency and aligns the clock with when audio
@@ -1732,20 +1940,18 @@ final class DirectPlayPipeline {
                     // AirPlay buffer is filled, producing a perceptible
                     // audio-behind-video offset after pause/resume.
                     renderer.setRate(rate, time: anchorTime)
-                    let reason = timedOut ? "timeout" : "audio+video_primed"
+                    let reason = timedOut ? "timeout_\(prerollPolicy.label)" : "audio+video_primed"
                     return (rate, anchorSeconds, reason)
                 }
 
-                guard let started = startedRate else { return false }
+                guard let started = startedRate else {
+                    prerollState.cancelStarting()
+                    return false
+                }
 
                 let (playbackRate, anchorTime, reason) = started
-                let packetTime = currentPTSSeconds ?? prerollMaxPTSSeconds ?? anchorTime
-                waitingForPrerollStart = false
-                prerollWaitStartWall = nil
-                prerollAnchorPTSSeconds = nil
-                prerollAnchorTime = nil
-                prerollMaxPTSSeconds = nil
-                prerollMaxVideoPTSSeconds = nil
+                let packetTime = currentPTSSeconds ?? startSnapshot.maxPTSSeconds ?? anchorTime
+                prerollState.finishStarting()
                 playerDebugLog(
                     "[DirectPlay] Preroll complete: starting clock from anchor=\(String(format: "%.3f", anchorTime))s " +
                     "packet=\(String(format: "%.3f", packetTime))s rate=\(String(format: "%.2f", playbackRate)) " +
@@ -1757,12 +1963,11 @@ final class DirectPlayPipeline {
                 // Emit any .running state change that fresh start() deferred until
                 // playback was actually visible. This dismisses the player loading
                 // view at the same instant audio/video begins.
-                await MainActor.run { [weak self] in
-                    guard let self else { return }
-                    if self.deferRunningStateChange {
-                        self.deferRunningStateChange = false
+                await MainActor.run {
+                    if pipeline.deferRunningStateChange {
+                        pipeline.deferRunningStateChange = false
                         playerDebugLog("[StartupTrace] deferred .running emitted (preroll done, audio+video flowing)")
-                        self.onStateChange?(.running)
+                        pipeline.onStateChange?(.running)
                     } else {
                         playerDebugLog("[StartupTrace] preroll done but no deferred .running (flag already cleared)")
                     }
@@ -1779,7 +1984,7 @@ final class DirectPlayPipeline {
                 }
             }
 
-            let enqueueAudioBuffer: @Sendable (CMSampleBuffer) async -> Void = { sampleBuffer in
+            func enqueueAudioBuffer(_ sampleBuffer: CMSampleBuffer) async {
                 let samplePTS = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
                 let samplePTSSeconds = CMTimeGetSeconds(samplePTS)
 
@@ -1787,20 +1992,15 @@ final class DirectPlayPipeline {
                 // completed. The closure has its own early-return guard, but
                 // the await suspension overhead is non-trivial at 30+ audio
                 // packets/sec and adds to MainActor contention.
-                if waitingForPrerollStart || audioPacketCount < 8 {
+                if prerollState.isWaiting() || renderer.currentTime < 0.1 {
                     await maybePrimePrerollTimeline(samplePTSSeconds, samplePTS, "audio")
                 }
 
-                if waitingForPrerollStart,
-                   let anchor = prerollAnchorPTSSeconds,
-                   samplePTSSeconds.isFinite,
-                   samplePTSSeconds + 0.05 < anchor {
-                    let previousAnchor = anchor
-                    prerollAnchorPTSSeconds = samplePTSSeconds
-                    prerollAnchorTime = samplePTS
-                    if let maxPTS = prerollMaxPTSSeconds {
-                        prerollMaxPTSSeconds = max(maxPTS, samplePTSSeconds)
-                    }
+                if let previousAnchor = prerollState.adjustAnchorIfEarlier(
+                    to: samplePTSSeconds,
+                    time: samplePTS,
+                    tolerance: 0.05
+                ) {
                     await MainActor.run {
                         renderer.setRate(0, time: samplePTS)
                     }
@@ -1812,13 +2012,8 @@ final class DirectPlayPipeline {
                     )
                 }
 
-                if waitingForPrerollStart {
-                    if let maxPTS = prerollMaxPTSSeconds {
-                        prerollMaxPTSSeconds = max(maxPTS, samplePTSSeconds)
-                    } else if samplePTSSeconds.isFinite {
-                        prerollMaxPTSSeconds = samplePTSSeconds
-                    }
-
+                if prerollState.isWaiting() {
+                    prerollState.recordPacketPTS(samplePTSSeconds)
                     await renderer.enqueueAudio(sampleBuffer)
                     _ = await maybeCompletePrerollStart(samplePTSSeconds, false)
                     return
@@ -1947,7 +2142,7 @@ final class DirectPlayPipeline {
                     // actually hold in its internal queue for 4K HEVC on tvOS
                     // (empirically ~3–5 s). Preroll bypasses the throttle so
                     // the initial buffer still fills quickly.
-                    if !waitingForPrerollStart {
+                    if !prerollState.isWaiting() {
                         let renderedNow = renderer.currentTime
                         if renderedNow > 0.1 {
                             let ahead = packet.ptsSeconds - renderedNow
@@ -2018,7 +2213,7 @@ final class DirectPlayPipeline {
                         // own MainActor hop that early-returns post-preroll, but
                         // even the await itself has overhead — check the local
                         // flag first to skip it entirely on the hot path.
-                        if waitingForPrerollStart || isFirstVideoFrame {
+                        if prerollState.isWaiting() || isFirstVideoFrame {
                             await maybePrimePrerollTimeline(ptsSeconds, packet.cmPTS, "video")
                         }
 
@@ -2026,12 +2221,11 @@ final class DirectPlayPipeline {
                         // During preroll, run the entire video pipeline inline on
                         // the read loop (DV conversion → sample buffer → enqueue
                         // with bypassLookahead=true → preroll bookkeeping). This
-                        // mirrors the audio enqueueAudioBuffer preroll bypass and
-                        // keeps prerollAnchor*/prerollMax* state lock-free
-                        // (single-thread access). Preroll is brief (~3-7s), so
-                        // the brief duplication of conversion+sampleBuffer code
-                        // here vs. the video task is acceptable.
-                        if waitingForPrerollStart {
+                        // mirrors the audio enqueueAudioBuffer preroll bypass.
+                        // Preroll is brief (~3-7s), so the brief duplication of
+                        // conversion+sampleBuffer code here vs. the video task
+                        // is acceptable.
+                        if prerollState.isWaiting() {
                             var packetData = packet.data
                             if requiresConversion && !conversionDisabled, let converter = profileConverter {
                                 packetData = converter.processVideoSample(packetData)
@@ -2073,16 +2267,8 @@ final class DirectPlayPipeline {
                             // still prevents overflow.
                             await renderer.enqueueVideo(sampleBuffer, bypassLookahead: true)
 
-                            if let maxPTS = prerollMaxPTSSeconds {
-                                prerollMaxPTSSeconds = max(maxPTS, ptsSeconds)
-                            } else {
-                                prerollMaxPTSSeconds = ptsSeconds
-                            }
-                            if let maxVPTS = prerollMaxVideoPTSSeconds {
-                                prerollMaxVideoPTSSeconds = max(maxVPTS, ptsSeconds)
-                            } else {
-                                prerollMaxVideoPTSSeconds = ptsSeconds
-                            }
+                            prerollState.recordPacketPTS(ptsSeconds)
+                            prerollState.recordVideoPTS(ptsSeconds)
 
                             let didStartPreroll = await maybeCompletePrerollStart(ptsSeconds, false)
                             if !didStartPreroll, (videoPacketCount <= 10 || videoPacketCount % 120 == 0) {
@@ -2093,17 +2279,22 @@ final class DirectPlayPipeline {
                                     renderer.hasReliableAudioStart
                                 }
                                 let audioReady = !hasAudioPath || audioPrimed
+                                let prerollSnapshot = prerollState.snapshot()
                                 let prerollLeadSeconds: Double = {
-                                    guard let anchor = prerollAnchorPTSSeconds, let maxPTS = prerollMaxPTSSeconds else { return 0 }
+                                    guard let anchor = prerollSnapshot.anchorPTSSeconds,
+                                          let maxPTS = prerollSnapshot.maxPTSSeconds else { return 0 }
                                     return max(0, maxPTS - anchor)
                                 }()
-                                let requiredPrerollLeadSeconds: Double = {
-                                    if requiresConversion { return 5.0 }
-                                    if hasDV { return 3.0 }
-                                    return 0.20
-                                }()
+                                let prerollPolicy = await MainActor.run {
+                                    pipelineRef.value?.prerollPolicy() ?? PrerollPolicy(
+                                        requiredLeadSeconds: 0.20,
+                                        minimumLeadSecondsOnTimeout: 0.20,
+                                        timeoutMs: 1_000,
+                                        label: "fallback"
+                                    )
+                                }
                                 let waitedMs: Double = {
-                                    guard let start = prerollWaitStartWall else { return 0 }
+                                    guard let start = prerollSnapshot.waitStartWall else { return 0 }
                                     return (CFAbsoluteTimeGetCurrent() - start) * 1000
                                 }()
                                 playerDebugLog(
@@ -2112,7 +2303,8 @@ final class DirectPlayPipeline {
                                     "audioPrimed=\(audioPrimed) audioReady=\(audioReady) reliableStart=\(audioReliableStart) " +
                                     "videoLead=\(String(format: "%.0f", prerollLeadSeconds * 1000))ms " +
                                     "bypass=true " +
-                                    "needLead=\(String(format: "%.0f", requiredPrerollLeadSeconds * 1000))ms " +
+                                    "needLead=\(String(format: "%.0f", prerollPolicy.requiredLeadSeconds * 1000))ms " +
+                                    "policy=\(prerollPolicy.label) " +
                                     "wait=\(String(format: "%.0f", waitedMs))ms"
                                 )
                             }
@@ -2159,10 +2351,11 @@ final class DirectPlayPipeline {
 
                                 await renderer.enqueueVideo(sampleBuffer, bypassLookahead: false)
 
+                                let pausedSeekFrameNumber = videoPacketCount
                                 await MainActor.run { [weak self] in
                                     guard let self else { return }
                                     if let layerError = renderer.displayLayerError {
-                                        playerDebugLog("[DirectPlay] Display layer error after paused-seek frame \(videoPacketCount): \(layerError)")
+                                        playerDebugLog("[DirectPlay] Display layer error after paused-seek frame \(pausedSeekFrameNumber): \(layerError)")
                                     }
                                     self.state = .paused
                                     self.onStateChange?(.paused)

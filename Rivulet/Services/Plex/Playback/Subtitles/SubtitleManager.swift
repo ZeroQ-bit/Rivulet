@@ -8,6 +8,12 @@
 import Foundation
 import Combine
 
+struct PreparedSubtitle: Sendable {
+    let track: SubtitleTrack
+    let format: SubtitleFormat
+    let sourceDescription: String
+}
+
 /// Manages subtitle loading and provides current cues based on playback time
 @MainActor
 final class SubtitleManager: ObservableObject {
@@ -32,35 +38,47 @@ final class SubtitleManager: ObservableObject {
     func load(url: URL, headers: [String: String], format: SubtitleFormat? = nil) async {
         isLoading = true
         error = nil
-        currentTrack = .empty
-        currentCues = []
 
         do {
-            let content = try await fetchSubtitleContent(url: url, headers: headers)
-            let detectedFormat = format ?? SubtitleFormat(fromURL: url)
-
-            let track: SubtitleTrack
-            if let parser = detectedFormat.parser {
-                track = try parser.parse(content)
-            } else {
-                // Try to auto-detect from content
-                track = try parseWithAutoDetect(content)
-            }
-
-            guard !track.cues.isEmpty else {
-                throw SubtitleLoadError.noCues
-            }
-
-            currentTrack = track
-            if diagnosticsEnabled {
-                playerDebugLog("🎬 [Subtitles] Loaded \(track.cues.count) cues (\(detectedFormat)) from \(url.lastPathComponent)")
-            }
+            let prepared = try await prepare(url: url, headers: headers, format: format)
+            load(prepared: prepared)
         } catch {
             self.error = error
+            currentTrack = .empty
+            currentCues = []
             playerDebugLog("🎬 [Subtitles] ❌ Failed to load: \(error.localizedDescription)")
         }
 
         isLoading = false
+    }
+
+    /// Prepare subtitles from a URL without mutating the active subtitle state.
+    func prepare(url: URL, headers: [String: String], format: SubtitleFormat? = nil) async throws -> PreparedSubtitle {
+        let content = try await fetchSubtitleContent(url: url, headers: headers)
+        let detectedFormat = format ?? SubtitleFormat(fromURL: url)
+        return try makePreparedSubtitle(
+            content: content,
+            detectedFormat: detectedFormat,
+            sourceDescription: url.lastPathComponent
+        )
+    }
+
+    /// Apply a prepared subtitle track instantly without hitting the network again.
+    func load(prepared: PreparedSubtitle) {
+        error = nil
+        currentTrack = prepared.track
+        currentCues = []
+        accumulatedCues = []
+        currentBitmapCues = []
+        accumulatedBitmapCues = []
+        lastUpdateTime = -1
+
+        if diagnosticsEnabled {
+            playerDebugLog(
+                "🎬 [Subtitles] Loaded \(prepared.track.cues.count) cues " +
+                "(\(prepared.format)) from \(prepared.sourceDescription)"
+            )
+        }
     }
 
     /// Load subtitles from raw content string
@@ -69,17 +87,13 @@ final class SubtitleManager: ObservableObject {
         currentTrack = .empty
         currentCues = []
 
-        guard let parser = format.parser else {
-            playerDebugLog("🎬 [Subtitles] ❌ No parser for format")
-            return
-        }
-
         do {
-            let track = try parser.parse(content)
-            currentTrack = track
-            if diagnosticsEnabled {
-                playerDebugLog("🎬 [Subtitles] Loaded \(track.cues.count) cues (\(format)) from content")
-            }
+            let prepared = try makePreparedSubtitle(
+                content: content,
+                detectedFormat: format,
+                sourceDescription: "content"
+            )
+            load(prepared: prepared)
         } catch {
             self.error = error
             playerDebugLog("🎬 [Subtitles] ❌ Parse error: \(error.localizedDescription)")
@@ -224,6 +238,29 @@ final class SubtitleManager: ObservableObject {
         }
 
         throw SubtitleLoadError.invalidEncoding
+    }
+
+    private func makePreparedSubtitle(
+        content: String,
+        detectedFormat: SubtitleFormat,
+        sourceDescription: String
+    ) throws -> PreparedSubtitle {
+        let track: SubtitleTrack
+        if let parser = detectedFormat.parser {
+            track = try parser.parse(content)
+        } else {
+            track = try parseWithAutoDetect(content)
+        }
+
+        guard !track.cues.isEmpty else {
+            throw SubtitleLoadError.noCues
+        }
+
+        return PreparedSubtitle(
+            track: track,
+            format: detectedFormat,
+            sourceDescription: sourceDescription
+        )
     }
 
     private func parseWithAutoDetect(_ content: String) throws -> SubtitleTrack {

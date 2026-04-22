@@ -12,7 +12,7 @@ import Sentry
 // MARK: - HLS Segment
 
 /// Represents a single media segment in an HLS playlist
-struct HLSSegment {
+nonisolated struct HLSSegment {
     let url: URL
     let duration: TimeInterval
     let startTime: TimeInterval  // Cumulative start time
@@ -23,7 +23,7 @@ struct HLSSegment {
 
 /// Fetches and parses HLS playlists and downloads fMP4 segments.
 /// Handles Plex auth headers on all requests.
-final class HLSSegmentFetcher {
+nonisolated final class HLSSegmentFetcher {
 
     // MARK: - Properties
 

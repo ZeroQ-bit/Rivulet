@@ -15,17 +15,17 @@ enum TMDBMediaType: String {
     case tv
 }
 
-struct TMDBKeyword: Codable {
+nonisolated struct TMDBKeyword: Codable {
     let id: Int?
     let name: String?
 }
 
-struct TMDBGenre: Codable {
+nonisolated struct TMDBGenre: Codable {
     let id: Int?
     let name: String?
 }
 
-struct TMDBDetails: Codable {
+nonisolated struct TMDBDetails: Codable {
     let genres: [TMDBGenre]?
     let voteAverage: Double?
     let voteCount: Int?
@@ -37,7 +37,7 @@ struct TMDBDetails: Codable {
     }
 }
 
-struct TMDBCredit: Codable {
+nonisolated struct TMDBCredit: Codable {
     let id: Int?
     let name: String?
     let job: String?
@@ -45,7 +45,7 @@ struct TMDBCredit: Codable {
     let character: String?
 }
 
-private struct TMDBKeywordsResponse: Codable {
+nonisolated private struct TMDBKeywordsResponse: Codable {
     let keywords: [TMDBKeyword]?
     let results: [TMDBKeyword]?
 
@@ -56,12 +56,12 @@ private struct TMDBKeywordsResponse: Codable {
     }
 }
 
-private struct TMDBCreditsResponse: Codable {
+nonisolated private struct TMDBCreditsResponse: Codable {
     let cast: [TMDBCredit]?
     let crew: [TMDBCredit]?
 }
 
-struct TMDBItemFeatures: Codable {
+nonisolated struct TMDBItemFeatures: Codable {
     var keywords: [String]
     var cast: [String]
     var directors: [String]
@@ -88,12 +88,12 @@ struct TMDBItemFeatures: Codable {
     }
 }
 
-private struct CachedFeatures: Codable {
+nonisolated private struct CachedFeatures: Codable {
     let generatedAt: Date
     let features: TMDBItemFeatures
 }
 
-final class TMDBClient: @unchecked Sendable {
+nonisolated final class TMDBClient: @unchecked Sendable {
     static let shared = TMDBClient()
 
     private let session: URLSession

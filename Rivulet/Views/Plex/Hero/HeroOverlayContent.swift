@@ -9,6 +9,7 @@
 //
 
 import SwiftUI
+import UIKit
 import os.log
 
 private let overlayLog = Logger(subsystem: "com.rivulet.app", category: "HeroOverlay")
@@ -58,12 +59,18 @@ struct HeroOverlayContent: View {
     }
 
     /// Must match the hero-section height computed in `PlexHomeView.contentView`
-    /// and `PlexLibraryView.contentView` (`UIScreen.main.bounds.height - 180`).
+    /// and `PlexLibraryView.contentView`.
     /// Set here explicitly so the layout doesn't depend on SwiftUI propagating
     /// the parent's `.frame(height:)` through the ZStack — which wasn't
     /// reaching the VStack reliably and caused the controls to overflow below
     /// the clipped hero bounds.
-    private static let heroHeight: CGFloat = UIScreen.main.bounds.height - 200
+    @MainActor
+    private static var heroHeight: CGFloat {
+        let screenHeight = UIApplication.shared.connectedScenes
+            .compactMap { ($0 as? UIWindowScene)?.screen.bounds.height }
+            .max() ?? 1080
+        return screenHeight - 200
+    }
 
     var body: some View {
         ZStack(alignment: .bottom) {

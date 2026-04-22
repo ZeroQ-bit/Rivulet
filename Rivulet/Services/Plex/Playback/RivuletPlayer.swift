@@ -703,15 +703,8 @@ final class RivuletPlayer: ObservableObject {
         hasStartedPlayback = false
         timeObserverTask?.cancel()
         timeObserverTask = nil
-
-        switch activePipeline {
-        case .directPlay:
-            directPlayPipeline?.stop()
-        case .hls:
-            hlsPipeline?.stop()
-        case .none:
-            break
-        }
+        let (oldDirect, oldHLS) = detachPipelines()
+        shutdownDetachedPipelines(oldDirect, oldHLS)
 
         renderer.flush()
         renderer.disableAudioEngine()
@@ -826,17 +819,13 @@ final class RivuletPlayer: ObservableObject {
         }
     }
 
-    /// Enable embedded subtitle extraction for a Plex track ID.
-    /// Matches to FFmpeg stream by codec type to handle Plex lists that include
-    /// external/sidecar subs not present in the container.
-    /// Returns `true` if an embedded FFmpeg match was found, `false` if the track
-    /// is likely external and should be fetched via Plex URL instead.
-    @discardableResult
-    func selectEmbeddedSubtitle(plexTrackId: Int, plexSubtitleTracks: [MediaTrack]) -> Bool {
-        guard activePipeline == .directPlay, let pipeline = directPlayPipeline else { return false }
+    /// Resolve a Plex subtitle track to an FFmpeg subtitle stream index when it
+    /// exists inside the currently opened container.
+    func embeddedSubtitleStreamIndex(plexTrackId: Int, plexSubtitleTracks: [MediaTrack]) -> Int32? {
+        guard activePipeline == .directPlay else { return nil }
 
         let ffmpegSubs = ffmpegSubtitleTracks
-        guard let plexTrack = plexSubtitleTracks.first(where: { $0.id == plexTrackId }) else { return false }
+        guard let plexTrack = plexSubtitleTracks.first(where: { $0.id == plexTrackId }) else { return nil }
 
         let plexCodec = MediaTrack.normalizedSubtitleCodec(plexTrack.codec)
 
@@ -850,22 +839,46 @@ final class RivuletPlayer: ObservableObject {
             }
         }
 
-        // Find the Nth FFmpeg sub with matching codec
+        // Find the Nth FFmpeg sub with matching codec.
         var matchCount = 0
         for ffmpeg in ffmpegSubs {
             if MediaTrack.normalizedSubtitleCodec(ffmpeg.codecName) == plexCodec {
                 if matchCount == sameCodecPosition {
-                    playerDebugLog("[RivuletPlayer] Mapped Plex subtitle \(plexTrackId) → FFmpeg stream \(ffmpeg.streamIndex) (\(ffmpeg.codecName))")
-                    pipeline.selectSubtitleStream(ffmpegStreamIndex: ffmpeg.streamIndex)
-                    return true
+                    return ffmpeg.streamIndex
                 }
                 matchCount += 1
             }
         }
 
+        return nil
+    }
+
+    func hasEmbeddedSubtitleMatch(plexTrackId: Int, plexSubtitleTracks: [MediaTrack]) -> Bool {
+        embeddedSubtitleStreamIndex(plexTrackId: plexTrackId, plexSubtitleTracks: plexSubtitleTracks) != nil
+    }
+
+    /// Enable embedded subtitle extraction for a Plex track ID.
+    /// Matches to FFmpeg stream by codec type to handle Plex lists that include
+    /// external/sidecar subs not present in the container.
+    /// Returns `true` if an embedded FFmpeg match was found, `false` if the track
+    /// is likely external and should be fetched via Plex URL instead.
+    @discardableResult
+    func selectEmbeddedSubtitle(plexTrackId: Int, plexSubtitleTracks: [MediaTrack]) -> Bool {
+        guard activePipeline == .directPlay, let pipeline = directPlayPipeline else { return false }
+        if let ffmpegStreamIndex = embeddedSubtitleStreamIndex(
+            plexTrackId: plexTrackId,
+            plexSubtitleTracks: plexSubtitleTracks
+        ) {
+            let codecName = ffmpegSubtitleTracks.first(where: { $0.streamIndex == ffmpegStreamIndex })?.codecName ?? "unknown"
+            playerDebugLog("[RivuletPlayer] Mapped Plex subtitle \(plexTrackId) → FFmpeg stream \(ffmpegStreamIndex) (\(codecName))")
+            pipeline.selectSubtitleStream(ffmpegStreamIndex: ffmpegStreamIndex)
+            return true
+        }
+
         // No match — likely an external/sidecar subtitle not in the container
+        let plexTrack = plexSubtitleTracks.first(where: { $0.id == plexTrackId })
         playerDebugLog("[RivuletPlayer] No FFmpeg match for Plex subtitle \(plexTrackId) " +
-              "(\(plexTrack.codec ?? "unknown") \(plexTrack.language ?? "")) — falling back to Plex URL")
+              "(\(plexTrack?.codec ?? "unknown") \(plexTrack?.language ?? "")) — falling back to Plex URL")
         return false
     }
 
@@ -892,11 +905,8 @@ final class RivuletPlayer: ObservableObject {
 
     private func cleanupPipelines() {
         invalidatePipelineGeneration()
-        directPlayPipeline?.stop()
-        directPlayPipeline = nil
-        hlsPipeline?.stop()
-        hlsPipeline = nil
-        activePipeline = .none
+        let (oldDirect, oldHLS) = detachPipelines()
+        shutdownDetachedPipelines(oldDirect, oldHLS)
 
         // Flush the shared renderer so the display layer and audio renderer
         // don't have stale data from a previous pipeline.
@@ -907,11 +917,7 @@ final class RivuletPlayer: ObservableObject {
     }
 
     private func cleanupPipelinesAsync() async {
-        let oldDirect = directPlayPipeline
-        let oldHLS = hlsPipeline
-        directPlayPipeline = nil
-        hlsPipeline = nil
-        activePipeline = .none
+        let (oldDirect, oldHLS) = detachPipelines()
 
         await oldDirect?.shutdown()
         await oldHLS?.shutdown()
@@ -926,6 +932,28 @@ final class RivuletPlayer: ObservableObject {
 
     private func invalidatePipelineGeneration() {
         pipelineGeneration &+= 1
+    }
+
+    /// Detach current pipelines from the player immediately so transport/UI
+    /// state can reset without waiting for FFmpeg read tasks to unwind.
+    private func detachPipelines() -> (DirectPlayPipeline?, HLSPipeline?) {
+        let oldDirect = directPlayPipeline
+        let oldHLS = hlsPipeline
+        directPlayPipeline = nil
+        hlsPipeline = nil
+        activePipeline = .none
+        return (oldDirect, oldHLS)
+    }
+
+    /// `DirectPlayPipeline.shutdown()` awaits the read loop before closing the
+    /// demuxer, which avoids the EXC_BAD_ACCESS we can hit if stop frees FFmpeg
+    /// state while `av_read_frame` is still active on a background task.
+    private func shutdownDetachedPipelines(_ oldDirect: DirectPlayPipeline?, _ oldHLS: HLSPipeline?) {
+        guard oldDirect != nil || oldHLS != nil else { return }
+        Task { @MainActor in
+            await oldDirect?.shutdown()
+            await oldHLS?.shutdown()
+        }
     }
 
     // MARK: - Private: Pipeline Callbacks
@@ -1055,72 +1083,64 @@ final class RivuletPlayer: ObservableObject {
     /// URLSession.dataTask delegate and prints the wire-level throughput.
     /// Use this to compare plain URLSession against our AVIO source — if the
     /// numbers match, the cap is not in our code.
-    fileprivate static func runURLSessionProbe(url: URL, headers: [String: String]?) async {
-        final class ProbeDelegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
-            var bytes: Int64 = 0
-            var firstByte: CFAbsoluteTime = 0
-            var lastByte: CFAbsoluteTime = 0
-            var done = DispatchSemaphore(value: 0)
-            let stopAfter: Int64
-            init(stopAfter: Int64) { self.stopAfter = stopAfter }
-            func urlSession(_ s: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
-                if firstByte == 0 { firstByte = CFAbsoluteTimeGetCurrent() }
-                bytes += Int64(data.count)
-                lastByte = CFAbsoluteTimeGetCurrent()
-                if bytes >= stopAfter { dataTask.cancel() }
-            }
-            func urlSession(_ s: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-                done.signal()
-            }
-        }
-
+    nonisolated fileprivate static func runURLSessionProbe(url: URL, headers: [String: String]?) async {
         let stopAfter: Int64 = 8 * 1024 * 1024
-        var request = URLRequest(url: url)
-        request.httpMethod = "GET"
-        request.addValue("bytes=0-\(stopAfter - 1)", forHTTPHeaderField: "Range")
-        if let headers {
-            for (k, v) in headers { request.addValue(v, forHTTPHeaderField: k) }
+        func runProbe(configuration: URLSessionConfiguration, label: String) async {
+            var request = URLRequest(url: url)
+            request.httpMethod = "GET"
+            request.addValue("bytes=0-\(stopAfter - 1)", forHTTPHeaderField: "Range")
+            if let headers {
+                for (k, v) in headers {
+                    request.addValue(v, forHTTPHeaderField: k)
+                }
+            }
+
+            let session = URLSession(configuration: configuration)
+            defer { session.invalidateAndCancel() }
+
+            do {
+                let (bytes, _) = try await session.bytes(for: request)
+                var iterator = bytes.makeAsyncIterator()
+                var byteCount: Int64 = 0
+                var firstByteWall: CFAbsoluteTime = 0
+                var lastByteWall: CFAbsoluteTime = 0
+
+                while byteCount < stopAfter, let _ = try await iterator.next() {
+                    let now = CFAbsoluteTimeGetCurrent()
+                    if firstByteWall == 0 { firstByteWall = now }
+                    lastByteWall = now
+                    byteCount += 1
+                }
+
+                let elapsed = max(lastByteWall - firstByteWall, 0.001)
+                let mbps = Double(byteCount) * 8 / 1_000_000 / elapsed
+                playerDebugLog(
+                    String(
+                        format: "[URLSessionProbe/%@] bytes=%.2fMB elapsed=%.2fs rate=%.1fMbps",
+                        label,
+                        Double(byteCount) / 1_000_000,
+                        elapsed,
+                        mbps
+                    )
+                )
+            } catch {
+                playerDebugLog("[URLSessionProbe/\(label)] failed: \(error.localizedDescription)")
+            }
         }
 
-        // Probe A: default config
-        do {
-            let cfg = URLSessionConfiguration.default
-            cfg.urlCache = nil
-            cfg.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
-            let delegate = ProbeDelegate(stopAfter: stopAfter)
-            let q = OperationQueue(); q.maxConcurrentOperationCount = 1
-            let session = URLSession(configuration: cfg, delegate: delegate, delegateQueue: q)
-            let task = session.dataTask(with: request)
-            task.resume()
-            _ = delegate.done.wait(timeout: .now() + 30)
-            session.invalidateAndCancel()
-            let elapsed = max(delegate.lastByte - delegate.firstByte, 0.001)
-            let mbps = Double(delegate.bytes) * 8 / 1_000_000 / elapsed
-            playerDebugLog(String(format: "[URLSessionProbe/default] bytes=%.2fMB elapsed=%.2fs rate=%.1fMbps",
-                         Double(delegate.bytes) / 1_000_000, elapsed, mbps))
-        }
+        let defaultConfig = URLSessionConfiguration.default
+        defaultConfig.urlCache = nil
+        defaultConfig.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        await runProbe(configuration: defaultConfig, label: "default")
 
-        // Probe B: ephemeral + .avStreaming (same config our AVIO uses)
-        do {
-            let cfg = URLSessionConfiguration.ephemeral
-            cfg.urlCache = nil
-            cfg.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
-            cfg.networkServiceType = .avStreaming
-            cfg.waitsForConnectivity = false
-            cfg.allowsConstrainedNetworkAccess = true
-            cfg.allowsExpensiveNetworkAccess = true
-            let delegate = ProbeDelegate(stopAfter: stopAfter)
-            let q = OperationQueue(); q.maxConcurrentOperationCount = 1
-            let session = URLSession(configuration: cfg, delegate: delegate, delegateQueue: q)
-            let task = session.dataTask(with: request)
-            task.resume()
-            _ = delegate.done.wait(timeout: .now() + 30)
-            session.invalidateAndCancel()
-            let elapsed = max(delegate.lastByte - delegate.firstByte, 0.001)
-            let mbps = Double(delegate.bytes) * 8 / 1_000_000 / elapsed
-            playerDebugLog(String(format: "[URLSessionProbe/ephemeral-avs] bytes=%.2fMB elapsed=%.2fs rate=%.1fMbps",
-                         Double(delegate.bytes) / 1_000_000, elapsed, mbps))
-        }
+        let avStreamingConfig = URLSessionConfiguration.ephemeral
+        avStreamingConfig.urlCache = nil
+        avStreamingConfig.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        avStreamingConfig.networkServiceType = .avStreaming
+        avStreamingConfig.waitsForConnectivity = false
+        avStreamingConfig.allowsConstrainedNetworkAccess = true
+        avStreamingConfig.allowsExpensiveNetworkAccess = true
+        await runProbe(configuration: avStreamingConfig, label: "ephemeral-avs")
     }
 }
 

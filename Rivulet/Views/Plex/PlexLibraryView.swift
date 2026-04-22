@@ -417,11 +417,18 @@ struct PlexLibraryView: View {
         }
     }
 
+    @MainActor
+    private var currentScreenHeight: CGFloat {
+        UIApplication.shared.connectedScenes
+            .compactMap { ($0 as? UIWindowScene)?.screen.bounds.height }
+            .max() ?? 1080
+    }
+
     // MARK: - Content View
 
     private var contentView: some View {
         let heroActive = showLibraryHero && !heroItems.isEmpty
-        let screenHeight = UIScreen.main.bounds.height
+        let screenHeight = currentScreenHeight
         // Same sizing as the home hero so both screens feel consistent:
         // full-width, near-full-height with a modest peek for the row below.
         let heroSectionHeight = screenHeight - 200

@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import UIKit
 
 struct PlayerControlsOverlay: View {
     @ObservedObject var viewModel: UniversalPlayerViewModel
@@ -504,6 +505,13 @@ private struct TransportProgressBar: View {
     var scrubThumbnail: UIImage?
     var markers: [PlexMarker] = []
 
+    @MainActor
+    private var currentScreenWidth: CGFloat {
+        UIApplication.shared.connectedScenes
+            .compactMap { ($0 as? UIWindowScene)?.screen.bounds.width }
+            .max() ?? 1920
+    }
+
     private var displayTime: TimeInterval {
         isScrubbing ? scrubTime : currentTime
     }
@@ -548,7 +556,7 @@ private struct TransportProgressBar: View {
                 }
                 .frame(maxWidth: .infinity)
                 // Position horizontally based on progress
-                .offset(x: (progress - 0.5) * (UIScreen.main.bounds.width - 320))
+                .offset(x: (progress - 0.5) * (currentScreenWidth - 320))
             }
 
             // Progress track

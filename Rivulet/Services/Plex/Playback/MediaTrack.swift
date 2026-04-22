@@ -50,16 +50,35 @@ struct MediaTrack: Identifiable, Equatable, Sendable {
 
     /// Creates a MediaTrack from a PlexStream
     init(from stream: PlexStream) {
+        let normalizedLanguageCode = LanguageOption.canonicalCode(from: stream.languageCode)
+            ?? LanguageOption.canonicalCode(from: stream.languageTag)
+            ?? LanguageOption.canonicalCode(from: stream.language)
+
         self.id = stream.id
         self.name = stream.displayTitle ?? stream.title ?? stream.language ?? "Track \(stream.id)"
         self.language = stream.language
-        self.languageCode = stream.languageCode
+        self.languageCode = normalizedLanguageCode ?? stream.languageCode ?? stream.languageTag
         self.codec = stream.codec
         self.isDefault = stream.default ?? false
         self.isForced = stream.forced ?? false
         self.isHearingImpaired = stream.hearingImpaired ?? false
         self.channels = stream.channels
         self.subtitleKey = stream.key
+    }
+
+    var normalizedLanguageMatchKey: String? {
+        Self.normalizedLanguageMatchKey(languageCode: languageCode, language: language)
+    }
+
+    static func normalizedLanguageMatchKey(languageCode: String?, language: String?) -> String? {
+        if let canonical = LanguageOption.canonicalCode(from: languageCode) {
+            return canonical
+        }
+        if let canonical = LanguageOption.canonicalCode(from: language) {
+            return canonical
+        }
+        return languageCode?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            ?? language?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     }
 
     /// Display name with additional info
@@ -191,6 +210,8 @@ struct MediaTrack: Identifiable, Equatable, Sendable {
         // Fallback: common language codes
         switch code.lowercased() {
         case "eng", "en": return "ENGLISH"
+        case "bos", "bs": return "BOSNIAN"
+        case "hrv", "hr", "scr", "cro": return "CROATIAN"
         case "spa", "es": return "SPANISH"
         case "fra", "fr": return "FRENCH"
         case "deu", "de", "ger": return "GERMAN"
@@ -200,6 +221,7 @@ struct MediaTrack: Identifiable, Equatable, Sendable {
         case "kor", "ko": return "KOREAN"
         case "zho", "zh", "chi": return "CHINESE"
         case "rus", "ru": return "RUSSIAN"
+        case "srp", "sr", "scc", "ser": return "SERBIAN"
         case "ara", "ar": return "ARABIC"
         case "hin", "hi": return "HINDI"
         case "und": return "UNKNOWN"

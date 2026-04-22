@@ -7,6 +7,7 @@
 
 import SwiftUI
 import Combine
+import UIKit
 import os.log
 
 private let homeLog = Logger(subsystem: "com.rivulet.app", category: "PlexHome")
@@ -481,11 +482,18 @@ struct PlexHomeView: View {
         nestedNavState.isNested = selectedItem != nil
     }
 
+    @MainActor
+    private var currentScreenHeight: CGFloat {
+        UIApplication.shared.connectedScenes
+            .compactMap { ($0 as? UIWindowScene)?.screen.bounds.height }
+            .max() ?? 1080
+    }
+
     // MARK: - Content View
 
     private var contentView: some View {
         let heroActive = showHomeHero && !heroItems.isEmpty
-        let screenHeight = UIScreen.main.bounds.height
+        let screenHeight = currentScreenHeight
         // Leave a modest peek for Continue Watching at the bottom of the hero
         // at the top scroll position. The backdrop fills the full screen behind
         // the scroll view; this height controls where the overlay content ends.

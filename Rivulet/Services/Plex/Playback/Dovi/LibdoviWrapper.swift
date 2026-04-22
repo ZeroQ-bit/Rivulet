@@ -12,7 +12,7 @@ import Libdovi
 // MARK: - Conversion Mode
 
 /// RPU conversion modes supported by libdovi
-enum DoviConversionMode: UInt8 {
+nonisolated enum DoviConversionMode: UInt8 {
     /// Don't modify the RPU
     case none = 0
 
@@ -33,7 +33,7 @@ enum DoviConversionMode: UInt8 {
 // MARK: - RPU Info
 
 /// Information extracted from a parsed RPU
-struct DoviRPUInfo {
+nonisolated struct DoviRPUInfo {
     /// Profile guessed from RPU header values (5, 7, or 8)
     let profile: UInt8
 
@@ -64,7 +64,7 @@ struct DoviRPUInfo {
 // MARK: - Libdovi Error
 
 /// Errors from libdovi operations
-enum LibdoviError: Error, LocalizedError {
+nonisolated enum LibdoviError: Error, LocalizedError {
     case parseError(String)
     case conversionError(String)
     case writeError(String)
@@ -83,7 +83,7 @@ enum LibdoviError: Error, LocalizedError {
 // MARK: - Libdovi Wrapper
 
 /// Swift wrapper for libdovi C API operations
-final class LibdoviWrapper {
+nonisolated final class LibdoviWrapper {
 
     // MARK: - Parsing
 

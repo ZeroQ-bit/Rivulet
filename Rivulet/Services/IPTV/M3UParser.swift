@@ -216,7 +216,7 @@ enum M3UParseError: LocalizedError {
 
 // MARK: - Convenience Extensions
 
-extension M3UParser.ParsedChannel {
+nonisolated extension M3UParser.ParsedChannel {
     /// Convert to UnifiedChannel
     func toUnifiedChannel(sourceType: LiveTVSourceType, sourceId: String) -> UnifiedChannel {
         // Create a unique ID for this channel

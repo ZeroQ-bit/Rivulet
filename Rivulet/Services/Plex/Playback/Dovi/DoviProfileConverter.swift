@@ -18,7 +18,7 @@ import Foundation
 // MARK: - Profile Converter
 
 /// Converts Dolby Vision Profile 7/8.6 samples to Profile 8.1 on-the-fly
-final class DoviProfileConverter {
+nonisolated final class DoviProfileConverter {
 
     // MARK: - Dependencies
 

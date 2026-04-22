@@ -8,7 +8,7 @@
 	<string>development</string>
 	<key>com.apple.security.application-groups</key>
 	<array>
-		<string>group.com.bain.Rivulet</string>
+		<string>group.app.rivulet</string>
 	</array>
 </dict>
 </plist>

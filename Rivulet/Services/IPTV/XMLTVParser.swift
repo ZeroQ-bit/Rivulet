@@ -117,7 +117,7 @@ actor XMLTVParser {
 
 // MARK: - XMLTV Internal Parser (XMLParserDelegate)
 
-private class XMLTVInternalParser: NSObject, XMLParserDelegate {
+nonisolated private final class XMLTVInternalParser: NSObject, XMLParserDelegate {
     private var channels: [String: XMLTVParser.ParsedXMLTVChannel] = [:]
     private var programs: [String: [XMLTVParser.ParsedProgram]] = [:]
 
@@ -324,7 +324,7 @@ enum XMLTVParseError: LocalizedError {
 
 // MARK: - Convenience Extensions
 
-extension XMLTVParser.ParsedProgram {
+nonisolated extension XMLTVParser.ParsedProgram {
     /// Convert to UnifiedProgram
     func toUnifiedProgram(unifiedChannelId: String) -> UnifiedProgram {
         // Create unique ID from channel and start time

@@ -12,14 +12,6 @@ import Sentry
 // MARK: - App Delegate
 
 class RivuletAppDelegate: NSObject, UIApplicationDelegate {
-
-    func application(_ app: UIApplication, open url: URL, options: [UIApplication.OpenURLOptionsKey: Any] = [:]) -> Bool {
-        Task {
-            await DeepLinkHandler.shared.handle(url: url)
-        }
-        return true
-    }
-
     func application(_ application: UIApplication, continue userActivity: NSUserActivity, restorationHandler: @escaping ([any UIUserActivityRestoring]?) -> Void) -> Bool {
         guard let ratingKey = userActivity.userInfo?["ratingKey"] as? String,
               !ratingKey.isEmpty else { return false }
@@ -109,6 +101,11 @@ struct RivuletApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()
+                .onOpenURL { url in
+                    Task {
+                        await DeepLinkHandler.shared.handle(url: url)
+                    }
+                }
         }
         .modelContainer(sharedModelContainer)
     }

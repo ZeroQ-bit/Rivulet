@@ -407,7 +407,7 @@ struct ASSParser: SubtitleParser {
 
 // MARK: - Parser Factory
 
-enum SubtitleFormat {
+enum SubtitleFormat: Sendable {
     case srt
     case vtt
     case ass

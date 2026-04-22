@@ -181,7 +181,7 @@ class PlexDataStore: ObservableObject {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            Task { @MainActor in
+            MainActor.assumeIsolated {
                 self?.isInForeground = true
                 self?.startPollingIfNeeded()
             }
@@ -192,7 +192,7 @@ class PlexDataStore: ObservableObject {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            Task { @MainActor in
+            MainActor.assumeIsolated {
                 self?.isInForeground = false
                 self?.stopPolling()
             }
@@ -204,7 +204,7 @@ class PlexDataStore: ObservableObject {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            Task { @MainActor in
+            MainActor.assumeIsolated {
                 self?.isPlaybackActive = true
                 self?.stopPolling()
             }
@@ -215,7 +215,7 @@ class PlexDataStore: ObservableObject {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            Task { @MainActor in
+            MainActor.assumeIsolated {
                 self?.isPlaybackActive = false
                 self?.startPollingIfNeeded()
             }
@@ -523,7 +523,7 @@ class PlexDataStore: ObservableObject {
                         }
                     }
 
-                    for await (key, title, hubs) in group {
+                    for await (key, _, hubs) in group {
                         if let hubs {
                             libraryHubs[key] = hubs
                             recordFetch(for: "libraryHubs:\(key)")
@@ -555,7 +555,7 @@ class PlexDataStore: ObservableObject {
                         }
                     }
 
-                    for await (key, title, hubs) in group {
+                    for await (key, _, hubs) in group {
                         if let hubs {
                             libraryHubs[key] = hubs
                             recordFetch(for: "libraryHubs:\(key)")

@@ -16,30 +16,107 @@ import AVKit
 
 /// Stores user's subtitle preference for auto-selection
 struct SubtitlePreference: Codable, Equatable {
+    static let maxPreferredLanguages = 5
+
     /// Whether subtitles are enabled
     var enabled: Bool
-    /// Preferred language code (e.g., "en", "es")
-    var languageCode: String?
+    /// Ordered preferred language codes (e.g., ["eng", "spa"]).
+    private var storedLanguageCodes: [String]
     /// Preferred codec (e.g., "srt", "ass", "pgs")
     var codec: String?
     /// Whether to prefer hearing impaired tracks
     var preferHearingImpaired: Bool
 
-    static let off = SubtitlePreference(enabled: false, languageCode: nil, codec: nil, preferHearingImpaired: false)
+    static let off = SubtitlePreference(enabled: false, languageCodes: [], codec: nil, preferHearingImpaired: false)
 
-    init(enabled: Bool, languageCode: String?, codec: String?, preferHearingImpaired: Bool) {
+    /// Backward-compatible primary language accessor.
+    var languageCode: String? {
+        get { storedLanguageCodes.first }
+        set {
+            if let newValue {
+                storedLanguageCodes = Self.normalizedLanguageCodes([newValue])
+            } else {
+                storedLanguageCodes = []
+            }
+        }
+    }
+
+    /// Ordered language preference list used for subtitle auto-selection.
+    var preferredLanguageCodes: [String] {
+        get { storedLanguageCodes }
+        set { storedLanguageCodes = Self.normalizedLanguageCodes(newValue) }
+    }
+
+    init(enabled: Bool, languageCodes: [String], codec: String?, preferHearingImpaired: Bool) {
         self.enabled = enabled
-        self.languageCode = languageCode
+        self.storedLanguageCodes = Self.normalizedLanguageCodes(languageCodes)
         self.codec = codec
         self.preferHearingImpaired = preferHearingImpaired
     }
 
+    init(enabled: Bool, languageCode: String?, codec: String?, preferHearingImpaired: Bool) {
+        self.init(
+            enabled: enabled,
+            languageCodes: languageCode.map { [$0] } ?? [],
+            codec: codec,
+            preferHearingImpaired: preferHearingImpaired
+        )
+    }
+
     /// Create preference from a selected track
     init(from track: MediaTrack) {
-        self.enabled = true
-        self.languageCode = track.languageCode
-        self.codec = track.codec
-        self.preferHearingImpaired = track.isHearingImpaired
+        self.init(
+            enabled: true,
+            languageCodes: track.languageCode.map { [$0] } ?? [],
+            codec: track.codec,
+            preferHearingImpaired: track.isHearingImpaired
+        )
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case enabled
+        case languageCode
+        case languageCodes
+        case codec
+        case preferHearingImpaired
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        enabled = try container.decode(Bool.self, forKey: .enabled)
+        codec = try container.decodeIfPresent(String.self, forKey: .codec)
+        preferHearingImpaired = try container.decodeIfPresent(Bool.self, forKey: .preferHearingImpaired) ?? false
+
+        let codes = try container.decodeIfPresent([String].self, forKey: .languageCodes) ?? []
+        let fallbackCode = try container.decodeIfPresent(String.self, forKey: .languageCode)
+        var combinedCodes = codes
+        if combinedCodes.isEmpty, let fallbackCode {
+            combinedCodes = [fallbackCode]
+        }
+        storedLanguageCodes = Self.normalizedLanguageCodes(combinedCodes)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(enabled, forKey: .enabled)
+        try container.encodeIfPresent(languageCode, forKey: .languageCode)
+        try container.encode(preferredLanguageCodes, forKey: .languageCodes)
+        try container.encodeIfPresent(codec, forKey: .codec)
+        try container.encode(preferHearingImpaired, forKey: .preferHearingImpaired)
+    }
+
+    private static func normalizedLanguageCodes(_ codes: [String]) -> [String] {
+        var result: [String] = []
+        for code in codes {
+            let normalized = LanguageOption.canonicalCode(from: code) ??
+                code.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard !normalized.isEmpty, !result.contains(normalized) else { continue }
+            result.append(normalized)
+            if result.count == maxPreferredLanguages {
+                break
+            }
+        }
+        return result
     }
 }
 
@@ -47,6 +124,7 @@ struct SubtitlePreference: Codable, Equatable {
 enum SubtitlePreferenceManager {
     // Individual keys for each preference field (more robust than JSON)
     private static let enabledKey = "subtitlePreferenceEnabled"
+    private static let languagesKey = "subtitlePreferenceLanguages"
     private static let languageKey = "subtitlePreferenceLanguage"
     private static let codecKey = "subtitlePreferenceCodec"
     private static let hearingImpairedKey = "subtitlePreferenceHearingImpaired"
@@ -63,7 +141,14 @@ enum SubtitlePreferenceManager {
                    let oldPref = try? JSONDecoder().decode(SubtitlePreference.self, from: data) {
                     // Migrate old values to new format
                     UserDefaults.standard.set(oldPref.enabled, forKey: enabledKey)
-                    UserDefaults.standard.set(oldPref.languageCode, forKey: languageKey)
+                    let preferredLanguages = oldPref.preferredLanguageCodes
+                    if preferredLanguages.isEmpty {
+                        UserDefaults.standard.removeObject(forKey: languagesKey)
+                        UserDefaults.standard.removeObject(forKey: languageKey)
+                    } else {
+                        UserDefaults.standard.set(preferredLanguages, forKey: languagesKey)
+                        UserDefaults.standard.set(preferredLanguages.first, forKey: languageKey)
+                    }
                     UserDefaults.standard.set(oldPref.codec, forKey: codecKey)
                     UserDefaults.standard.set(oldPref.preferHearingImpaired, forKey: hearingImpairedKey)
                     UserDefaults.standard.removeObject(forKey: "subtitlePreference")
@@ -72,20 +157,28 @@ enum SubtitlePreferenceManager {
 
             // Read from individual keys
             let enabled = UserDefaults.standard.bool(forKey: enabledKey)
-            let languageCode = UserDefaults.standard.string(forKey: languageKey)
+            let preferredLanguages = UserDefaults.standard.stringArray(forKey: languagesKey) ??
+                UserDefaults.standard.string(forKey: languageKey).map { [$0] } ?? []
             let codec = UserDefaults.standard.string(forKey: codecKey)
             let preferHearingImpaired = UserDefaults.standard.bool(forKey: hearingImpairedKey)
 
             return SubtitlePreference(
                 enabled: enabled,
-                languageCode: languageCode,
+                languageCodes: preferredLanguages,
                 codec: codec,
                 preferHearingImpaired: preferHearingImpaired
             )
         }
         set {
+            let preferredLanguages = newValue.preferredLanguageCodes
             UserDefaults.standard.set(newValue.enabled, forKey: enabledKey)
-            UserDefaults.standard.set(newValue.languageCode, forKey: languageKey)
+            if preferredLanguages.isEmpty {
+                UserDefaults.standard.removeObject(forKey: languagesKey)
+                UserDefaults.standard.removeObject(forKey: languageKey)
+            } else {
+                UserDefaults.standard.set(preferredLanguages, forKey: languagesKey)
+                UserDefaults.standard.set(preferredLanguages.first, forKey: languageKey)
+            }
             UserDefaults.standard.set(newValue.codec, forKey: codecKey)
             UserDefaults.standard.set(newValue.preferHearingImpaired, forKey: hearingImpairedKey)
         }
@@ -95,6 +188,7 @@ enum SubtitlePreferenceManager {
     /// If false, playback should honor stream defaults/forced tracks.
     static var hasStoredPreference: Bool {
         UserDefaults.standard.object(forKey: enabledKey) != nil ||
+        UserDefaults.standard.object(forKey: languagesKey) != nil ||
         UserDefaults.standard.object(forKey: languageKey) != nil ||
         UserDefaults.standard.object(forKey: codecKey) != nil ||
         UserDefaults.standard.object(forKey: hearingImpairedKey) != nil ||
@@ -103,37 +197,47 @@ enum SubtitlePreferenceManager {
 
     /// Find best matching subtitle track based on preference
     static func findBestMatch(in tracks: [MediaTrack], preference: SubtitlePreference) -> MediaTrack? {
-        guard preference.enabled, let preferredLang = preference.languageCode else {
+        guard preference.enabled else {
             return nil
         }
+        let preferredLanguageKeys = preference.preferredLanguageCodes.compactMap(normalizedLanguageMatchKey)
+        guard !preferredLanguageKeys.isEmpty else { return nil }
 
-        // Filter tracks by language
-        let langMatches = tracks.filter { $0.languageCode == preferredLang }
-        guard !langMatches.isEmpty else {
-            // No tracks match preferred language - keep subtitles off
-            return nil
-        }
+        for preferredKey in preferredLanguageKeys {
+            let langMatches = tracks.filter { $0.normalizedLanguageMatchKey == preferredKey }
+            guard !langMatches.isEmpty else { continue }
 
-        // Try to find exact codec match
-        if let preferredCodec = preference.codec {
-            if let exactMatch = langMatches.first(where: {
-                $0.codec == preferredCodec && $0.isHearingImpaired == preference.preferHearingImpaired
-            }) {
-                return exactMatch
+            // Try to find exact codec match
+            if let preferredCodec = preference.codec {
+                if let exactMatch = langMatches.first(where: {
+                    $0.codec == preferredCodec && $0.isHearingImpaired == preference.preferHearingImpaired
+                }) {
+                    return exactMatch
+                }
+                // Try codec match without hearing impaired preference
+                if let codecMatch = langMatches.first(where: { $0.codec == preferredCodec }) {
+                    return codecMatch
+                }
             }
-            // Try codec match without hearing impaired preference
-            if let codecMatch = langMatches.first(where: { $0.codec == preferredCodec }) {
-                return codecMatch
+
+            // Fall back to first track of preferred language with matching HI preference
+            if let hiMatch = langMatches.first(where: { $0.isHearingImpaired == preference.preferHearingImpaired }) {
+                return hiMatch
             }
+
+            // Fall back to first track of preferred language
+            return langMatches.first
         }
 
-        // Fall back to first track of preferred language with matching HI preference
-        if let hiMatch = langMatches.first(where: { $0.isHearingImpaired == preference.preferHearingImpaired }) {
-            return hiMatch
-        }
+        // No tracks match any preferred language - keep subtitles off
+        return nil
+    }
 
-        // Fall back to first track of preferred language
-        return langMatches.first
+    nonisolated private static func normalizedLanguageMatchKey(_ code: String?) -> String? {
+        if let canonical = LanguageOption.canonicalCode(from: code) {
+            return canonical
+        }
+        return code?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     }
 }
 
@@ -197,8 +301,9 @@ enum AudioPreferenceManager {
 
         // Try preferred language first
         if let preferredLang = preference.languageCode {
+            let preferredKey = normalizedLanguageMatchKey(preferredLang)
             let langMatches = tracks.filter {
-                $0.languageCode?.lowercased() == preferredLang.lowercased()
+                $0.normalizedLanguageMatchKey == preferredKey
             }
             if let best = bestTrack(in: langMatches) {
                 return best
@@ -207,8 +312,7 @@ enum AudioPreferenceManager {
 
         // Fall back to English tracks
         let englishMatches = tracks.filter {
-            let code = $0.languageCode?.lowercased()
-            return code == "eng" || code == "en" || code == "english"
+            $0.normalizedLanguageMatchKey == LanguageOption.english.rawValue
         }
         if let best = bestTrack(in: englishMatches) {
             return best
@@ -216,6 +320,13 @@ enum AudioPreferenceManager {
 
         // No English either - return the first track (usually default)
         return tracks.first(where: { $0.isDefault }) ?? tracks.first
+    }
+
+    nonisolated private static func normalizedLanguageMatchKey(_ code: String?) -> String? {
+        if let canonical = LanguageOption.canonicalCode(from: code) {
+            return canonical
+        }
+        return code?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     }
 }
 
@@ -325,6 +436,7 @@ final class UniversalPlayerViewModel: ObservableObject {
     @Published private(set) var subtitleTracks: [MediaTrack] = []
     @Published private(set) var currentAudioTrackId: Int?
     @Published private(set) var currentSubtitleTrackId: Int?
+    private var hlsSubtitleSelection: PlexNetworkManager.HLSSubtitleSelection = .automatic
     private var compatibilityNoticeTimer: Timer?
     private nonisolated(unsafe) var userActivity: NSUserActivity?
 
@@ -491,6 +603,11 @@ final class UniversalPlayerViewModel: ObservableObject {
     /// One-shot direct-play -> HLS fallback guards (prevents loops).
     private var hasAttemptedRivuletHLSFallback = false
     private var isAttemptingRivuletHLSFallback = false
+    /// Avoid re-running subtitle search/download on every URL rebuild in the same session.
+    private var hasPreparedPreferredSubtitleCandidates = false
+    /// Parsed external subtitle tracks cached for instant switching on the custom player path.
+    private var preloadedRivuletSubtitles: [Int: PreparedSubtitle] = [:]
+    private var preloadingRivuletSubtitleTrackIds: Set<Int> = []
 
     // MARK: - Shuffled Queue
 
@@ -556,6 +673,11 @@ final class UniversalPlayerViewModel: ObservableObject {
         observeAppLifecycle()
     }
 
+    private func resetRivuletSubtitlePrefetchState() {
+        preloadedRivuletSubtitles.removeAll()
+        preloadingRivuletSubtitleTrackIds.removeAll()
+    }
+
     /// Clear any prepared stream state so the next startup recomputes route + URLs.
     private func resetPreparedStreamContext() {
         streamPreparationTask?.cancel()
@@ -565,6 +687,7 @@ final class UniversalPlayerViewModel: ObservableObject {
         playbackPlan = nil
         rivuletFallbackURL = nil
         rivuletFallbackHeaders = [:]
+        resetRivuletSubtitlePrefetchState()
     }
 
     /// Ensure stream URL preparation runs at most once for a startup attempt.
@@ -604,11 +727,11 @@ final class UniversalPlayerViewModel: ObservableObject {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            guard let self else { return }
-            if self.playbackState == .playing {
-                self.pausedDueToAppInactive = true
-                print("[Remux] App entering background — pausing")
-                Task { @MainActor in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                if self.playbackState == .playing {
+                    self.pausedDueToAppInactive = true
+                    print("[Remux] App entering background — pausing")
                     self.pause()
                 }
             }
@@ -620,9 +743,11 @@ final class UniversalPlayerViewModel: ObservableObject {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            guard let self else { return }
-            if self.pausedDueToAppInactive {
-                self.pausedDueToAppInactive = false
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                if self.pausedDueToAppInactive {
+                    self.pausedDueToAppInactive = false
+                }
             }
         }
     }
@@ -639,6 +764,8 @@ final class UniversalPlayerViewModel: ObservableObject {
             await fetchFullMetadataIfNeeded()
         }
 
+        await ensurePreferredSubtitleCandidatesAvailable()
+
         let useApplePlayer = UserDefaults.standard.bool(forKey: "useApplePlayer")
         let routingContext = ContentRoutingContext(
             metadata: metadata,
@@ -652,6 +779,21 @@ final class UniversalPlayerViewModel: ObservableObject {
         playbackPlan = plan
         rivuletFallbackURL = nil
         rivuletFallbackHeaders = [:]
+
+        let needsHLSSubtitlePreparation: Bool
+        switch plan.primary {
+        case .hls:
+            needsHLSSubtitlePreparation = true
+        default:
+            needsHLSSubtitlePreparation = plan.fallbacks.contains { route in
+                if case .hls = route { return true }
+                return false
+            }
+        }
+
+        if needsHLSSubtitlePreparation {
+            await preparePreferredSubtitleSelectionForHLS()
+        }
 
         switch plan.primary {
         case .avPlayerDirect(let url, let headers):
@@ -1275,7 +1417,10 @@ final class UniversalPlayerViewModel: ObservableObject {
     }
 
     /// Build an HLS URL and headers for Rivulet fallback at the requested offset.
-    private func buildRivuletHLSURL(offset: TimeInterval?) -> (url: URL, headers: [String: String], sessionId: String?)? {
+    private func buildRivuletHLSURL(
+        offset: TimeInterval?,
+        subtitleSelection: PlexNetworkManager.HLSSubtitleSelection? = nil
+    ) -> (url: URL, headers: [String: String], sessionId: String?)? {
         guard let ratingKey = metadata.ratingKey else { return nil }
         guard let result = PlexNetworkManager.shared.buildHLSDirectPlayURL(
             serverURL: serverURL,
@@ -1284,13 +1429,269 @@ final class UniversalPlayerViewModel: ObservableObject {
             offsetMs: Int((offset ?? 0) * 1000),
             hasHDR: metadata.hasHDR,
             useDolbyVision: metadata.hasDolbyVision,
-            allowAudioDirectStream: allowAudioDirectStreamDecision(reason: "rivulet_hls_fallback_build")
+            allowAudioDirectStream: allowAudioDirectStreamDecision(reason: "rivulet_hls_fallback_build"),
+            subtitleSelection: subtitleSelection ?? hlsSubtitleSelection
         ) else {
             return nil
         }
         let sessionId = URLComponents(url: result.url, resolvingAgainstBaseURL: false)?
             .queryItems?.first(where: { $0.name == "session" })?.value
         return (url: result.url, headers: result.headers, sessionId: sessionId)
+    }
+
+    private var subtitleSearchTitle: String? {
+        if let file = metadata.Media?.first?.Part?.first?.file,
+           !file.isEmpty {
+            return URL(fileURLWithPath: file).lastPathComponent
+        }
+        return title
+    }
+
+    private static let subtitleSearchStopWords: Set<String> = [
+        "the", "a", "an", "and", "of", "for", "to", "in", "on",
+        "s", "season", "episode", "marvel", "marvels"
+    ]
+
+    private func normalizedSubtitleCandidateText(_ text: String) -> String {
+        text.lowercased()
+            .replacingOccurrences(of: "[^a-z0-9]+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var expectedSubtitleEpisodeMarkers: [String] {
+        guard metadata.type == "episode",
+              let season = metadata.parentIndex,
+              let episode = metadata.index else {
+            return []
+        }
+
+        return [
+            String(format: "s%02de%02d", season, episode),
+            String(format: "%dx%02d", season, episode)
+        ]
+    }
+
+    private var requiredSubtitleTitleTokens: [String] {
+        let rawSource = metadata.type == "episode"
+            ? (metadata.grandparentTitle ?? metadata.title ?? "")
+            : (metadata.title ?? "")
+
+        let normalized = normalizedSubtitleCandidateText(rawSource)
+        let tokens = normalized
+            .split(separator: " ")
+            .map(String.init)
+            .filter {
+                $0.count >= 3 && !Self.subtitleSearchStopWords.contains($0)
+            }
+
+        if !tokens.isEmpty {
+            return Array(Set(tokens)).sorted { lhs, rhs in
+                if lhs.count == rhs.count { return lhs < rhs }
+                return lhs.count > rhs.count
+            }
+        }
+
+        if let searchTitle = subtitleSearchTitle {
+            let searchTokens = normalizedSubtitleCandidateText(searchTitle)
+                .split(separator: " ")
+                .map(String.init)
+                .filter { $0.count >= 3 }
+            return Array(Set(searchTokens))
+        }
+
+        return []
+    }
+
+    private func filterRelevantSubtitleCandidates(_ candidates: [PlexSubtitleCandidate]) -> [PlexSubtitleCandidate] {
+        let requiredTokens = requiredSubtitleTitleTokens
+        let episodeMarkers = expectedSubtitleEpisodeMarkers
+
+        return candidates.filter { candidate in
+            let haystack = normalizedSubtitleCandidateText(
+                candidate.title ?? candidate.displayTitle ?? candidate.key ?? ""
+            )
+
+            if !requiredTokens.isEmpty && !requiredTokens.allSatisfy(haystack.contains) {
+                return false
+            }
+
+            if !episodeMarkers.isEmpty && !episodeMarkers.contains(where: haystack.contains) {
+                return false
+            }
+
+            return true
+        }
+    }
+
+    private var isUsingPlexHLSPlayback: Bool {
+        if let rp = rivuletPlayer {
+            return rp.activePipeline == .hls
+        }
+        if plexSessionId != nil {
+            return true
+        }
+        guard let streamURL else { return false }
+        return streamURL.absoluteString.contains("/video/:/transcode/universal/start.m3u8")
+    }
+
+    private func ensurePreferredSubtitleCandidatesAvailable() async {
+        guard !hasPreparedPreferredSubtitleCandidates else { return }
+        hasPreparedPreferredSubtitleCandidates = true
+
+        guard SubtitlePreferenceManager.hasStoredPreference else { return }
+        let preference = SubtitlePreferenceManager.current
+        guard preference.enabled else { return }
+
+        let preferredLanguages = preference.preferredLanguageCodes.compactMap(LanguageOption.canonicalCode(from:))
+        guard !preferredLanguages.isEmpty else { return }
+        guard let metadataKey = metadata.key,
+              let ratingKey = metadata.ratingKey else { return }
+
+        let networkManager = PlexNetworkManager.shared
+        let mediaItemID = metadata.Media?.first?.id
+        let existingLanguageKeys = Set(
+            metadata.Media?.first?.Part?.first?.Stream?
+                .filter(\.isSubtitle)
+                .compactMap { MediaTrack.normalizedLanguageMatchKey(languageCode: $0.languageCode ?? $0.languageTag, language: $0.language) } ?? []
+        )
+        var knownSubtitleKeys = Set(
+            metadata.Media?.first?.Part?.first?.Stream?
+                .filter(\.isSubtitle)
+                .compactMap(\.key) ?? []
+        )
+        let knownSubtitleSourceKeys = Set(
+            metadata.Media?.first?.Part?.first?.Stream?
+                .filter(\.isSubtitle)
+                .compactMap(\.sourceKey) ?? []
+        )
+        var expectedDownloadedKeys = Set<String>()
+        var expectedDownloadedSourceKeys = Set<String>()
+        var shouldRefreshMetadata = false
+
+        for languageCode in preferredLanguages {
+            if existingLanguageKeys.contains(languageCode) {
+                continue
+            }
+
+            let searchLanguageCode = LanguageOption.plexSubtitleSearchCode(from: languageCode) ?? languageCode
+            do {
+                let candidates = try await networkManager.searchSubtitles(
+                    serverURL: serverURL,
+                    authToken: authToken,
+                    metadataKey: metadataKey,
+                    language: searchLanguageCode,
+                    title: subtitleSearchTitle,
+                    mediaItemID: mediaItemID,
+                    hearingImpaired: preference.preferHearingImpaired,
+                    forced: false
+                )
+                let sortedCandidates = candidates.sorted { lhs, rhs in
+                    (lhs.score ?? -.greatestFiniteMagnitude) > (rhs.score ?? -.greatestFiniteMagnitude)
+                }
+                let relevantCandidates = filterRelevantSubtitleCandidates(sortedCandidates)
+                let candidatesToDownload = sortedCandidates
+
+                if !relevantCandidates.isEmpty {
+                    print(
+                        "🎬 [Subtitles] Search \(searchLanguageCode): found \(relevantCandidates.count) title-matched candidate(s); " +
+                        "downloading \(candidatesToDownload.count) result(s) for manual selection"
+                    )
+                } else if !candidates.isEmpty {
+                    print(
+                        "🎬 [Subtitles] Search \(searchLanguageCode): no relevant matches in \(candidates.count) result(s); " +
+                        "downloading returned results for manual selection"
+                    )
+                }
+
+                for candidate in candidatesToDownload {
+                    guard let candidateKey = candidate.key,
+                          !candidateKey.isEmpty else { continue }
+                    let candidateSourceKey = candidate.sourceKey
+                    let isKnownSource = candidateSourceKey.map {
+                        knownSubtitleSourceKeys.contains($0) || expectedDownloadedSourceKeys.contains($0)
+                    } ?? false
+
+                    if candidate.downloaded == true {
+                        if !knownSubtitleKeys.contains(candidateKey) && !isKnownSource {
+                            expectedDownloadedKeys.insert(candidateKey)
+                            if let candidateSourceKey {
+                                expectedDownloadedSourceKeys.insert(candidateSourceKey)
+                            }
+                            shouldRefreshMetadata = true
+                        }
+                        continue
+                    }
+
+                    if knownSubtitleKeys.contains(candidateKey) ||
+                        expectedDownloadedKeys.contains(candidateKey) ||
+                        isKnownSource {
+                        continue
+                    }
+
+                    do {
+                        _ = try await networkManager.downloadSubtitle(
+                            serverURL: serverURL,
+                            authToken: authToken,
+                            metadataKey: metadataKey,
+                            candidate: candidate,
+                            mediaItemID: mediaItemID,
+                            forced: false,
+                            transient: false
+                        )
+                        expectedDownloadedKeys.insert(candidateKey)
+                        if let candidateSourceKey {
+                            expectedDownloadedSourceKeys.insert(candidateSourceKey)
+                        }
+                        shouldRefreshMetadata = true
+                        print(
+                            "🎬 [Subtitles] Download requested: \(candidate.displayTitle ?? candidate.title ?? candidateKey)"
+                        )
+                    } catch {
+                        print(
+                            "🎬 [Subtitles] Download failed for \(candidate.displayTitle ?? candidate.title ?? candidateKey): \(error.localizedDescription)"
+                        )
+                    }
+                }
+            } catch {
+                print("🎬 [Subtitles] Search failed for \(searchLanguageCode): \(error.localizedDescription)")
+            }
+        }
+
+        guard shouldRefreshMetadata else { return }
+
+        let timeout = Date().addingTimeInterval(30)
+        var refreshedMetadata: PlexMetadata?
+
+        while Date() < timeout {
+            do {
+                let latest = try await networkManager.getFullMetadata(
+                    serverURL: serverURL,
+                    authToken: authToken,
+                    ratingKey: ratingKey
+                )
+                refreshedMetadata = latest
+
+                let latestKeys = Set(
+                    latest.Media?.first?.Part?.first?.Stream?
+                        .filter(\.isSubtitle)
+                        .compactMap(\.key) ?? []
+                )
+                knownSubtitleKeys = latestKeys
+
+                if expectedDownloadedKeys.isEmpty || expectedDownloadedKeys.isSubset(of: latestKeys) {
+                    break
+                }
+            } catch {
+                print("🎬 [Subtitles] Metadata refresh failed: \(error.localizedDescription)")
+                break
+            }
+
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+        }
+
+        guard let refreshedMetadata else { return }
+        metadata = refreshedMetadata
+        updateTrackLists()
     }
 
     private func classifyDirectPlayFailure(_ error: Error) -> DirectPlayFailureKind {
@@ -2066,6 +2467,7 @@ final class UniversalPlayerViewModel: ObservableObject {
         streamPreparationTask?.cancel()
         streamPreparationTask = nil
         subtitleClockSync.stop()
+        resetRivuletSubtitlePrefetchState()
 
         // Stop RivuletPlayer if active
         rivuletPlayer?.stop()
@@ -2410,14 +2812,14 @@ final class UniversalPlayerViewModel: ObservableObject {
         // Debug: Log metadata structure
         if let media = metadata.Media {
             //print("🖼️ [THUMB] Media count: \(media.count)")
-            if let firstMedia = media.first {
-                //print("🖼️ [THUMB] First media id: \(firstMedia.id)")
-                if let parts = firstMedia.Part {
-                    //print("🖼️ [THUMB] Part count: \(parts.count)")
-                    if let firstPart = parts.first {
-                        //print("🖼️ [THUMB] First part id: \(firstPart.id)")
-                    }
-                } else {
+                if let firstMedia = media.first {
+                    //print("🖼️ [THUMB] First media id: \(firstMedia.id)")
+                    if let parts = firstMedia.Part {
+                        //print("🖼️ [THUMB] Part count: \(parts.count)")
+                        if parts.first != nil {
+                            //print("🖼️ [THUMB] First part id: \(firstPart.id)")
+                        }
+                    } else {
                     print("⚠️ [THUMB] No Part array in media")
                 }
             }
@@ -2490,7 +2892,8 @@ final class UniversalPlayerViewModel: ObservableObject {
             offsetMs: Int(resumeTime * 1000),
             hasHDR: metadata.hasHDR,
             useDolbyVision: metadata.hasDolbyVision,
-            allowAudioDirectStream: allowAudioDirectStreamDecision(reason: "rivulet_hls_audio_switch")
+            allowAudioDirectStream: allowAudioDirectStreamDecision(reason: "rivulet_hls_audio_switch"),
+            subtitleSelection: hlsSubtitleSelection
         ) else {
             print("🎬 [AudioSwitch] Failed to build HLS URL")
             return
@@ -2540,14 +2943,99 @@ final class UniversalPlayerViewModel: ObservableObject {
     }
 
     func selectSubtitleTrack(id: Int?) {
-        // TODO: AVPlayer subtitle selection via AVMediaSelectionGroup
         currentSubtitleTrackId = id
+        hlsSubtitleSelection = id.map(PlexNetworkManager.HLSSubtitleSelection.stream) ?? .disabled
 
-        // Save preference
-        if let id = id, let track = subtitleTracks.first(where: { $0.id == id }) {
-            SubtitlePreferenceManager.current = SubtitlePreference(from: track)
+        if let rp = rivuletPlayer, rp.activePipeline != .hls {
+            rp.selectSubtitleTrack(id: id)
+            loadSubtitleForRivuletPlayer(trackId: id)
+            return
+        }
+
+        guard isUsingPlexHLSPlayback else {
+            return
+        }
+
+        Task { await switchHLSSubtitleTrack(plexStreamId: id) }
+    }
+
+    /// Switch subtitle track for Plex HLS playback by rebuilding the transcode session.
+    /// This is the subtitle equivalent of HLS audio switching.
+    private func switchHLSSubtitleTrack(plexStreamId: Int?) async {
+        guard isUsingPlexHLSPlayback else { return }
+
+        let resumeTime = currentTime
+        let wasPlaying = isPlaying
+        let targetDescription = plexStreamId.map(String.init) ?? "off"
+        let subtitleSelection = plexStreamId.map(PlexNetworkManager.HLSSubtitleSelection.stream) ?? .disabled
+        hlsSubtitleSelection = subtitleSelection
+        print("🎬 [SubtitleSwitch] Switching HLS subtitle to \(targetDescription) at \(String(format: "%.1f", resumeTime))s")
+
+        if let rp = rivuletPlayer, rp.activePipeline == .hls {
+            rp.stop()
         } else {
-            SubtitlePreferenceManager.current = .off
+            player?.pause()
+        }
+
+        if let sessionId = plexSessionId {
+            await PlexNetworkManager.shared.stopTranscodeSession(
+                serverURL: serverURL,
+                authToken: authToken,
+                sessionId: sessionId
+            )
+            plexSessionId = nil
+        }
+
+        if let partId = metadata.Media?.first?.Part?.first?.id {
+            await PlexNetworkManager.shared.setSelectedSubtitleStream(
+                serverURL: serverURL,
+                authToken: authToken,
+                partId: partId,
+                subtitleStreamID: plexStreamId
+            )
+        }
+
+        guard let result = buildRivuletHLSURL(offset: resumeTime, subtitleSelection: subtitleSelection) else {
+            print("🎬 [SubtitleSwitch] Failed to build HLS URL")
+            return
+        }
+
+        streamURL = result.url
+        streamHeaders = result.headers
+        plexSessionId = result.sessionId
+
+        let transcodeReady = await waitForHLSTranscodeReady(url: result.url, headers: result.headers)
+        guard transcodeReady else {
+            print("🎬 [SubtitleSwitch] New transcode session failed to start")
+            errorMessage = "Failed to switch subtitle track"
+            return
+        }
+
+        do {
+            if let rp = rivuletPlayer, rp.activePipeline == .hls {
+                try await rp.loadHLSWithConversion(
+                    url: result.url,
+                    headers: result.headers,
+                    startTime: resumeTime,
+                    requiresProfileConversion: requiresProfileConversion
+                )
+                if wasPlaying {
+                    rp.play()
+                }
+                duration = rp.duration
+            } else {
+                try loadAVPlayer(url: result.url, headers: result.headers)
+                if resumeTime > 0 {
+                    await player?.seek(to: CMTime(seconds: resumeTime, preferredTimescale: 600))
+                }
+                if wasPlaying {
+                    player?.play()
+                }
+            }
+            print("🎬 [SubtitleSwitch] Switched to subtitle stream \(targetDescription)")
+        } catch {
+            print("🎬 [SubtitleSwitch] Failed to reload with subtitle \(targetDescription): \(error)")
+            errorMessage = "Failed to switch subtitle track"
         }
     }
 
@@ -2595,8 +3083,20 @@ final class UniversalPlayerViewModel: ObservableObject {
                 rp.onBitmapSubtitleCue = nil
             }
 
+            if let prepared = preloadedRivuletSubtitles[trackId] {
+                subtitleManager.load(prepared: prepared)
+                print("🎬 [Subtitles] Loaded subtitle track \(trackId) from preloaded cache")
+                return
+            }
+
             // No embedded match — try Plex URL (external sidecar subs)
             print("🎬 [Subtitles] Track \(trackId) not embedded in container, trying Plex URL")
+        }
+
+        if let prepared = preloadedRivuletSubtitles[trackId] {
+            subtitleManager.load(prepared: prepared)
+            print("🎬 [Subtitles] Loaded subtitle track \(trackId) from preloaded cache")
+            return
         }
 
         loadSubtitleFromPlexURL(trackId: trackId, track: track)
@@ -2604,15 +3104,43 @@ final class UniversalPlayerViewModel: ObservableObject {
 
     /// Load subtitle from Plex server URL for external sidecar subtitles.
     private func loadSubtitleFromPlexURL(trackId: Int, track: MediaTrack) {
+        if let prepared = preloadedRivuletSubtitles[trackId] {
+            subtitleManager.load(prepared: prepared)
+            print("🎬 [Subtitles] Loaded subtitle track \(trackId) from preloaded cache")
+            return
+        }
+
+        if let rp = rivuletPlayer {
+            rp.deselectEmbeddedSubtitle()
+            rp.onSubtitleCue = nil
+            rp.onBitmapSubtitleCue = nil
+        }
+
+        Task { @MainActor in
+            if let prepared = self.preloadedRivuletSubtitles[trackId] {
+                self.subtitleManager.load(prepared: prepared)
+                print("🎬 [Subtitles] Loaded subtitle track \(trackId) from preloaded cache")
+                return
+            }
+
+            if let (prepared, candidateURL) = await self.prepareSubtitleFromPlexCandidates(
+                trackId: trackId,
+                track: track
+            ) {
+                self.preloadedRivuletSubtitles[trackId] = prepared
+                self.subtitleManager.load(prepared: prepared)
+                print("🎬 [Subtitles] Loaded subtitle track \(trackId) from \(candidateURL.absoluteString)")
+            } else {
+                self.subtitleManager.clear()
+            }
+        }
+    }
+
+    private func plexSubtitleCandidateURLs(for track: MediaTrack) -> (candidateURLs: [URL], hintedFormat: SubtitleFormat?) {
         let codec = track.codec?.lowercased()
         let supportedCodecs = ["srt", "subrip", "vtt", "webvtt", "ass", "ssa", "mov_text", "tx3g"]
         let isLikelyTextSubtitle = codec.map { supportedCodecs.contains($0) } ?? true
-        if let codec, !isLikelyTextSubtitle {
-            print("🎬 [Subtitles] Non-text or unsupported subtitle codec '\(codec)' - attempting SRT conversion fallback")
-        }
-
         let hintedFormat: SubtitleFormat? = isLikelyTextSubtitle ? SubtitleFormat(from: codec) : .srt
-        let headers = ["X-Plex-Token": authToken]
 
         // Build candidate subtitle URLs from the track's key only. Plex's
         // `/library/streams/{id}` endpoint is PUT-only (used to change stream
@@ -2634,33 +3162,88 @@ final class UniversalPlayerViewModel: ObservableObject {
         var seen = Set<String>()
         candidateURLStrings = candidateURLStrings.filter { seen.insert($0).inserted }
 
-        let candidateURLs = candidateURLStrings.compactMap(URL.init(string:))
-        guard !candidateURLs.isEmpty else {
-            print("🎬 [Subtitles] Could not build subtitle URL candidates for track \(trackId)")
-            subtitleManager.clear()
-            return
+        return (
+            candidateURLStrings.compactMap(URL.init(string:)),
+            hintedFormat
+        )
+    }
+
+    private func prepareSubtitleFromPlexCandidates(trackId: Int, track: MediaTrack) async -> (PreparedSubtitle, URL)? {
+        let codec = track.codec?.lowercased()
+        let supportedCodecs = ["srt", "subrip", "vtt", "webvtt", "ass", "ssa", "mov_text", "tx3g"]
+        if let codec, !supportedCodecs.contains(codec) {
+            print("🎬 [Subtitles] Non-text or unsupported subtitle codec '\(codec)' - attempting SRT conversion fallback")
         }
 
-        Task { @MainActor in
-            var loaded = false
-            for candidateURL in candidateURLs {
-                let formatHintForCandidate: SubtitleFormat? =
-                    candidateURL.query?.localizedCaseInsensitiveContains("format=srt") == true ? .srt : hintedFormat
-                await subtitleManager.load(url: candidateURL, headers: headers, format: formatHintForCandidate)
-                if subtitleManager.error == nil {
-                    loaded = true
-                    print("🎬 [Subtitles] Loaded subtitle track \(trackId) from \(candidateURL.absoluteString)")
-                    break
-                }
+        let headers = ["X-Plex-Token": authToken]
+        let (candidateURLs, hintedFormat) = plexSubtitleCandidateURLs(for: track)
+        guard !candidateURLs.isEmpty else {
+            print("🎬 [Subtitles] Could not build subtitle URL candidates for track \(trackId)")
+            return nil
+        }
+
+        for candidateURL in candidateURLs {
+            let formatHintForCandidate: SubtitleFormat? =
+                candidateURL.query?.localizedCaseInsensitiveContains("format=srt") == true ? .srt : hintedFormat
+            do {
+                let prepared = try await subtitleManager.prepare(
+                    url: candidateURL,
+                    headers: headers,
+                    format: formatHintForCandidate
+                )
+                return (prepared, candidateURL)
+            } catch {
                 print(
                     "🎬 [Subtitles] Candidate failed for track \(trackId): \(candidateURL.absoluteString) " +
-                    "(\(subtitleManager.error?.localizedDescription ?? "unknown error"))"
+                    "(\(error.localizedDescription))"
                 )
             }
+        }
 
-            if !loaded {
-                print("🎬 [Subtitles] Failed to load subtitle track \(trackId) from all candidate URLs")
-                subtitleManager.clear()
+        print("🎬 [Subtitles] Failed to load subtitle track \(trackId) from all candidate URLs")
+        return nil
+    }
+
+    private func prefetchPreferredSubtitlesForRivuletPlayerIfNeeded() {
+        guard let rp = rivuletPlayer, rp.activePipeline == .directPlay else { return }
+        guard SubtitlePreferenceManager.hasStoredPreference else { return }
+
+        let preference = SubtitlePreferenceManager.current
+        guard preference.enabled else { return }
+
+        let preferredLanguageKeys = Set(
+            preference.preferredLanguageCodes.compactMap {
+                LanguageOption.canonicalCode(from: $0)
+                    ?? MediaTrack.normalizedLanguageMatchKey(languageCode: $0, language: nil)
+            }
+        )
+        guard !preferredLanguageKeys.isEmpty else { return }
+
+        for track in subtitleTracks {
+            guard let languageKey = track.normalizedLanguageMatchKey,
+                  preferredLanguageKeys.contains(languageKey) else { continue }
+            guard track.id != currentSubtitleTrackId else { continue }
+            guard preloadedRivuletSubtitles[track.id] == nil else { continue }
+            guard !preloadingRivuletSubtitleTrackIds.contains(track.id) else { continue }
+            guard !rp.hasEmbeddedSubtitleMatch(
+                plexTrackId: track.id,
+                plexSubtitleTracks: subtitleTracks
+            ) else { continue }
+
+            preloadingRivuletSubtitleTrackIds.insert(track.id)
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                defer { self.preloadingRivuletSubtitleTrackIds.remove(track.id) }
+
+                guard self.preloadedRivuletSubtitles[track.id] == nil else { return }
+
+                if let (prepared, candidateURL) = await self.prepareSubtitleFromPlexCandidates(
+                    trackId: track.id,
+                    track: track
+                ) {
+                    self.preloadedRivuletSubtitles[track.id] = prepared
+                    print("🎬 [Subtitles] Prefetched subtitle track \(track.id) from \(candidateURL.absoluteString)")
+                }
             }
         }
     }
@@ -2699,6 +3282,13 @@ final class UniversalPlayerViewModel: ObservableObject {
 
         audioTracks = newAudioTracks
         subtitleTracks = newSubtitleTracks
+        let validSubtitleTrackIds = Set(newSubtitleTracks.map(\.id))
+        preloadedRivuletSubtitles = Dictionary(
+            uniqueKeysWithValues: preloadedRivuletSubtitles.filter { validSubtitleTrackIds.contains($0.key) }
+        )
+        preloadingRivuletSubtitleTrackIds = Set(
+            preloadingRivuletSubtitleTrackIds.filter { validSubtitleTrackIds.contains($0) }
+        )
 
         // Only update current track IDs on first population.
         // After tracks are populated, the user's explicit selections take precedence.
@@ -2720,6 +3310,8 @@ final class UniversalPlayerViewModel: ObservableObject {
             hasAppliedSubtitlePreference = true
             applySubtitlePreference()
         }
+
+        prefetchPreferredSubtitlesForRivuletPlayerIfNeeded()
     }
 
     enum StreamType { case audio, subtitle }
@@ -2735,15 +3327,23 @@ final class UniversalPlayerViewModel: ObservableObject {
         }
 
         return tracks.map { track in
+            let trackLanguageKey = track.normalizedLanguageMatchKey
+
             // Try to find matching Plex stream by language code and codec
             let matchingStream = filteredStreams.first { stream in
-                // Match by language code and codec type
-                let langMatch = track.languageCode?.lowercased() == stream.languageCode?.lowercased()
+                let streamLanguageKey = MediaTrack.normalizedLanguageMatchKey(
+                    languageCode: stream.languageCode ?? stream.languageTag,
+                    language: stream.language
+                )
+                let langMatch = trackLanguageKey == streamLanguageKey
                 let codecMatch = track.codec?.lowercased() == stream.codec?.lowercased()
                 return langMatch && codecMatch
             } ?? filteredStreams.first { stream in
-                // Fallback: just match by language
-                track.languageCode?.lowercased() == stream.languageCode?.lowercased()
+                let streamLanguageKey = MediaTrack.normalizedLanguageMatchKey(
+                    languageCode: stream.languageCode ?? stream.languageTag,
+                    language: stream.language
+                )
+                return trackLanguageKey == streamLanguageKey
             }
 
             guard let stream = matchingStream else { return track }
@@ -2756,7 +3356,12 @@ final class UniversalPlayerViewModel: ObservableObject {
                 id: track.id,
                 name: enrichedName,
                 language: stream.language ?? track.language,
-                languageCode: stream.languageCode ?? track.languageCode,
+                languageCode: LanguageOption.canonicalCode(from: stream.languageCode)
+                    ?? LanguageOption.canonicalCode(from: stream.languageTag)
+                    ?? LanguageOption.canonicalCode(from: stream.language)
+                    ?? stream.languageCode
+                    ?? stream.languageTag
+                    ?? track.languageCode,
                 codec: stream.codec ?? track.codec,
                 isDefault: stream.default ?? track.isDefault,
                 isForced: stream.forced ?? track.isForced,
@@ -2811,8 +3416,59 @@ final class UniversalPlayerViewModel: ObservableObject {
         }
     }
 
+    private func preparePreferredSubtitleSelectionForHLS() async {
+        guard let part = metadata.Media?.first?.Part?.first else {
+            hlsSubtitleSelection = .automatic
+            return
+        }
+
+        let plexStreams = part.Stream ?? []
+        let subtitleTracks = plexStreams
+            .filter(\.isSubtitle)
+            .map(MediaTrack.init(from:))
+        let currentlySelectedSubtitleId = plexStreams
+            .first(where: { $0.isSubtitle && $0.selected == true })?.id
+
+        let targetSubtitleId: Int?
+        let targetSelection: PlexNetworkManager.HLSSubtitleSelection
+        if !SubtitlePreferenceManager.hasStoredPreference {
+            if let selectedId = currentlySelectedSubtitleId
+                ?? subtitleTracks.first(where: \.isForced)?.id {
+                targetSubtitleId = selectedId
+                targetSelection = .stream(selectedId)
+            } else {
+                targetSubtitleId = nil
+                targetSelection = .automatic
+            }
+        } else {
+            let preference = SubtitlePreferenceManager.current
+            if !preference.enabled {
+                targetSubtitleId = nil
+                targetSelection = .disabled
+            } else if let matchId = SubtitlePreferenceManager.findBestMatch(in: subtitleTracks, preference: preference)?.id {
+                targetSubtitleId = matchId
+                targetSelection = .stream(matchId)
+            } else {
+                targetSubtitleId = nil
+                targetSelection = .disabled
+            }
+        }
+
+        hlsSubtitleSelection = targetSelection
+
+        guard targetSubtitleId != currentlySelectedSubtitleId else { return }
+
+        await PlexNetworkManager.shared.setSelectedSubtitleStream(
+            serverURL: serverURL,
+            authToken: authToken,
+            partId: part.id,
+            subtitleStreamID: targetSubtitleId
+        )
+    }
+
     /// Select subtitle track without saving preference (for auto-selection)
     private func selectSubtitleTrackWithoutSaving(id: Int?) {
+        hlsSubtitleSelection = id.map(PlexNetworkManager.HLSSubtitleSelection.stream) ?? .disabled
         if rivuletPlayer != nil {
             rivuletPlayer?.selectSubtitleTrack(id: id)
             loadSubtitleForRivuletPlayer(trackId: id)
@@ -2843,10 +3499,8 @@ final class UniversalPlayerViewModel: ObservableObject {
     private func startControlsHideTimer() {
         controlsTimer?.invalidate()
         controlsTimer = Timer.scheduledTimer(withTimeInterval: controlsHideDelay, repeats: false) { [weak self] _ in
-            guard let self else { return }
-            let isPlaying = self.playbackState == .playing
             Task { @MainActor [weak self] in
-                guard let self, isPlaying else { return }
+                guard let self, self.playbackState == .playing else { return }
                 withAnimation(.easeOut(duration: 0.3)) {
                     self.showControls = false
                 }
@@ -2860,7 +3514,9 @@ final class UniversalPlayerViewModel: ObservableObject {
         compatibilityNotice = message
         compatibilityNoticeTimer?.invalidate()
         compatibilityNoticeTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: false) { [weak self] _ in
-            self?.compatibilityNotice = nil
+            Task { @MainActor [weak self] in
+                self?.compatibilityNotice = nil
+            }
         }
     }
 
@@ -3350,7 +4006,7 @@ final class UniversalPlayerViewModel: ObservableObject {
 
         // Check if next episode was prefetched
         if let ratingKey = metadata.ratingKey,
-           let cached = await PlexDataStore.shared.getCachedNextEpisode(for: ratingKey) {
+           let cached = PlexDataStore.shared.getCachedNextEpisode(for: ratingKey) {
             return cached
         }
 
@@ -3381,8 +4037,6 @@ final class UniversalPlayerViewModel: ObservableObject {
             }
 
             // Debug: show what episodes and indexes we have
-            let episodeInfo = sortedEpisodes.map { "E\($0.index ?? -1): \($0.title ?? "?")" }
-
             // End of season - try next season
             guard let showKey = metadata.grandparentRatingKey,
                   let seasonIndex = metadata.parentIndex else {
@@ -3402,7 +4056,6 @@ final class UniversalPlayerViewModel: ObservableObject {
 
             guard let nextSeason = sortedSeasons.first(where: { ($0.index ?? 0) > seasonIndex }),
                   let nextSeasonKey = nextSeason.ratingKey else {
-                let seasonIndexes = sortedSeasons.compactMap { $0.index }
                 return nil
             }
 

@@ -30,7 +30,7 @@ import Libavcodec
 import Libavutil
 
 /// Decodes PGS/DVB-SUB bitmap subtitles using libavcodec.
-final class FFmpegSubtitleDecoder: @unchecked Sendable {
+nonisolated final class FFmpegSubtitleDecoder: @unchecked Sendable {
 
     /// Bitmap subtitle codecs this decoder handles.
     static let supportedCodecs: Set<String> = [
@@ -208,7 +208,7 @@ final class FFmpegSubtitleDecoder: @unchecked Sendable {
 // =============================================================================
 
 /// Stub subtitle decoder when FFmpeg libraries are not linked.
-final class FFmpegSubtitleDecoder: @unchecked Sendable {
+nonisolated final class FFmpegSubtitleDecoder: @unchecked Sendable {
 
     static let supportedCodecs: Set<String> = []
     static let isAvailable = false
