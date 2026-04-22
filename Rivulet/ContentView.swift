@@ -55,6 +55,14 @@ struct ContentView: View {
             }
         }
         .task {
+            // Bootstrap the agnostic media layer registries. Touching the
+            // metadata registry initializes it (and registers TMDB). The
+            // provider registry needs the active Plex auth state — populate
+            // now and again whenever the URL/token changes via the onChange
+            // observers below.
+            _ = MetadataSourceRegistry.shared
+            MediaProviderRegistry.shared.populateFromCurrentAuth()
+
             splashLog.info("Splash task started — hasCredentials=\(self.authManager.hasCredentials)")
             if !authManager.hasCredentials {
                 splashLog.info("No credentials on launch — dismissing splash immediately")
@@ -67,6 +75,12 @@ struct ContentView: View {
                 splashLog.warning("Safety timeout reached (15s) — force dismissing splash")
                 showSplash = false
             }
+        }
+        .onChange(of: authManager.selectedServerURL) { _, _ in
+            MediaProviderRegistry.shared.populateFromCurrentAuth()
+        }
+        .onChange(of: authManager.selectedServerToken) { _, _ in
+            MediaProviderRegistry.shared.populateFromCurrentAuth()
         }
     }
 
