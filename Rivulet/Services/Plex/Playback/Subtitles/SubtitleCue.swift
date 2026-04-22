@@ -20,8 +20,10 @@ struct SubtitleCue: Identifiable, Equatable, Sendable {
     }
 }
 
-/// Collection of parsed subtitle cues
-struct SubtitleTrack: Sendable {
+/// Collection of parsed subtitle cues. Domain-specific to the playback
+/// subtitle pipeline (parsed from SRT/ASS/etc.) — distinct from the
+/// agnostic-layer `SubtitleTrack` in `Models/Media/`.
+struct ParsedSubtitleTrack: Sendable {
     let cues: [SubtitleCue]
 
     /// Find all cues that should be displayed at the given time
@@ -61,7 +63,7 @@ struct SubtitleTrack: Sendable {
     }
 
     /// Empty track
-    static let empty = SubtitleTrack(cues: [])
+    static let empty = ParsedSubtitleTrack(cues: [])
 }
 
 // MARK: - Bitmap Subtitle Types (PGS, DVB-SUB)

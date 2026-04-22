@@ -10,7 +10,7 @@ import Foundation
 // MARK: - Parser Protocol
 
 protocol SubtitleParser {
-    func parse(_ content: String) throws -> SubtitleTrack
+    func parse(_ content: String) throws -> ParsedSubtitleTrack
 }
 
 enum SubtitleParseError: Error, LocalizedError {
@@ -41,7 +41,7 @@ enum SubtitleParseError: Error, LocalizedError {
 /// ```
 struct SRTParser: SubtitleParser {
 
-    func parse(_ content: String) throws -> SubtitleTrack {
+    func parse(_ content: String) throws -> ParsedSubtitleTrack {
         let content = content.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !content.isEmpty else {
             throw SubtitleParseError.emptyContent
@@ -90,7 +90,7 @@ struct SRTParser: SubtitleParser {
             ))
         }
 
-        return SubtitleTrack(cues: cues.sorted { $0.startTime < $1.startTime })
+        return ParsedSubtitleTrack(cues: cues.sorted { $0.startTime < $1.startTime })
     }
 
     /// Parse SRT timing line: "00:00:01,000 --> 00:00:04,000"
@@ -168,7 +168,7 @@ struct SRTParser: SubtitleParser {
 /// ```
 struct VTTParser: SubtitleParser {
 
-    func parse(_ content: String) throws -> SubtitleTrack {
+    func parse(_ content: String) throws -> ParsedSubtitleTrack {
         let content = content.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !content.isEmpty else {
             throw SubtitleParseError.emptyContent
@@ -242,7 +242,7 @@ struct VTTParser: SubtitleParser {
             ))
         }
 
-        return SubtitleTrack(cues: cues.sorted { $0.startTime < $1.startTime })
+        return ParsedSubtitleTrack(cues: cues.sorted { $0.startTime < $1.startTime })
     }
 
     /// Parse VTT timing line: "00:00:01.000 --> 00:00:04.000" with optional settings
@@ -304,7 +304,7 @@ struct VTTParser: SubtitleParser {
 /// strips override/style tags for readable overlay text.
 struct ASSParser: SubtitleParser {
 
-    func parse(_ content: String) throws -> SubtitleTrack {
+    func parse(_ content: String) throws -> ParsedSubtitleTrack {
         let normalized = content.replacingOccurrences(of: "\r\n", with: "\n")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalized.isEmpty else {
@@ -369,7 +369,7 @@ struct ASSParser: SubtitleParser {
             )
         }
 
-        return SubtitleTrack(cues: cues.sorted { $0.startTime < $1.startTime })
+        return ParsedSubtitleTrack(cues: cues.sorted { $0.startTime < $1.startTime })
     }
 
     /// Parse ASS timestamp format: H:MM:SS.cc

@@ -22,7 +22,7 @@ final class SubtitleManager: ObservableObject {
 
     // MARK: - Private State
 
-    private var currentTrack: SubtitleTrack = .empty
+    private var currentTrack: ParsedSubtitleTrack = .empty
     private var lastUpdateTime: TimeInterval = -1
     private let updateThreshold: TimeInterval = 0.05  // 50ms threshold to avoid excessive updates
 
@@ -39,7 +39,7 @@ final class SubtitleManager: ObservableObject {
             let content = try await fetchSubtitleContent(url: url, headers: headers)
             let detectedFormat = format ?? SubtitleFormat(fromURL: url)
 
-            let track: SubtitleTrack
+            let track: ParsedSubtitleTrack
             if let parser = detectedFormat.parser {
                 track = try parser.parse(content)
             } else {
@@ -126,7 +126,7 @@ final class SubtitleManager: ObservableObject {
         accumulatedCues.append(cue)
 
         // Rebuild track — cues arrive in PTS order from the demuxer, so they're already sorted
-        currentTrack = SubtitleTrack(cues: accumulatedCues)
+        currentTrack = ParsedSubtitleTrack(cues: accumulatedCues)
     }
 
     /// Add a bitmap subtitle cue from an embedded PGS/DVB-SUB stream.
@@ -226,7 +226,7 @@ final class SubtitleManager: ObservableObject {
         throw SubtitleLoadError.invalidEncoding
     }
 
-    private func parseWithAutoDetect(_ content: String) throws -> SubtitleTrack {
+    private func parseWithAutoDetect(_ content: String) throws -> ParsedSubtitleTrack {
         // Try ASS/SSA first when script sections are present.
         if content.contains("[Script Info]") || content.contains("[Events]") || content.contains("Dialogue:") {
             if let assTrack = try? ASSParser().parse(content), !assTrack.cues.isEmpty {
