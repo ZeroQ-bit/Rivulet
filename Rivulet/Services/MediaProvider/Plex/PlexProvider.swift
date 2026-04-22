@@ -105,11 +105,42 @@ final class PlexProvider: MediaProvider, @unchecked Sendable {
         }
     }
 
-    // Stubbed in Task 5; Task 7 implements relatedItems + allEpisodes.
-    // collectionItems remains a Wave 1 stub — see Task 7's commit message.
-    func collectionItems(matching collectionName: String, in library: MediaLibrary) async throws -> [MediaItem] { [] }
-    func relatedItems(for itemRef: MediaItemRef) async throws -> [MediaItem] { [] }
-    func allEpisodes(of showRef: MediaItemRef) async throws -> [MediaItem] { [] }
+    func collectionItems(matching collectionName: String, in library: MediaLibrary) async throws -> [MediaItem] {
+        // PlexNetworkManager.getCollectionItems takes sectionId + collectionId;
+        // the existing detail view's Collection footer is populated indirectly
+        // by Plex embedding collection items in the show/movie's metadata
+        // response. Resolving collectionName -> collectionId in a clean async
+        // call requires a network helper that doesn't exist yet — out of
+        // scope for Wave 1.
+        //
+        // TODO(post-wave-1): add /library/sections/{id}/collections?title= query
+        // helper to PlexNetworkManager and wire it through here.
+        return []
+    }
+
+    func relatedItems(for itemRef: MediaItemRef) async throws -> [MediaItem] {
+        try await plexCall {
+            let related = try await networkManager.getRelatedItems(
+                serverURL: serverURL, authToken: authToken, ratingKey: itemRef.itemID
+            )
+            return related.map {
+                PlexMediaMapper.item($0, providerID: id,
+                                    serverURL: serverURL, authToken: authToken)
+            }
+        }
+    }
+
+    func allEpisodes(of showRef: MediaItemRef) async throws -> [MediaItem] {
+        try await plexCall {
+            let episodes = try await networkManager.getAllLeaves(
+                serverURL: serverURL, authToken: authToken, ratingKey: showRef.itemID
+            )
+            return episodes.map {
+                PlexMediaMapper.item($0, providerID: id,
+                                    serverURL: serverURL, authToken: authToken)
+            }
+        }
+    }
 
     // MARK: - Home rails
 
