@@ -20,6 +20,7 @@ struct HeroButtonRow: View {
     let isResolvingPlay: Bool
     let isWatched: Bool
     let canAdvance: Bool
+    var showsNextButton: Bool = true
 
     @FocusState.Binding var focusedButton: HeroButton?
 
@@ -27,6 +28,7 @@ struct HeroButtonRow: View {
     let onToggleWatched: () -> Void
     let onInfo: () -> Void
     let onNext: () -> Void
+    var onMoveDown: (() -> Void)? = nil
 
     // Match detail view button sizing for visual consistency.
     private let pillButtonHeight: CGFloat = 66
@@ -37,8 +39,13 @@ struct HeroButtonRow: View {
             playButton
             watchlistButton
             infoButton
-            if canAdvance {
+            if canAdvance && showsNextButton {
                 nextButton
+            }
+        }
+        .onMoveCommand { direction in
+            if direction == .down {
+                onMoveDown?()
             }
         }
     }

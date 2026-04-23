@@ -12,6 +12,7 @@ import SwiftUI
 /// Identifies where the context menu was triggered from
 enum MediaItemContextSource {
     case continueWatching
+    case discover
     case library
     case other
 }
@@ -45,38 +46,16 @@ struct MediaItemContextMenu: ViewModifier {
 
     func body(content: Content) -> some View {
         content.contextMenu {
-            // Watch from Beginning
-            Button {
-                performAction(optimisticWatched: false) {
-                    try await networkManager.markUnwatched(
-                        serverURL: serverURL,
-                        authToken: authToken,
-                        ratingKey: item.ratingKey ?? ""
-                    )
-                }
-            } label: {
-                Label("Watch from Beginning", systemImage: "play.fill")
-            }
-
-            Divider()
-
-            // Mark as Watched
-            if item.viewCount == nil || item.viewCount == 0 || item.watchProgress != nil {
-                Button {
-                    performAction(optimisticWatched: true) {
-                        try await networkManager.markWatched(
-                            serverURL: serverURL,
-                            authToken: authToken,
-                            ratingKey: item.ratingKey ?? ""
-                        )
+            if source == .discover {
+                if let onShowInfo = onShowInfo {
+                    Button {
+                        onShowInfo()
+                    } label: {
+                        Label("More Info", systemImage: "info.circle")
                     }
-                } label: {
-                    Label("Mark as Watched", systemImage: "eye.fill")
                 }
-            }
-
-            // Mark as Unwatched (only show if already watched)
-            if let viewCount = item.viewCount, viewCount > 0 {
+            } else {
+                // Watch from Beginning
                 Button {
                     performAction(optimisticWatched: false) {
                         try await networkManager.markUnwatched(
@@ -86,77 +65,109 @@ struct MediaItemContextMenu: ViewModifier {
                         )
                     }
                 } label: {
-                    Label("Mark as Unwatched", systemImage: "eye.slash.fill")
+                    Label("Watch from Beginning", systemImage: "play.fill")
                 }
-            }
 
-            // Remove from Continue Watching (only in continue watching section)
-            if source == .continueWatching {
-                Button(role: .destructive) {
+                Divider()
+
+                // Mark as Watched
+                if item.viewCount == nil || item.viewCount == 0 || item.watchProgress != nil {
+                    Button {
+                        performAction(optimisticWatched: true) {
+                            try await networkManager.markWatched(
+                                serverURL: serverURL,
+                                authToken: authToken,
+                                ratingKey: item.ratingKey ?? ""
+                            )
+                        }
+                    } label: {
+                        Label("Mark as Watched", systemImage: "eye.fill")
+                    }
+                }
+
+                // Mark as Unwatched (only show if already watched)
+                if let viewCount = item.viewCount, viewCount > 0 {
+                    Button {
+                        performAction(optimisticWatched: false) {
+                            try await networkManager.markUnwatched(
+                                serverURL: serverURL,
+                                authToken: authToken,
+                                ratingKey: item.ratingKey ?? ""
+                            )
+                        }
+                    } label: {
+                        Label("Mark as Unwatched", systemImage: "eye.slash.fill")
+                    }
+                }
+
+                // Remove from Continue Watching (only in continue watching section)
+                if source == .continueWatching {
+                    Button(role: .destructive) {
+                        performAction {
+                            try await networkManager.removeFromContinueWatching(
+                                serverURL: serverURL,
+                                authToken: authToken,
+                                ratingKey: item.ratingKey ?? ""
+                            )
+                        }
+                    } label: {
+                        Label("Remove from Continue Watching", systemImage: "xmark.circle.fill")
+                    }
+                }
+
+                // Go to Season/Show (only for episodes)
+                if item.type == "episode" {
+                    if let onGoToSeason = onGoToSeason, item.parentRatingKey != nil {
+                        Button {
+                            onGoToSeason()
+                        } label: {
+                            Label("Go to Season", systemImage: "list.number")
+                        }
+                    }
+
+                    if let onGoToShow = onGoToShow, item.grandparentRatingKey != nil {
+                        Button {
+                            onGoToShow()
+                        } label: {
+                            Label("Go to Show", systemImage: "tv")
+                        }
+                    }
+                }
+
+                // Shuffle Play (for shows and seasons)
+                if item.type == "show" || item.type == "season" {
+                    if let onShufflePlay {
+                        Button {
+                            onShufflePlay()
+                        } label: {
+                            Label("Shuffle Play", systemImage: "shuffle")
+                        }
+                    }
+                }
+
+                Divider()
+
+                // More Info (navigate to detail view)
+                if let onShowInfo = onShowInfo {
+                    Button {
+                        onShowInfo()
+                    } label: {
+                        Label("More Info", systemImage: "info.circle")
+                    }
+                }
+
+                // Refresh Metadata
+                Button {
                     performAction {
-                        try await networkManager.removeFromContinueWatching(
+                        try await networkManager.refreshMetadata(
                             serverURL: serverURL,
                             authToken: authToken,
                             ratingKey: item.ratingKey ?? ""
                         )
                     }
                 } label: {
-                    Label("Remove from Continue Watching", systemImage: "xmark.circle.fill")
+                    Label("Refresh Metadata", systemImage: "arrow.clockwise")
                 }
-            }
-
-            // Go to Season/Show (only for episodes)
-            if item.type == "episode" {
-                if let onGoToSeason = onGoToSeason, item.parentRatingKey != nil {
-                    Button {
-                        onGoToSeason()
-                    } label: {
-                        Label("Go to Season", systemImage: "list.number")
-                    }
-                }
-
-                if let onGoToShow = onGoToShow, item.grandparentRatingKey != nil {
-                    Button {
-                        onGoToShow()
-                    } label: {
-                        Label("Go to Show", systemImage: "tv")
-                    }
-                }
-            }
-
-            // Shuffle Play (for shows and seasons)
-            if item.type == "show" || item.type == "season" {
-                if let onShufflePlay {
-                    Button {
-                        onShufflePlay()
-                    } label: {
-                        Label("Shuffle Play", systemImage: "shuffle")
-                    }
-                }
-            }
-
-            Divider()
-
-            // More Info (navigate to detail view)
-            if let onShowInfo = onShowInfo {
-                Button {
-                    onShowInfo()
-                } label: {
-                    Label("More Info", systemImage: "info.circle")
-                }
-            }
-
-            // Refresh Metadata
-            Button {
-                performAction {
-                    try await networkManager.refreshMetadata(
-                        serverURL: serverURL,
-                        authToken: authToken,
-                        ratingKey: item.ratingKey ?? ""
-                    )
-                }
-            } label: {
-                Label("Refresh Metadata", systemImage: "arrow.clockwise")
             }
         }
     }

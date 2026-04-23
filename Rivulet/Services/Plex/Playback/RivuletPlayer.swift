@@ -51,6 +51,7 @@ import Combine
     func selectAudioTrack(plexTrackId: Int, plexAudioTracks: [MediaTrack]) {}
     func selectEmbeddedSubtitle(streamIndex: Int32) {}
     func selectEmbeddedSubtitle(plexTrackId: Int, plexSubtitleTracks: [MediaTrack]) -> Bool { false }
+    func hasEmbeddedSubtitleMatch(plexTrackId: Int, plexSubtitleTracks: [MediaTrack]) -> Bool { false }
     func deselectEmbeddedSubtitle() {}
     var ffmpegSubtitleTracks: [(streamIndex: Int32, language: String?, title: String?, codec: String?)] { [] }
 }

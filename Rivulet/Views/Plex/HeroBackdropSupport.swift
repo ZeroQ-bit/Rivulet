@@ -205,6 +205,7 @@ final class HeroBackdropCoordinator: ObservableObject {
 struct HeroBackdropImage<Placeholder: View>: View {
     let url: URL?
     var animationDuration: Double = 0.22
+    var contentMode: ContentMode = .fill
     @ViewBuilder let placeholder: () -> Placeholder
 
     @State private var currentURL: URL?
@@ -238,7 +239,7 @@ struct HeroBackdropImage<Placeholder: View>: View {
     private func imageView(_ image: UIImage) -> some View {
         Image(uiImage: image)
             .resizable()
-            .aspectRatio(contentMode: .fill)
+            .aspectRatio(contentMode: contentMode)
     }
 
     @MainActor
@@ -305,15 +306,21 @@ extension PlexMetadata {
         let thumbnailPath = thumb ?? bestThumb
         let logoPath = logoPathOverride ?? clearLogoPath
 
-        let plexBackdropURL = backdropPath.flatMap {
-            URL(string: "\(serverURL)\($0)?X-Plex-Token=\(authToken)")
-        }
-        let plexThumbnailURL = thumbnailPath.flatMap {
-            URL(string: "\(serverURL)\($0)?X-Plex-Token=\(authToken)")
-        }
-        let plexLogoURL = logoPath.flatMap {
-            URL(string: "\(serverURL)\($0)?X-Plex-Token=\(authToken)")
-        }
+        let plexBackdropURL = PlexMetadata.resolvedImageURL(
+            from: backdropPath,
+            serverURL: serverURL,
+            authToken: authToken
+        )
+        let plexThumbnailURL = PlexMetadata.resolvedImageURL(
+            from: thumbnailPath,
+            serverURL: serverURL,
+            authToken: authToken
+        )
+        let plexLogoURL = PlexMetadata.resolvedImageURL(
+            from: logoPath,
+            serverURL: serverURL,
+            authToken: authToken
+        )
 
         return HeroBackdropRequest(
             cacheKey: ratingKey ?? "\(type ?? "item"):\(title ?? "unknown")",

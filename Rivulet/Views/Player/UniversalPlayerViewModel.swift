@@ -767,13 +767,14 @@ final class UniversalPlayerViewModel: ObservableObject {
         await ensurePreferredSubtitleCandidatesAvailable()
 
         let useApplePlayer = UserDefaults.standard.bool(forKey: "useApplePlayer")
+        let rivuletNeedsRawDirectPath = requiresProfileConversion
         let routingContext = ContentRoutingContext(
             metadata: metadata,
             serverURL: URL(string: serverURL)!,
             authToken: authToken,
             requiresProfileConversion: requiresProfileConversion,
             playbackPolicy: .directPlayFirst,
-            useLocalRemux: !useApplePlayer  // RivuletPlayer handles locally
+            useLocalRemux: !useApplePlayer && rivuletNeedsRawDirectPath
         )
         let plan = ContentRouter.plan(for: routingContext)
         playbackPlan = plan
@@ -1219,7 +1220,7 @@ final class UniversalPlayerViewModel: ObservableObject {
                 authToken: authToken,
                 requiresProfileConversion: requiresProfileConversion,
                 playbackPolicy: .directPlayFirst,
-                useLocalRemux: true  // RivuletPlayer always handles locally
+                useLocalRemux: requiresProfileConversion
             )
             let plan = ContentRouter.plan(for: routingContext)
             playbackPlan = plan

@@ -8,6 +8,17 @@
 import SwiftUI
 import UIKit
 
+private struct LibraryCatalogSection: Identifiable {
+    let id: String
+    let title: String
+    let items: [PlexMetadata]
+    let hubKey: String?
+    let hubIdentifier: String?
+    let isContinueWatching: Bool
+    let contextMenuSource: MediaItemContextSource
+    let refreshAction: (() async -> Void)?
+    let previewAction: ((PreviewRequest) -> Void)?
+}
 
 struct PlexLibraryView: View {
     let libraryKey: String
@@ -19,7 +30,6 @@ struct PlexLibraryView: View {
     @StateObject private var authManager = PlexAuthManager.shared
     @ObservedObject private var librarySettings = LibrarySettingsManager.shared
     private let dataStore = PlexDataStore.shared
-    @AppStorage("showLibraryHero") private var showLibraryHero = false
     @AppStorage("showLibraryRecommendations") private var showLibraryRecommendations = true
     @AppStorage("showLibraryRecentRows") private var showLibraryRecentRows = true
     @State private var currentSortOption: LibrarySortOption = .addedAtDesc
@@ -54,6 +64,12 @@ struct PlexLibraryView: View {
     @State private var capturedSourceFrames: [PreviewSourceTarget: CGRect] = [:]
     @State private var showPreviewCover = false
     @State private var lastPrefetchIndex: Int = -18  // Track last prefetch position for throttling
+    @State private var currentCatalogIndex: Int = 0
+    @State private var currentCatalogID: String?
+    @State private var catalogFocusRequestID = UUID()
+    @State private var heroFocusRequestID = UUID()
+    @State private var catalogFocusTargets: [String: String] = [:]
+    @State private var lastCatalogNavigationAt: Date = .distantPast
     private var firstDisplayedItem: PlexMetadata? {
         items.first
     }
@@ -66,6 +82,7 @@ struct PlexLibraryView: View {
     private let networkManager = PlexNetworkManager.shared
     private let cacheManager = CacheManager.shared
     private let recommendationService = PersonalizedRecommendationService.shared
+    private let catalogNavigationCooldown: TimeInterval = 0.24
 
     /// Check if this is a music library (uses square posters)
     private var isMusicLibrary: Bool {
@@ -340,6 +357,12 @@ struct PlexLibraryView: View {
 
                 focusedItemId = nil
                 lastFocusedItemId = nil
+                currentCatalogIndex = 0
+                currentCatalogID = nil
+                catalogFocusTargets = [:]
+                heroCurrentIndex = 0
+                heroScrollOffset = 0
+                isSortButtonFocused = false
 
                 heroItems = dataStore.getCachedHeroItems(forLibrary: libraryKey) ?? []
 
@@ -396,6 +419,12 @@ struct PlexLibraryView: View {
             hubs = []
             cachedProcessedHubs = []
             heroItems = []
+            currentCatalogIndex = 0
+            currentCatalogID = nil
+            catalogFocusTargets = [:]
+            heroCurrentIndex = 0
+            heroScrollOffset = 0
+            isSortButtonFocused = false
             lastLoadedLibraryKey = nil
             isLoading = false
         }
@@ -404,6 +433,357 @@ struct PlexLibraryView: View {
     private func libraryRowID(for hub: PlexHub, section: String, index: Int) -> String {
         let identifier = hub.hubIdentifier ?? hub.key ?? hub.hubKey ?? hub.title ?? "row"
         return "library:\(libraryKey):\(section):\(index):\(identifier)"
+    }
+
+    private var libraryCatalogSections: [LibraryCatalogSection] {
+        var sections: [LibraryCatalogSection] = []
+        var insertedRecommendations = false
+        let continueWatchingIndex = essentialHubs.firstIndex(where: isContinueWatchingHub)
+
+        for (index, hub) in essentialHubs.enumerated() {
+            guard let hubItems = hub.Metadata, !hubItems.isEmpty else { continue }
+
+            let isContinueWatching = isContinueWatchingHub(hub)
+            sections.append(
+                LibraryCatalogSection(
+                    id: libraryRowID(for: hub, section: "essential", index: index),
+                    title: hub.title ?? "Untitled",
+                    items: hubItems,
+                    hubKey: hub.key ?? hub.hubKey,
+                    hubIdentifier: hub.hubIdentifier,
+                    isContinueWatching: isContinueWatching,
+                    contextMenuSource: isContinueWatching ? .continueWatching : .library,
+                    refreshAction: {
+                        await refresh()
+                    },
+                    previewAction: isContinueWatching ? nil : { request in
+                        withAnimation(previewEntryAnimation) {
+                            rowPreviewRequest = request
+                            showPreviewCover = true
+                        }
+                    }
+                )
+            )
+
+            if enablePersonalizedRecommendations,
+               shouldShowRecommendationsRow,
+               continueWatchingIndex == index,
+               !recommendations.isEmpty {
+                sections.append(recommendationsCatalogSection)
+                insertedRecommendations = true
+            }
+        }
+
+        if enablePersonalizedRecommendations,
+           shouldShowRecommendationsRow,
+           !insertedRecommendations,
+           !recommendations.isEmpty {
+            sections.append(recommendationsCatalogSection)
+        }
+
+        if showLibraryRecommendations {
+            for (index, hub) in discoveryHubs.enumerated() {
+                guard let hubItems = hub.Metadata, !hubItems.isEmpty else { continue }
+
+                sections.append(
+                    LibraryCatalogSection(
+                        id: libraryRowID(for: hub, section: "discovery", index: index),
+                        title: hub.title ?? "Untitled",
+                        items: hubItems,
+                        hubKey: hub.key ?? hub.hubKey,
+                        hubIdentifier: hub.hubIdentifier,
+                        isContinueWatching: false,
+                        contextMenuSource: .library,
+                        refreshAction: {
+                            await refresh()
+                        },
+                        previewAction: { request in
+                            withAnimation(previewEntryAnimation) {
+                                rowPreviewRequest = request
+                                showPreviewCover = true
+                            }
+                        }
+                    )
+                )
+            }
+        }
+
+        return sections
+    }
+
+    private var recommendationsCatalogSection: LibraryCatalogSection {
+        LibraryCatalogSection(
+            id: "library:\(libraryKey):recommendations",
+            title: "Personalized Recommendations",
+            items: recommendations,
+            hubKey: nil,
+            hubIdentifier: nil,
+            isContinueWatching: false,
+            contextMenuSource: .library,
+            refreshAction: {
+                await refreshRecommendations(force: true)
+            },
+            previewAction: { request in
+                withAnimation(previewEntryAnimation) {
+                    rowPreviewRequest = request
+                    showPreviewCover = true
+                }
+            }
+        )
+    }
+
+    private func resolvedCurrentCatalogIndex(in sections: [LibraryCatalogSection]) -> Int? {
+        guard !sections.isEmpty else { return nil }
+
+        if let currentCatalogID,
+           let index = sections.firstIndex(where: { $0.id == currentCatalogID }) {
+            return index
+        }
+
+        return ensureValidCatalogIndex(currentCatalogIndex, in: sections)
+    }
+
+    private func ensureValidCatalogIndex(_ index: Int, in sections: [LibraryCatalogSection]) -> Int {
+        guard !sections.isEmpty else { return 0 }
+        return min(max(index, 0), sections.count - 1)
+    }
+
+    private func catalogItemID(for item: PlexMetadata, rowID: String, index: Int) -> String {
+        if let ratingKey = item.ratingKey {
+            return ratingKey
+        }
+        return "\(rowID)-\(index)"
+    }
+
+    private func preferredCatalogFocusTarget(for section: LibraryCatalogSection) -> String? {
+        if let savedTarget = catalogFocusTargets[section.id],
+           section.items.enumerated().contains(where: { index, item in
+               catalogItemID(for: item, rowID: section.id, index: index) == savedTarget
+           }) {
+            return savedTarget
+        }
+
+        guard let first = section.items.first else { return nil }
+        return catalogItemID(for: first, rowID: section.id, index: 0)
+    }
+
+    private func preferredCatalogFocusIndex(for section: LibraryCatalogSection) -> Int {
+        guard let target = preferredCatalogFocusTarget(for: section) else { return 0 }
+        return section.items.enumerated().first(where: { index, item in
+            catalogItemID(for: item, rowID: section.id, index: index) == target
+        })?.offset ?? 0
+    }
+
+    private func reconcileCatalogSelection(with sections: [LibraryCatalogSection]) {
+        guard !sections.isEmpty else {
+            currentCatalogIndex = 0
+            currentCatalogID = nil
+            heroCurrentIndex = 0
+            return
+        }
+
+        let resolvedIndex = resolvedCurrentCatalogIndex(in: sections) ?? 0
+        let resolvedSection = sections[resolvedIndex]
+        let didChangeSection = currentCatalogID != resolvedSection.id
+
+        currentCatalogIndex = resolvedIndex
+        currentCatalogID = resolvedSection.id
+        heroCurrentIndex = preferredCatalogFocusIndex(for: resolvedSection)
+
+        if didChangeSection {
+            catalogFocusRequestID = UUID()
+        }
+    }
+
+    private func consumeVerticalCatalogNavigation() -> Bool {
+        let now = Date()
+        guard now.timeIntervalSince(lastCatalogNavigationAt) >= catalogNavigationCooldown else {
+            return false
+        }
+
+        lastCatalogNavigationAt = now
+        return true
+    }
+
+    private func focusActiveCatalog(in sections: [LibraryCatalogSection], using scrollProxy: ScrollViewProxy) {
+        guard let resolvedIndex = resolvedCurrentCatalogIndex(in: sections) else { return }
+
+        withAnimation(.smooth(duration: 0.45)) {
+            scrollProxy.scrollTo("libraryHeroTop", anchor: .top)
+        }
+
+        currentCatalogIndex = resolvedIndex
+        currentCatalogID = sections[resolvedIndex].id
+        heroCurrentIndex = preferredCatalogFocusIndex(for: sections[resolvedIndex])
+
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 260_000_000)
+            catalogFocusRequestID = UUID()
+        }
+    }
+
+    private func requestHeroFocus(using scrollProxy: ScrollViewProxy) {
+        withAnimation(.smooth(duration: 0.45)) {
+            scrollProxy.scrollTo("libraryHeroTop", anchor: .top)
+        }
+
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 240_000_000)
+            heroFocusRequestID = UUID()
+        }
+    }
+
+    private func enterLibraryBrowse(using scrollProxy: ScrollViewProxy) {
+        withAnimation(.smooth(duration: 0.45)) {
+            scrollProxy.scrollTo("libraryBrowseHeader", anchor: .top)
+        }
+
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 280_000_000)
+            isSortButtonFocused = true
+        }
+    }
+
+    private func moveToAdjacentCatalog(
+        step: Int,
+        in sections: [LibraryCatalogSection],
+        heroActive: Bool,
+        using scrollProxy: ScrollViewProxy
+    ) {
+        guard !sections.isEmpty, consumeVerticalCatalogNavigation() else { return }
+
+        let candidateIndex = (resolvedCurrentCatalogIndex(in: sections) ?? 0) + step
+        if candidateIndex >= 0 && candidateIndex < sections.count {
+            let section = sections[candidateIndex]
+            currentCatalogIndex = candidateIndex
+            currentCatalogID = section.id
+            heroCurrentIndex = preferredCatalogFocusIndex(for: section)
+            withAnimation(.easeInOut(duration: 0.24)) {
+                catalogFocusRequestID = UUID()
+            }
+            return
+        }
+
+        if step < 0, heroActive {
+            requestHeroFocus(using: scrollProxy)
+        } else if step > 0 {
+            enterLibraryBrowse(using: scrollProxy)
+        }
+    }
+
+    @ViewBuilder
+    private func catalogNavigationHint(for sections: [LibraryCatalogSection]) -> some View {
+        if let resolvedIndex = resolvedCurrentCatalogIndex(in: sections) {
+            let previousTitle = resolvedIndex > 0 ? sections[resolvedIndex - 1].title : nil
+            let nextTitle = resolvedIndex < sections.count - 1 ? sections[resolvedIndex + 1].title : nil
+
+            HStack(spacing: 18) {
+                if let previousTitle {
+                    Label(previousTitle, systemImage: "chevron.up")
+                        .labelStyle(.titleAndIcon)
+                        .font(.system(size: 16, weight: .medium, design: .rounded))
+                        .foregroundStyle(.white.opacity(0.48))
+                        .lineLimit(1)
+                }
+
+                if let nextTitle {
+                    Label(nextTitle, systemImage: "chevron.down")
+                        .labelStyle(.titleAndIcon)
+                        .font(.system(size: 16, weight: .medium, design: .rounded))
+                        .foregroundStyle(.white.opacity(0.58))
+                        .lineLimit(1)
+                }
+
+                Spacer(minLength: 16)
+
+                if sections.count > 1 {
+                    Text("\(resolvedIndex + 1) / \(sections.count)")
+                        .font(.system(size: 14, weight: .semibold, design: .rounded))
+                        .foregroundStyle(.white.opacity(0.40))
+                }
+            }
+            .padding(.horizontal, ScaledDimensions.rowHorizontalPadding + 4)
+        }
+    }
+
+    @ViewBuilder
+    private func activeCatalogStage(
+        in sections: [LibraryCatalogSection],
+        heroActive: Bool,
+        scrollProxy: ScrollViewProxy
+    ) -> some View {
+        if let resolvedIndex = resolvedCurrentCatalogIndex(in: sections) {
+            let activeSection = sections[resolvedIndex]
+
+            VStack(alignment: .leading, spacing: 10) {
+                InfiniteContentRow(
+                    rowID: activeSection.id,
+                    title: activeSection.title,
+                    initialItems: activeSection.items,
+                    hubKey: activeSection.hubKey,
+                    hubIdentifier: activeSection.hubIdentifier,
+                    serverURL: authManager.selectedServerURL ?? "",
+                    authToken: authManager.selectedServerToken ?? "",
+                    isContinueWatching: activeSection.isContinueWatching,
+                    contextMenuSource: activeSection.contextMenuSource,
+                    onItemSelected: { item in
+                        selectedItem = item
+                    },
+                    onPlayItem: { item in
+                        playItemDirectly(item)
+                    },
+                    onPlayFromBeginning: { item in
+                        playItemDirectly(item, fromBeginning: true)
+                    },
+                    onGoToItem: { item in
+                        selectedItem = item
+                    },
+                    onRefreshNeeded: activeSection.refreshAction,
+                    onPreviewRequested: activeSection.previewAction,
+                    restorePreviewFocusTarget: $previewRestoreTarget,
+                    presentationStyle: .pinnedStage,
+                    preferredFocusItemID: preferredCatalogFocusTarget(for: activeSection),
+                    focusRequestID: catalogFocusRequestID,
+                    onItemFocusChanged: { target in
+                        catalogFocusTargets[activeSection.id] = target
+                        currentCatalogIndex = resolvedIndex
+                        currentCatalogID = activeSection.id
+                        if let newHeroIndex = activeSection.items.enumerated().first(where: { index, item in
+                            catalogItemID(for: item, rowID: activeSection.id, index: index) == target
+                        })?.offset {
+                            heroCurrentIndex = newHeroIndex
+                        }
+                    },
+                    onMoveUp: {
+                        moveToAdjacentCatalog(
+                            step: -1,
+                            in: sections,
+                            heroActive: heroActive,
+                            using: scrollProxy
+                        )
+                    },
+                    onMoveDown: {
+                        moveToAdjacentCatalog(
+                            step: 1,
+                            in: sections,
+                            heroActive: heroActive,
+                            using: scrollProxy
+                        )
+                    },
+                    onRowFocused: {
+                        withAnimation(.smooth(duration: 0.45)) {
+                            scrollProxy.scrollTo("libraryHeroTop", anchor: .top)
+                        }
+                    }
+                )
+                .id(activeSection.id)
+                .transition(.opacity.combined(with: .move(edge: .bottom)))
+
+                catalogNavigationHint(for: sections)
+            }
+            .padding(.bottom, 10)
+            .frame(maxWidth: .infinity, alignment: .bottomLeading)
+        }
     }
 
     private func updateNestedNavigationState() {
@@ -424,110 +804,94 @@ struct PlexLibraryView: View {
             .max() ?? 1080
     }
 
+    private func libraryCanvas(
+        accent: Color = Color(red: 0.24, green: 0.48, blue: 0.92)
+    ) -> some View {
+        ZStack {
+            LinearGradient(
+                colors: [
+                    Color(red: 0.03, green: 0.04, blue: 0.06),
+                    .black,
+                    Color(red: 0.04, green: 0.06, blue: 0.10)
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+
+            RadialGradient(
+                colors: [
+                    accent.opacity(0.18),
+                    .clear
+                ],
+                center: .topTrailing,
+                startRadius: 24,
+                endRadius: 860
+            )
+
+            LinearGradient(
+                colors: [
+                    .clear,
+                    .black.opacity(0.54)
+                ],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+        }
+    }
+
     // MARK: - Content View
 
     private var contentView: some View {
-        let heroActive = showLibraryHero && !heroItems.isEmpty
-        let screenHeight = currentScreenHeight
-        // Same sizing as the home hero so both screens feel consistent:
-        // full-width, near-full-height with a modest peek for the row below.
-        let heroSectionHeight = screenHeight - 200
-
-        let currentHeroItem: PlexMetadata? = {
-            guard heroActive, !heroItems.isEmpty else { return nil }
-            let clamped = max(0, min(heroCurrentIndex, heroItems.count - 1))
-            return heroItems[clamped]
-        }()
-
-        return ZStack(alignment: .top) {
-            // Layer 0: Fixed backdrop — fills the full screen behind the scroll
-            // view. Parallax offset at 40% of scroll speed creates the Apple TV
-            // "receding hero" effect as the user scrolls down.
-            if heroActive {
-                HeroBackdropLayer(
-                    currentItem: currentHeroItem,
-                    serverURL: authManager.selectedServerURL ?? "",
-                    authToken: authManager.selectedServerToken ?? ""
-                )
+        ZStack(alignment: .top) {
+            libraryCanvas()
                 .ignoresSafeArea()
-                .offset(y: -heroScrollOffset * 1.3 - min(122, heroScrollOffset * 1.22))
-                .allowsHitTesting(false)
-            }
 
-            // Layer 1: Scrollable content
             ScrollViewReader { scrollProxy in
-            ScrollView(.vertical, showsIndicators: false) {
-                LazyVStack(alignment: .leading, spacing: 0) {
-                    // Hero overlay: transparent foreground (logo/buttons/dots)
-                    // that scrolls with content. The backdrop behind is fixed.
-                    if heroActive {
-                        HeroOverlayContent(
-                            items: heroItems,
-                            serverURL: authManager.selectedServerURL ?? "",
-                            authToken: authManager.selectedServerToken ?? "",
-                            currentIndex: $heroCurrentIndex,
-                            onInfo: { item in selectedItem = item },
-                            onPlay: { item in playItemDirectly(item) },
-                            onHeroFocused: {
-                                withAnimation(.smooth(duration: 0.8)) {
-                                    scrollProxy.scrollTo("libraryHero", anchor: .top)
-                                }
-                            }
+                ScrollView(.vertical, showsIndicators: false) {
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        essentialRowsView(scrollProxy: scrollProxy)
+
+                        discoveryRowsView(scrollProxy: scrollProxy)
+
+                        librarySectionHeader(
+                            scrollProxy: scrollProxy,
+                            catalogSections: [],
+                            heroActive: false
                         )
-                        .frame(height: heroSectionHeight)
-                        .focusSection()
-                        .id("libraryHero")
-                    }
+                        .id("libraryBrowseHeader")
 
-                    essentialRowsView(scrollProxy: scrollProxy)
-                    discoveryRowsView(scrollProxy: scrollProxy)
-                    librarySectionHeader
-                    libraryGridView
+                        libraryGridView
 
-                    // Loading more indicator
-                    if isLoadingMore {
-                        HStack {
-                            Spacer()
-                            ProgressView()
-                                .scaleEffect(1.2)
-                            Spacer()
+                        if isLoadingMore {
+                            HStack {
+                                Spacer()
+                                ProgressView()
+                                    .scaleEffect(1.2)
+                                Spacer()
+                            }
+                            .padding(.bottom, 40)
                         }
-                        .padding(.bottom, 40)
                     }
                 }
+                .scrollClipDisabled()
+                .ignoresSafeArea(.container, edges: [.horizontal, .bottom])
+                .id("library-standard-\(libraryKey)")
             }
-            .onScrollGeometryChange(for: CGFloat.self) { geometry in
-                geometry.contentOffset.y
-            } action: { _, offset in
-                heroScrollOffset = max(0, offset)
-            }
-            .scrollClipDisabled()  // Allow shadow overflow
-            .ignoresSafeArea(.container, edges: heroActive ? [.top, .horizontal] : [])
-            .id(libraryKey)  // Force fresh ScrollView when library changes - starts at top
-            } // ScrollViewReader
         }
         .opacity(rowPreviewRequest != nil ? 0.12 : 1)
         .offset(y: rowPreviewRequest != nil ? 20 : 0)
         .allowsHitTesting(rowPreviewRequest == nil)
         .animation(previewEntryAnimation, value: rowPreviewRequest?.id)
         .onAppear {
-            // Hero will be selected when items load via task handler
-            if heroItems.isEmpty && !items.isEmpty {
-                selectHeroItems()
-            }
+            currentCatalogIndex = 0
+            currentCatalogID = nil
+            heroScrollOffset = 0
         }
         .onChange(of: items.count) { oldCount, newCount in
-            // Consolidated handler: hero selection + prefetch
-            if heroItems.isEmpty {
-                selectHeroItems()
-            }
             handleItemsCountChange(oldCount: oldCount, newCount: newCount)
         }
         .onChange(of: hubs.count) { _, _ in
-            // Recompute cached hubs (memoization)
             cachedProcessedHubs = computeProcessedHubs(from: hubs)
-            // Reselect hero whenever hubs change so the promoted list stays current.
-            selectHeroItems()
         }
     }
 
@@ -664,10 +1028,7 @@ struct PlexLibraryView: View {
                 }
             }
             .padding(.horizontal, ScaledDimensions.rowHorizontalPadding)
-            // When the hero is active it sits above these rows and already
-            // provides visual separation; only add the large top inset when
-            // the essential rows are the first thing on the page.
-            .padding(.top, (showLibraryHero && !heroItems.isEmpty) ? 0 : 100)
+            .padding(.top, 100)
         }
     }
 
@@ -788,7 +1149,11 @@ struct PlexLibraryView: View {
 
     // MARK: - Library Section Header
 
-    private var librarySectionHeader: some View {
+    private func librarySectionHeader(
+        scrollProxy: ScrollViewProxy,
+        catalogSections: [LibraryCatalogSection],
+        heroActive: Bool
+    ) -> some View {
         HStack(alignment: .top) {
             VStack(alignment: .leading, spacing: 10) {
                 Text(libraryTitle)
@@ -807,7 +1172,11 @@ struct PlexLibraryView: View {
 
             Spacer()
 
-            sortButton
+            sortButton(
+                scrollProxy: scrollProxy,
+                catalogSections: catalogSections,
+                heroActive: heroActive
+            )
         }
         .padding(.horizontal, ScaledDimensions.rowHorizontalPadding)
         .padding(.top, 60)
@@ -818,7 +1187,11 @@ struct PlexLibraryView: View {
 
     @FocusState private var isSortButtonFocused: Bool
 
-    private var sortButton: some View {
+    private func sortButton(
+        scrollProxy: ScrollViewProxy,
+        catalogSections: [LibraryCatalogSection],
+        heroActive: Bool
+    ) -> some View {
         Menu {
             ForEach(LibrarySortOption.options(for: currentLibraryType), id: \.self) { option in
                 Button {
@@ -859,6 +1232,15 @@ struct PlexLibraryView: View {
         .hoverEffectDisabled()
         .focusEffectDisabled()
         .focused($isSortButtonFocused)
+        .onMoveCommand { direction in
+            if direction == .up, !catalogSections.isEmpty || heroActive {
+                if !catalogSections.isEmpty {
+                    focusActiveCatalog(in: catalogSections, using: scrollProxy)
+                } else if heroActive {
+                    requestHeroFocus(using: scrollProxy)
+                }
+            }
+        }
         .animation(.spring(response: 0.25, dampingFraction: 0.8), value: isSortButtonFocused)
     }
 

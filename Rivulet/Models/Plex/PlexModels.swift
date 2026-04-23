@@ -13,6 +13,7 @@ import Foundation
 /// Plex API constants
 nonisolated enum PlexAPI: Sendable {
     static let baseUrl = "https://plex.tv"
+    static let discoverBaseUrl = "https://discover.provider.plex.tv"
     static let clientIdentifier = "com.gstudios.rivulet"
     static let productName = "Rivulet"
     static let deviceName = "Apple TV"
@@ -168,6 +169,34 @@ nonisolated struct PlexMediaContainer: Codable, Sendable {
     var librarySectionTitle: String?
     var Metadata: [PlexMetadata]?
     var Hub: [PlexHub]?
+
+    enum CodingKeys: String, CodingKey {
+        case size
+        case totalSize
+        case librarySectionID
+        case librarySectionTitle
+        case Metadata
+        case Hub
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        size = try container.decodeIfPresent(Int.self, forKey: .size)
+        totalSize = try container.decodeIfPresent(Int.self, forKey: .totalSize)
+
+        if let sectionID = try? container.decodeIfPresent(Int.self, forKey: .librarySectionID) {
+            librarySectionID = sectionID
+        } else if let sectionIDString = try? container.decodeIfPresent(String.self, forKey: .librarySectionID),
+                  let parsedSectionID = Int(sectionIDString) {
+            librarySectionID = parsedSectionID
+        } else {
+            librarySectionID = nil
+        }
+
+        librarySectionTitle = try container.decodeIfPresent(String.self, forKey: .librarySectionTitle)
+        Metadata = try container.decodeIfPresent([PlexMetadata].self, forKey: .Metadata)
+        Hub = try container.decodeIfPresent([PlexHub].self, forKey: .Hub)
+    }
 }
 
 nonisolated struct PlexMediaContainerWrapper: Codable, Sendable {

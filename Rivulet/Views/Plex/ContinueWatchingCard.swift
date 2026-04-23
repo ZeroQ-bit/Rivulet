@@ -31,7 +31,7 @@ struct ContinueWatchingCard: View, Equatable {
     private var cornerRadius: CGFloat { ScaledDimensions.posterCornerRadius }
 
     var body: some View {
-        ZStack {
+        ZStack(alignment: .bottomLeading) {
             // Background artwork
             artworkImage
                 .frame(width: cardWidth, height: cardHeight)
@@ -48,20 +48,20 @@ struct ContinueWatchingCard: View, Equatable {
                 endPoint: .bottom
             )
 
-            // Centered title logo
-            ContinueWatchingTitleLogo(item: item)
-
-            // Bottom info bar
-            VStack {
-                Spacer()
+            VStack(alignment: .leading, spacing: 14) {
+                ContinueWatchingTitleLogo(item: item)
                 bottomInfoBar
-                    .padding(20)
             }
+            .padding(20)
         }
         .frame(width: cardWidth, height: cardHeight)
+        .overlay {
+            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                .strokeBorder(.white.opacity(isFocused ? 0.22 : 0.06), lineWidth: isFocused ? 1.5 : 1)
+        }
         .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
-        .hoverEffect(.highlight)
-        .shadow(color: .black.opacity(0.35), radius: 8, x: 0, y: 6)
+        .shadow(color: .black.opacity(isFocused ? 0.34 : 0.18), radius: isFocused ? 20 : 10, x: 0, y: isFocused ? 16 : 8)
+        .animation(.spring(response: 0.28, dampingFraction: 0.8), value: isFocused)
     }
 
     // MARK: - Artwork Image
@@ -128,9 +128,22 @@ struct ContinueWatchingCard: View, Equatable {
                 .font(.system(size: 20 * scale, weight: .medium))
                 .foregroundStyle(.white.opacity(infoOpacity))
                 .lineLimit(1)
-
-            Spacer()
         }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(Color.black.opacity(isFocused ? 0.40 : 0.28))
+                .background(
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .fill(.ultraThinMaterial)
+                        .opacity(isFocused ? 0.18 : 0.12)
+                )
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(.white.opacity(isFocused ? 0.18 : 0.08), lineWidth: 1)
+        )
         .animation(.easeInOut(duration: 0.2), value: isFocused)
     }
 
@@ -212,7 +225,7 @@ private struct ContinueWatchingTitleLogo: View {
     }
 
     var body: some View {
-        ZStack {
+        ZStack(alignment: .leading) {
             textFallback
                 .opacity(loadedLogo == nil ? 1 : 0)
 
@@ -228,6 +241,7 @@ private struct ContinueWatchingTitleLogo: View {
                     .opacity(revealOpacity)
             }
         }
+        .frame(maxWidth: maxWidth, alignment: .leading)
         .task {
             guard !hasFetched else { return }
             hasFetched = true
@@ -237,9 +251,11 @@ private struct ContinueWatchingTitleLogo: View {
 
     private var textFallback: some View {
         Text(displayTitle)
-            .font(.system(size: 30 * scale, weight: .bold))
+            .font(.system(size: 28 * scale, weight: .bold, design: .rounded))
             .foregroundStyle(.white)
-            .lineLimit(1)
+            .lineLimit(2)
+            .multilineTextAlignment(.leading)
+            .frame(maxWidth: maxWidth, alignment: .leading)
             .shadow(color: .black.opacity(0.5), radius: 4, y: 2)
     }
 

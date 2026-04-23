@@ -28,6 +28,8 @@ struct PlexDetailView: View {
     var onPreviewExitRequested: (() -> Void)? = nil
     var onDetailsBecameVisible: (() -> Void)? = nil
     var enableDetailDataLoading: Bool = true
+    var assetServerURL: String? = nil
+    var assetAuthToken: String? = nil
     /// When hosted inside `PreviewOverlayHost`, reflects whether the entry /
     /// paging animation has fully settled. The detail data cascade is deferred
     /// until this flips to `true` so the main thread stays quiet while the
@@ -121,8 +123,7 @@ struct PlexDetailView: View {
     private var isPreviewCarousel: Bool { presentationMode == .previewCarousel }
     private var isExpandedPreviewFlow: Bool { onPreviewExitRequested != nil && presentationMode == .expandedDetail }
     private var shouldLoadDetailData: Bool {
-        if !isPreviewCarousel { return true }
-        return enableDetailDataLoading
+        enableDetailDataLoading
     }
     /// Cascade work is gated on both `shouldLoadDetailData` (which card is
     /// current) and `previewAnimationSettled` (no animation in flight). Both
@@ -142,6 +143,12 @@ struct PlexDetailView: View {
     }
     private var effectiveHeroLogoURL: URL? {
         heroBackdrop.session.logoURL ?? retainedLogoURL
+    }
+    private var resolvedAssetServerURL: String? {
+        assetServerURL ?? authManager.selectedServerURL
+    }
+    private var resolvedAssetAuthToken: String? {
+        assetAuthToken ?? authManager.selectedServerToken ?? authManager.authToken
     }
     private var heroBackdropScale: CGFloat {
         (isPreviewCarousel || isExpandedPreviewFlow) ? 1.14 : 1.08
@@ -1972,8 +1979,8 @@ struct PlexDetailView: View {
     }
 
     private func currentHeroBackdropRequest() -> HeroBackdropRequest? {
-        guard let serverURL = authManager.selectedServerURL,
-              let token = authManager.selectedServerToken else { return nil }
+        guard let serverURL = resolvedAssetServerURL,
+              let token = resolvedAssetAuthToken else { return nil }
 
         // Prefer full metadata (carries the Image array) but fall back to the
         // hub item so we still get backdrop/thumb while the network call is in
@@ -1987,8 +1994,8 @@ struct PlexDetailView: View {
     }
 
     private func playerHeroBackdropRequest(for metadata: PlexMetadata) -> HeroBackdropRequest? {
-        guard let serverURL = authManager.selectedServerURL,
-              let token = authManager.selectedServerToken else { return nil }
+        guard let serverURL = resolvedAssetServerURL,
+              let token = resolvedAssetAuthToken else { return nil }
 
         let backdropSource = (metadata.type == "episode" && selectedEpisode != nil) ? currentItem : metadata
         let baseRequest = backdropSource.heroBackdropRequest(
@@ -1997,8 +2004,11 @@ struct PlexDetailView: View {
             logoPathOverride: parentShowLogoPath
         )
 
-        let thumbPath = metadata.thumb ?? metadata.bestThumb
-        let thumbURL = thumbPath.flatMap { URL(string: "\(serverURL)\($0)?X-Plex-Token=\(token)") }
+        let thumbURL = PlexMetadata.resolvedImageURL(
+            from: metadata.thumb ?? metadata.bestThumb,
+            serverURL: serverURL,
+            authToken: token
+        )
 
         return HeroBackdropRequest(
             cacheKey: metadata.ratingKey ?? baseRequest.cacheKey,

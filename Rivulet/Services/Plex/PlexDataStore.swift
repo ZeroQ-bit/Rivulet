@@ -144,9 +144,17 @@ class PlexDataStore: ObservableObject {
         !visibleMusicLibraries.isEmpty
     }
 
+    /// Video and music libraries in the user's preferred order, regardless of
+    /// sidebar visibility. Home visibility is managed separately.
+    var homeEligibleMediaLibraries: [PlexLibrary] {
+        librarySettings.sortLibraries(
+            libraries.filter { $0.isVideoLibrary || $0.isMusicLibrary }
+        )
+    }
+
     /// Video and music libraries that should appear on the Home screen
     var librariesForHomeScreen: [PlexLibrary] {
-        visibleMediaLibraries.filter { librarySettings.isLibraryShownOnHome($0.key) }
+        homeEligibleMediaLibraries.filter { librarySettings.isLibraryShownOnHome($0.key) }
     }
 
     // Track if initial load has been attempted

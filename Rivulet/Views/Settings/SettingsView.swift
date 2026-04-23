@@ -376,8 +376,7 @@ struct SettingsView: View {
     @State private var selectedLiveTVSource: LiveTVDataStore.LiveTVSourceInfo?
 
     // AppStorage
-    @AppStorage("showHomeHero") private var showHomeHero = false
-    @AppStorage("showLibraryHero") private var showLibraryHero = false
+    @AppStorage("showHomeHero") private var showHomeHero = true
     @AppStorage("showLibraryRecommendations") private var showLibraryRecommendations = true
     @AppStorage("showLibraryRecentRows") private var showLibraryRecentRows = true
     @AppStorage("enablePersonalizedRecommendations") private var enablePersonalizedRecommendations = false
@@ -732,12 +731,6 @@ struct SettingsView: View {
                 title: "Home Hero",
                 isOn: $showHomeHero,
                 onFocusChange: { if $0 { focusState.focusedSettingId = "homeHero" } }
-            )
-
-            SettingsToggleRow(
-                title: "Library Hero",
-                isOn: $showLibraryHero,
-                onFocusChange: { if $0 { focusState.focusedSettingId = "libraryHero" } }
             )
 
             SettingsToggleRow(

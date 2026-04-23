@@ -377,6 +377,32 @@ nonisolated struct PlexMetadata: Codable, Identifiable, Hashable, Sendable {
 // MARK: - Computed Properties
 
 nonisolated extension PlexMetadata {
+    /// Resolve a Plex artwork path into a usable URL.
+    /// Supports both server-relative paths and absolute Discover/static URLs.
+    static func resolvedImageURL(
+        from path: String?,
+        serverURL: String,
+        authToken: String
+    ) -> URL? {
+        guard let path, !path.isEmpty else { return nil }
+
+        var urlString = path
+        if !path.hasPrefix("http://"), !path.hasPrefix("https://") {
+            urlString = "\(serverURL)\(path)"
+        }
+
+        let needsToken = !authToken.isEmpty &&
+            !urlString.contains("X-Plex-Token=") &&
+            !urlString.contains("metadata-static.plex.tv")
+
+        if needsToken {
+            urlString += urlString.contains("?") ? "&" : "?"
+            urlString += "X-Plex-Token=\(authToken)"
+        }
+
+        return URL(string: urlString)
+    }
+
     /// Best-effort extraction of TMDB ID from the guid or Guid array
     var tmdbId: Int? {
         // Try primary guid first

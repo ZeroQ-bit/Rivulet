@@ -800,6 +800,30 @@ nonisolated class PlexNetworkManager: NSObject, @unchecked Sendable {
         return container.MediaContainer.Hub ?? []
     }
 
+    /// Get Plex Discover home hubs from Plex's hosted Discover provider.
+    /// These are the online Discover catalogs shown when the Discover source
+    /// is pinned in official Plex apps.
+    func getDiscoverHubs(authToken: String, count: Int = 24) async throws -> [PlexHub] {
+        guard var components = URLComponents(string: "\(PlexAPI.discoverBaseUrl)/hubs/sections/home") else {
+            throw PlexAPIError.invalidURL
+        }
+
+        components.queryItems = [
+            URLQueryItem(name: "count", value: "\(count)")
+        ]
+
+        guard let url = components.url else {
+            throw PlexAPIError.invalidURL
+        }
+
+        let container: PlexMediaContainerWrapper = try await request(
+            url,
+            headers: plexHeaders(authToken: authToken)
+        )
+
+        return container.MediaContainer.Hub ?? []
+    }
+
     /// Get more items from a hub using its key (for pagination/infinite scroll)
     /// - Parameters:
     ///   - hubKey: The hub's key path (e.g., "/hubs/sections/1/continueWatching")

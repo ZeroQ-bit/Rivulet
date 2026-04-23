@@ -12,56 +12,76 @@ import os.log
 
 private let homeLog = Logger(subsystem: "com.rivulet.app", category: "PlexHome")
 
+private struct HomeCatalogSection: Identifiable {
+    let id: String
+    let title: String
+    let items: [PlexMetadata]
+    let hubKey: String?
+    let hubIdentifier: String?
+    let isContinueWatching: Bool
+    let serverURL: String
+    let authToken: String
+    let usesReadOnlyDetail: Bool
+    let contextMenuSource: MediaItemContextSource
+    let refreshAction: (() async -> Void)?
+    let previewAction: ((PreviewRequest) -> Void)?
+}
+
+private struct HomeDiscoverNavigationTarget: Identifiable, Hashable {
+    let item: PlexMetadata
+    let assetServerURL: String
+    let assetAuthToken: String
+
+    var id: String {
+        let key = item.ratingKey ?? item.guid ?? item.key ?? item.title ?? UUID().uuidString
+        return "\(assetServerURL)|\(key)"
+    }
+}
+
 struct PlexHomeView: View {
     @StateObject private var dataStore = PlexDataStore.shared
     @StateObject private var authManager = PlexAuthManager.shared
-    @AppStorage("showHomeHero") private var showHomeHero = false
+    @AppStorage("showHomeHero") private var showHomeHero = true
+    @AppStorage("didMigrateHomeHeroDefault") private var didMigrateHomeHeroDefault = false
+    @AppStorage("showLibraryRecommendations") private var showDiscoveryRows = true
     @AppStorage("enablePersonalizedRecommendations") private var enablePersonalizedRecommendations = false
     @Environment(\.nestedNavigationState) private var nestedNavState
     @State private var selectedItem: PlexMetadata?
+    @State private var selectedDiscoverItem: HomeDiscoverNavigationTarget?
     @State private var heroItems: [PlexMetadata] = []
     @State private var heroCurrentIndex: Int = 0
     @State private var cachedProcessedHubs: [PlexHub] = []  // Memoized to avoid recalculation on every render
+    @State private var discoverHubs: [PlexHub] = []
+    @State private var isLoadingDiscoverHubs = false
+    @State private var discoverHubsError: String?
     @State private var recommendations: [PlexMetadata] = []
     @State private var isLoadingRecommendations = false
     @State private var recommendationsError: String?
-    @FocusState private var focusedItemId: String?  // Tracks focused item by "context:itemId" format
     @State private var rowPreviewRequest: PreviewRequest?
     @State private var previewRestoreTarget: PreviewSourceTarget?
     @State private var capturedSourceFrames: [PreviewSourceTarget: CGRect] = [:]
     @State private var showPreviewCover = false
-    @State private var heroScrollOffset: CGFloat = 0
+    @State private var currentCatalogIndex: Int = 0
+    @State private var currentCatalogID: String?
+    @State private var catalogFocusRequestID = UUID()
+    @State private var heroFocusRequestID = UUID()
+    @State private var catalogFocusTargets: [String: String] = [:]
+    @State private var lastCatalogNavigationAt: Date = .distantPast
 
     private let recommendationService = PersonalizedRecommendationService.shared
+    private let networkManager = PlexNetworkManager.shared
     private let recommendationsContentType: RecommendationContentType = .moviesAndShows
+    private let catalogNavigationCooldown: TimeInterval = 0.24
 
-    // MARK: - Processed Hubs (merged Continue Watching + library-specific sections)
+    // MARK: - Processed Hubs
 
-    /// Computes processed hubs with library-specific sections
-    /// - Continue Watching is merged from global hubs (across all libraries)
-    /// - Other hubs come from library-specific endpoints with library name prefixes
+    /// Home's server-backed hubs are limited to Continue Watching.
+    /// Library-specific recent/discovery rows belong on the library pages.
     private func computeProcessedHubs(from hubsToProcess: [PlexHub]) -> [PlexHub] {
-        var result: [PlexHub] = []
-
-        // 1. Extract and merge Continue Watching / On Deck from global hubs
-        let continueWatchingHub = extractContinueWatchingHub(from: hubsToProcess)
-        if let hub = continueWatchingHub {
-            result.append(hub)
+        if let continueWatchingHub = extractContinueWatchingHub(from: hubsToProcess) {
+            return [continueWatchingHub]
         }
-
-        // 2. Add "Recently Added" hub for each library shown on Home (video and music)
-        for library in dataStore.librariesForHomeScreen {
-            if let hubs = dataStore.libraryHubs[library.key] {
-                // Find the "Recently Added" hub for this library
-                if let recentlyAddedHub = hubs.first(where: { isRecentlyAddedHub($0) }) {
-                    var transformedHub = recentlyAddedHub
-                    transformedHub.title = "Recently Added \(library.title)"
-                    result.append(transformedHub)
-                }
-            }
-        }
-
-        return result
+        return []
     }
 
     /// Extract Continue Watching / On Deck items and merge into a single hub
@@ -112,29 +132,91 @@ struct PlexHomeView: View {
                title.contains("recently added")
     }
 
-    /// Transform generic hub titles to include library name
-    private func transformHubTitle(_ hubTitle: String?, libraryName: String) -> String {
-        guard let title = hubTitle else { return libraryName }
+    private var selectedServerURL: String {
+        authManager.selectedServerURL ?? ""
+    }
 
-        let lowercasedTitle = title.lowercased()
+    private var selectedServerToken: String {
+        authManager.selectedServerToken ?? ""
+    }
 
-        // Map common hub titles to library-specific versions
-        switch lowercasedTitle {
-        case "recently added":
-            return "\(libraryName) added"
-        case "recently released":
-            return "\(libraryName) recently released"
-        case "recommended":
-            return "\(libraryName) recommended"
-        case "new releases":
-            return "\(libraryName) new releases"
-        default:
-            // For other hubs, check if library name is already included
-            if lowercasedTitle.contains(libraryName.lowercased()) {
-                return title
+    private var discoverAuthToken: String {
+        authManager.authToken ?? ""
+    }
+
+    private func updateHomeContentReady() {
+        let hasSections = !homeCatalogSections.isEmpty
+        let discoverSettled = !showDiscoveryRows || !isLoadingDiscoverHubs
+        let recommendationsSettled = !enablePersonalizedRecommendations || !isLoadingRecommendations
+        dataStore.isHomeContentReady = hasSections || (!dataStore.isLoadingHubs && discoverSettled && recommendationsSettled)
+    }
+
+    private func refreshDiscoverHubs(force: Bool = false) async {
+        guard showDiscoveryRows else {
+            await MainActor.run {
+                isLoadingDiscoverHubs = false
+                discoverHubsError = nil
+                updateHomeContentReady()
             }
-            // Prepend library name for clarity
-            return "\(libraryName) - \(title)"
+            return
+        }
+
+        let token = discoverAuthToken
+        guard !token.isEmpty else {
+            await MainActor.run {
+                discoverHubs = []
+                isLoadingDiscoverHubs = false
+                discoverHubsError = nil
+                updateHomeContentReady()
+            }
+            return
+        }
+
+        await MainActor.run {
+            if force || discoverHubs.isEmpty {
+                isLoadingDiscoverHubs = true
+            }
+            discoverHubsError = nil
+        }
+
+        do {
+            let hubs = try await networkManager.getDiscoverHubs(authToken: token)
+            let usableHubs = hubs.compactMap { hub -> PlexHub? in
+                guard let items = hub.Metadata, !items.isEmpty else { return nil }
+                var cleanedHub = hub
+                cleanedHub.Metadata = items
+                return cleanedHub
+            }
+
+            await MainActor.run {
+                discoverHubs = usableHubs
+                isLoadingDiscoverHubs = false
+                discoverHubsError = nil
+                updateHomeContentReady()
+            }
+        } catch {
+            await MainActor.run {
+                if force {
+                    discoverHubs = []
+                }
+                discoverHubsError = error.localizedDescription
+                isLoadingDiscoverHubs = false
+                updateHomeContentReady()
+            }
+        }
+    }
+
+    private func showDetail(for item: PlexMetadata, in section: HomeCatalogSection? = nil) {
+        if let section, section.usesReadOnlyDetail {
+            selectedItem = nil
+            selectedDiscoverItem = HomeDiscoverNavigationTarget(
+                item: item,
+                assetServerURL: section.serverURL,
+                assetAuthToken: section.authToken
+            )
+        } else {
+            selectedDiscoverItem = nil
+            selectedItem = item
         }
     }
 
@@ -143,79 +225,99 @@ struct PlexHomeView: View {
             ZStack {
                 if !authManager.hasCredentials {
                     notConnectedView
-                } else if dataStore.isLoadingHubs && dataStore.hubs.isEmpty {
-                    loadingView
-                } else if let error = dataStore.hubsError, dataStore.hubs.isEmpty {
-                    errorView(error)
-                } else if dataStore.hubs.isEmpty {
-                    emptyView
                 } else {
                     contentView
                 }
             }
             .refreshable {
                 await dataStore.refreshHubs()
-                await dataStore.refreshLibraryHubs()
+                if showDiscoveryRows {
+                    await refreshDiscoverHubs(force: true)
+                }
                 if enablePersonalizedRecommendations {
                     await refreshRecommendations(force: true)
                 }
+                await MainActor.run {
+                    updateHomeContentReady()
+                }
             }
             .onAppear {
+                if !didMigrateHomeHeroDefault {
+                    if showHomeHero == false {
+                        showHomeHero = true
+                    }
+                    didMigrateHomeHeroDefault = true
+                }
                 homeLog.info("PlexHomeView onAppear — cachedHubs=\(self.cachedProcessedHubs.count), dataStoreHubs=\(self.dataStore.hubs.count)")
                 // Initial computation of processed hubs
                 if cachedProcessedHubs.isEmpty && !dataStore.hubs.isEmpty {
                     cachedProcessedHubs = computeProcessedHubs(from: dataStore.hubs)
-                    homeLog.info("Computed \(self.cachedProcessedHubs.count) processed hubs on appear, setting isHomeContentReady=\(!self.cachedProcessedHubs.isEmpty)")
-                    dataStore.isHomeContentReady = !cachedProcessedHubs.isEmpty
                 }
+                updateHomeContentReady()
                 // Only select hero if we don't have one yet
                 if heroItems.isEmpty {
                     selectHeroItems()
+                }
+                if showDiscoveryRows && discoverHubs.isEmpty {
+                    Task { await refreshDiscoverHubs(force: false) }
                 }
                 if enablePersonalizedRecommendations && recommendations.isEmpty {
                     Task { await refreshRecommendations(force: false) }
                 }
             }
             .task(id: dataStore.libraries.count) {
-                // Load library-specific hubs for Home screen when libraries are available
-                // Initialize Home visibility for libraries if not configured
                 guard !dataStore.libraries.isEmpty else { return }
                 dataStore.librarySettings.initializeHomeVisibility(for: dataStore.libraries)
             }
             .onChange(of: dataStore.hubsVersion) { _, _ in
-                // Recompute cached hubs when global hub data changes (for Continue Watching)
                 cachedProcessedHubs = computeProcessedHubs(from: dataStore.hubs)
-                // Refresh hero items when hubs change; stable comparison prevents unnecessary rebuilds.
                 selectHeroItems()
+                updateHomeContentReady()
             }
-            .onChange(of: dataStore.libraryHubsVersion) { _, _ in
-                // Recompute when library-specific hubs change
-                cachedProcessedHubs = computeProcessedHubs(from: dataStore.hubs)
+            .onChange(of: dataStore.isLoadingHubs) { _, _ in
+                updateHomeContentReady()
             }
-            .onChange(of: dataStore.librarySettings.librariesShownOnHome) { _, _ in
-                // Recompute and reload when Home library selection changes
-                cachedProcessedHubs = computeProcessedHubs(from: dataStore.hubs)
-                Task { await dataStore.loadLibraryHubsIfNeeded() }
-            }
-            .onChange(of: cachedProcessedHubs.isEmpty) { _, isEmpty in
-                homeLog.info("cachedProcessedHubs.isEmpty changed to \(isEmpty) (count: \(self.cachedProcessedHubs.count))")
-                dataStore.isHomeContentReady = !isEmpty
+            .onChange(of: showDiscoveryRows) { _, _ in
+                if showDiscoveryRows {
+                    updateHomeContentReady()
+                    Task { await refreshDiscoverHubs(force: discoverHubs.isEmpty) }
+                } else {
+                    updateHomeContentReady()
+                }
             }
             .onChange(of: enablePersonalizedRecommendations) { _, _ in
                 handleRecommendationsToggle()
+            }
+            .onChange(of: authManager.authToken) { _, _ in
+                guard showDiscoveryRows else { return }
+                Task { await refreshDiscoverHubs(force: true) }
             }
             // Refresh hubs when notified (e.g., after playback ends, watch status changes)
             .onReceive(NotificationCenter.default.publisher(for: .plexDataNeedsRefresh)) { _ in
                 Task {
                     await dataStore.refreshHubs()
-                    await dataStore.refreshLibraryHubs()
+                    if showDiscoveryRows {
+                        await refreshDiscoverHubs(force: true)
+                    }
                     if enablePersonalizedRecommendations {
                         await refreshRecommendations(force: true)
+                    }
+                    await MainActor.run {
+                        updateHomeContentReady()
                     }
                 }
             }
             .navigationDestination(item: $selectedItem) { item in
                 PlexDetailView(item: item)
+            }
+            .navigationDestination(item: $selectedDiscoverItem) { target in
+                PlexDetailView(
+                    item: target.item,
+                    allowActionRowInteraction: false,
+                    enableDetailDataLoading: false,
+                    assetServerURL: target.assetServerURL,
+                    assetAuthToken: target.assetAuthToken
+                )
             }
             .overlayPreferenceValue(PreviewSourceFramePreferenceKey.self) { anchors in
                 // Resolve anchor frames into CGRects
@@ -236,6 +338,10 @@ struct PlexHomeView: View {
         }
         .onChange(of: selectedItem) { _, newValue in
             print("[PlexHome] selectedItem changed: \(newValue?.title ?? "nil") (ratingKey: \(newValue?.ratingKey ?? "nil"))")
+            updateNestedNavigationState()
+        }
+        .onChange(of: selectedDiscoverItem) { _, newValue in
+            print("[PlexHome] selectedDiscoverItem changed: \(newValue?.item.title ?? "nil")")
             updateNestedNavigationState()
         }
         // Handle navigation from player (Go to Season / Go to Show)
@@ -453,12 +559,14 @@ struct PlexHomeView: View {
             await MainActor.run {
                 recommendations = items
                 isLoadingRecommendations = false
+                updateHomeContentReady()
             }
         } catch {
             await MainActor.run {
                 recommendations = []
                 recommendationsError = error.localizedDescription
                 isLoadingRecommendations = false
+                updateHomeContentReady()
             }
         }
     }
@@ -470,16 +578,302 @@ struct PlexHomeView: View {
             recommendations = []
             recommendationsError = nil
             isLoadingRecommendations = false
+            updateHomeContentReady()
         }
     }
 
-    private func homeRowID(for hub: PlexHub, index: Int) -> String {
+    private func homeRowID(for hub: PlexHub, index: Int, source: String) -> String {
         let identifier = hub.hubIdentifier ?? hub.key ?? hub.hubKey ?? hub.title ?? "row"
-        return "home:\(index):\(identifier)"
+        return "home:\(source):\(index):\(identifier)"
     }
 
     private func updateNestedNavigationState() {
-        nestedNavState.isNested = selectedItem != nil
+        nestedNavState.isNested = selectedItem != nil || selectedDiscoverItem != nil
+    }
+
+    private var homeCatalogSections: [HomeCatalogSection] {
+        var sections = cachedProcessedHubs.enumerated().compactMap { index, hub -> HomeCatalogSection? in
+            guard let items = hub.Metadata, !items.isEmpty else { return nil }
+
+            let isContinueWatching = isContinueWatchingHub(hub)
+            return HomeCatalogSection(
+                id: homeRowID(for: hub, index: index, source: "server"),
+                title: hub.title ?? "Unknown",
+                items: items,
+                hubKey: hub.key ?? hub.hubKey,
+                hubIdentifier: hub.hubIdentifier,
+                isContinueWatching: isContinueWatching,
+                serverURL: selectedServerURL,
+                authToken: selectedServerToken,
+                usesReadOnlyDetail: false,
+                contextMenuSource: isContinueWatching ? .continueWatching : .other,
+                refreshAction: {
+                    await dataStore.refreshHubs()
+                },
+                previewAction: isContinueWatching ? nil : { request in
+                    homeLog.info("[Preview] Opening carousel: \(request.items.count) items, tapped index=\(request.selectedIndex), title=\(request.items[request.selectedIndex].title ?? "?")")
+                    rowPreviewRequest = request
+                    showPreviewCover = true
+                }
+            )
+        }
+
+        if showDiscoveryRows {
+            sections.append(contentsOf: discoverHubs.enumerated().compactMap { index, hub in
+                guard let items = hub.Metadata, !items.isEmpty else { return nil }
+
+                return HomeCatalogSection(
+                    id: homeRowID(for: hub, index: index, source: "discover"),
+                    title: hub.title ?? "Discover",
+                    items: items,
+                    hubKey: hub.key ?? hub.hubKey,
+                    hubIdentifier: hub.hubIdentifier,
+                    isContinueWatching: false,
+                    serverURL: PlexAPI.discoverBaseUrl,
+                    authToken: discoverAuthToken,
+                    usesReadOnlyDetail: true,
+                    contextMenuSource: .discover,
+                    refreshAction: {
+                        await refreshDiscoverHubs(force: true)
+                    },
+                    previewAction: nil
+                )
+            })
+        }
+
+        if !recommendations.isEmpty {
+            sections.append(
+                HomeCatalogSection(
+                    id: "home:recommendations",
+                    title: "Personalized Recommendations",
+                    items: recommendations,
+                    hubKey: nil,
+                    hubIdentifier: nil,
+                    isContinueWatching: false,
+                    serverURL: selectedServerURL,
+                    authToken: selectedServerToken,
+                    usesReadOnlyDetail: false,
+                    contextMenuSource: .other,
+                    refreshAction: {
+                        await refreshRecommendations(force: true)
+                    },
+                    previewAction: { request in
+                        rowPreviewRequest = request
+                        showPreviewCover = true
+                    }
+                )
+            )
+        }
+
+        return sections
+    }
+
+    private func resolvedCurrentCatalogIndex(in sections: [HomeCatalogSection]) -> Int? {
+        guard !sections.isEmpty else { return nil }
+
+        if let currentCatalogID,
+           let index = sections.firstIndex(where: { $0.id == currentCatalogID }) {
+            return index
+        }
+
+        return ensureValidCatalogIndex(currentCatalogIndex, in: sections)
+    }
+
+    private func ensureValidCatalogIndex(_ index: Int, in sections: [HomeCatalogSection]) -> Int {
+        guard !sections.isEmpty else { return 0 }
+        return min(max(index, 0), sections.count - 1)
+    }
+
+    private func catalogItemID(for item: PlexMetadata, rowID: String, index: Int) -> String {
+        if let ratingKey = item.ratingKey {
+            return ratingKey
+        }
+        return "\(rowID)-\(index)"
+    }
+
+    private func preferredCatalogFocusTarget(for section: HomeCatalogSection) -> String? {
+        if let savedTarget = catalogFocusTargets[section.id],
+           section.items.enumerated().contains(where: { index, item in
+               catalogItemID(for: item, rowID: section.id, index: index) == savedTarget
+           }) {
+            return savedTarget
+        }
+
+        guard let first = section.items.first else { return nil }
+        return catalogItemID(for: first, rowID: section.id, index: 0)
+    }
+
+    private func preferredCatalogFocusIndex(for section: HomeCatalogSection) -> Int {
+        guard let target = preferredCatalogFocusTarget(for: section) else { return 0 }
+        return section.items.enumerated().first(where: { index, item in
+            catalogItemID(for: item, rowID: section.id, index: index) == target
+        })?.offset ?? 0
+    }
+
+    private func reconcileCatalogSelection(with sections: [HomeCatalogSection]) {
+        guard !sections.isEmpty else {
+            currentCatalogIndex = 0
+            currentCatalogID = nil
+            heroCurrentIndex = 0
+            return
+        }
+
+        let resolvedIndex = resolvedCurrentCatalogIndex(in: sections) ?? 0
+        let resolvedSection = sections[resolvedIndex]
+        let didChangeSection = currentCatalogID != resolvedSection.id
+
+        currentCatalogIndex = resolvedIndex
+        currentCatalogID = resolvedSection.id
+        heroCurrentIndex = preferredCatalogFocusIndex(for: resolvedSection)
+
+        if didChangeSection {
+            catalogFocusRequestID = UUID()
+        }
+    }
+
+    private func consumeVerticalCatalogNavigation() -> Bool {
+        let now = Date()
+        guard now.timeIntervalSince(lastCatalogNavigationAt) >= catalogNavigationCooldown else {
+            return false
+        }
+
+        lastCatalogNavigationAt = now
+        return true
+    }
+
+    private func focusActiveCatalog(in sections: [HomeCatalogSection]) {
+        guard let resolvedIndex = resolvedCurrentCatalogIndex(in: sections) else { return }
+        currentCatalogIndex = resolvedIndex
+        currentCatalogID = sections[resolvedIndex].id
+        heroCurrentIndex = preferredCatalogFocusIndex(for: sections[resolvedIndex])
+        catalogFocusRequestID = UUID()
+    }
+
+    private func requestHeroFocus() {
+        heroFocusRequestID = UUID()
+    }
+
+    private func moveToAdjacentCatalog(
+        step: Int,
+        in sections: [HomeCatalogSection],
+        heroActive: Bool
+    ) {
+        guard !sections.isEmpty, consumeVerticalCatalogNavigation() else { return }
+
+        let candidateIndex = (resolvedCurrentCatalogIndex(in: sections) ?? 0) + step
+        while candidateIndex >= 0 && candidateIndex < sections.count {
+            let section = sections[candidateIndex]
+            currentCatalogIndex = candidateIndex
+            currentCatalogID = section.id
+            heroCurrentIndex = preferredCatalogFocusIndex(for: section)
+            withAnimation(.easeInOut(duration: 0.24)) {
+                catalogFocusRequestID = UUID()
+            }
+            return
+        }
+
+        if step < 0 && heroActive {
+            requestHeroFocus()
+        }
+    }
+
+    @ViewBuilder
+    private func catalogNavigationHint(for sections: [HomeCatalogSection]) -> some View {
+        if let resolvedIndex = resolvedCurrentCatalogIndex(in: sections) {
+            let previousTitle = resolvedIndex > 0 ? sections[resolvedIndex - 1].title : nil
+            let nextTitle = resolvedIndex < sections.count - 1 ? sections[resolvedIndex + 1].title : nil
+
+            HStack(spacing: 18) {
+                if let previousTitle {
+                    Label(previousTitle, systemImage: "chevron.up")
+                        .labelStyle(.titleAndIcon)
+                        .font(.system(size: 16, weight: .medium, design: .rounded))
+                        .foregroundStyle(.white.opacity(0.48))
+                        .lineLimit(1)
+                }
+
+                if let nextTitle {
+                    Label(nextTitle, systemImage: "chevron.down")
+                        .labelStyle(.titleAndIcon)
+                        .font(.system(size: 16, weight: .medium, design: .rounded))
+                        .foregroundStyle(.white.opacity(0.58))
+                        .lineLimit(1)
+                }
+
+                Spacer(minLength: 16)
+
+                if sections.count > 1 {
+                    Text("\(resolvedIndex + 1) / \(sections.count)")
+                        .font(.system(size: 14, weight: .semibold, design: .rounded))
+                        .foregroundStyle(.white.opacity(0.40))
+                }
+            }
+            .padding(.horizontal, ScaledDimensions.rowHorizontalPadding + 4)
+        }
+    }
+
+    @ViewBuilder
+    private func activeCatalogStage(
+        in sections: [HomeCatalogSection],
+        heroActive: Bool
+    ) -> some View {
+        if let resolvedIndex = resolvedCurrentCatalogIndex(in: sections) {
+            let activeSection = sections[resolvedIndex]
+
+            VStack(alignment: .leading, spacing: 10) {
+                InfiniteContentRow(
+                    rowID: activeSection.id,
+                    title: activeSection.title,
+                    initialItems: activeSection.items,
+                    hubKey: activeSection.hubKey,
+                    hubIdentifier: activeSection.hubIdentifier,
+                    serverURL: activeSection.serverURL,
+                    authToken: activeSection.authToken,
+                    isContinueWatching: activeSection.isContinueWatching,
+                    contextMenuSource: activeSection.contextMenuSource,
+                    onItemSelected: { item in
+                        showDetail(for: item, in: activeSection)
+                    },
+                    onPlayItem: { item in
+                        playItemDirectly(item)
+                    },
+                    onPlayFromBeginning: { item in
+                        playItemDirectly(item, fromBeginning: true)
+                    },
+                    onGoToItem: { item in
+                        showDetail(for: item, in: activeSection)
+                    },
+                    onRefreshNeeded: activeSection.refreshAction,
+                    onPreviewRequested: activeSection.previewAction,
+                    restorePreviewFocusTarget: $previewRestoreTarget,
+                    presentationStyle: .pinnedStage,
+                    preferredFocusItemID: preferredCatalogFocusTarget(for: activeSection),
+                    focusRequestID: catalogFocusRequestID,
+                    onItemFocusChanged: { target in
+                        catalogFocusTargets[activeSection.id] = target
+                        currentCatalogIndex = resolvedIndex
+                        currentCatalogID = activeSection.id
+                        if let newHeroIndex = activeSection.items.enumerated().first(where: { index, item in
+                            catalogItemID(for: item, rowID: activeSection.id, index: index) == target
+                        })?.offset {
+                            heroCurrentIndex = newHeroIndex
+                        }
+                    },
+                    onMoveUp: {
+                        moveToAdjacentCatalog(step: -1, in: sections, heroActive: heroActive)
+                    },
+                    onMoveDown: {
+                        moveToAdjacentCatalog(step: 1, in: sections, heroActive: heroActive)
+                    }
+                )
+                .id(activeSection.id)
+                .transition(.opacity.combined(with: .move(edge: .bottom)))
+
+                catalogNavigationHint(for: sections)
+            }
+            .padding(.bottom, 10)
+            .frame(maxWidth: .infinity, alignment: .bottomLeading)
+        }
     }
 
     @MainActor
@@ -492,134 +886,150 @@ struct PlexHomeView: View {
     // MARK: - Content View
 
     private var contentView: some View {
-        let heroActive = showHomeHero && !heroItems.isEmpty
         let screenHeight = currentScreenHeight
-        // Leave a modest peek for Continue Watching at the bottom of the hero
-        // at the top scroll position. The backdrop fills the full screen behind
-        // the scroll view; this height controls where the overlay content ends.
         let heroSectionHeight = screenHeight - 200
+        let catalogSections = homeCatalogSections
+        let catalogSignature = catalogSections.map { section in
+            let keySignature = section.items.prefix(10).enumerated().map { index, item in
+                catalogItemID(for: item, rowID: section.id, index: index)
+            }
+            .joined(separator: ",")
+            return "\(section.id)|\(section.items.count)|\(keySignature)"
+        }
+        let currentHeroSection: HomeCatalogSection? = {
+            guard let resolvedIndex = resolvedCurrentCatalogIndex(in: catalogSections),
+                  catalogSections.indices.contains(resolvedIndex) else { return nil }
+            return catalogSections[resolvedIndex]
+        }()
+        let heroSourceItems = currentHeroSection?.items ?? heroItems
+        let heroActive = showHomeHero && !heroSourceItems.isEmpty
 
         let currentHeroItem: PlexMetadata? = {
-            guard heroActive, !heroItems.isEmpty else { return nil }
-            let clamped = max(0, min(heroCurrentIndex, heroItems.count - 1))
-            return heroItems[clamped]
+            guard heroActive, !heroSourceItems.isEmpty else { return nil }
+            let clamped = max(0, min(heroCurrentIndex, heroSourceItems.count - 1))
+            return heroSourceItems[clamped]
         }()
+        let heroServerURL = currentHeroSection?.serverURL ?? selectedServerURL
+        let heroAuthToken = currentHeroSection?.authToken ?? selectedServerToken
 
-        return ZStack(alignment: .top) {
-            // Layer 0: Fixed backdrop — fills the screen behind the scroll view.
-            // Parallax offset at 40% of scroll speed creates the Apple TV
-            // "receding hero" effect as the user scrolls down.
-            if heroActive {
-                HeroBackdropLayer(
-                    currentItem: currentHeroItem,
-                    serverURL: authManager.selectedServerURL ?? "",
-                    authToken: authManager.selectedServerToken ?? ""
-                )
-                .ignoresSafeArea()
-                .offset(y: -heroScrollOffset * 1.3 - min(72, heroScrollOffset * 0.72))
-                .allowsHitTesting(false)
-            }
+        return Group {
+            if catalogSections.isEmpty {
+                if dataStore.isLoadingHubs || isLoadingDiscoverHubs || (enablePersonalizedRecommendations && isLoadingRecommendations) {
+                    homeStatusView(
+                        accent: Color(red: 0.24, green: 0.48, blue: 0.92),
+                        icon: "sparkles.tv.fill",
+                        title: "Loading Home",
+                        message: "Preparing your home catalogs.",
+                        showsProgress: true
+                    )
+                } else if let hubsError = dataStore.hubsError, !showDiscoveryRows {
+                    errorView(hubsError)
+                } else if let discoverHubsError, showDiscoveryRows {
+                    homeStatusView(
+                        accent: .orange,
+                        icon: "exclamationmark.triangle.fill",
+                        title: "Discover Unavailable",
+                        message: discoverHubsError,
+                        actionTitle: "Try Again",
+                        action: {
+                            Task { await refreshDiscoverHubs(force: true) }
+                        }
+                    )
+                } else {
+                    emptyView
+                }
+            } else {
+                ZStack(alignment: .top) {
+                    homeCanvas()
+                        .ignoresSafeArea()
 
-            // Layer 1: Scrollable content — hero overlay (transparent) scrolls
-            // normally so focus management works, backdrop shows through.
-            ScrollViewReader { scrollProxy in
-            ScrollView(.vertical, showsIndicators: false) {
-                LazyVStack(alignment: .leading, spacing: 0) {
-                    // Connection error banner (when showing cached content while offline)
-                    if !authManager.isConnected {
-                        connectionErrorBanner
+                    if heroActive {
+                        HeroBackdropLayer(
+                            currentItem: currentHeroItem,
+                            serverURL: heroServerURL,
+                            authToken: heroAuthToken,
+                            presentationStyle: .spotlight
+                        )
+                        .ignoresSafeArea()
+                        .allowsHitTesting(false)
                     }
 
-                    // Hero overlay: transparent foreground (logo/buttons/dots)
-                    // that scrolls with content. The backdrop behind is fixed.
                     if heroActive {
                         HeroOverlayContent(
-                            items: heroItems,
-                            serverURL: authManager.selectedServerURL ?? "",
-                            authToken: authManager.selectedServerToken ?? "",
+                            items: heroSourceItems,
+                            serverURL: heroServerURL,
+                            authToken: heroAuthToken,
                             currentIndex: $heroCurrentIndex,
-                            onInfo: { item in selectedItem = item },
+                            layoutStyle: .topLeading,
+                            showsButtonRow: false,
+                            showsPagingDots: false,
+                            showsAdvanceButton: false,
+                            topLeadingInsets: .init(top: 106, leading: 120, bottom: 176, trailing: 72),
+                            onInfo: { item in showDetail(for: item, in: currentHeroSection) },
                             onPlay: { item in playItemDirectly(item) },
-                            onHeroFocused: {
-                                withAnimation(.smooth(duration: 0.8)) {
-                                    scrollProxy.scrollTo("homeHero", anchor: .top)
-                                }
-                            },
-                            onHeroExited: nil
+                            focusRequestID: heroFocusRequestID,
+                            onMoveDownToCatalog: {
+                                focusActiveCatalog(in: catalogSections)
+                            }
                         )
                         .frame(height: heroSectionHeight)
-                        .focusSection()
-                        .id("homeHero")
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                     }
 
-                    // Content rows (uses cached processedHubs which merges Continue Watching + On Deck)
-                    VStack(alignment: .leading, spacing: 48) {
-                        // Invisible anchor so we can scroll to place Continue
-                        // Watching at roughly mid-screen (matching Apple TV).
-                        Color.clear
-                            .frame(height: 0)
-                            .id("contentRowsAnchor")
-                        ForEach(Array(cachedProcessedHubs.enumerated()), id: \.element.id) { index, hub in
-                            if let items = hub.Metadata, !items.isEmpty {
-                                let isContinueWatching = isContinueWatchingHub(hub)
-                                InfiniteContentRow(
-                                    rowID: homeRowID(for: hub, index: index),
-                                    title: hub.title ?? "Unknown",
-                                    initialItems: items,
-                                    hubKey: hub.key ?? hub.hubKey,
-                                    hubIdentifier: hub.hubIdentifier,
-                                    serverURL: authManager.selectedServerURL ?? "",
-                                    authToken: authManager.selectedServerToken ?? "",
-                                    isContinueWatching: isContinueWatching,
-                                    contextMenuSource: isContinueWatching ? .continueWatching : .other,
-                                    onItemSelected: { item in
-                                        selectedItem = item
-                                    },
-                                    onPlayItem: { item in
-                                        playItemDirectly(item)
-                                    },
-                                    onPlayFromBeginning: { item in
-                                        playItemDirectly(item, fromBeginning: true)
-                                    },
-                                    onGoToItem: { item in
-                                        selectedItem = item
-                                    },
-                                    onRefreshNeeded: {
-                                        await dataStore.refreshHubs()
-                                    },
-                                    onPreviewRequested: isContinueWatching ? nil : { request in
-                                        homeLog.info("[Preview] Opening carousel: \(request.items.count) items, tapped index=\(request.selectedIndex), title=\(request.items[request.selectedIndex].title ?? "?")")
-                                        rowPreviewRequest = request
-                                        showPreviewCover = true
-                                    },
-                                    restorePreviewFocusTarget: $previewRestoreTarget,
-                                    onRowFocused: {
-                                        let targetID = homeRowID(for: hub, index: index)
-                                        withAnimation(.smooth(duration: 0.8)) {
-                                            scrollProxy.scrollTo(targetID, anchor: UnitPoint(x: 0.5, y: 0.5))
-                                        }
-                                    }
-                                )
-                                .id(homeRowID(for: hub, index: index))
-                            }
+                    VStack(spacing: 0) {
+                        if !authManager.isConnected {
+                            connectionErrorBanner
                         }
 
-                        // Recommendations at the end of all library hubs
-                        if enablePersonalizedRecommendations {
-                            recommendationsSection
-                        }
+                        Spacer(minLength: 0)
+
+                        activeCatalogStage(in: catalogSections, heroActive: heroActive)
                     }
-                    .padding(.top, heroActive ? 0 : 48)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                }
+                .ignoresSafeArea(edges: heroActive ? [.top, .horizontal, .bottom] : [.horizontal, .bottom])
+                .onAppear {
+                    reconcileCatalogSelection(with: catalogSections)
+                }
+                .onChange(of: catalogSignature) { _, _ in
+                    reconcileCatalogSelection(with: homeCatalogSections)
                 }
             }
-            .onScrollGeometryChange(for: CGFloat.self) { geometry in
-                geometry.contentOffset.y
-            } action: { _, offset in
-                heroScrollOffset = max(0, offset)
-            }
-            .scrollClipDisabled()  // Allow shadow overflow
-            .ignoresSafeArea(.container, edges: heroActive ? [.top, .horizontal] : [])
-            } // ScrollViewReader
+        }
+    }
+
+    private func homeCanvas(
+        accent: Color = Color(red: 0.24, green: 0.48, blue: 0.92)
+    ) -> some View {
+        ZStack {
+            LinearGradient(
+                colors: [
+                    Color(red: 0.03, green: 0.04, blue: 0.06),
+                    .black,
+                    Color(red: 0.04, green: 0.06, blue: 0.10)
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+
+            RadialGradient(
+                colors: [
+                    accent.opacity(0.18),
+                    .clear
+                ],
+                center: .topTrailing,
+                startRadius: 24,
+                endRadius: 860
+            )
+
+            LinearGradient(
+                colors: [
+                    .clear,
+                    .black.opacity(0.54)
+                ],
+                startPoint: .top,
+                endPoint: .bottom
+            )
         }
     }
 
@@ -657,29 +1067,32 @@ struct PlexHomeView: View {
         .padding(.vertical, 16)
         .background(
             RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(.yellow.opacity(0.15))
+                .fill(Color.black.opacity(0.34))
+                .background(
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .fill(.ultraThinMaterial)
+                        .opacity(0.16)
+                )
                 .overlay(
                     RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        .strokeBorder(.yellow.opacity(0.3), lineWidth: 1)
+                        .strokeBorder(.yellow.opacity(0.32), lineWidth: 1)
                 )
         )
         .padding(.horizontal, ScaledDimensions.rowHorizontalPadding)
         .padding(.top, 100)  // Below safe area
-        .padding(.bottom, 20)
+        .padding(.bottom, 28)
     }
 
     // MARK: - Loading View
 
     private var loadingView: some View {
-        VStack(spacing: 24) {
-            ProgressView()
-                .scaleEffect(1.5)
-            Text("Loading")
-                .font(.title3)
-                .fontWeight(.medium)
-                .foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        homeStatusView(
+            accent: Color(red: 0.24, green: 0.48, blue: 0.92),
+            icon: "sparkles.tv.fill",
+            title: "Loading Home",
+            message: "Syncing your Plex shelves and artwork.",
+            showsProgress: true
+        )
     }
 
     // MARK: - Recommendations Section
@@ -749,74 +1162,107 @@ struct PlexHomeView: View {
     // MARK: - Error View
 
     private func errorView(_ error: String) -> some View {
-        VStack(spacing: 24) {
-            Image(systemName: "exclamationmark.triangle")
-                .font(.system(size: 48, weight: .light))
-                .foregroundStyle(.secondary)
-
-            Text("Unable to Load")
-                .font(.title2)
-                .fontWeight(.medium)
-
-            Text(error)
-                .font(.body)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .frame(maxWidth: 400)
-
-            Button {
+        homeStatusView(
+            accent: .orange,
+            icon: "exclamationmark.triangle.fill",
+            title: "Unable to Load",
+            message: error,
+            actionTitle: "Try Again",
+            action: {
                 Task { await dataStore.refreshHubs() }
-            } label: {
-                Text("Try Again")
-                    .fontWeight(.medium)
             }
-            .buttonStyle(AppStoreButtonStyle())
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        )
     }
 
     // MARK: - Empty View
 
     private var emptyView: some View {
-        VStack(spacing: 24) {
-            Image(systemName: "film.stack")
-                .font(.system(size: 48, weight: .light))
-                .foregroundStyle(.secondary)
-
-            Text("No Content")
-                .font(.title2)
-                .fontWeight(.medium)
-
-            Text("Your Plex library appears to be empty.")
-                .font(.body)
-                .foregroundStyle(.secondary)
-
-            Button {
+        homeStatusView(
+            accent: Color(red: 0.17, green: 0.62, blue: 0.54),
+            icon: "film.stack.fill",
+            title: "No Content Yet",
+            message: "Your Plex libraries are connected, but there is nothing on Home right now.",
+            actionTitle: "Refresh",
+            action: {
                 Task { await dataStore.refreshHubs() }
-            } label: {
-                Text("Refresh")
-                    .fontWeight(.medium)
             }
-            .buttonStyle(AppStoreButtonStyle())
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        )
     }
 
     // MARK: - Not Connected View
 
     private var notConnectedView: some View {
-        VStack(spacing: 24) {
-            Image(systemName: "server.rack")
-                .font(.system(size: 48, weight: .light))
-                .foregroundStyle(.secondary)
+        homeStatusView(
+            accent: Color(red: 0.44, green: 0.52, blue: 0.92),
+            icon: "server.rack",
+            title: "Not Connected",
+            message: "Connect to your Plex server in Settings to bring Home to life."
+        )
+    }
 
-            Text("Not Connected")
-                .font(.title2)
-                .fontWeight(.medium)
+    private func homeStatusView(
+        accent: Color,
+        icon: String,
+        title: String,
+        message: String,
+        showsProgress: Bool = false,
+        actionTitle: String? = nil,
+        action: (() -> Void)? = nil
+    ) -> some View {
+        ZStack {
+            homeCanvas(accent: accent)
+                .ignoresSafeArea()
 
-            Text("Connect to your Plex server in Settings.")
-                .font(.body)
-                .foregroundStyle(.secondary)
+            VStack(spacing: 22) {
+                ZStack {
+                    Circle()
+                        .fill(accent.opacity(0.18))
+                        .frame(width: 94, height: 94)
+
+                    if showsProgress {
+                        ProgressView()
+                            .scaleEffect(1.35)
+                            .tint(.white)
+                    } else {
+                        Image(systemName: icon)
+                            .font(.system(size: 34, weight: .semibold))
+                            .foregroundStyle(.white)
+                    }
+                }
+
+                Text(title)
+                    .font(.system(size: 36, weight: .bold, design: .rounded))
+                    .foregroundStyle(.white)
+
+                Text(message)
+                    .font(.system(size: 19, weight: .medium, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.72))
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 520)
+
+                if let actionTitle, let action {
+                    Button(actionTitle, action: action)
+                        .buttonStyle(AppStoreButtonStyle())
+                        .padding(.top, 6)
+                }
+            }
+            .padding(.horizontal, 44)
+            .padding(.vertical, 42)
+            .frame(maxWidth: 640)
+            .background(
+                RoundedRectangle(cornerRadius: 32, style: .continuous)
+                    .fill(Color.black.opacity(0.34))
+                    .background(
+                        RoundedRectangle(cornerRadius: 32, style: .continuous)
+                            .fill(.ultraThinMaterial)
+                            .opacity(0.18)
+                    )
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 32, style: .continuous)
+                    .stroke(.white.opacity(0.10), lineWidth: 1)
+            )
+            .padding(.horizontal, 32)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -976,6 +1422,11 @@ struct ContentRow: View {
 // MARK: - Infinite Content Row (with endless scrolling)
 
 /// A content row that loads more items as the user scrolls near the end
+enum InfiniteContentRowPresentationStyle {
+    case standard
+    case pinnedStage
+}
+
 struct InfiniteContentRow: View {
     let rowID: String
     let title: String
@@ -993,21 +1444,35 @@ struct InfiniteContentRow: View {
     var onRefreshNeeded: MediaItemRefreshCallback?
     var onPreviewRequested: ((PreviewRequest) -> Void)?
     var restorePreviewFocusTarget: Binding<PreviewSourceTarget?> = .constant(nil)
+    var presentationStyle: InfiniteContentRowPresentationStyle = .standard
+    var preferredFocusItemID: String? = nil
+    var focusRequestID: UUID? = nil
+    var onItemFocusChanged: ((String) -> Void)?
+    var onMoveUp: (() -> Void)?
+    var onMoveDown: (() -> Void)?
     var onRowFocused: (() -> Void)?
 
+    @Environment(\.uiScale) private var scale
     @State private var items: [PlexMetadata] = []
     @State private var isLoadingMore = false
     @State private var hasReachedEnd = false
     @State private var totalSize: Int?
     @FocusState private var focusedItemId: String?  // Track which item is focused (format: "context:itemId")
+    @State private var pendingFocusTask: Task<Void, Never>?
 
     /// Create a unique focus ID for an item in this row
-    private func focusId(for item: PlexMetadata) -> String {
-        focusId(forItemID: sourceItemID(for: item))
+    private func focusId(for item: PlexMetadata, index: Int? = nil) -> String {
+        focusId(forItemID: sourceItemID(for: item, index: index))
     }
 
     private func focusId(forItemID itemID: String) -> String {
         "\(rowID):\(itemID)"
+    }
+
+    private func sourceItemID(from focusID: String) -> String? {
+        let prefix = "\(rowID):"
+        guard focusID.hasPrefix(prefix) else { return nil }
+        return String(focusID.dropFirst(prefix.count))
     }
 
     private func sourceItemID(for item: PlexMetadata, index: Int? = nil) -> String {
@@ -1040,25 +1505,131 @@ struct InfiniteContentRow: View {
         return hasher.finalize()
     }
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            // Section title with item count
-            HStack(spacing: 12) {
-                Text(title)
-                    .font(.system(size: 30, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.6))
+    private var rowEyebrow: String {
+        let normalizedTitle = title.lowercased()
 
-                if let total = totalSize, total > items.count {
-                    Text("\(items.count) of \(total)")
-                        .font(.system(size: 17, weight: .medium))
-                        .foregroundStyle(.white.opacity(0.3))
-                } else if hasReachedEnd && items.count > pageSize {
-                    Text("All \(items.count)")
-                        .font(.system(size: 17, weight: .medium))
-                        .foregroundStyle(.white.opacity(0.3))
+        if isContinueWatching {
+            return "Resume Queue"
+        }
+        if normalizedTitle.contains("recently added") {
+            return "Fresh In"
+        }
+        if normalizedTitle.contains("recommended") {
+            return "Picked for You"
+        }
+        if normalizedTitle.contains("recently released") || normalizedTitle.contains("new releases") {
+            return "New Releases"
+        }
+        if isMusicRow {
+            return "Music Shelf"
+        }
+        return "Curated Shelf"
+    }
+
+    private var countLabel: String? {
+        if let total = totalSize, total > items.count {
+            return "\(items.count) of \(total)"
+        }
+        if hasReachedEnd && items.count > pageSize {
+            return "All \(items.count)"
+        }
+        return nil
+    }
+
+    private var isPinnedStageStyle: Bool {
+        presentationStyle == .pinnedStage
+    }
+
+    private var rowHeaderSpacing: CGFloat {
+        isPinnedStageStyle ? 8 : 10
+    }
+
+    private var rowEyebrowFontSize: CGFloat {
+        isPinnedStageStyle ? 11 : 12
+    }
+
+    private var rowTitleFontSize: CGFloat {
+        isPinnedStageStyle ? 28 : 32
+    }
+
+    private var rowHeaderTopPadding: CGFloat {
+        isPinnedStageStyle ? 2 : 8
+    }
+
+    private var rowVerticalPadding: CGFloat {
+        isPinnedStageStyle ? 14 : ScaledDimensions.rowVerticalPadding
+    }
+
+    private var rowContainerVerticalPadding: CGFloat {
+        isPinnedStageStyle ? 12 : 26
+    }
+
+    private var rowBackgroundHorizontalInset: CGFloat {
+        isPinnedStageStyle ? 14 : 22
+    }
+
+    private var rowBackgroundCornerRadius: CGFloat {
+        isPinnedStageStyle ? 28 : 32
+    }
+
+    private var rowCardHeight: CGFloat {
+        if isContinueWatching {
+            return ScaledDimensions.continueWatchingHeight * scale
+        }
+
+        let posterWidth = ScaledDimensions.posterWidth * scale
+        if isMusicRow {
+            return posterWidth
+        }
+
+        return ScaledDimensions.posterHeight * scale
+    }
+
+    private var rowScrollHeight: CGFloat {
+        rowCardHeight + (rowVerticalPadding * 2) + 18
+    }
+
+    private var rowHeader: some View {
+        VStack(alignment: .leading, spacing: rowHeaderSpacing) {
+            Text(rowEyebrow.uppercased())
+                .font(.system(size: rowEyebrowFontSize, weight: .semibold, design: .rounded))
+                .tracking(1.6)
+                .foregroundStyle(.white.opacity(0.44))
+
+            HStack(alignment: .firstTextBaseline, spacing: 14) {
+                Text(title)
+                    .font(.system(size: rowTitleFontSize, weight: .bold, design: .rounded))
+                    .foregroundStyle(.white)
+
+                if let countLabel {
+                    Text(countLabel)
+                        .font(.system(size: isPinnedStageStyle ? 14 : 15, weight: .semibold, design: .rounded))
+                        .foregroundStyle(.white.opacity(0.70))
+                        .padding(.horizontal, isPinnedStageStyle ? 9 : 10)
+                        .padding(.vertical, isPinnedStageStyle ? 5 : 6)
+                        .background(
+                            Capsule()
+                                .fill(.white.opacity(0.08))
+                                .background(
+                                    Capsule()
+                                        .fill(.ultraThinMaterial)
+                                        .opacity(0.10)
+                                )
+                        )
+                        .overlay(
+                            Capsule()
+                                .stroke(.white.opacity(0.08), lineWidth: 1)
+                        )
                 }
             }
-            .padding(.horizontal, ScaledDimensions.rowHorizontalPadding)
+        }
+        .padding(.horizontal, ScaledDimensions.rowHorizontalPadding)
+        .padding(.top, rowHeaderTopPadding)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            rowHeader
 
             // Horizontal scroll of posters with infinite loading
             ScrollView(.horizontal, showsIndicators: false) {
@@ -1085,7 +1656,7 @@ struct InfiniteContentRow: View {
                                     item: item,
                                     serverURL: serverURL,
                                     authToken: authToken,
-                                    isFocused: focusedItemId == focusId(for: item)
+                                    isFocused: focusedItemId == focusId(for: item, index: index)
                                 )
                             } else {
                                 MediaPosterCard(
@@ -1097,7 +1668,17 @@ struct InfiniteContentRow: View {
                         }
                         .previewSourceAnchor(rowID: rowID, itemID: sourceItemID(for: item, index: index))
                         .buttonStyle(CardButtonStyle())
-                        .focused($focusedItemId, equals: focusId(for: item))
+                        .focused($focusedItemId, equals: focusId(for: item, index: index))
+                        .onMoveCommand { direction in
+                            switch direction {
+                            case .up:
+                                onMoveUp?()
+                            case .down:
+                                onMoveDown?()
+                            default:
+                                break
+                            }
+                        }
                         .modifier(ContinueWatchingContextMenuModifier(
                             item: item,
                             serverURL: serverURL,
@@ -1126,9 +1707,25 @@ struct InfiniteContentRow: View {
                     }
                 }
                 .padding(.horizontal, ScaledDimensions.rowHorizontalPadding)
-                .padding(.vertical, ScaledDimensions.rowVerticalPadding)  // Room for scale effect and shadow
+                .padding(.vertical, rowVerticalPadding)  // Room for scale effect and shadow
             }
+            .frame(height: rowScrollHeight, alignment: .topLeading)
             .scrollClipDisabled()  // Allow shadow overflow
+        }
+        .padding(.vertical, rowContainerVerticalPadding)
+        .background {
+            RoundedRectangle(cornerRadius: rowBackgroundCornerRadius, style: .continuous)
+                .fill(Color.white.opacity(0.035))
+                .background(
+                    RoundedRectangle(cornerRadius: rowBackgroundCornerRadius, style: .continuous)
+                        .fill(.ultraThinMaterial)
+                        .opacity(0.12)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: rowBackgroundCornerRadius, style: .continuous)
+                        .stroke(.white.opacity(0.08), lineWidth: 1)
+                )
+                .padding(.horizontal, rowBackgroundHorizontalInset)
         }
         .onAppear {
             if items.isEmpty {
@@ -1138,6 +1735,7 @@ struct InfiniteContentRow: View {
                     hasReachedEnd = true
                 }
             }
+            requestFocusIfNeeded()
         }
         .onChange(of: initialItemsHash) { _, _ in
             // Reset when initial items change (e.g., on refresh or watch status change)
@@ -1146,33 +1744,49 @@ struct InfiniteContentRow: View {
             hasReachedEnd = false
             // Restore focus after items reset to prevent focus loss (e.g., after marking watched)
             if let savedFocusId {
-                let parts = savedFocusId.split(separator: ":", maxSplits: 1)
-                let savedKey = parts.count == 2 ? String(parts[1]) : nil
-                if let savedKey, items.contains(where: { $0.ratingKey == savedKey }) {
+                if let savedKey = sourceItemID(from: savedFocusId),
+                   items.enumerated().contains(where: { index, item in
+                       sourceItemID(for: item, index: index) == savedKey
+                   }) {
                     // Must nil first then restore async — SwiftUI ignores setting the same value
                     focusedItemId = nil
                     DispatchQueue.main.async {
                         focusedItemId = savedFocusId
                     }
+                } else {
+                    requestFocusIfNeeded()
                 }
+            } else {
+                requestFocusIfNeeded()
             }
         }
         .onChange(of: focusedItemId) { oldValue, newValue in
             if oldValue == nil && newValue != nil {
                 onRowFocused?()
             }
+            if let newValue, let sourceItemID = sourceItemID(from: newValue) {
+                onItemFocusChanged?(sourceItemID)
+            }
         }
         .onChange(of: restorePreviewFocusTarget.wrappedValue) { _, target in
             guard let target, target.rowID == rowID else { return }
 
             let targetFocusID = focusId(forItemID: target.itemID)
-            guard items.contains(where: { sourceItemID(for: $0) == target.itemID }) else { return }
+            guard items.enumerated().contains(where: { index, item in
+                sourceItemID(for: item, index: index) == target.itemID
+            }) else { return }
 
             focusedItemId = nil
             DispatchQueue.main.async {
                 focusedItemId = targetFocusID
                 restorePreviewFocusTarget.wrappedValue = nil
             }
+        }
+        .onChange(of: focusRequestID) { _, _ in
+            requestFocusIfNeeded()
+        }
+        .onDisappear {
+            pendingFocusTask?.cancel()
         }
         .focusSection()
     }
@@ -1214,6 +1828,39 @@ struct InfiniteContentRow: View {
 
     private var endIndicator: some View {
         EmptyView()
+    }
+
+    private func requestFocusIfNeeded() {
+        pendingFocusTask?.cancel()
+
+        guard let targetFocusID = resolvedTargetFocusID() else {
+            focusedItemId = nil
+            return
+        }
+
+        pendingFocusTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 120_000_000)
+            guard !Task.isCancelled else { return }
+
+            if focusedItemId == targetFocusID {
+                focusedItemId = nil
+                await Task.yield()
+            }
+
+            focusedItemId = targetFocusID
+        }
+    }
+
+    private func resolvedTargetFocusID() -> String? {
+        if let preferredFocusItemID,
+           let match = items.enumerated().first(where: { index, item in
+               sourceItemID(for: item, index: index) == preferredFocusItemID
+           }) {
+            return focusId(forItemID: sourceItemID(for: match.element, index: match.offset))
+        }
+
+        guard let first = items.enumerated().first else { return nil }
+        return focusId(forItemID: sourceItemID(for: first.element, index: first.offset))
     }
 
     private func loadMoreIfNeeded() async {
