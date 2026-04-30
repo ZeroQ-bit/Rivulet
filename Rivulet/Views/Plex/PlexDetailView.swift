@@ -105,6 +105,7 @@ struct PlexDetailView: View {
     @State private var retainedLogoURL: URL?
     @State private var hasDisplayedHeroLogoImage = false
     @State private var parentShowLogoPath: String?
+    @AppStorage("showCastAndCrew") private var showCastAndCrew = true
 
     // Navigation state for episode parent navigation
     @State private var navigateToSeason: PlexMetadata?
@@ -160,11 +161,11 @@ struct PlexDetailView: View {
     }
 
     private var heroLogoMaxWidth: CGFloat {
-        (isPreviewCarousel || isExpandedPreviewFlow) ? 620 : 520
+        (isPreviewCarousel || isExpandedPreviewFlow) ? 520 : 460
     }
 
     private var heroLogoSlotHeight: CGFloat {
-        (isPreviewCarousel || isExpandedPreviewFlow) ? 138 : 120
+        (isPreviewCarousel || isExpandedPreviewFlow) ? 104 : 96
     }
 
     private var heroActionRowTopPadding: CGFloat {
@@ -381,14 +382,11 @@ struct PlexDetailView: View {
                             VStack(alignment: .leading, spacing: 0) {
                                 VStack(alignment: .leading, spacing: 32) {
                                     // TV Show specific: Seasons and Episodes
-                                    if currentItem.type == "show" || currentItem.type == "episode" {
+                                    if currentItem.type == "show" || currentItem.type == "episode" || currentItem.type == "season" {
                                         seasonSection
                                     }
 
                                     // Season specific: Episodes list (no season picker needed)
-                                    if currentItem.type == "season" {
-                                        episodeSection
-                                    }
 
                                     // Album specific: Tracks
                                     if currentItem.type == "album" {
@@ -437,7 +435,7 @@ struct PlexDetailView: View {
                                 }
 
                                 // Cast & Crew Section
-                                if let metadata = fullMetadata,
+                                if showCastAndCrew, let metadata = fullMetadata,
                                    (!metadata.cast.isEmpty || !(metadata.Director?.isEmpty ?? true)) {
                                     CastCrewRow(
                                         cast: metadata.cast,
@@ -764,7 +762,8 @@ struct PlexDetailView: View {
     private var heroMetadataOverlay: some View {
         GeometryReader { metaGeo in
             VStack(alignment: .leading, spacing: 10) {
-                Spacer()
+                Spacer(minLength: 0)
+                    .frame(height: 120)
 
                 // Text content — fixed height so buttons/peek distance
                 // stays constant regardless of description length, logo vs title, etc.
@@ -778,7 +777,7 @@ struct PlexDetailView: View {
                                 case .success(let image):
                                     image
                                         .resizable()
-                                        .aspectRatio(contentMode: .fit)
+                                        .scaledToFit()
                                         // Shadow is redundant in carousel mode — the bottom
                                         // vignette at lines ~305-321 already hits 95% black
                                         // opacity where the logo sits, so the drop shadow is
@@ -810,8 +809,7 @@ struct PlexDetailView: View {
                             heroTitleText
                         }
                     }
-                    .frame(maxWidth: heroLogoMaxWidth, alignment: .leading)
-                    .frame(height: heroLogoSlotHeight, alignment: .bottomLeading)
+                    .frame(width: heroLogoMaxWidth, height: heroLogoSlotHeight, alignment: .leading)
 
                     // Genre + content rating row
                     heroMetadataRow
@@ -867,7 +865,7 @@ struct PlexDetailView: View {
                             .foregroundStyle(.white.opacity(0.7))
                     }
                 }
-                .frame(height: 420, alignment: .bottomLeading)
+                .frame(height: 360, alignment: .bottomLeading)
                 .frame(maxWidth: 760, alignment: .leading)
                 .opacity(1 - scrollProgress)
 
@@ -887,7 +885,7 @@ struct PlexDetailView: View {
                     Spacer(minLength: 40)
 
                     // Starring (comma-separated, right-aligned)
-                    if let roles = (fullMetadata ?? currentItem).Role, !roles.isEmpty {
+                    if showCastAndCrew, let roles = (fullMetadata ?? currentItem).Role, !roles.isEmpty {
                         let topCast = roles.prefix(3).compactMap { $0.tag }
                         if !topCast.isEmpty {
                             Text("Starring \(topCast.joined(separator: ", "))")
@@ -919,7 +917,7 @@ struct PlexDetailView: View {
                     case .success(let image):
                         image
                             .resizable()
-                            .aspectRatio(contentMode: .fit)
+                            .scaledToFit()
                             .onAppear {
                                 if !hasDisplayedHeroLogoImage {
                                     hasDisplayedHeroLogoImage = true
@@ -939,7 +937,7 @@ struct PlexDetailView: View {
                             .foregroundStyle(.primary)
                     }
                 }
-                .frame(maxWidth: 680, maxHeight: 126)
+                .frame(width: 520, height: 104)
             } else {
                 Text(heroBrandTitle)
                     .font(.system(size: 42, weight: .bold))
@@ -954,7 +952,7 @@ struct PlexDetailView: View {
 
     private var heroTitleText: some View {
         Text(heroBrandTitle)
-            .font(.system(size: 52, weight: .bold))
+            .font(.system(size: 46, weight: .bold))
             .foregroundStyle(.white)
             .shadow(color: .black.opacity(0.5), radius: 10, x: 0, y: 4)
     }
@@ -1662,7 +1660,7 @@ struct PlexDetailView: View {
                     loadingThumbImage: thumbImage
                 )
 
-                let useApplePlayer = UserDefaults.standard.bool(forKey: "useApplePlayer")
+                let useApplePlayer = PlaybackPreferences.useApplePlayer
                 let playerVC: UIViewController
                 if useApplePlayer {
                     let nativePlayer = NativePlayerViewController(viewModel: viewModel)
@@ -1810,7 +1808,7 @@ struct PlexDetailView: View {
 
         case "season":
             async let seasonsTask: Void = loadSeasonsForCurrentSeason()
-            async let episodesTask: Void = loadEpisodesForSeason()
+            async let episodesTask: Void = loadAllEpisodes()
             async let nextUpTask: Void = loadNextUpEpisode()
             _ = await (seasonsTask, episodesTask, nextUpTask)
 

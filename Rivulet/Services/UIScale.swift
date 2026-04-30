@@ -60,18 +60,18 @@ extension View {
 
 /// Standard UI dimensions that scale with the display size setting
 enum ScaledDimensions {
-    // Poster card dimensions (base sizes - larger for fewer items per row)
-    static let posterWidth: CGFloat = 260
-    static let posterHeight: CGFloat = 390
+    // Standard media card dimensions (Apple TV-style landscape 16:9)
+    static let posterWidth: CGFloat = 340
+    static let posterHeight: CGFloat = 191
     static let squarePosterSize: CGFloat = 260  // For music items
 
-    // Continue Watching card dimensions (wide landscape, ~7:5)
-    static let continueWatchingWidth: CGFloat = 392
-    static let continueWatchingHeight: CGFloat = 280
+    // Continue Watching card dimensions (Apple TV-style landscape 16:9)
+    static let continueWatchingWidth: CGFloat = 340
+    static let continueWatchingHeight: CGFloat = 191
 
     // Grid column constraints
-    static let gridMinWidth: CGFloat = 260
-    static let gridMaxWidth: CGFloat = 300
+    static let gridMinWidth: CGFloat = 340
+    static let gridMaxWidth: CGFloat = 380
     static let gridSpacing: CGFloat = 32
 
     // Typography

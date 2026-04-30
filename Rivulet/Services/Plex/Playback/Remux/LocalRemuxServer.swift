@@ -430,13 +430,16 @@ final class LocalRemuxServer {
         for _ in 0..<200 {
             try? await Task.sleep(nanoseconds: 50_000_000)
 
-            if let cached = cacheLock.withLock({ segmentCache[index] }) {
+            cacheLock.lock()
+            if let cached = segmentCache[index] {
+                cacheLock.unlock()
                 let waitedMs = Int(Date().timeIntervalSince(waitStart) * 1000)
                 playerDebugLog("[Remux] Segment \(index) served from read-ahead cache (wait=\(waitedMs)ms)")
                 sendResponse(on: connection, contentType: "video/mp4", body: cached)
                 startReadAhead(from: index + 1)
                 return
             }
+            cacheLock.unlock()
 
             // If read-ahead finished without caching (error/cancel), generate directly
             if !inFlightSegments.contains(index) {

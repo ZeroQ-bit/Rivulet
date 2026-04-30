@@ -7,6 +7,25 @@
 
 import SwiftUI
 
+// MARK: - Playback Preferences
+
+enum PlaybackPreferences {
+    static let useApplePlayerKey = "useApplePlayer"
+
+    /// Match the Settings UI default. `bool(forKey:)` returns false for a
+    /// missing key, which would silently route fresh installs to RivuletPlayer.
+    static var useApplePlayer: Bool {
+        if UserDefaults.standard.object(forKey: useApplePlayerKey) == nil {
+            return true
+        }
+        return UserDefaults.standard.bool(forKey: useApplePlayerKey)
+    }
+
+    static var useApplePlayerSource: String {
+        UserDefaults.standard.object(forKey: useApplePlayerKey) == nil ? "default" : "stored"
+    }
+}
+
 // MARK: - Crossfade Option
 
 enum CrossfadeOption: String, CaseIterable, Hashable, CustomStringConvertible {
@@ -33,6 +52,18 @@ enum CrossfadeOption: String, CaseIterable, Hashable, CustomStringConvertible {
         case .fiveSeconds: return 5
         case .eightSeconds: return 8
         case .twelveSeconds: return 12
+        }
+    }
+}
+
+enum MediaOpenStyle: String, CaseIterable, Hashable, CustomStringConvertible {
+    case previewCard = "previewCard"
+    case fullScreenDetail = "fullScreenDetail"
+
+    var description: String {
+        switch self {
+        case .previewCard: return "Preview Card"
+        case .fullScreenDetail: return "Full Screen"
         }
     }
 }
@@ -390,6 +421,8 @@ struct SettingsView: View {
     @AppStorage("autoSkipCredits") private var autoSkipCredits = false
     @AppStorage("autoSkipAds") private var autoSkipAds = false
     @AppStorage("useApplePlayer") private var useApplePlayer = true
+    @AppStorage("mediaOpenStyle") private var mediaOpenStyleRaw = MediaOpenStyle.previewCard.rawValue
+    @AppStorage("showCastAndCrew") private var showCastAndCrew = true
     @AppStorage("autoplayCountdown") private var autoplayCountdownRaw = AutoplayCountdown.fiveSeconds.rawValue
     @AppStorage("displaySize") private var displaySizeRaw = DisplaySize.normal.rawValue
     @AppStorage("musicLoudnessNormalization") private var musicLoudnessNormalization = false
@@ -400,6 +433,13 @@ struct SettingsView: View {
         Binding(
             get: { CrossfadeOption(rawValue: musicCrossfadeDurationRaw) ?? .off },
             set: { musicCrossfadeDurationRaw = $0.rawValue }
+        )
+    }
+
+    private var mediaOpenStyle: Binding<MediaOpenStyle> {
+        Binding(
+            get: { MediaOpenStyle(rawValue: mediaOpenStyleRaw) ?? .previewCard },
+            set: { mediaOpenStyleRaw = $0.rawValue }
         )
     }
 
@@ -761,6 +801,20 @@ struct SettingsView: View {
                 title: "Use Apple's Player",
                 isOn: $useApplePlayer,
                 onFocusChange: { if $0 { focusState.focusedSettingId = "useApplePlayer" } }
+            )
+
+            SettingsPickerRow(
+                title: "Open Media",
+                description: "Choose whether items open in a preview card or go straight to full screen",
+                selection: mediaOpenStyle,
+                options: MediaOpenStyle.allCases,
+                onFocusChange: { if $0 { focusState.focusedSettingId = "mediaOpenStyle" } }
+            )
+
+            SettingsToggleRow(
+                title: "Show Cast & Crew",
+                isOn: $showCastAndCrew,
+                onFocusChange: { if $0 { focusState.focusedSettingId = "showCastAndCrew" } }
             )
 
             SettingsRow(

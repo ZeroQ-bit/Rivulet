@@ -25,15 +25,21 @@ struct ContentView: View {
     #endif
 
     var body: some View {
-        TVSidebarView()
-            .modifier(AutoPlayLauncherModifier())
-            .overlay {
-                if showSplash {
-                    splashOverlay
-                        .transition(.opacity)
+        ZStack {
+            Color.black
+                .ignoresSafeArea()
+
+            TVSidebarView()
+                .modifier(AutoPlayLauncherModifier())
+                .overlay {
+                    if showSplash {
+                        splashOverlay
+                            .transition(.opacity)
+                    }
                 }
-            }
-            .animation(.easeOut(duration: 0.4), value: showSplash)
+        }
+        .preferredColorScheme(.dark)
+        .animation(.easeOut(duration: 0.4), value: showSplash)
         .onChange(of: authManager.hasCredentials) { _, hasCredentials in
             splashLog.info("hasCredentials changed to \(hasCredentials)")
             if !hasCredentials {
@@ -167,7 +173,7 @@ private struct AutoPlayLauncherModifier: ViewModifier {
                         loadingThumbImage: nil
                     )
 
-                    let useApplePlayer = UserDefaults.standard.bool(forKey: "useApplePlayer")
+                    let useApplePlayer = PlaybackPreferences.useApplePlayer
                     let playerVC: UIViewController
                     if useApplePlayer {
                         playerVC = NativePlayerViewController(viewModel: viewModel)

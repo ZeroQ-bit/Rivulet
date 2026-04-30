@@ -9,14 +9,14 @@
 //
 //  Design:
 //   - Byte fetches are broken into fixed-size `Segment`s (e.g. 4 MB each).
-//     We keep up to `maxConcurrentSegments` active simultaneously for
+//     We keep up to `maxConcurrentSegments` in flight simultaneously for
 //     consecutive byte ranges. Each segment is its own URLSessionDataTask.
 //   - FFmpeg reads sequentially from the head segment; when it drains we
 //     promote the next segment to head and kick off a new tail segment.
 //     Behind the scenes multiple TCP connections are delivering bytes in
 //     parallel, which lets us exceed a per-connection throughput cap.
-//   - Backpressure: we cap the buffered byte window ahead of the current
-//     read position, so memory stays O(targetBufferedBytes).
+//   - Backpressure: each segment has a bounded buffer equal to its length,
+//     so total memory is O(maxConcurrentSegments × segmentSize).
 //   - `seek(offset:whence:)` cancels every in-flight segment and restarts
 //     the pipeline at the new offset. Small forward seeks that land within
 //     already-buffered bytes just advance the cursor.
@@ -34,7 +34,7 @@ import Libavutil
 /// Feeds bytes from URLSession into an FFmpeg AVIOContext.
 /// The object is retained by the AVIOContext's opaque pointer for its
 /// lifetime; `freeAVIOContext(_:)` releases the retain.
-nonisolated final class URLSessionAVIOSource: NSObject, @unchecked Sendable {
+final class URLSessionAVIOSource: NSObject, @unchecked Sendable {
 
     // MARK: - Config
 
@@ -48,11 +48,6 @@ nonisolated final class URLSessionAVIOSource: NSObject, @unchecked Sendable {
     /// disables parallelism and behaves like the original single-task
     /// implementation.
     private let maxConcurrentSegments: Int
-    /// Maximum byte window we try to keep allocated ahead of the current
-    /// read position. This can exceed `maxConcurrentSegments × segmentSize`
-    /// because completed tail segments may stay queued while the head is
-    /// still being consumed.
-    private let targetBufferedBytes: Int64
 
     // MARK: - Segment
 
@@ -99,8 +94,8 @@ nonisolated final class URLSessionAVIOSource: NSObject, @unchecked Sendable {
     private let condition = NSCondition()
     /// In-flight segments in ascending byte order. Index 0 is the head.
     private var segments: [Segment] = []
-    /// Byte offset immediately after the tail of the last queued segment.
-    /// Initialized to the pipeline start offset.
+    /// Byte offset of the NEXT segment we'll kick off behind the last one
+    /// currently in `segments`. Initialized to the pipeline start offset.
     private var nextSegmentStart: Int64 = 0
     /// Absolute byte offset of the next byte FFmpeg will read.
     private var absolutePosition: Int64 = 0
@@ -143,16 +138,14 @@ nonisolated final class URLSessionAVIOSource: NSObject, @unchecked Sendable {
 
     // MARK: - Init
 
-    nonisolated init(url: URL,
+    init(url: URL,
          headers: [String: String]? = nil,
          segmentSize: Int64 = 4 * 1024 * 1024,
-         maxConcurrentSegments: Int = 8,
-         targetBufferedBytes: Int64 = 64 * 1024 * 1024) {
+         maxConcurrentSegments: Int = 8) {
         self.url = url
         self.headers = headers
         self.segmentSize = segmentSize
         self.maxConcurrentSegments = maxConcurrentSegments
-        self.targetBufferedBytes = max(targetBufferedBytes, segmentSize * Int64(maxConcurrentSegments))
         super.init()
 
         let config = URLSessionConfiguration.ephemeral
@@ -173,12 +166,6 @@ nonisolated final class URLSessionAVIOSource: NSObject, @unchecked Sendable {
         delegateQueue.name = "rivulet.urlsession-avio.delegate"
 
         self.session = URLSession(configuration: config, delegate: self, delegateQueue: delegateQueue)
-        playerDebugLog(String(
-            format: "[URLSessionAVIO] Config: segment=%.1fMB activeReq=%d targetWindow=%.1fMB",
-            Double(segmentSize) / (1024 * 1024),
-            maxConcurrentSegments,
-            Double(self.targetBufferedBytes) / (1024 * 1024)
-        ))
 
         kickoffPipeline(atOffset: 0)
     }
@@ -201,42 +188,38 @@ nonisolated final class URLSessionAVIOSource: NSObject, @unchecked Sendable {
         nextSegmentStart = offset
         condition.unlock()
 
-        refillPipeline()
-    }
-
-    /// Number of requests that still have an active URLSession task.
-    /// Call under `condition.lock()`.
-    private func activeRequestCountLocked() -> Int {
-        segments.reduce(0) { partial, seg in
-            partial + ((seg.task != nil && !seg.isComplete) ? 1 : 0)
+        // Start segments up to the concurrency limit.
+        for _ in 0..<maxConcurrentSegments {
+            startNextSegmentIfPossible()
         }
     }
 
-    /// Total byte window currently covered from the next FFmpeg read
-    /// position to the tail of the last queued segment.
-    /// Call under `condition.lock()`.
-    private func bufferedWindowBytesLocked() -> Int64 {
-        max(0, nextSegmentStart - absolutePosition)
-    }
-
-    /// Allocate another tail segment if we still need more parallel work
-    /// or more covered bytes ahead of the read head.
-    /// Call under `condition.lock()`.
-    private func makeNextSegmentTaskLockedIfPossible() -> URLSessionDataTask? {
-        if closed { return nil }
-        if activeRequestCountLocked() >= maxConcurrentSegments { return nil }
-        if totalContentLength >= 0 && nextSegmentStart >= totalContentLength { return nil }
-
-        let windowBytes = bufferedWindowBytesLocked()
-        if windowBytes >= targetBufferedBytes { return nil }
-
+    /// If the resource has more bytes and we're below the concurrency
+    /// limit, allocate a new segment and start its task.
+    private func startNextSegmentIfPossible() {
+        condition.lock()
+        if closed {
+            condition.unlock()
+            return
+        }
+        if segments.count >= maxConcurrentSegments {
+            condition.unlock()
+            return
+        }
+        // Bound by known content length if we have it.
+        if totalContentLength >= 0 && nextSegmentStart >= totalContentLength {
+            condition.unlock()
+            return
+        }
         let start = nextSegmentStart
-        var len = min(segmentSize, targetBufferedBytes - windowBytes)
+        var len = segmentSize
         if totalContentLength >= 0 {
             len = min(len, totalContentLength - start)
         }
-        guard len > 0 else { return nil }
-
+        guard len > 0 else {
+            condition.unlock()
+            return
+        }
         nextSegmentID &+= 1
         let id = nextSegmentID
         let gen = pipelineGeneration
@@ -246,22 +229,8 @@ nonisolated final class URLSessionAVIOSource: NSObject, @unchecked Sendable {
         totalSegmentStarts += 1
         let task = makeDataTask(for: segment, generation: gen)
         segment.task = task
-        return task
-    }
-
-    /// Start tail segments until both the active-request count and the
-    /// buffered byte window are topped up.
-    private func refillPipeline() {
-        var tasks: [URLSessionDataTask] = []
-        condition.lock()
-        while let task = makeNextSegmentTaskLockedIfPossible() {
-            tasks.append(task)
-        }
         condition.unlock()
-
-        for task in tasks {
-            task.resume()
-        }
+        task.resume()
     }
 
     /// Replace the head segment with a fresh re-fetch from the current
@@ -399,7 +368,7 @@ nonisolated final class URLSessionAVIOSource: NSObject, @unchecked Sendable {
                     return AVERROR_EOF_VALUE
                 }
                 condition.unlock()
-                refillPipeline()
+                startNextSegmentIfPossible()
                 continue
             }
 
@@ -471,6 +440,8 @@ nonisolated final class URLSessionAVIOSource: NSObject, @unchecked Sendable {
         if fullyDrained {
             advanceHeadIfDrainedLocked()
         }
+        let needMoreSegments = segments.count < maxConcurrentSegments
+
         let callEnd = CFAbsoluteTimeGetCurrent()
         totalBytesConsumed += Int64(bytesCopied)
         totalReadCalls += 1
@@ -482,7 +453,9 @@ nonisolated final class URLSessionAVIOSource: NSObject, @unchecked Sendable {
 
         condition.unlock()
 
-        refillPipeline()
+        if needMoreSegments {
+            startNextSegmentIfPossible()
+        }
         return Int32(bytesCopied)
     }
 
@@ -504,17 +477,14 @@ nonisolated final class URLSessionAVIOSource: NSObject, @unchecked Sendable {
         let blockingRatio = totalReadCalls > 0
             ? 1.0 - Double(totalReadZeroWaitCalls) / Double(totalReadCalls)
             : 0
-        let bufferedMB = Double(segments.reduce(0) { $0 + $1.bytesInBuffer }) / (1024 * 1024)
-        let windowMB = Double(bufferedWindowBytesLocked()) / (1024 * 1024)
-        let activeReqs = activeRequestCountLocked()
-        let retainedSegments = segments.count
+        let queueMB = Double(segments.reduce(0) { $0 + $1.bytesInBuffer }) / (1024 * 1024)
         let deliveriesDelta = totalDelegateDeliveries - diagLastDeliveries
         let deliveryRatePerSec = Double(deliveriesDelta) / elapsed
         let avgChunkBytes = deliveriesDelta > 0 ? deliveredDelta / Int64(deliveriesDelta) : 0
 
         playerDebugLog(String(
-            format: "[URLSessionAVIODiag] delivered=%.1fMbps consumed=%.1fMbps bufferedMB=%.2f windowMB=%.2f activeReq=%d retained=%d reads=%d avgWait=%.2fms blockRatio=%.0f%% deliveries/s=%.0f avgChunk=%lldB minChunk=%dB maxChunk=%dB segStarts=%d segRetries=%d seeks=%d",
-            deliveredMbps, consumedMbps, bufferedMB, windowMB, activeReqs, retainedSegments, totalReadCalls,
+            format: "[URLSessionAVIODiag] delivered=%.1fMbps consumed=%.1fMbps queueMB=%.2f segInFlight=%d reads=%d avgWait=%.2fms blockRatio=%.0f%% deliveries/s=%.0f avgChunk=%lldB minChunk=%dB maxChunk=%dB segStarts=%d segRetries=%d seeks=%d",
+            deliveredMbps, consumedMbps, queueMB, segments.count, totalReadCalls,
             avgWaitMs, blockingRatio * 100,
             deliveryRatePerSec, avgChunkBytes,
             minDelegateChunkBytes == Int.max ? 0 : minDelegateChunkBytes,
@@ -583,8 +553,9 @@ nonisolated final class URLSessionAVIOSource: NSObject, @unchecked Sendable {
                     head.chunksHead = 0
                 }
                 advanceHeadIfDrainedLocked()
+                let needMore = segments.count < maxConcurrentSegments
                 condition.unlock()
-                refillPipeline()
+                if needMore { startNextSegmentIfPossible() }
                 return newOffset
             }
             condition.unlock()
@@ -621,10 +592,10 @@ nonisolated final class URLSessionAVIOSource: NSObject, @unchecked Sendable {
 
 extension URLSessionAVIOSource: URLSessionDataDelegate {
 
-    nonisolated func urlSession(_ session: URLSession,
-                                dataTask: URLSessionDataTask,
-                                didReceive response: URLResponse,
-                                completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+    func urlSession(_ session: URLSession,
+                    dataTask: URLSessionDataTask,
+                    didReceive response: URLResponse,
+                    completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
         condition.lock()
         guard findSegmentForTaskLocked(dataTask) != nil else {
             condition.unlock()
@@ -646,9 +617,9 @@ extension URLSessionAVIOSource: URLSessionDataDelegate {
         completionHandler(.allow)
     }
 
-    nonisolated func urlSession(_ session: URLSession,
-                                dataTask: URLSessionDataTask,
-                                didReceive data: Data) {
+    func urlSession(_ session: URLSession,
+                    dataTask: URLSessionDataTask,
+                    didReceive data: Data) {
         condition.lock()
         guard let segment = findSegmentForTaskLocked(dataTask), !closed else {
             condition.unlock()
@@ -671,9 +642,9 @@ extension URLSessionAVIOSource: URLSessionDataDelegate {
         condition.unlock()
     }
 
-    nonisolated func urlSession(_ session: URLSession,
-                                task: URLSessionTask,
-                                didCompleteWithError error: Error?) {
+    func urlSession(_ session: URLSession,
+                    task: URLSessionTask,
+                    didCompleteWithError error: Error?) {
         condition.lock()
         guard let segment = findSegmentForTaskLocked(task) else {
             condition.unlock()
@@ -691,7 +662,7 @@ extension URLSessionAVIOSource: URLSessionDataDelegate {
         // advance through it eventually. If it WAS the head and delivered
         // everything, read() will advance to the next segment on its next
         // call. Either way we want to top up the pipeline.
-        refillPipeline()
+        startNextSegmentIfPossible()
     }
 }
 
@@ -702,7 +673,7 @@ extension URLSessionAVIOSource {
     /// Allocate an AVIOContext that reads from `source`. The returned
     /// context holds a retained reference via its opaque pointer; free
     /// with `freeAVIOContext(_:)`.
-    nonisolated static func makeAVIOContext(for source: URLSessionAVIOSource) -> UnsafeMutablePointer<AVIOContext>? {
+    static func makeAVIOContext(for source: URLSessionAVIOSource) -> UnsafeMutablePointer<AVIOContext>? {
         let bufferSize = 1 * 1024 * 1024
         guard let rawBuffer = av_malloc(bufferSize) else { return nil }
         let buffer = rawBuffer.assumingMemoryBound(to: UInt8.self)
@@ -734,7 +705,7 @@ extension URLSessionAVIOSource {
         return ctx
     }
 
-    nonisolated static func freeAVIOContext(_ ctx: UnsafeMutablePointer<AVIOContext>) {
+    static func freeAVIOContext(_ ctx: UnsafeMutablePointer<AVIOContext>) {
         let opaque = ctx.pointee.opaque
         var mutableCtx: UnsafeMutablePointer<AVIOContext>? = ctx
         avio_context_free(&mutableCtx)
@@ -747,7 +718,7 @@ extension URLSessionAVIOSource {
 
 // MARK: - AVERROR / AVSEEK shims
 
-nonisolated private let AVERROR_EOF_VALUE: Int32 = {
+private let AVERROR_EOF_VALUE: Int32 = {
     let tag = Int32(bitPattern:
         (UInt32(Character("E").asciiValue!) |
         (UInt32(Character("O").asciiValue!) << 8) |
@@ -756,7 +727,7 @@ nonisolated private let AVERROR_EOF_VALUE: Int32 = {
     return -tag
 }()
 
-nonisolated private let AVSEEK_SIZE_VALUE: Int32 = 0x10000
-nonisolated private let AVSEEK_FORCE_VALUE: Int32 = 0x20000
+private let AVSEEK_SIZE_VALUE: Int32 = 0x10000
+private let AVSEEK_FORCE_VALUE: Int32 = 0x20000
 
 #endif  // RIVULET_FFMPEG

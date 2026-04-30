@@ -267,16 +267,19 @@ struct MediaPosterCard: View, Equatable {
     // MARK: - Computed Properties
 
     private var posterURL: URL? {
-        // For episodes, prefer the series poster (grandparentThumb) over episode thumbnail
-        let thumb: String?
-        if item.type == "episode" {
-            thumb = item.grandparentThumb ?? item.parentThumb ?? item.thumb
+        let imagePath: String?
+        let isMusicItem = item.type == "album" || item.type == "artist" || item.type == "track"
+
+        if isMusicItem {
+            imagePath = item.thumb ?? item.parentThumb
+        } else if item.type == "episode" {
+            imagePath = item.art ?? item.grandparentArt ?? item.grandparentThumb ?? item.parentThumb ?? item.thumb
         } else {
-            thumb = item.thumb
+            imagePath = item.art ?? item.thumb
         }
 
         return PlexMetadata.resolvedImageURL(
-            from: thumb,
+            from: imagePath,
             serverURL: serverURL,
             authToken: authToken
         )

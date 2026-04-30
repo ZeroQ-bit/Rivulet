@@ -209,34 +209,14 @@ struct HeroOverlayContent: View {
                     onMoveDown: onMoveDownToCatalog
                 )
             } else {
-                Button {
-                    onInfo(item)
-                } label: {
-                    HeroSlideContent(
-                        item: item,
-                        serverURL: serverURL,
-                        authToken: authToken
-                    )
-                    .id(item.ratingKey ?? "idx-\(displayedIndex)")
-                    .transition(.opacity)
-                    .padding(.vertical, 6)
-                    .scaleEffect(focusedButton == .play ? 1.015 : 1)
-                    .shadow(
-                        color: .white.opacity(focusedButton == .play ? 0.08 : 0),
-                        radius: focusedButton == .play ? 24 : 0,
-                        x: 0,
-                        y: 10
-                    )
-                }
-                .buttonStyle(.plain)
-                .hoverEffectDisabled()
-                .focusEffectDisabled()
-                .focused($focusedButton, equals: .play)
-                .onMoveCommand { direction in
-                    if direction == .down {
-                        onMoveDownToCatalog?()
-                    }
-                }
+                HeroSlideContent(
+                    item: item,
+                    serverURL: serverURL,
+                    authToken: authToken
+                )
+                .id(item.ratingKey ?? "idx-\(displayedIndex)")
+                .transition(.opacity)
+                .padding(.vertical, 6)
             }
         }
     }

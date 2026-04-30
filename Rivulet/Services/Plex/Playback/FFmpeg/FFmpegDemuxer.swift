@@ -20,7 +20,7 @@ import Sentry
 // MARK: - Track Info
 
 /// Metadata about a media track discovered by the demuxer.
-nonisolated struct FFmpegTrackInfo: Sendable {
+struct FFmpegTrackInfo: Sendable {
     let streamIndex: Int32
     let trackType: TrackType
     let codecId: UInt32
@@ -39,7 +39,7 @@ nonisolated struct FFmpegTrackInfo: Sendable {
     let channels: Int32
     let channelLayout: String?
 
-    nonisolated enum TrackType: Sendable {
+    enum TrackType: Sendable {
         case video
         case audio
         case subtitle
@@ -49,7 +49,7 @@ nonisolated struct FFmpegTrackInfo: Sendable {
 // MARK: - Demuxed Packet
 
 /// A compressed packet extracted from the container, ready for CMSampleBuffer creation.
-nonisolated struct DemuxedPacket: Sendable {
+struct DemuxedPacket: Sendable {
     let streamIndex: Int32
     let trackType: FFmpegTrackInfo.TrackType
     let data: Data
@@ -98,7 +98,7 @@ nonisolated struct DemuxedPacket: Sendable {
 
 // MARK: - FFmpegError
 
-nonisolated enum FFmpegError: Error, Sendable {
+enum FFmpegError: Error, Sendable {
     case alreadyOpen
     case allocationFailed
     case openFailed(averror: Int32)
@@ -136,7 +136,7 @@ nonisolated enum FFmpegError: Error, Sendable {
 
 // MARK: - Codec Type Constants
 
-nonisolated private let kCMVideoCodecType_DolbyVisionHEVC: CMVideoCodecType = 0x64766831
+private let kCMVideoCodecType_DolbyVisionHEVC: CMVideoCodecType = 0x64766831
 
 // =============================================================================
 // MARK: - FFmpeg Implementation (when libraries are available)
@@ -150,7 +150,7 @@ import Libavcodec
 import Libavutil
 
 /// Demuxes media containers using libavformat.
-nonisolated final class FFmpegDemuxer: @unchecked Sendable {
+final class FFmpegDemuxer: @unchecked Sendable {
 
     // MARK: - Public State
 
@@ -685,7 +685,8 @@ nonisolated final class FFmpegDemuxer: @unchecked Sendable {
         formatDescription: CMFormatDescription,
         payloadSize: Int
     ) throws -> CMSampleBuffer {
-        guard let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(formatDescription)?.pointee else {
+        guard let audioFD = formatDescription as? CMAudioFormatDescription,
+              let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(audioFD)?.pointee else {
             throw FFmpegError.noCodecParameters
         }
 
@@ -805,7 +806,7 @@ nonisolated final class FFmpegDemuxer: @unchecked Sendable {
         let status = CMAudioSampleBufferCreateReadyWithPacketDescriptions(
             allocator: kCFAllocatorDefault,
             dataBuffer: blockBuffer,
-            formatDescription: formatDescription,
+            formatDescription: audioFD,
             sampleCount: sampleCount,
             presentationTimeStamp: presentationTimeStamp,
             packetDescriptions: &packetDescription,
@@ -1588,7 +1589,7 @@ nonisolated final class FFmpegDemuxer: @unchecked Sendable {
 }
 
 /// AVERROR_EOF as usable Int32
-nonisolated private let AVERROR_EOF_VALUE: Int32 = {
+private let AVERROR_EOF_VALUE: Int32 = {
     let tag = Int32(bitPattern:
         (UInt32(Character("E").asciiValue!) |
         (UInt32(Character("O").asciiValue!) << 8) |
@@ -1605,7 +1606,7 @@ nonisolated private let AVERROR_EOF_VALUE: Int32 = {
 
 /// Stub demuxer when FFmpeg libraries are not linked.
 /// All operations throw .notAvailable, causing ContentRouter to use HLS instead.
-nonisolated final class FFmpegDemuxer: @unchecked Sendable {
+final class FFmpegDemuxer: @unchecked Sendable {
 
     private(set) var videoFormatDescription: CMFormatDescription?
     private(set) var audioFormatDescription: CMFormatDescription?

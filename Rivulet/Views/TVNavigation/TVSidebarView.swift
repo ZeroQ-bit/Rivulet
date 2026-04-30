@@ -424,7 +424,7 @@ struct TVSidebarView: View {
                     loadingArtImage: artImage,
                     loadingThumbImage: thumbImage
                 )
-                let useApplePlayer = UserDefaults.standard.bool(forKey: "useApplePlayer")
+                let useApplePlayer = PlaybackPreferences.useApplePlayer
                 let playerVC: UIViewController
                 if useApplePlayer {
                     playerVC = NativePlayerViewController(viewModel: viewModel)

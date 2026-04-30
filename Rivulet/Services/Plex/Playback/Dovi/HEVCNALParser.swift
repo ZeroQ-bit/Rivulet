@@ -11,7 +11,7 @@ import Foundation
 // MARK: - NAL Unit Types
 
 /// HEVC NAL unit types relevant to Dolby Vision
-nonisolated enum HEVCNALType: UInt8 {
+enum HEVCNALType: UInt8 {
     case trailN = 0
     case trailR = 1
     case idrWRadl = 19
@@ -34,7 +34,7 @@ nonisolated enum HEVCNALType: UInt8 {
 // MARK: - NAL Unit
 
 /// Represents a parsed NAL unit from HEVC sample data
-nonisolated struct NALUnit {
+struct NALUnit {
     /// NAL unit type (0-63)
     let type: UInt8
 
@@ -61,7 +61,7 @@ nonisolated struct NALUnit {
 
 /// Parses HEVC NAL units from fMP4 sample data.
 /// fMP4 uses 4-byte length prefixes (not Annex B start codes).
-nonisolated final class HEVCNALParser {
+final class HEVCNALParser {
 
     /// Length prefix size in bytes (fMP4 always uses 4-byte length)
     private let lengthPrefixSize = 4

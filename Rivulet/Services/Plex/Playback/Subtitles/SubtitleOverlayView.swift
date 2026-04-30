@@ -105,21 +105,25 @@ private struct BitmapSubtitleRectView: View {
         let expectedSize = height * bytesPerRow
         guard rect.imageData.count >= expectedSize else { return nil }
 
-        guard let provider = CGDataProvider(data: rect.imageData as CFData) else { return nil }
+        return rect.imageData.withUnsafeBytes { rawBuf -> CGImage? in
+            guard let baseAddress = rawBuf.baseAddress else { return nil }
 
-        return CGImage(
-            width: width,
-            height: height,
-            bitsPerComponent: 8,
-            bitsPerPixel: 32,
-            bytesPerRow: bytesPerRow,
-            space: CGColorSpaceCreateDeviceRGB(),
-            bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.last.rawValue),
-            provider: provider,
-            decode: nil,
-            shouldInterpolate: true,
-            intent: .defaultIntent
-        )
+            guard let provider = CGDataProvider(data: rect.imageData as CFData) else { return nil }
+
+            return CGImage(
+                width: width,
+                height: height,
+                bitsPerComponent: 8,
+                bitsPerPixel: 32,
+                bytesPerRow: bytesPerRow,
+                space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.last.rawValue),
+                provider: provider,
+                decode: nil,
+                shouldInterpolate: true,
+                intent: .defaultIntent
+            )
+        }
     }
 }
 

@@ -23,52 +23,23 @@ enum NetworkPriority {
     case low       // Prefetching / background operations
 }
 
-nonisolated private final class PlexURLSessionDelegate: NSObject, URLSessionDelegate {
-    nonisolated func urlSession(
-        _ session: URLSession,
-        didReceive challenge: URLAuthenticationChallenge,
-        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
-    ) {
-        guard challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
-              let serverTrust = challenge.protectionSpace.serverTrust else {
-            completionHandler(.performDefaultHandling, nil)
-            return
-        }
-
-        let host = challenge.protectionSpace.host
-        let port = challenge.protectionSpace.port
-
-        let isIPAddress = host.range(of: #"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$"#, options: .regularExpression) != nil
-        let isPlexDirect = host.hasSuffix(".plex.direct")
-        let isPlexPort = port == 32400
-
-        if isIPAddress || isPlexDirect || isPlexPort {
-            completionHandler(.useCredential, URLCredential(trust: serverTrust))
-        } else {
-            completionHandler(.performDefaultHandling, nil)
-        }
-    }
-}
-
 // MARK: - Plex Network Manager
 
-nonisolated class PlexNetworkManager: NSObject, @unchecked Sendable {
-    nonisolated static let shared = PlexNetworkManager()
+class PlexNetworkManager: NSObject, @unchecked Sendable {
+    static let shared = PlexNetworkManager()
 
     // Default timeout for requests
-    private static let defaultTimeout: TimeInterval = 30.0
+    private let defaultTimeout: TimeInterval = 30.0
 
     // URL session with custom delegate for self-signed certs
-    private let sessionDelegate: PlexURLSessionDelegate
-    private let session: URLSession
+    private lazy var session: URLSession = {
+        let configuration = URLSessionConfiguration.default
+        configuration.timeoutIntervalForRequest = defaultTimeout
+        configuration.timeoutIntervalForResource = defaultTimeout * 2
+        return URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
+    }()
 
     private override init() {
-        let configuration = URLSessionConfiguration.default
-        configuration.timeoutIntervalForRequest = Self.defaultTimeout
-        configuration.timeoutIntervalForResource = Self.defaultTimeout * 2
-        let sessionDelegate = PlexURLSessionDelegate()
-        self.sessionDelegate = sessionDelegate
-        self.session = URLSession(configuration: configuration, delegate: sessionDelegate, delegateQueue: nil)
         super.init()
     }
 
@@ -84,7 +55,7 @@ nonisolated class PlexNetworkManager: NSObject, @unchecked Sendable {
         var request = URLRequest(url: url)
         request.httpMethod = method
         request.httpBody = body
-        request.timeoutInterval = Self.defaultTimeout
+        request.timeoutInterval = defaultTimeout
 
         // Default headers
         request.addValue("application/json", forHTTPHeaderField: "Accept")
@@ -182,7 +153,7 @@ nonisolated class PlexNetworkManager: NSObject, @unchecked Sendable {
     ) async throws -> Data {
         var request = URLRequest(url: url)
         request.httpMethod = method
-        request.timeoutInterval = Self.defaultTimeout
+        request.timeoutInterval = defaultTimeout
 
         for (key, value) in headers {
             request.addValue(value, forHTTPHeaderField: key)
@@ -1456,12 +1427,6 @@ nonisolated class PlexNetworkManager: NSObject, @unchecked Sendable {
         return components.url
     }
 
-    enum HLSSubtitleSelection {
-        case automatic
-        case disabled
-        case stream(Int)
-    }
-
     /// Build an HLS playback URL with direct stream (remux only, no transcoding)
     /// This preserves video/audio codecs including Dolby Vision while providing HLS format
     /// Returns both the URL and required HTTP headers (Plex HLS requires auth in headers, not query params)
@@ -1477,8 +1442,7 @@ nonisolated class PlexNetworkManager: NSObject, @unchecked Sendable {
         hasHDR: Bool = false,
         useDolbyVision: Bool = true,
         forceVideoTranscode: Bool = false,
-        allowAudioDirectStream: Bool = true,
-        subtitleSelection: HLSSubtitleSelection = .automatic
+        allowAudioDirectStream: Bool = true
     ) -> (url: URL, headers: [String: String])? {
         // Request an HLS remux that keeps the HEVC/Dolby Vision bitstream intact
         // tvOS requires fMP4/CMAF segments for Dolby Vision profiles 5/8
@@ -1525,14 +1489,6 @@ nonisolated class PlexNetworkManager: NSObject, @unchecked Sendable {
         headers["X-Plex-Client-Profile-Extra"] = clientProfile
         headers["X-Plex-Client-Profile-Name"] = clientProfileName
 
-        let subtitlesMode: String
-        switch subtitleSelection {
-        case .disabled:
-            subtitlesMode = "none"
-        case .automatic, .stream:
-            subtitlesMode = "auto"
-        }
-
         // URL query params (no auth here - must be in headers)
         var items: [URLQueryItem] = [
             URLQueryItem(name: "X-Plex-Client-Profile-Name", value: clientProfileName),
@@ -1563,7 +1519,7 @@ nonisolated class PlexNetworkManager: NSObject, @unchecked Sendable {
             URLQueryItem(name: "audioCodec", value: allowAudioDirectStream ? "aac,eac3,ac3" : "eac3,ac3,aac"),
             URLQueryItem(name: "audioBitrate", value: "1024"),
             URLQueryItem(name: "audioChannels", value: "8"),
-            URLQueryItem(name: "subtitles", value: subtitlesMode),
+            URLQueryItem(name: "subtitles", value: "auto"),
             URLQueryItem(name: "subtitleSize", value: "100"),
             URLQueryItem(name: "context", value: "streaming"),
             URLQueryItem(name: "location", value: "lan"),
@@ -1573,25 +1529,6 @@ nonisolated class PlexNetworkManager: NSObject, @unchecked Sendable {
             // Keyframe playlist improves seeking accuracy in HLS streams
             URLQueryItem(name: "includeKeyframePlaylist", value: "1")
         ]
-
-        switch subtitleSelection {
-        case .automatic:
-            break
-        case .disabled:
-            items.append(URLQueryItem(name: "subtitleStreamID", value: "0"))
-        case .stream(let streamID):
-            items.append(URLQueryItem(name: "subtitleStreamID", value: String(streamID)))
-        }
-
-        let subtitleSelectionDescription: String
-        switch subtitleSelection {
-        case .automatic:
-            subtitleSelectionDescription = "automatic"
-        case .disabled:
-            subtitleSelectionDescription = "off"
-        case .stream(let streamID):
-            subtitleSelectionDescription = String(streamID)
-        }
 
         items.append(URLQueryItem(name: "X-Plex-Client-Profile-Extra", value: clientProfile))
 
@@ -1604,7 +1541,7 @@ nonisolated class PlexNetworkManager: NSObject, @unchecked Sendable {
             components.queryItems?.append(URLQueryItem(name: "includeCodecs", value: "1"))
         }
 
-        print("[Plex HLS] Using \(clientProfileName) profile for \(useDolbyVision ? "Dolby Vision" : "HDR/SDR") (session: \(sessionId), subtitleSelection: \(subtitleSelectionDescription))")
+        print("[Plex HLS] Using \(clientProfileName) profile for \(useDolbyVision ? "Dolby Vision" : "HDR/SDR") (session: \(sessionId))")
 
         guard let url = components.url else { return nil }
         return (url, headers)
@@ -1630,158 +1567,11 @@ nonisolated class PlexNetworkManager: NSObject, @unchecked Sendable {
 
         do {
             let (_, response) = try await URLSession.shared.data(for: request)
-            let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
-            print("[Plex] Set audio stream \(audioStreamID) on part \(partId): HTTP \(statusCode)")
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            print("[Plex] Set audio stream \(audioStreamID) on part \(partId): HTTP \(status)")
         } catch {
             print("[Plex] Failed to set audio stream: \(error.localizedDescription)")
         }
-    }
-
-    /// Set the preferred subtitle stream on a media part.
-    /// Pass `nil` to turn subtitles off for the next transcode session.
-    func setSelectedSubtitleStream(
-        serverURL: String,
-        authToken: String,
-        partId: Int,
-        subtitleStreamID: Int?
-    ) async {
-        guard var components = URLComponents(string: "\(serverURL)/library/parts/\(partId)") else {
-            print("[Plex] Failed to build subtitle stream selection URL")
-            return
-        }
-
-        components.queryItems = [
-            URLQueryItem(name: "subtitleStreamID", value: String(subtitleStreamID ?? 0)),
-            URLQueryItem(name: "X-Plex-Token", value: authToken)
-        ]
-
-        guard let url = components.url else {
-            print("[Plex] Failed to build subtitle stream selection URL")
-            return
-        }
-
-        var request = URLRequest(url: url)
-        request.httpMethod = "PUT"
-
-        do {
-            let (_, response) = try await URLSession.shared.data(for: request)
-            let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
-            let selectionDescription = subtitleStreamID.map(String.init) ?? "off"
-            print("[Plex] Set subtitle stream \(selectionDescription) on part \(partId): HTTP \(statusCode)")
-        } catch {
-            print("[Plex] Failed to set subtitle stream: \(error.localizedDescription)")
-        }
-    }
-
-    /// Search Plex's subtitle providers for a metadata item.
-    func searchSubtitles(
-        serverURL: String,
-        authToken: String,
-        metadataKey: String,
-        language: String,
-        title: String? = nil,
-        mediaItemID: Int? = nil,
-        minimumScore: Double? = nil,
-        hearingImpaired: Bool? = nil,
-        forced: Bool? = nil
-        ) async throws -> [PlexSubtitleCandidate] {
-        guard var components = URLComponents(string: "\(serverURL)\(metadataKey)/subtitles") else {
-            throw PlexAPIError.invalidURL
-        }
-
-        var queryItems = [URLQueryItem(name: "language", value: language)]
-        if let title, !title.isEmpty {
-            queryItems.append(URLQueryItem(name: "title", value: title))
-        }
-        if let mediaItemID {
-            queryItems.append(URLQueryItem(name: "mediaItemID", value: String(mediaItemID)))
-        }
-        if let minimumScore {
-            queryItems.append(URLQueryItem(name: "minimumScore", value: String(minimumScore)))
-        }
-        // Plex's subtitle search endpoint rejects explicit false values for
-        // `hearingImpaired` / `forced` with HTTP 400. Match Plex Web/HTPC by
-        // only sending those filters when we positively require them.
-        if hearingImpaired == true {
-            queryItems.append(URLQueryItem(name: "hearingImpaired", value: "true"))
-        }
-        if forced == true {
-            queryItems.append(URLQueryItem(name: "forced", value: "true"))
-        }
-        components.queryItems = queryItems
-
-        guard let url = components.url else {
-            throw PlexAPIError.invalidURL
-        }
-
-        let response: PlexSubtitleSearchContainerWrapper = try await request(
-            url,
-            headers: plexHeaders(authToken: authToken)
-        )
-        return response.MediaContainer.Stream ?? []
-    }
-
-    /// Download a searched subtitle candidate into the Plex library item.
-    @discardableResult
-    func downloadSubtitle(
-        serverURL: String,
-        authToken: String,
-        metadataKey: String,
-        candidate: PlexSubtitleCandidate,
-        mediaItemID: Int? = nil,
-        forced: Bool = false,
-        transient: Bool = false
-    ) async throws -> String? {
-        guard let candidateKey = candidate.key, !candidateKey.isEmpty else {
-            throw PlexAPIError.invalidURL
-        }
-        guard var components = URLComponents(string: "\(serverURL)\(metadataKey)/subtitles") else {
-            throw PlexAPIError.invalidURL
-        }
-
-        var queryItems = [URLQueryItem(name: "key", value: candidateKey)]
-        if let codec = candidate.codec, !codec.isEmpty {
-            queryItems.append(URLQueryItem(name: "codec", value: codec))
-        }
-        if let language = candidate.languageCode ?? candidate.language, !language.isEmpty {
-            queryItems.append(URLQueryItem(name: "language", value: language))
-        }
-        queryItems.append(URLQueryItem(
-            name: "hearingImpaired",
-            value: (candidate.hearingImpaired ?? false) ? "1" : "0"
-        ))
-        queryItems.append(URLQueryItem(name: "forced", value: forced ? "1" : "0"))
-        if let providerTitle = candidate.providerTitle, !providerTitle.isEmpty {
-            queryItems.append(URLQueryItem(name: "providerTitle", value: providerTitle))
-        }
-        if let mediaItemID {
-            queryItems.append(URLQueryItem(name: "mediaItemID", value: String(mediaItemID)))
-        }
-        queryItems.append(URLQueryItem(name: "transient", value: transient ? "1" : "0"))
-        components.queryItems = queryItems
-
-        guard let url = components.url else {
-            throw PlexAPIError.invalidURL
-        }
-
-        var request = URLRequest(url: url)
-        request.httpMethod = "PUT"
-        request.timeoutInterval = Self.defaultTimeout
-        for (key, value) in plexHeaders(authToken: authToken) {
-            request.addValue(value, forHTTPHeaderField: key)
-        }
-
-        let (data, response) = try await session.data(for: request)
-
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw PlexAPIError.invalidResponse
-        }
-
-        guard (200...299).contains(httpResponse.statusCode) else {
-            throw PlexAPIError.httpError(statusCode: httpResponse.statusCode, data: data)
-        }
-
-        return httpResponse.value(forHTTPHeaderField: "X-Plex-Activity")
     }
 
     /// Ping the `/decision` endpoint to tell Plex to actually start the transcode/remux session.
@@ -1807,7 +1597,8 @@ nonisolated class PlexNetworkManager: NSObject, @unchecked Sendable {
         }
 
         do {
-            _ = try await URLSession.shared.data(for: request)
+            let (_, response) = try await URLSession.shared.data(for: request)
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         } catch {
             print("[Plex] Decision request failed: \(error.localizedDescription)")
         }
@@ -1847,7 +1638,8 @@ nonisolated class PlexNetworkManager: NSObject, @unchecked Sendable {
         }
 
         do {
-            _ = try await session.data(for: rangeRequest)
+            let (_, response) = try await session.data(for: rangeRequest)
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         } catch {
             // Best effort only.
         }
@@ -1868,7 +1660,8 @@ nonisolated class PlexNetworkManager: NSObject, @unchecked Sendable {
         }
 
         do {
-            _ = try await URLSession.shared.data(for: request)
+            let (_, response) = try await URLSession.shared.data(for: request)
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         } catch {
             // Best-effort — don't block on failure
             print("[Plex] Failed to stop transcode session \(sessionId): \(error.localizedDescription)")
@@ -2749,6 +2542,43 @@ nonisolated class PlexNetworkManager: NSObject, @unchecked Sendable {
     }
 }
 
+// MARK: - URLSessionDelegate (SSL Certificate Handling)
+
+extension PlexNetworkManager: URLSessionDelegate {
+    /// Handle SSL certificate challenges for self-signed certificates
+    nonisolated func urlSession(
+        _ session: URLSession,
+        didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+        guard challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
+              let serverTrust = challenge.protectionSpace.serverTrust else {
+            completionHandler(.performDefaultHandling, nil)
+            return
+        }
+
+        let host = challenge.protectionSpace.host
+        let port = challenge.protectionSpace.port
+
+        // Trust self-signed certificates for:
+        // - IP addresses (local Plex servers)
+        // - plex.direct domains
+        // - Port 32400 (default Plex port)
+        let isIPAddress = host.range(of: #"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$"#, options: .regularExpression) != nil
+        let isPlexDirect = host.hasSuffix(".plex.direct")
+        let isPlexPort = port == 32400
+
+        if isIPAddress || isPlexDirect || isPlexPort {
+            // Trust the self-signed certificate
+            let credential = URLCredential(trust: serverTrust)
+            completionHandler(.useCredential, credential)
+        } else {
+            // Use default handling for other hosts (like plex.tv)
+            completionHandler(.performDefaultHandling, nil)
+        }
+    }
+}
+
 // MARK: - API Errors
 
 enum PlexAPIError: LocalizedError {
@@ -2782,11 +2612,11 @@ enum PlexAPIError: LocalizedError {
 
 // MARK: - Playback Decision Models
 
-nonisolated struct PlaybackDecisionContainer: Codable, Sendable {
+struct PlaybackDecisionContainer: Codable, Sendable {
     let MediaContainer: PlaybackDecision
 }
 
-nonisolated struct PlaybackDecision: Codable, Sendable {
+struct PlaybackDecision: Codable, Sendable {
     let size: Int?
     let directPlayDecisionCode: Int?
     let directPlayDecisionText: String?

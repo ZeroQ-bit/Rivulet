@@ -32,6 +32,7 @@ struct PlexLibraryView: View {
     private let dataStore = PlexDataStore.shared
     @AppStorage("showLibraryRecommendations") private var showLibraryRecommendations = true
     @AppStorage("showLibraryRecentRows") private var showLibraryRecentRows = true
+    @AppStorage("mediaOpenStyle") private var mediaOpenStyleRaw = MediaOpenStyle.previewCard.rawValue
     @State private var currentSortOption: LibrarySortOption = .addedAtDesc
     @State private var items: [PlexMetadata] = []
     @State private var hubs: [PlexHub] = []  // Library-specific hubs from Plex API
@@ -84,9 +85,36 @@ struct PlexLibraryView: View {
     private let recommendationService = PersonalizedRecommendationService.shared
     private let catalogNavigationCooldown: TimeInterval = 0.24
 
+    private var mediaOpenStyle: MediaOpenStyle {
+        MediaOpenStyle(rawValue: mediaOpenStyleRaw) ?? .previewCard
+    }
+
     /// Check if this is a music library (uses square posters)
     private var isMusicLibrary: Bool {
         dataStore.libraries.first(where: { $0.key == libraryKey })?.isMusicLibrary ?? false
+    }
+
+    private func handlePreviewRequest(_ request: PreviewRequest, animated: Bool = false) {
+        if mediaOpenStyle == .fullScreenDetail {
+            guard request.items.indices.contains(request.selectedIndex) else { return }
+            rowPreviewRequest = nil
+            showPreviewCover = false
+            selectedItem = request.items[request.selectedIndex]
+            return
+        }
+
+        let presentPreview = {
+            rowPreviewRequest = request
+            showPreviewCover = true
+        }
+
+        if animated {
+            withAnimation(previewEntryAnimation) {
+                presentPreview()
+            }
+        } else {
+            presentPreview()
+        }
     }
 
     private var columns: [GridItem] {
@@ -1005,10 +1033,7 @@ struct PlexLibraryView: View {
                                 await refresh()
                             },
                             onPreviewRequested: isContinueWatching ? nil : { request in
-                                withAnimation(previewEntryAnimation) {
-                                    rowPreviewRequest = request
-                                    showPreviewCover = true
-                                }
+                                handlePreviewRequest(request, animated: true)
                             },
                             restorePreviewFocusTarget: $previewRestoreTarget,
                             onRowFocused: {
@@ -1085,10 +1110,7 @@ struct PlexLibraryView: View {
                     await refreshRecommendations(force: true)
                 },
                 onPreviewRequested: { request in
-                    withAnimation(previewEntryAnimation) {
-                        rowPreviewRequest = request
-                        showPreviewCover = true
-                    }
+                    handlePreviewRequest(request, animated: true)
                 },
                 restorePreviewFocusTarget: $previewRestoreTarget,
                 onRowFocused: {
@@ -1126,10 +1148,7 @@ struct PlexLibraryView: View {
                                 await refresh()
                             },
                             onPreviewRequested: { request in
-                                withAnimation(previewEntryAnimation) {
-                                    rowPreviewRequest = request
-                                    showPreviewCover = true
-                                }
+                                handlePreviewRequest(request, animated: true)
                             },
                             restorePreviewFocusTarget: $previewRestoreTarget,
                             onRowFocused: {
@@ -1548,7 +1567,7 @@ struct PlexLibraryView: View {
                     loadingArtImage: artImage,
                     loadingThumbImage: thumbImage
                 )
-                let useApplePlayer = UserDefaults.standard.bool(forKey: "useApplePlayer")
+                let useApplePlayer = PlaybackPreferences.useApplePlayer
                 let playerVC: UIViewController
                 if useApplePlayer {
                     let nativePlayer = NativePlayerViewController(viewModel: viewModel)

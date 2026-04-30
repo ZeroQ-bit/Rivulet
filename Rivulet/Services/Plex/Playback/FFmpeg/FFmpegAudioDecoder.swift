@@ -18,7 +18,7 @@ import Sentry
 // MARK: - Decoded Audio Frame
 
 /// PCM audio data decoded from a compressed packet, ready for CMSampleBuffer creation.
-nonisolated struct DecodedAudioFrame: Sendable {
+struct DecodedAudioFrame: Sendable {
     let data: Data              // Interleaved PCM samples
     let sampleCount: Int        // Number of audio frames (e.g., 4096)
     let sampleRate: Int         // e.g., 48000
@@ -37,7 +37,7 @@ import Libavutil
 import Libswresample
 
 /// Decodes TrueHD/DTS audio to interleaved PCM using libavcodec + libswresample.
-nonisolated final class FFmpegAudioDecoder: @unchecked Sendable {
+final class FFmpegAudioDecoder: @unchecked Sendable {
 
     /// Audio codecs this decoder handles.
     /// Includes both non-native codecs (DTS, TrueHD) and native codecs (AAC, AC3, etc.)
@@ -920,10 +920,10 @@ nonisolated final class FFmpegAudioDecoder: @unchecked Sendable {
 // MARK: - AVERROR Constants
 
 /// AVERROR(EAGAIN) on Darwin: -(EAGAIN) = -35
-nonisolated private let kAudioDecoderEAGAIN: Int32 = -35
+private let kAudioDecoderEAGAIN: Int32 = -35
 
 /// AVERROR_EOF: FFERRTAG('E','O','F',' ')
-nonisolated private let kAudioDecoderEOF: Int32 = {
+private let kAudioDecoderEOF: Int32 = {
     let tag = Int32(bitPattern:
         (UInt32(Character("E").asciiValue!) |
         (UInt32(Character("O").asciiValue!) << 8) |
@@ -939,7 +939,7 @@ nonisolated private let kAudioDecoderEOF: Int32 = {
 // =============================================================================
 
 /// Stub audio decoder when FFmpeg libraries are not linked.
-nonisolated final class FFmpegAudioDecoder: @unchecked Sendable {
+final class FFmpegAudioDecoder: @unchecked Sendable {
 
     static let supportedCodecs: Set<String> = []
     static let isAvailable = false

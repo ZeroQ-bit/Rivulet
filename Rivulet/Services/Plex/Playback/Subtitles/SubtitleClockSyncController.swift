@@ -84,6 +84,7 @@ final class SubtitleClockSyncController: NSObject {
 
         // Lightweight diagnostics: detect jumps or regressions in playback clock updates.
         if subtitleManager.diagnosticsEnabled, isPlayingProvider(), lastPlaybackTime >= 0 {
+            let delta = playbackTime - lastPlaybackTime
             // if delta < -0.35 || delta > 0.8 {
             //     playerDebugLog(
             //         "🎬 [Subtitles] Clock jump (\(owner)) prev=\(String(format: "%.3f", lastPlaybackTime)) " +

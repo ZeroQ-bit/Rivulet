@@ -16,7 +16,7 @@
 import Foundation
 
 @inline(__always)
-nonisolated func playerDebugLog(_ message: @autoclosure () -> String) {
+func playerDebugLog(_ message: @autoclosure () -> String) {
     #if DEBUG
     print(message())
     #endif

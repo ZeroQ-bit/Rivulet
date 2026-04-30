@@ -15,7 +15,7 @@ import CoreMedia
 // MARK: - Encoded Audio Frame
 
 /// Compressed EAC3 audio packet ready for CMSampleBuffer creation.
-nonisolated struct EncodedAudioFrame: Sendable {
+struct EncodedAudioFrame: Sendable {
     let data: Data          // Compressed EAC3 packet
     let sampleCount: Int    // Always 1536 for EAC3
     let sampleRate: Int     // 48000
@@ -33,7 +33,7 @@ import Libavutil
 import Libswresample
 
 /// Re-encodes interleaved F32 PCM to EAC3 using libavcodec + libswresample.
-nonisolated final class FFmpegAudioEncoder: @unchecked Sendable {
+final class FFmpegAudioEncoder: @unchecked Sendable {
 
     static let isAvailable = true
 
@@ -505,8 +505,8 @@ nonisolated final class FFmpegAudioEncoder: @unchecked Sendable {
 
 // MARK: - AVERROR Constants
 
-nonisolated private let kAudioEncoderEAGAIN: Int32 = -35
-nonisolated private let kAudioEncoderEOF: Int32 = {
+private let kAudioEncoderEAGAIN: Int32 = -35
+private let kAudioEncoderEOF: Int32 = {
     let tag = Int32(bitPattern:
         (UInt32(Character("E").asciiValue!) |
         (UInt32(Character("O").asciiValue!) << 8) |
@@ -522,7 +522,7 @@ nonisolated private let kAudioEncoderEOF: Int32 = {
 // =============================================================================
 
 /// Stub audio encoder when FFmpeg libraries are not linked.
-nonisolated final class FFmpegAudioEncoder: @unchecked Sendable {
+final class FFmpegAudioEncoder: @unchecked Sendable {
 
     static let isAvailable = false
 

@@ -13,7 +13,7 @@ import VideoToolbox
 // MARK: - Demuxed Sample
 
 /// A single demuxed sample (video frame or audio frame) ready for CMSampleBuffer creation
-nonisolated struct DemuxedSample {
+struct DemuxedSample {
     let trackID: UInt32
     let data: Data
     let pts: CMTime
@@ -26,7 +26,7 @@ nonisolated struct DemuxedSample {
 // MARK: - Track Info
 
 /// Metadata about a track parsed from the init segment
-nonisolated struct DemuxedTrackInfo {
+struct DemuxedTrackInfo {
     let trackID: UInt32
     let isVideo: Bool
     let timescale: UInt32
@@ -39,7 +39,7 @@ nonisolated struct DemuxedTrackInfo {
 
 /// Parses ISO BMFF (fMP4) segments to extract individual samples.
 /// Handles init segments (moov) for codec config and media segments (moof+mdat) for sample data.
-nonisolated final class FMP4Demuxer {
+final class FMP4Demuxer {
 
     // MARK: - Parsed State
 
@@ -1130,7 +1130,7 @@ enum DemuxerError: Error, CustomStringConvertible {
 // MARK: - Bit Reader for AAC AudioSpecificConfig parsing
 
 /// Reads individual bits from a Data buffer, MSB first.
-nonisolated private final class BitReader {
+private class BitReader {
     private let data: Data
     private var byteOffset = 0
     private var bitOffset = 0  // 0-7, within current byte
@@ -1168,7 +1168,7 @@ nonisolated private final class BitReader {
 
 // MARK: - Data Extensions for Binary Reading
 
-nonisolated extension Data {
+extension Data {
     func readUInt32BE(at offset: Int) -> UInt32 {
         guard offset + 4 <= count else { return 0 }
         return withUnsafeBytes { buffer in

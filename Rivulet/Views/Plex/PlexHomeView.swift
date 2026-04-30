@@ -45,6 +45,7 @@ struct PlexHomeView: View {
     @AppStorage("didMigrateHomeHeroDefault") private var didMigrateHomeHeroDefault = false
     @AppStorage("showLibraryRecommendations") private var showDiscoveryRows = true
     @AppStorage("enablePersonalizedRecommendations") private var enablePersonalizedRecommendations = false
+    @AppStorage("mediaOpenStyle") private var mediaOpenStyleRaw = MediaOpenStyle.previewCard.rawValue
     @Environment(\.nestedNavigationState) private var nestedNavState
     @State private var selectedItem: PlexMetadata?
     @State private var selectedDiscoverItem: HomeDiscoverNavigationTarget?
@@ -72,6 +73,10 @@ struct PlexHomeView: View {
     private let networkManager = PlexNetworkManager.shared
     private let recommendationsContentType: RecommendationContentType = .moviesAndShows
     private let catalogNavigationCooldown: TimeInterval = 0.24
+
+    private var mediaOpenStyle: MediaOpenStyle {
+        MediaOpenStyle(rawValue: mediaOpenStyleRaw) ?? .previewCard
+    }
 
     // MARK: - Processed Hubs
 
@@ -218,6 +223,20 @@ struct PlexHomeView: View {
             selectedDiscoverItem = nil
             selectedItem = item
         }
+    }
+
+    private func handlePreviewRequest(_ request: PreviewRequest) {
+        if mediaOpenStyle == .fullScreenDetail {
+            guard request.items.indices.contains(request.selectedIndex) else { return }
+            rowPreviewRequest = nil
+            showPreviewCover = false
+            selectedDiscoverItem = nil
+            selectedItem = request.items[request.selectedIndex]
+            return
+        }
+
+        rowPreviewRequest = request
+        showPreviewCover = true
     }
 
     var body: some View {
@@ -391,7 +410,7 @@ struct PlexHomeView: View {
                     loadingArtImage: artImage,
                     loadingThumbImage: thumbImage
                 )
-                let useApplePlayer = UserDefaults.standard.bool(forKey: "useApplePlayer")
+                let useApplePlayer = PlaybackPreferences.useApplePlayer
                 let playerVC: UIViewController
                 if useApplePlayer {
                     let nativePlayer = NativePlayerViewController(viewModel: viewModel)
@@ -610,13 +629,12 @@ struct PlexHomeView: View {
                 refreshAction: {
                     await dataStore.refreshHubs()
                 },
-                previewAction: isContinueWatching ? nil : { request in
-                    homeLog.info("[Preview] Opening carousel: \(request.items.count) items, tapped index=\(request.selectedIndex), title=\(request.items[request.selectedIndex].title ?? "?")")
-                    rowPreviewRequest = request
-                    showPreviewCover = true
-                }
-            )
-        }
+                    previewAction: isContinueWatching ? nil : { request in
+                        homeLog.info("[Preview] Opening carousel: \(request.items.count) items, tapped index=\(request.selectedIndex), title=\(request.items[request.selectedIndex].title ?? "?")")
+                        handlePreviewRequest(request)
+                    }
+                )
+            }
 
         if showDiscoveryRows {
             sections.append(contentsOf: discoverHubs.enumerated().compactMap { index, hub in
@@ -658,8 +676,7 @@ struct PlexHomeView: View {
                         await refreshRecommendations(force: true)
                     },
                     previewAction: { request in
-                        rowPreviewRequest = request
-                        showPreviewCover = true
+                        handlePreviewRequest(request)
                     }
                 )
             )
@@ -1151,8 +1168,7 @@ struct PlexHomeView: View {
                     await refreshRecommendations(force: true)
                 },
                 onPreviewRequested: { request in
-                    rowPreviewRequest = request
-                    showPreviewCover = true
+                    handlePreviewRequest(request)
                 },
                 restorePreviewFocusTarget: $previewRestoreTarget
             )
@@ -1713,20 +1729,6 @@ struct InfiniteContentRow: View {
             .scrollClipDisabled()  // Allow shadow overflow
         }
         .padding(.vertical, rowContainerVerticalPadding)
-        .background {
-            RoundedRectangle(cornerRadius: rowBackgroundCornerRadius, style: .continuous)
-                .fill(Color.white.opacity(0.035))
-                .background(
-                    RoundedRectangle(cornerRadius: rowBackgroundCornerRadius, style: .continuous)
-                        .fill(.ultraThinMaterial)
-                        .opacity(0.12)
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: rowBackgroundCornerRadius, style: .continuous)
-                        .stroke(.white.opacity(0.08), lineWidth: 1)
-                )
-                .padding(.horizontal, rowBackgroundHorizontalInset)
-        }
         .onAppear {
             if items.isEmpty {
                 items = initialItems

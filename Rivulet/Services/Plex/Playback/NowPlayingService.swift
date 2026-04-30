@@ -81,7 +81,7 @@ final class NowPlayingService: ObservableObject {
             object: AVAudioSession.sharedInstance(),
             queue: .main
         ) { [weak self] notification in
-            MainActor.assumeIsolated {
+            Task { @MainActor [weak self] in
                 self?.handleInterruption(notification)
             }
         }
