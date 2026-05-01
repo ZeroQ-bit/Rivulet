@@ -12,7 +12,7 @@ import Foundation
 final class TopShelfCache: Sendable {
     static let shared = TopShelfCache()
 
-    private let appGroupIdentifier = "group.app.rivulet"
+    private let appGroupIdentifier: String? = nil
     private let cacheFileName = "top_shelf_items.json"
 
     private init() {}
@@ -20,7 +20,8 @@ final class TopShelfCache: Sendable {
     // MARK: - Container Access
 
     private var containerURL: URL? {
-        FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupIdentifier)
+        guard let appGroupIdentifier else { return nil }
+        return FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupIdentifier)
     }
 
     private var cacheFileURL: URL? {
@@ -30,7 +31,8 @@ final class TopShelfCache: Sendable {
     // MARK: - UserDefaults Suite (more reliable than file access)
 
     private var sharedDefaults: UserDefaults? {
-        UserDefaults(suiteName: appGroupIdentifier)
+        guard let appGroupIdentifier else { return nil }
+        return UserDefaults(suiteName: appGroupIdentifier)
     }
 
     private let userDefaultsKey = "topShelfItems"

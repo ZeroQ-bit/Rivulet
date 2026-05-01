@@ -257,7 +257,7 @@ actor DepthLayerCache {
 // MARK: - Memory Cache Entry Wrapper
 
 /// Wrapper class for NSCache (requires class type)
-nonisolated private final class CachedLayerEntry {
+private final class CachedLayerEntry {
     let result: DepthLayerResult
 
     init(result: DepthLayerResult) {

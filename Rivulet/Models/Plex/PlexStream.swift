@@ -9,7 +9,7 @@ import Foundation
 
 /// Represents a media stream within a Plex media part
 /// streamType: 1 = video, 2 = audio, 3 = subtitle
-nonisolated struct PlexStream: Codable, Identifiable, Sendable {
+struct PlexStream: Codable, Identifiable, Sendable {
     /// Plex-assigned stream id. `nil` for streams embedded in the video
     /// container (e.g., EIA-608 closed captions with `embeddedInVideo: "1"`),
     /// which Plex omits because they're baked into their parent stream.
@@ -63,7 +63,6 @@ nonisolated struct PlexStream: Codable, Identifiable, Sendable {
     // Subtitle-specific
     let format: String?
     let key: String?           // For external subtitles
-    let sourceKey: String?
     let extendedDisplayTitle: String?
     let hearingImpaired: Bool?
 
@@ -94,7 +93,7 @@ nonisolated struct PlexStream: Codable, Identifiable, Sendable {
         case DOVIRPUPresent, DOVIVersion
         case frameRate, height, width, level, profile, refFrames, scanType
         case audioChannelLayout, channels, bitrate, samplingRate
-        case format, key, sourceKey, extendedDisplayTitle, hearingImpaired
+        case format, key, extendedDisplayTitle, hearingImpaired
     }
 
     // MARK: - Convenience Properties

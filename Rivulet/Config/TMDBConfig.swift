@@ -7,7 +7,7 @@
 
 import Foundation
 
-nonisolated enum TMDBConfig {
+enum TMDBConfig {
     /// Proxy base URL (Cloudflare Worker) that forwards TMDB requests with caching.
     static let proxyBaseURL = URL(string: "https://tmdb-proxy.baingurley.workers.dev")!
 

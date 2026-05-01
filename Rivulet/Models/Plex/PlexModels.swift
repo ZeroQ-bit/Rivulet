@@ -11,9 +11,8 @@ import Foundation
 // MARK: - Plex API Configuration
 
 /// Plex API constants
-nonisolated enum PlexAPI: Sendable {
+enum PlexAPI: Sendable {
     static let baseUrl = "https://plex.tv"
-    static let discoverBaseUrl = "https://discover.provider.plex.tv"
     static let clientIdentifier = "com.gstudios.rivulet"
     static let productName = "Rivulet"
     static let deviceName = "Apple TV"
@@ -22,7 +21,7 @@ nonisolated enum PlexAPI: Sendable {
 
 // MARK: - Server/Device Models
 
-nonisolated struct PlexDevice: Codable, Sendable {
+struct PlexDevice: Codable, Sendable {
     let name: String
     let product: String
     let productVersion: String
@@ -98,7 +97,7 @@ nonisolated struct PlexDevice: Codable, Sendable {
     }
 }
 
-nonisolated struct PlexConnection: Codable, Sendable {
+struct PlexConnection: Codable, Sendable {
     let protocolType: String
     let address: String
     let port: Int
@@ -120,17 +119,17 @@ nonisolated struct PlexConnection: Codable, Sendable {
 
 // MARK: - Library Models
 
-nonisolated struct PlexLibraryContainer: Codable, Sendable {
+struct PlexLibraryContainer: Codable, Sendable {
     let MediaContainer: PlexLibraryMediaContainer
 }
 
-nonisolated struct PlexLibraryMediaContainer: Codable, Sendable {
+struct PlexLibraryMediaContainer: Codable, Sendable {
     let size: Int
     let title1: String?
     let Directory: [PlexLibrary]?
 }
 
-nonisolated struct PlexLibrary: Codable, Identifiable, Sendable {
+struct PlexLibrary: Codable, Identifiable, Sendable {
     var id: String { key }
     let key: String
     let type: String          // "movie", "show", "artist", etc.
@@ -155,161 +154,39 @@ nonisolated struct PlexLibrary: Codable, Identifiable, Sendable {
     }
 }
 
-nonisolated struct PlexLibraryLocation: Codable, Sendable {
+struct PlexLibraryLocation: Codable, Sendable {
     let id: Int
     let path: String
 }
 
 // MARK: - Media Container (Generic Response Wrapper)
 
-nonisolated struct PlexMediaContainer: Codable, Sendable {
+struct PlexMediaContainer: Codable, Sendable {
     var size: Int?
     var totalSize: Int?  // Total items in collection (for pagination)
     var librarySectionID: Int?  // Library section ID (at container level)
     var librarySectionTitle: String?
     var Metadata: [PlexMetadata]?
     var Hub: [PlexHub]?
-
-    enum CodingKeys: String, CodingKey {
-        case size
-        case totalSize
-        case librarySectionID
-        case librarySectionTitle
-        case Metadata
-        case Hub
-    }
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        size = try container.decodeIfPresent(Int.self, forKey: .size)
-        totalSize = try container.decodeIfPresent(Int.self, forKey: .totalSize)
-
-        if let sectionID = try? container.decodeIfPresent(Int.self, forKey: .librarySectionID) {
-            librarySectionID = sectionID
-        } else if let sectionIDString = try? container.decodeIfPresent(String.self, forKey: .librarySectionID),
-                  let parsedSectionID = Int(sectionIDString) {
-            librarySectionID = parsedSectionID
-        } else {
-            librarySectionID = nil
-        }
-
-        librarySectionTitle = try container.decodeIfPresent(String.self, forKey: .librarySectionTitle)
-        Metadata = try container.decodeIfPresent([PlexMetadata].self, forKey: .Metadata)
-        Hub = try container.decodeIfPresent([PlexHub].self, forKey: .Hub)
-    }
 }
 
-nonisolated struct PlexMediaContainerWrapper: Codable, Sendable {
+struct PlexMediaContainerWrapper: Codable, Sendable {
     var MediaContainer: PlexMediaContainer
 }
 
-// MARK: - Subtitle Search / Download
-
-nonisolated struct PlexSubtitleSearchContainerWrapper: Codable, Sendable {
-    let MediaContainer: PlexSubtitleSearchMediaContainer
-}
-
-nonisolated struct PlexSubtitleSearchMediaContainer: Codable, Sendable {
-    let size: Int?
-    let Stream: [PlexSubtitleCandidate]?
-
-    enum CodingKeys: String, CodingKey {
-        case size
-        case Stream
-    }
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        size = try container.decodeIfPresent(Int.self, forKey: .size)
-
-        if let streams = try? container.decodeIfPresent([PlexSubtitleCandidate].self, forKey: .Stream) {
-            Stream = streams
-        } else if let stream = try? container.decodeIfPresent(PlexSubtitleCandidate.self, forKey: .Stream) {
-            Stream = [stream]
-        } else {
-            Stream = nil
-        }
-    }
-}
-
-nonisolated struct PlexSubtitleCandidate: Codable, Sendable {
-    let id: Int?
-    let key: String?
-    let sourceKey: String?
-    let streamType: Int?
-    let codec: String?
-    let index: Int?
-    let language: String?
-    let languageCode: String?
-    let score: Double?
-    let providerTitle: String?
-    let title: String?
-    let displayTitle: String?
-    let reason: String?
-    let hearingImpaired: Bool?
-    let perfectMatch: Bool?
-    let downloaded: Bool?
-
-    enum CodingKeys: String, CodingKey {
-        case id
-        case key
-        case sourceKey
-        case streamType
-        case codec
-        case index
-        case language
-        case languageCode
-        case score
-        case providerTitle
-        case title
-        case displayTitle
-        case reason
-        case hearingImpaired
-        case perfectMatch
-        case downloaded
-    }
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        id = try container.decodeIfPresent(Int.self, forKey: .id)
-        key = try container.decodeIfPresent(String.self, forKey: .key)
-        sourceKey = try container.decodeIfPresent(String.self, forKey: .sourceKey)
-        streamType = try container.decodeIfPresent(Int.self, forKey: .streamType)
-        codec = try container.decodeIfPresent(String.self, forKey: .codec)
-        index = try container.decodeIfPresent(Int.self, forKey: .index)
-        language = try container.decodeIfPresent(String.self, forKey: .language)
-        languageCode = try container.decodeIfPresent(String.self, forKey: .languageCode)
-        if let numericScore = try? container.decodeIfPresent(Double.self, forKey: .score) {
-            score = numericScore
-        } else if let stringScore = try? container.decodeIfPresent(String.self, forKey: .score),
-                  let parsedScore = Double(stringScore) {
-            score = parsedScore
-        } else {
-            score = nil
-        }
-        providerTitle = try container.decodeIfPresent(String.self, forKey: .providerTitle)
-        title = try container.decodeIfPresent(String.self, forKey: .title)
-        displayTitle = try container.decodeIfPresent(String.self, forKey: .displayTitle)
-        reason = try container.decodeIfPresent(String.self, forKey: .reason)
-        hearingImpaired = try container.decodeIfPresent(Bool.self, forKey: .hearingImpaired)
-        perfectMatch = try container.decodeIfPresent(Bool.self, forKey: .perfectMatch)
-        downloaded = try container.decodeIfPresent(Bool.self, forKey: .downloaded)
-    }
-}
-
 /// Container for extras API response
-nonisolated struct PlexExtrasMediaContainer: Codable, Sendable {
+struct PlexExtrasMediaContainer: Codable, Sendable {
     var size: Int?
     var Metadata: [PlexExtra]?
 }
 
-nonisolated struct PlexExtrasContainerWrapper: Codable, Sendable {
+struct PlexExtrasContainerWrapper: Codable, Sendable {
     var MediaContainer: PlexExtrasMediaContainer
 }
 
 // MARK: - Hub (for home screen sections)
 
-nonisolated struct PlexHub: Codable, Identifiable, Sendable {
+struct PlexHub: Codable, Identifiable, Sendable {
     var id: String { hubIdentifier ?? title ?? UUID().uuidString }
     var hubIdentifier: String?
     var title: String?

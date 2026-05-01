@@ -9,30 +9,17 @@
 //
 
 import SwiftUI
-import UIKit
 import os.log
 
 private let overlayLog = Logger(subsystem: "com.rivulet.app", category: "HeroOverlay")
-
-enum HeroOverlayLayoutStyle {
-    case bottomAnchored
-    case topLeading
-}
 
 struct HeroOverlayContent: View {
     let items: [PlexMetadata]
     let serverURL: String
     let authToken: String
     @Binding var currentIndex: Int
-    var layoutStyle: HeroOverlayLayoutStyle = .bottomAnchored
-    var showsButtonRow: Bool = true
-    var showsPagingDots: Bool = true
-    var showsAdvanceButton: Bool = true
-    var topLeadingInsets: EdgeInsets = .init(top: 84, leading: 92, bottom: 144, trailing: 64)
     let onInfo: (PlexMetadata) -> Void
     let onPlay: (PlexMetadata) -> Void
-    var focusRequestID: UUID? = nil
-    var onMoveDownToCatalog: (() -> Void)? = nil
     var onHeroFocused: (() -> Void)? = nil
     var onHeroExited: (() -> Void)? = nil
 
@@ -71,26 +58,51 @@ struct HeroOverlayContent: View {
     }
 
     /// Must match the hero-section height computed in `PlexHomeView.contentView`
-    /// and `PlexLibraryView.contentView`.
+    /// and `PlexLibraryView.contentView` (`UIScreen.main.bounds.height - 180`).
     /// Set here explicitly so the layout doesn't depend on SwiftUI propagating
     /// the parent's `.frame(height:)` through the ZStack — which wasn't
     /// reaching the VStack reliably and caused the controls to overflow below
     /// the clipped hero bounds.
-    @MainActor
-    private static var heroHeight: CGFloat {
-        let screenHeight = UIApplication.shared.connectedScenes
-            .compactMap { ($0 as? UIWindowScene)?.screen.bounds.height }
-            .max() ?? 1080
-        return screenHeight - 200
-    }
+    private static let heroHeight: CGFloat = UIScreen.main.bounds.height - 200
 
     var body: some View {
         ZStack(alignment: .bottom) {
-            overlayContent
+            VStack(spacing: 0) {
+                // Push everything to the bottom of the hero.
+                Spacer(minLength: 0)
+
+                if let item = displayedItem {
+                    VStack(alignment: .leading, spacing: 28) {
+                        HeroSlideContent(
+                            item: item,
+                            serverURL: serverURL,
+                            authToken: authToken
+                        )
+                        .id(item.ratingKey ?? "idx-\(displayedIndex)")
+                        .transition(.opacity)
+
+                        HeroButtonRow(
+                            isResolvingPlay: isResolvingPlay,
+                            isWatched: isWatched(item),
+                            canAdvance: canAdvance,
+                            focusedButton: $focusedButton,
+                            onPlay: { handlePlay(item) },
+                            onToggleWatched: { handleToggleWatched(item) },
+                            onInfo: { onInfo(item) },
+                            onNext: { advance() }
+                        )
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.leading, 120)
+                }
+
+                // Reserve bottom space for dots so logo/buttons sit above them.
+                Spacer().frame(height: 120)
+            }
 
             // Paging dots — pinned to the bottom of the hero independently
             // of the logo/buttons column.
-            if showsPagingDots && canAdvance {
+            if canAdvance {
                 pagingDots
                     .padding(.horizontal, 14)
                     .padding(.vertical, 8)
@@ -128,96 +140,6 @@ struct HeroOverlayContent: View {
         .onChange(of: items.map(\.ratingKey)) { _, _ in
             if currentIndex >= items.count { currentIndex = 0 }
             if displayedIndex >= items.count { displayedIndex = 0 }
-        }
-        .onChange(of: focusRequestID) { _, newValue in
-            guard newValue != nil else { return }
-            Task { @MainActor in
-                try? await Task.sleep(for: .milliseconds(80))
-                guard !Task.isCancelled else { return }
-                if focusedButton == .play {
-                    focusedButton = nil
-                    await Task.yield()
-                }
-                focusedButton = .play
-            }
-        }
-    }
-
-    @ViewBuilder
-    private var overlayContent: some View {
-        switch layoutStyle {
-        case .bottomAnchored:
-            bottomAnchoredOverlay
-        case .topLeading:
-            topLeadingOverlay
-        }
-    }
-
-    private var bottomAnchoredOverlay: some View {
-        VStack(spacing: 0) {
-            Spacer(minLength: 0)
-
-            if let item = displayedItem {
-                heroColumn(for: item)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.leading, 120)
-            }
-
-            Spacer().frame(height: 120)
-        }
-    }
-
-    private var topLeadingOverlay: some View {
-        VStack(spacing: 0) {
-            if let item = displayedItem {
-                heroColumn(for: item)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.leading, topLeadingInsets.leading)
-                    .padding(.top, topLeadingInsets.top)
-                    .padding(.trailing, topLeadingInsets.trailing)
-            }
-
-            Spacer(minLength: 0)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-
-            Spacer().frame(height: topLeadingInsets.bottom)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-    }
-
-    private func heroColumn(for item: PlexMetadata) -> some View {
-        VStack(alignment: .leading, spacing: showsButtonRow ? 28 : 0) {
-            if showsButtonRow {
-                HeroSlideContent(
-                    item: item,
-                    serverURL: serverURL,
-                    authToken: authToken
-                )
-                .id(item.ratingKey ?? "idx-\(displayedIndex)")
-                .transition(.opacity)
-
-                HeroButtonRow(
-                    isResolvingPlay: isResolvingPlay,
-                    isWatched: isWatched(item),
-                    canAdvance: canAdvance,
-                    showsNextButton: showsAdvanceButton,
-                    focusedButton: $focusedButton,
-                    onPlay: { handlePlay(item) },
-                    onToggleWatched: { handleToggleWatched(item) },
-                    onInfo: { onInfo(item) },
-                    onNext: { advance() },
-                    onMoveDown: onMoveDownToCatalog
-                )
-            } else {
-                HeroSlideContent(
-                    item: item,
-                    serverURL: serverURL,
-                    authToken: authToken
-                )
-                .id(item.ratingKey ?? "idx-\(displayedIndex)")
-                .transition(.opacity)
-                .padding(.vertical, 6)
-            }
         }
     }
 

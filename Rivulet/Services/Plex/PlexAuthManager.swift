@@ -205,6 +205,8 @@ class PlexAuthManager: ObservableObject {
                     KeychainHelper.set(token, forKey: keychainServerTokenKey)
                 }
 
+                let isShared = server.owned == false
+
                 isConnected = true
                 connectionError = nil
                 state = .authenticated
@@ -247,6 +249,7 @@ class PlexAuthManager: ObservableObject {
 
         // For shared servers (not owned by user), use server-specific accessToken
         let tokenToUse = server.accessToken
+        let isShared = server.owned == false
         let httpsRequired = server.httpsRequired == true
 
         // If server requires HTTPS and we have a machineIdentifier, try plex.direct FIRST

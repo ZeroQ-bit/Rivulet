@@ -28,8 +28,6 @@ struct PlexDetailView: View {
     var onPreviewExitRequested: (() -> Void)? = nil
     var onDetailsBecameVisible: (() -> Void)? = nil
     var enableDetailDataLoading: Bool = true
-    var assetServerURL: String? = nil
-    var assetAuthToken: String? = nil
     /// When hosted inside `PreviewOverlayHost`, reflects whether the entry /
     /// paging animation has fully settled. The detail data cascade is deferred
     /// until this flips to `true` so the main thread stays quiet while the
@@ -95,6 +93,21 @@ struct PlexDetailView: View {
     @State private var trailerMetadata: PlexMetadata?  // Full metadata for trailer playback
     @State private var playFromBeginning = false  // For "Play from Beginning" button
     @State private var isLoadingShufflePlay = false
+
+    // Pre-play track picker state. Selections are per-detail-page-visit
+    // and are passed to the player on Play; we don't touch the saved
+    // language preference managers, so future plays still default to
+    // remembered language defaults until the user explicitly picks again.
+    @State private var preplayAudioTrackId: Int? = nil
+    @State private var preplaySubtitleSelection: UniversalPlayerViewModel.InitialSubtitleSelection = .auto
+    @State private var showAudioTrackPicker = false
+    @State private var showSubtitleTrackPicker = false
+
+    /// In-flight serialised chain of pre-play picker writes (Plex stream
+    /// selection PUT + fullMetadata refresh). presentPlayer awaits this
+    /// before building the player VM so the HLS URL is constructed
+    /// against Plex's updated server-side state.
+    @State private var pendingPreplayWrite: Task<Void, Never>? = nil
     @State private var shuffledEpisodeQueue: [PlexMetadata] = []
     @StateObject private var heroBackdrop = HeroBackdropCoordinator()
     @State private var belowFoldLoaded = false  // Flipped true after the full cascade finishes
@@ -105,7 +118,6 @@ struct PlexDetailView: View {
     @State private var retainedLogoURL: URL?
     @State private var hasDisplayedHeroLogoImage = false
     @State private var parentShowLogoPath: String?
-    @AppStorage("showCastAndCrew") private var showCastAndCrew = true
 
     // Navigation state for episode parent navigation
     @State private var navigateToSeason: PlexMetadata?
@@ -124,7 +136,8 @@ struct PlexDetailView: View {
     private var isPreviewCarousel: Bool { presentationMode == .previewCarousel }
     private var isExpandedPreviewFlow: Bool { onPreviewExitRequested != nil && presentationMode == .expandedDetail }
     private var shouldLoadDetailData: Bool {
-        enableDetailDataLoading
+        if !isPreviewCarousel { return true }
+        return enableDetailDataLoading
     }
     /// Cascade work is gated on both `shouldLoadDetailData` (which card is
     /// current) and `previewAnimationSettled` (no animation in flight). Both
@@ -145,12 +158,6 @@ struct PlexDetailView: View {
     private var effectiveHeroLogoURL: URL? {
         heroBackdrop.session.logoURL ?? retainedLogoURL
     }
-    private var resolvedAssetServerURL: String? {
-        assetServerURL ?? authManager.selectedServerURL
-    }
-    private var resolvedAssetAuthToken: String? {
-        assetAuthToken ?? authManager.selectedServerToken ?? authManager.authToken
-    }
     private var heroBackdropScale: CGFloat {
         (isPreviewCarousel || isExpandedPreviewFlow) ? 1.14 : 1.08
     }
@@ -161,11 +168,11 @@ struct PlexDetailView: View {
     }
 
     private var heroLogoMaxWidth: CGFloat {
-        (isPreviewCarousel || isExpandedPreviewFlow) ? 520 : 460
+        (isPreviewCarousel || isExpandedPreviewFlow) ? 620 : 520
     }
 
     private var heroLogoSlotHeight: CGFloat {
-        (isPreviewCarousel || isExpandedPreviewFlow) ? 104 : 96
+        (isPreviewCarousel || isExpandedPreviewFlow) ? 138 : 120
     }
 
     private var heroActionRowTopPadding: CGFloat {
@@ -382,11 +389,14 @@ struct PlexDetailView: View {
                             VStack(alignment: .leading, spacing: 0) {
                                 VStack(alignment: .leading, spacing: 32) {
                                     // TV Show specific: Seasons and Episodes
-                                    if currentItem.type == "show" || currentItem.type == "episode" || currentItem.type == "season" {
+                                    if currentItem.type == "show" || currentItem.type == "episode" {
                                         seasonSection
                                     }
 
                                     // Season specific: Episodes list (no season picker needed)
+                                    if currentItem.type == "season" {
+                                        episodeSection
+                                    }
 
                                     // Album specific: Tracks
                                     if currentItem.type == "album" {
@@ -435,7 +445,7 @@ struct PlexDetailView: View {
                                 }
 
                                 // Cast & Crew Section
-                                if showCastAndCrew, let metadata = fullMetadata,
+                                if let metadata = fullMetadata,
                                    (!metadata.cast.isEmpty || !(metadata.Director?.isEmpty ?? true)) {
                                     CastCrewRow(
                                         cast: metadata.cast,
@@ -630,6 +640,39 @@ struct PlexDetailView: View {
                 thumbURL: artistThumbURL
             )
         }
+        .sheet(isPresented: $showAudioTrackPicker) {
+            TrackSelectionSheet(
+                trackType: .audio,
+                tracks: preplayAudioTracks,
+                selectedTrackId: preplayAudioTrackId ?? currentSelectedAudioStreamId,
+                onSelect: { id in
+                    preplayAudioTrackId = id
+                    if let id { persistAudioStreamSelection(id) }
+                }
+            )
+        }
+        .sheet(isPresented: $showSubtitleTrackPicker) {
+            TrackSelectionSheet(
+                trackType: .subtitles,
+                tracks: preplaySubtitleTracks,
+                selectedTrackId: effectiveSubtitlePickerSelection,
+                onSelect: { id in
+                    preplaySubtitleSelection = id.map { .track(id: $0) } ?? .off
+                    persistSubtitleStreamSelection(id)
+                }
+            )
+        }
+        .onChange(of: currentItem.ratingKey) { _, _ in
+            // Reset pre-play picker state when navigating to a different
+            // item within this detail view (e.g., via collection / recs).
+            preplayAudioTrackId = nil
+            preplaySubtitleSelection = .auto
+            // Cancel any in-flight write for the previous item so
+            // presentPlayer() doesn't await a task that refreshes
+            // metadata for the now-defunct item.
+            pendingPreplayWrite?.cancel()
+            pendingPreplayWrite = nil
+        }
         .onChange(of: showPlayer) { _, isShowing in
             // Clear selected episode/track and playFromBeginning when player closes
             if !isShowing {
@@ -762,8 +805,7 @@ struct PlexDetailView: View {
     private var heroMetadataOverlay: some View {
         GeometryReader { metaGeo in
             VStack(alignment: .leading, spacing: 10) {
-                Spacer(minLength: 0)
-                    .frame(height: 120)
+                Spacer()
 
                 // Text content — fixed height so buttons/peek distance
                 // stays constant regardless of description length, logo vs title, etc.
@@ -777,7 +819,7 @@ struct PlexDetailView: View {
                                 case .success(let image):
                                     image
                                         .resizable()
-                                        .scaledToFit()
+                                        .aspectRatio(contentMode: .fit)
                                         // Shadow is redundant in carousel mode — the bottom
                                         // vignette at lines ~305-321 already hits 95% black
                                         // opacity where the logo sits, so the drop shadow is
@@ -809,7 +851,8 @@ struct PlexDetailView: View {
                             heroTitleText
                         }
                     }
-                    .frame(width: heroLogoMaxWidth, height: heroLogoSlotHeight, alignment: .leading)
+                    .frame(maxWidth: heroLogoMaxWidth, alignment: .leading)
+                    .frame(height: heroLogoSlotHeight, alignment: .bottomLeading)
 
                     // Genre + content rating row
                     heroMetadataRow
@@ -821,7 +864,7 @@ struct PlexDetailView: View {
                                 let title = currentItem.title ?? ""
                                 let header = epString + (title.isEmpty ? "" : " · \(title)")
                                 let desc = fullMetadata?.summary ?? currentItem.summary ?? ""
-                                Text("\(Text(header).bold())\(desc.isEmpty ? Text("") : Text(":  \(desc)"))")
+                                (Text(header).bold() + Text(desc.isEmpty ? "" : ":  \(desc)"))
                                     .font(.caption)
                                     .foregroundStyle(.white)
                                     .lineLimit(3)
@@ -865,7 +908,7 @@ struct PlexDetailView: View {
                             .foregroundStyle(.white.opacity(0.7))
                     }
                 }
-                .frame(height: 360, alignment: .bottomLeading)
+                .frame(height: 420, alignment: .bottomLeading)
                 .frame(maxWidth: 760, alignment: .leading)
                 .opacity(1 - scrollProgress)
 
@@ -885,7 +928,7 @@ struct PlexDetailView: View {
                     Spacer(minLength: 40)
 
                     // Starring (comma-separated, right-aligned)
-                    if showCastAndCrew, let roles = (fullMetadata ?? currentItem).Role, !roles.isEmpty {
+                    if let roles = (fullMetadata ?? currentItem).Role, !roles.isEmpty {
                         let topCast = roles.prefix(3).compactMap { $0.tag }
                         if !topCast.isEmpty {
                             Text("Starring \(topCast.joined(separator: ", "))")
@@ -917,7 +960,7 @@ struct PlexDetailView: View {
                     case .success(let image):
                         image
                             .resizable()
-                            .scaledToFit()
+                            .aspectRatio(contentMode: .fit)
                             .onAppear {
                                 if !hasDisplayedHeroLogoImage {
                                     hasDisplayedHeroLogoImage = true
@@ -937,7 +980,7 @@ struct PlexDetailView: View {
                             .foregroundStyle(.primary)
                     }
                 }
-                .frame(width: 520, height: 104)
+                .frame(maxWidth: 680, maxHeight: 126)
             } else {
                 Text(heroBrandTitle)
                     .font(.system(size: 42, weight: .bold))
@@ -952,7 +995,7 @@ struct PlexDetailView: View {
 
     private var heroTitleText: some View {
         Text(heroBrandTitle)
-            .font(.system(size: 46, weight: .bold))
+            .font(.system(size: 52, weight: .bold))
             .foregroundStyle(.white)
             .shadow(color: .black.opacity(0.5), radius: 10, x: 0, y: 4)
     }
@@ -1323,8 +1366,131 @@ struct PlexDetailView: View {
                 .buttonStyle(AppStoreActionButtonStyle(isFocused: focusedActionButton == "trailer", cornerRadius: circleButtonSize / 2, isPrimary: false))
                 .focused($focusedActionButton, equals: "trailer")
             }
+
+            // Pre-play audio track picker — only for movies and episodes
+            // (single-video items where we know the streams ahead of play).
+            if showsPreplayTrackPickers, !preplayAudioTracks.isEmpty {
+                Button {
+                    showAudioTrackPicker = true
+                } label: {
+                    Image(systemName: "speaker.wave.3")
+                        .font(.system(size: 24, weight: .semibold))
+                        .frame(width: circleButtonSize, height: circleButtonSize)
+                }
+                .buttonStyle(AppStoreActionButtonStyle(isFocused: focusedActionButton == "audioTrack", cornerRadius: circleButtonSize / 2, isPrimary: false))
+                .focused($focusedActionButton, equals: "audioTrack")
+            }
+
+            // Pre-play subtitle track picker — hidden when there are no subtitle streams.
+            if showsPreplayTrackPickers, !preplaySubtitleTracks.isEmpty {
+                Button {
+                    showSubtitleTrackPicker = true
+                } label: {
+                    Image(systemName: "captions.bubble")
+                        .font(.system(size: 24, weight: .semibold))
+                        .frame(width: circleButtonSize, height: circleButtonSize)
+                }
+                .buttonStyle(AppStoreActionButtonStyle(isFocused: focusedActionButton == "subtitleTrack", cornerRadius: circleButtonSize / 2, isPrimary: false))
+                .focused($focusedActionButton, equals: "subtitleTrack")
+            }
         }
         .disabled(!allowActionRowInteraction)
+    }
+
+    // MARK: - Pre-play Track Picker Helpers
+
+    /// Whether the pre-play picker buttons make sense for the current
+    /// item type. Show / season / artist / album / track detail pages
+    /// don't have a single, known track list at this level.
+    private var showsPreplayTrackPickers: Bool {
+        switch currentItem.type {
+        case "movie", "episode": return true
+        default: return false
+        }
+    }
+
+    /// Streams come from `fullMetadata` once it's loaded; before that,
+    /// the pickers stay hidden because their counts are zero.
+    private var preplayStreams: [PlexStream] {
+        (fullMetadata ?? currentItem).Media?.first?.Part?.first?.Stream ?? []
+    }
+
+    private var preplayAudioTracks: [MediaTrack] {
+        preplayStreams.filter { $0.isAudio }.map { MediaTrack(from: $0) }
+    }
+
+    private var preplaySubtitleTracks: [MediaTrack] {
+        preplayStreams.filter { $0.isSubtitle }.map { MediaTrack(from: $0) }
+    }
+
+    /// Audio stream Plex has marked `selected` for the current user.
+    /// Reflects whatever the user previously chose (in any client) or
+    /// Plex's server-side default; what the player would pick today.
+    private var currentSelectedAudioStreamId: Int? {
+        preplayStreams.first(where: { $0.isAudio && $0.selected == true })?.id
+    }
+
+    /// Subtitle stream Plex has marked `selected` for the current user.
+    /// `nil` means subtitles are off server-side.
+    private var currentSelectedSubtitleStreamId: Int? {
+        preplayStreams.first(where: { $0.isSubtitle && $0.selected == true })?.id
+    }
+
+    /// What to highlight in the subtitle picker on open. Honors the
+    /// user's local preplay choice first, then falls back to the
+    /// server-side selection so reopening the picker mid-visit shows
+    /// the current state rather than always defaulting to "Off".
+    private var effectiveSubtitlePickerSelection: Int? {
+        switch preplaySubtitleSelection {
+        case .track(let id): return id
+        case .off: return nil
+        case .auto: return currentSelectedSubtitleStreamId
+        }
+    }
+
+    /// PUT the chosen audio stream to Plex so it persists per-user-per-item
+    /// across plays from any client. Refresh `fullMetadata` afterward so
+    /// the local view of `selected: true` matches the new server state.
+    /// Chained off any prior in-flight write so concurrent audio + subtitle
+    /// picks serialise rather than racing each other (or the Play tap).
+    private func persistAudioStreamSelection(_ streamId: Int) {
+        guard let serverURL = authManager.selectedServerURL,
+              let authToken = authManager.selectedServerToken,
+              let partId = (fullMetadata ?? currentItem).Media?.first?.Part?.first?.id else {
+            return
+        }
+        let previous = pendingPreplayWrite
+        pendingPreplayWrite = Task {
+            if let previous { _ = await previous.value }
+            await networkManager.setSelectedAudioStream(
+                serverURL: serverURL,
+                authToken: authToken,
+                partId: partId,
+                audioStreamID: streamId
+            )
+            await loadFullMetadata()
+        }
+    }
+
+    /// PUT the chosen subtitle stream to Plex (id `0` disables subs).
+    /// Refresh `fullMetadata` afterward. Same chained-Task pattern as audio.
+    private func persistSubtitleStreamSelection(_ streamId: Int?) {
+        guard let serverURL = authManager.selectedServerURL,
+              let authToken = authManager.selectedServerToken,
+              let partId = (fullMetadata ?? currentItem).Media?.first?.Part?.first?.id else {
+            return
+        }
+        let previous = pendingPreplayWrite
+        pendingPreplayWrite = Task {
+            if let previous { _ = await previous.value }
+            await networkManager.setSelectedSubtitleStream(
+                serverURL: serverURL,
+                authToken: authToken,
+                partId: partId,
+                subtitleStreamID: streamId ?? 0
+            )
+            await loadFullMetadata()
+        }
     }
 
     /// Play button label with inline progress bar + time remaining (Apple TV+ style)
@@ -1585,6 +1751,16 @@ struct PlexDetailView: View {
     private func presentPlayer() {
         // Get images and metadata, then present player
         Task {
+            // Wait for any in-flight pre-play picker writes to land first,
+            // so the player is built against Plex's updated server-side
+            // stream selection (avoids a race where the HLS URL is built
+            // with stale audio / subtitle ids). Awaiting an already-finished
+            // Task returns immediately, so leaving pendingPreplayWrite set
+            // after it completes is harmless.
+            if let pending = pendingPreplayWrite {
+                _ = await pending.value
+            }
+
             // Determine which item to play and fetch full metadata if needed (for DV/HDR detection)
             let playItem: PlexMetadata
             if let episode = selectedEpisode {
@@ -1650,6 +1826,11 @@ struct PlexDetailView: View {
                 let queue = shuffledEpisodeQueue
                 shuffledEpisodeQueue = []
 
+                // Forward pre-play picker selections only when the picker
+                // applies to the actual item being played. Show/season Play
+                // resolves to a child episode whose stream ids may differ;
+                // playFromBeginning paths reuse the same metadata so are fine.
+                let useTrackOverrides = (selectedEpisode == nil && selectedTrack == nil)
                 let viewModel = UniversalPlayerViewModel(
                     metadata: playItem,
                     serverURL: authManager.selectedServerURL ?? "",
@@ -1657,10 +1838,12 @@ struct PlexDetailView: View {
                     startOffset: resumeOffset != nil && resumeOffset! > 0 ? resumeOffset : nil,
                     shuffledQueue: queue,
                     loadingArtImage: artImage,
-                    loadingThumbImage: thumbImage
+                    loadingThumbImage: thumbImage,
+                    initialAudioTrackId: useTrackOverrides ? preplayAudioTrackId : nil,
+                    initialSubtitleSelection: useTrackOverrides ? preplaySubtitleSelection : .auto
                 )
 
-                let useApplePlayer = PlaybackPreferences.useApplePlayer
+                let useApplePlayer = UserDefaults.standard.bool(forKey: "useApplePlayer")
                 let playerVC: UIViewController
                 if useApplePlayer {
                     let nativePlayer = NativePlayerViewController(viewModel: viewModel)
@@ -1786,12 +1969,10 @@ struct PlexDetailView: View {
         switch currentItem.type {
         case "movie":
             // Collection + recommendations are independent of each other
-            let collection = fullMetadata?.Collection?.first
-            let sectionId = fullMetadata?.librarySectionID
             async let collectionTask: Void = {
-                if let collection,
+                if let collection = fullMetadata?.Collection?.first,
                    let collectionId = collection.idString,
-                   let sectionId {
+                   let sectionId = fullMetadata?.librarySectionID {
                     let name = (collection.tag ?? "Collection") + " Collection"
                     await loadCollectionItems(sectionId: String(sectionId), collectionId: collectionId, name: name)
                 }
@@ -1808,7 +1989,7 @@ struct PlexDetailView: View {
 
         case "season":
             async let seasonsTask: Void = loadSeasonsForCurrentSeason()
-            async let episodesTask: Void = loadAllEpisodes()
+            async let episodesTask: Void = loadEpisodesForSeason()
             async let nextUpTask: Void = loadNextUpEpisode()
             _ = await (seasonsTask, episodesTask, nextUpTask)
 
@@ -1977,8 +2158,8 @@ struct PlexDetailView: View {
     }
 
     private func currentHeroBackdropRequest() -> HeroBackdropRequest? {
-        guard let serverURL = resolvedAssetServerURL,
-              let token = resolvedAssetAuthToken else { return nil }
+        guard let serverURL = authManager.selectedServerURL,
+              let token = authManager.selectedServerToken else { return nil }
 
         // Prefer full metadata (carries the Image array) but fall back to the
         // hub item so we still get backdrop/thumb while the network call is in
@@ -1992,8 +2173,8 @@ struct PlexDetailView: View {
     }
 
     private func playerHeroBackdropRequest(for metadata: PlexMetadata) -> HeroBackdropRequest? {
-        guard let serverURL = resolvedAssetServerURL,
-              let token = resolvedAssetAuthToken else { return nil }
+        guard let serverURL = authManager.selectedServerURL,
+              let token = authManager.selectedServerToken else { return nil }
 
         let backdropSource = (metadata.type == "episode" && selectedEpisode != nil) ? currentItem : metadata
         let baseRequest = backdropSource.heroBackdropRequest(
@@ -2002,11 +2183,8 @@ struct PlexDetailView: View {
             logoPathOverride: parentShowLogoPath
         )
 
-        let thumbURL = PlexMetadata.resolvedImageURL(
-            from: metadata.thumb ?? metadata.bestThumb,
-            serverURL: serverURL,
-            authToken: token
-        )
+        let thumbPath = metadata.thumb ?? metadata.bestThumb
+        let thumbURL = thumbPath.flatMap { URL(string: "\(serverURL)\($0)?X-Plex-Token=\(token)") }
 
         return HeroBackdropRequest(
             cacheKey: metadata.ratingKey ?? baseRequest.cacheKey,

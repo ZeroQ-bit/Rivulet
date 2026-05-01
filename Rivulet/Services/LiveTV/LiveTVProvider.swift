@@ -35,7 +35,7 @@ enum LiveTVSourceType: String, Codable, CaseIterable, Sendable {
 // MARK: - Unified Channel
 
 /// A unified channel representation that works across all Live TV sources
-nonisolated struct UnifiedChannel: Identifiable, Hashable, Sendable {
+struct UnifiedChannel: Identifiable, Hashable, Sendable {
     let id: String
     let sourceType: LiveTVSourceType
     let sourceId: String
@@ -83,7 +83,7 @@ nonisolated struct UnifiedChannel: Identifiable, Hashable, Sendable {
 // MARK: - Unified Program (EPG)
 
 /// A unified EPG program representation
-nonisolated struct UnifiedProgram: Identifiable, Hashable, Sendable {
+struct UnifiedProgram: Identifiable, Hashable, Sendable {
     let id: String
     let channelId: String
     let title: String

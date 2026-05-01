@@ -144,17 +144,9 @@ class PlexDataStore: ObservableObject {
         !visibleMusicLibraries.isEmpty
     }
 
-    /// Video and music libraries in the user's preferred order, regardless of
-    /// sidebar visibility. Home visibility is managed separately.
-    var homeEligibleMediaLibraries: [PlexLibrary] {
-        librarySettings.sortLibraries(
-            libraries.filter { $0.isVideoLibrary || $0.isMusicLibrary }
-        )
-    }
-
     /// Video and music libraries that should appear on the Home screen
     var librariesForHomeScreen: [PlexLibrary] {
-        homeEligibleMediaLibraries.filter { librarySettings.isLibraryShownOnHome($0.key) }
+        visibleMediaLibraries.filter { librarySettings.isLibraryShownOnHome($0.key) }
     }
 
     // Track if initial load has been attempted
@@ -189,7 +181,7 @@ class PlexDataStore: ObservableObject {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            MainActor.assumeIsolated {
+            Task { @MainActor in
                 self?.isInForeground = true
                 self?.startPollingIfNeeded()
             }
@@ -200,7 +192,7 @@ class PlexDataStore: ObservableObject {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            MainActor.assumeIsolated {
+            Task { @MainActor in
                 self?.isInForeground = false
                 self?.stopPolling()
             }
@@ -212,7 +204,7 @@ class PlexDataStore: ObservableObject {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            MainActor.assumeIsolated {
+            Task { @MainActor in
                 self?.isPlaybackActive = true
                 self?.stopPolling()
             }
@@ -223,7 +215,7 @@ class PlexDataStore: ObservableObject {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            MainActor.assumeIsolated {
+            Task { @MainActor in
                 self?.isPlaybackActive = false
                 self?.startPollingIfNeeded()
             }
@@ -531,7 +523,7 @@ class PlexDataStore: ObservableObject {
                         }
                     }
 
-                    for await (key, _, hubs) in group {
+                    for await (key, title, hubs) in group {
                         if let hubs {
                             libraryHubs[key] = hubs
                             recordFetch(for: "libraryHubs:\(key)")
@@ -563,7 +555,7 @@ class PlexDataStore: ObservableObject {
                         }
                     }
 
-                    for await (key, _, hubs) in group {
+                    for await (key, title, hubs) in group {
                         if let hubs {
                             libraryHubs[key] = hubs
                             recordFetch(for: "libraryHubs:\(key)")

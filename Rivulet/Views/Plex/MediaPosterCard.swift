@@ -14,22 +14,9 @@ import SwiftUI
 /// Hover effect is applied directly to the poster image inside MediaPosterCard.
 struct CardButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
-        CardButtonLabel(configuration: configuration)
-    }
-}
-
-private struct CardButtonLabel: View {
-    let configuration: ButtonStyle.Configuration
-
-    @Environment(\.isFocused) private var isFocused
-
-    var body: some View {
         configuration.label
-            .scaleEffect(configuration.isPressed ? 0.97 : (isFocused ? 1.035 : 1.0))
+            .scaleEffect(configuration.isPressed ? 0.97 : 1.0)
             .brightness(configuration.isPressed ? -0.05 : 0)
-            .shadow(color: .white.opacity(isFocused ? 0.10 : 0), radius: isFocused ? 18 : 0, y: 8)
-            .shadow(color: .black.opacity(isFocused ? 0.30 : 0.16), radius: isFocused ? 24 : 8, y: isFocused ? 14 : 6)
-            .animation(.spring(response: 0.28, dampingFraction: 0.78), value: isFocused)
             .animation(.easeInOut(duration: 0.15), value: configuration.isPressed)
     }
 }
@@ -76,7 +63,6 @@ struct MediaPosterCard: View, Equatable {
     let authToken: String
 
     @Environment(\.uiScale) private var scale
-    @Environment(\.isFocused) private var isFocused
 
     // Equatable: only re-render if the item's key data changes
     // Note: viewOffset excluded - it changes during playback and would cause excessive re-renders
@@ -98,36 +84,17 @@ struct MediaPosterCard: View, Equatable {
     }
 
     var body: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                .fill(Color.black.opacity(0.94))
-
-            posterImage
-
-            LinearGradient(
-                colors: [
-                    .white.opacity(isFocused ? 0.06 : 0.03),
-                    .clear,
-                    .black.opacity(0.08)
-                ],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-        }
-        .frame(width: posterWidth, height: posterHeight)
-        .overlay(alignment: .topTrailing) {
-            unwatchedBadge
-        }
-        .overlay {
-            progressBarOverlay
-        }
-        .overlay {
-            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                .strokeBorder(.white.opacity(isFocused ? 0.22 : 0.06), lineWidth: isFocused ? 1.5 : 1)
-        }
-        .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
-        .shadow(color: .black.opacity(isFocused ? 0.30 : 0.18), radius: isFocused ? 18 : 10, x: 0, y: isFocused ? 14 : 8)
-        .animation(.spring(response: 0.28, dampingFraction: 0.78), value: isFocused)
+        posterImage
+            .frame(width: posterWidth, height: posterHeight)
+            .overlay(alignment: .topTrailing) {
+                unwatchedBadge
+            }
+            .overlay {
+                progressBarOverlay
+            }
+            .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+            .hoverEffect(.highlight)
+            .shadow(color: .black.opacity(0.35), radius: 8, x: 0, y: 6)
     }
 
     // MARK: - Poster Image
@@ -267,22 +234,21 @@ struct MediaPosterCard: View, Equatable {
     // MARK: - Computed Properties
 
     private var posterURL: URL? {
-        let imagePath: String?
-        let isMusicItem = item.type == "album" || item.type == "artist" || item.type == "track"
-
-        if isMusicItem {
-            imagePath = item.thumb ?? item.parentThumb
-        } else if item.type == "episode" {
-            imagePath = item.art ?? item.grandparentArt ?? item.grandparentThumb ?? item.parentThumb ?? item.thumb
+        // For episodes, prefer the series poster (grandparentThumb) over episode thumbnail
+        let thumb: String?
+        if item.type == "episode" {
+            thumb = item.grandparentThumb ?? item.parentThumb ?? item.thumb
         } else {
-            imagePath = item.art ?? item.thumb
+            thumb = item.thumb
         }
 
-        return PlexMetadata.resolvedImageURL(
-            from: imagePath,
-            serverURL: serverURL,
-            authToken: authToken
-        )
+        guard let thumbPath = thumb else { return nil }
+        var urlString = "\(serverURL)\(thumbPath)"
+        if !urlString.contains("X-Plex-Token") {
+            urlString += urlString.contains("?") ? "&" : "?"
+            urlString += "X-Plex-Token=\(authToken)"
+        }
+        return URL(string: urlString)
     }
 
     private var iconForType: String {

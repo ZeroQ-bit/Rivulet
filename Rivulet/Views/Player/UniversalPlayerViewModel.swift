@@ -16,8 +16,6 @@ import AVKit
 
 /// Stores user's subtitle preference for auto-selection
 struct SubtitlePreference: Codable, Equatable {
-    static let maxPreferredLanguages = 1
-
     /// Whether subtitles are enabled
     var enabled: Bool
     /// Preferred language code (e.g., "en", "es")
@@ -28,12 +26,6 @@ struct SubtitlePreference: Codable, Equatable {
     var preferHearingImpaired: Bool
 
     static let off = SubtitlePreference(enabled: false, languageCode: nil, codec: nil, preferHearingImpaired: false)
-
-    /// Compatibility for the settings UI; upstream playback still uses a single primary language.
-    var preferredLanguageCodes: [String] {
-        get { languageCode.map { [$0] } ?? [] }
-        set { languageCode = newValue.first }
-    }
 
     init(enabled: Bool, languageCode: String?, codec: String?, preferHearingImpaired: Bool) {
         self.enabled = enabled
@@ -514,6 +506,15 @@ final class UniversalPlayerViewModel: ObservableObject {
 
     // MARK: - Initialization
 
+    /// Pre-play subtitle choice from the item-detail picker. Distinguishes
+    /// "user hasn't picked yet" from "user explicitly turned subs off"
+    /// from "user picked this specific subtitle track".
+    enum InitialSubtitleSelection {
+        case auto              // No preselection — fall through to SubtitlePreferenceManager.
+        case off               // User explicitly chose Off in the pre-play picker.
+        case track(id: Int)    // User picked a specific subtitle track.
+    }
+
     init(
         metadata: PlexMetadata,
         serverURL: String,
@@ -521,7 +522,9 @@ final class UniversalPlayerViewModel: ObservableObject {
         startOffset: TimeInterval? = nil,
         shuffledQueue: [PlexMetadata] = [],
         loadingArtImage: UIImage? = nil,
-        loadingThumbImage: UIImage? = nil
+        loadingThumbImage: UIImage? = nil,
+        initialAudioTrackId: Int? = nil,
+        initialSubtitleSelection: InitialSubtitleSelection = .auto
     ) {
         self.metadata = metadata
         self.serverURL = serverURL
@@ -530,6 +533,8 @@ final class UniversalPlayerViewModel: ObservableObject {
         self.shuffledQueue = shuffledQueue
         self.loadingArtImage = loadingArtImage
         self.loadingThumbImage = loadingThumbImage
+        self.initialAudioTrackId = initialAudioTrackId
+        self.initialSubtitleSelection = initialSubtitleSelection
 
         let isAirPlayRoute = Self.isAirPlayOutput()
         let hasDolbyVision = metadata.hasDolbyVision
@@ -546,14 +551,13 @@ final class UniversalPlayerViewModel: ObservableObject {
         let requiresDVProfileConversion = hasDolbyVision &&
             ((dvProfile == 7) || (dvProfile == 8 && doviBLCompatID == 6))
 
-        let useApplePlayer = PlaybackPreferences.useApplePlayer
-        print("[PlayerSelect] settings: useApplePlayer=\(useApplePlayer) source=\(PlaybackPreferences.useApplePlayerSource) " +
+        print("[PlayerSelect] settings: rivulet=true avDV=false avAll=false " +
               "content: DV=\(hasDolbyVision) profile=\(dvProfile ?? -1) blCompat=\(doviBLCompatID ?? -1) " +
               "container=\(container) airPlay=\(isAirPlayRoute) compatDV=\(!requiresDVProfileConversion)")
 
         self.requiresProfileConversion = requiresDVProfileConversion
 
-        print("[PlayerSelect] → \(useApplePlayer ? "AVPlayer" : "RivuletPlayer") (primary)")
+        print("[PlayerSelect] → AVPlayer (primary)")
 
         setupPlayer()
 
@@ -648,7 +652,7 @@ final class UniversalPlayerViewModel: ObservableObject {
             await fetchFullMetadataIfNeeded()
         }
 
-        let useApplePlayer = PlaybackPreferences.useApplePlayer
+        let useApplePlayer = UserDefaults.standard.bool(forKey: "useApplePlayer")
         let routingContext = ContentRoutingContext(
             metadata: metadata,
             serverURL: URL(string: serverURL)!,
@@ -1056,8 +1060,7 @@ final class UniversalPlayerViewModel: ObservableObject {
         // Fetch season/show poster for Now Playing artwork (episodes)
         await fetchSeasonPosterIfNeeded()
 
-        let useApplePlayer = PlaybackPreferences.useApplePlayer
-        print("[PlayerSelect] useApplePlayer=\(useApplePlayer) source=\(PlaybackPreferences.useApplePlayerSource)")
+        let useApplePlayer = UserDefaults.standard.bool(forKey: "useApplePlayer")
 
         if !useApplePlayer {
             await startRivuletPlayback()
@@ -1482,9 +1485,10 @@ final class UniversalPlayerViewModel: ObservableObject {
             await logHLSManifest(url: hlsURL, headers: streamHeaders)
 
             try loadAVPlayer(url: hlsURL, headers: streamHeaders)
-            // Plex HLS URLs are built with the resume offset already applied.
-            // Seeking again asks AVPlayer to jump within the offset session and
-            // can leave it waiting for segments Plex has not generated.
+
+            if let startTime, startTime > 0 {
+                await player?.seek(to: CMTime(seconds: startTime, preferredTimescale: 600))
+            }
         }
     }
 
@@ -1941,7 +1945,9 @@ final class UniversalPlayerViewModel: ObservableObject {
         }
 
         try loadAVPlayer(url: fallback.url, headers: fallback.headers)
-        // The fallback HLS URL already carries `offset=resumeTime`.
+        if resumeTime > 0 {
+            await player?.seek(to: CMTime(seconds: resumeTime, preferredTimescale: 600))
+        }
     }
 
     // MARK: - HLS Transcode Preflight
@@ -2447,10 +2453,13 @@ final class UniversalPlayerViewModel: ObservableObject {
     // MARK: - Track Selection
 
     func selectAudioTrack(id: Int) {
-        // TODO: AVPlayer audio track selection via AVMediaSelectionGroup
-        currentAudioTrackId = id
+        // Delegate the actual pipeline switch to the auto-selection helper,
+        // then persist the user's explicit choice as the saved preference so
+        // future playback sessions restore it.
+        // TODO: AVPlayer path still needs AVMediaSelectionGroup wiring; this
+        // fix only covers the RivuletPlayer pipeline (custom player).
+        selectAudioTrackWithoutSaving(id: id)
 
-        // Save preference
         if let track = audioTracks.first(where: { $0.id == id }) {
             AudioPreferenceManager.current = AudioPreference(from: track)
         }
@@ -2547,10 +2556,13 @@ final class UniversalPlayerViewModel: ObservableObject {
     }
 
     func selectSubtitleTrack(id: Int?) {
-        // TODO: AVPlayer subtitle selection via AVMediaSelectionGroup
-        currentSubtitleTrackId = id
+        // Delegate the actual pipeline switch to the auto-selection helper,
+        // then persist the user's explicit choice as the saved preference so
+        // future playback sessions restore it.
+        // TODO: AVPlayer path still needs AVMediaSelectionGroup wiring; this
+        // fix only covers the RivuletPlayer pipeline (custom player).
+        selectSubtitleTrackWithoutSaving(id: id)
 
-        // Save preference
         if let id = id, let track = subtitleTracks.first(where: { $0.id == id }) {
             SubtitlePreferenceManager.current = SubtitlePreference(from: track)
         } else {
@@ -2676,6 +2688,14 @@ final class UniversalPlayerViewModel: ObservableObject {
     private var hasAppliedSubtitlePreference = false
     private var hasAppliedAudioPreference = false
 
+    /// Pre-play track selections passed in from the item-detail picker.
+    /// Override the saved-preference auto-apply on first track population
+    /// — explicit user choice wins over remembered language preferences.
+    /// Cleared after consumption so subsequent re-applications fall back
+    /// to the preference managers.
+    private var initialAudioTrackId: Int?
+    private var initialSubtitleSelection: InitialSubtitleSelection = .auto
+
     private func updateTrackLists() {
         let previousSubtitleCount = subtitleTracks.count
         let previousAudioCount = audioTracks.count
@@ -2768,27 +2788,98 @@ final class UniversalPlayerViewModel: ObservableObject {
                 isDefault: stream.default ?? track.isDefault,
                 isForced: stream.forced ?? track.isForced,
                 isHearingImpaired: stream.hearingImpaired ?? track.isHearingImpaired,
+                extendedDisplayTitle: stream.extendedDisplayTitle ?? track.extendedDisplayTitle,
                 channels: stream.channels ?? track.channels,
                 subtitleKey: stream.key ?? track.subtitleKey
             )
         }
     }
 
-    /// Apply saved audio preference
+    /// Apply saved audio preference. Selection priority is:
+    ///  1. `initialAudioTrackId` from the pre-play picker (this session).
+    ///  2. Plex's per-item explicit selection (a `selected: true` stream
+    ///     that isn't also the file's `default: true` track — meaning the
+    ///     user picked something deliberately, in Plex Web / mobile / our
+    ///     own picker — that choice persists server-side and should win
+    ///     over a global language default).
+    ///  3. App-level `AudioPreferenceManager` language preference (which
+    ///     defaults to English even when nothing has been stored — drives
+    ///     the typical "auto-pick the highest-quality English stream"
+    ///     behavior for items the user has never deliberately picked for).
+    ///  4. Plex's default-flagged stream as a final fallback.
+    /// In every tier we issue `selectAudioTrackWithoutSaving` explicitly,
+    /// even when `currentAudioTrackId` already matches the desired id.
+    /// Reason: DirectPlay loaded the file's default-flagged audio track
+    /// and won't switch on its own, and Plex's HLS session is built from
+    /// server-state-at-session-start which doesn't always reflect the
+    /// persisted per-part selection — so an explicit switch is the only
+    /// reliable way to honor the user's actual choice. The cost is a
+    /// possibly-redundant HLS session rebuild at startup; correctness wins.
     private func applyAudioPreference() {
-        let preference = AudioPreferenceManager.current
-
-        // Find best matching track
-        if let match = AudioPreferenceManager.findBestMatch(in: audioTracks, preference: preference) {
-            if match.id != currentAudioTrackId {
-                selectAudioTrackWithoutSaving(id: match.id)
-            } else {
+        // 1. Pre-play picker (this session).
+        if let id = initialAudioTrackId {
+            initialAudioTrackId = nil
+            if audioTracks.contains(where: { $0.id == id }) {
+                selectAudioTrackWithoutSaving(id: id)
+                return
             }
+        }
+
+        // 2. Plex per-item explicit selection.
+        if let plexSelectedId = currentAudioTrackId,
+           let plexDefaultId = audioTracks.first(where: { $0.isDefault })?.id,
+           plexSelectedId != plexDefaultId,
+           audioTracks.contains(where: { $0.id == plexSelectedId }) {
+            selectAudioTrackWithoutSaving(id: plexSelectedId)
+            return
+        }
+
+        // 3. App-level language preference.
+        let preference = AudioPreferenceManager.current
+        if let match = AudioPreferenceManager.findBestMatch(in: audioTracks, preference: preference) {
+            selectAudioTrackWithoutSaving(id: match.id)
+            return
+        }
+
+        // 4. Plex default fallback.
+        if let id = currentAudioTrackId,
+           audioTracks.contains(where: { $0.id == id }) {
+            selectAudioTrackWithoutSaving(id: id)
         }
     }
 
     /// Apply saved subtitle preference
     private func applySubtitlePreference() {
+        // 1. Pre-play picker selection (this session). Off and a specific
+        //    track id are both explicit; auto means "no selection was
+        //    made, fall through". Consume and clear in either explicit
+        //    branch.
+        switch initialSubtitleSelection {
+        case .off:
+            initialSubtitleSelection = .auto
+            selectSubtitleTrackWithoutSaving(id: nil)
+            return
+        case .track(let id):
+            initialSubtitleSelection = .auto
+            if subtitleTracks.contains(where: { $0.id == id }) {
+                selectSubtitleTrackWithoutSaving(id: id)
+                return
+            }
+        case .auto:
+            break
+        }
+
+        // 2. Plex's per-item explicit selection. A `selected: true`
+        //    track that's neither the default nor the forced track is
+        //    one the user picked deliberately — honor it over the
+        //    app-level language preference.
+        if let plexSelectedSubId = currentSubtitleTrackId,
+           let track = subtitleTracks.first(where: { $0.id == plexSelectedSubId }),
+           !track.isDefault, !track.isForced {
+            selectSubtitleTrackWithoutSaving(id: plexSelectedSubId)
+            return
+        }
+
         // No explicit user preference yet: honor selected/default stream behavior.
         if !SubtitlePreferenceManager.hasStoredPreference {
             if currentSubtitleTrackId == nil,

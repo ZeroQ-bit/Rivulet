@@ -10,7 +10,7 @@ import Sentry
 
 // MARK: - Live TV Capabilities
 
-nonisolated struct PlexLiveTVCapabilities: Codable, Sendable {
+struct PlexLiveTVCapabilities: Codable, Sendable {
     let allowTuners: Bool
     let liveTVEnabled: Bool
     let hasDVR: Bool
@@ -24,16 +24,16 @@ nonisolated struct PlexLiveTVCapabilities: Codable, Sendable {
 
 // MARK: - Live TV Session/Provider
 
-nonisolated struct PlexLiveTVSessionContainer: Codable, Sendable {
+struct PlexLiveTVSessionContainer: Codable, Sendable {
     let MediaContainer: PlexLiveTVSessionMediaContainer
 }
 
-nonisolated struct PlexLiveTVSessionMediaContainer: Codable, Sendable {
+struct PlexLiveTVSessionMediaContainer: Codable, Sendable {
     let size: Int?
     let MediaSubscription: [PlexMediaSubscription]?
 }
 
-nonisolated struct PlexMediaSubscription: Codable, Sendable {
+struct PlexMediaSubscription: Codable, Sendable {
     let id: Int?
     let type: String?
     let flavor: String?
@@ -43,16 +43,16 @@ nonisolated struct PlexMediaSubscription: Codable, Sendable {
 
 // MARK: - Live TV Channels
 
-nonisolated struct PlexLiveTVChannelContainer: Codable, Sendable {
+struct PlexLiveTVChannelContainer: Codable, Sendable {
     let MediaContainer: PlexLiveTVChannelMediaContainer
 }
 
-nonisolated struct PlexLiveTVChannelMediaContainer: Codable, Sendable {
+struct PlexLiveTVChannelMediaContainer: Codable, Sendable {
     let size: Int?
     let Metadata: [PlexLiveTVChannel]?
 }
 
-nonisolated struct PlexLiveTVChannel: Codable, Identifiable, Sendable {
+struct PlexLiveTVChannel: Codable, Identifiable, Sendable {
     let ratingKey: String
     let key: String
     let guid: String?
@@ -90,16 +90,16 @@ nonisolated struct PlexLiveTVChannel: Codable, Identifiable, Sendable {
 
 // MARK: - Live TV Guide (EPG)
 
-nonisolated struct PlexLiveTVGuideContainer: Codable, Sendable {
+struct PlexLiveTVGuideContainer: Codable, Sendable {
     let MediaContainer: PlexLiveTVGuideMediaContainer
 }
 
-nonisolated struct PlexLiveTVGuideMediaContainer: Codable, Sendable {
+struct PlexLiveTVGuideMediaContainer: Codable, Sendable {
     let size: Int?
     let Metadata: [PlexLiveTVGuideChannel]?
 }
 
-nonisolated struct PlexLiveTVGuideChannel: Codable, Sendable {
+struct PlexLiveTVGuideChannel: Codable, Sendable {
     let ratingKey: String?
     let key: String?
     let guid: String?
@@ -110,7 +110,7 @@ nonisolated struct PlexLiveTVGuideChannel: Codable, Sendable {
     let Metadata: [PlexLiveTVProgram]?
 }
 
-nonisolated struct PlexLiveTVProgram: Codable, Identifiable, Sendable {
+struct PlexLiveTVProgram: Codable, Identifiable, Sendable {
     let ratingKey: String?
     let key: String?
     let guid: String?
@@ -162,22 +162,22 @@ nonisolated struct PlexLiveTVProgram: Codable, Identifiable, Sendable {
     }
 }
 
-nonisolated struct PlexGenreTag: Codable, Sendable {
+struct PlexGenreTag: Codable, Sendable {
     let tag: String
 }
 
 // MARK: - DVR Info
 
-nonisolated struct PlexDVRContainer: Codable, Sendable {
+struct PlexDVRContainer: Codable, Sendable {
     let MediaContainer: PlexDVRMediaContainer
 }
 
-nonisolated struct PlexDVRMediaContainer: Codable, Sendable {
+struct PlexDVRMediaContainer: Codable, Sendable {
     let size: Int?
     let Dvr: [PlexDVR]?
 }
 
-nonisolated struct PlexDVR: Codable, Sendable {
+struct PlexDVR: Codable, Sendable {
     let key: String?
     let uuid: String?
     let friendlyName: String?
@@ -190,7 +190,7 @@ nonisolated struct PlexDVR: Codable, Sendable {
     let Device: [PlexDVRDevice]?
 }
 
-nonisolated struct PlexDVRDevice: Sendable {
+struct PlexDVRDevice: Sendable {
     let key: String?
     let uuid: String?
     let uri: String?
@@ -221,7 +221,7 @@ extension PlexDVRDevice: Encodable {}
 
 // MARK: - Converters
 
-nonisolated extension PlexLiveTVChannel {
+extension PlexLiveTVChannel {
     /// Build a Plex HLS transcode URL for Live TV channels without an HDHomeRun stream URL.
     /// This is how official Plex clients stream from DVB tuners (e.g. TBS cards) — through
     /// the Plex server's universal transcode endpoint.
@@ -458,7 +458,7 @@ nonisolated extension PlexLiveTVChannel {
     }
 }
 
-nonisolated extension PlexLiveTVProgram {
+extension PlexLiveTVProgram {
     /// Convert to UnifiedProgram
     func toUnifiedProgram(unifiedChannelId: String) -> UnifiedProgram? {
         guard let start = startDate, let end = endDate else {
