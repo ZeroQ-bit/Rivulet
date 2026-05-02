@@ -19,7 +19,7 @@ This project has fairly *opinionated* designs and logic, with a few focal points
 |--------------------|
 | ![Seasons](Screenshots/seasons.png) |
 
-<a href="https://testflight.apple.com/join/TcCsF5As">
+<a href="Soon">
   <img src="https://developer.apple.com/assets/elements/icons/testflight/testflight-64x64_2x.png" alt="TestFlight" height="50">
   <br>
   <strong>Join the TestFlight Beta</strong>
