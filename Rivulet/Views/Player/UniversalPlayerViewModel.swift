@@ -415,18 +415,26 @@ final class UniversalPlayerViewModel: ObservableObject {
     // MARK: - Skip Marker State
     @Published private(set) var activeMarker: PlexMarker?
     @Published private(set) var showSkipButton = false
-    private var hasSkippedIntro = false
+    private var skippedIntroIds: Set<Int> = []
+    private var declinedIntroSkipIds: Set<Int> = []
     private var skippedCreditsIds: Set<Int> = []  // Track skipped credits by ID (can have multiple)
     private var skippedCommercialIds: Set<Int> = []  // Track skipped commercials by ID
     private var hasTriggeredPostVideo = false
+    private var introDBIntroMarker: PlexMarker?
+    private var introDBRecapMarker: PlexMarker?
+    private var introDBOutroMarker: PlexMarker?
+
+    private enum IntroMarkerSource {
+        case plexIntro
+        case introDBIntro
+        case introDBRecap
+    }
 
     // MARK: - Intro Skip Countdown State
     /// Current countdown value (5...4...3...2...1), 0 means no countdown active
     @Published var introSkipCountdownSeconds: Int = 0
     private var introSkipCountdownTimer: Timer?
     private let introSkipDelaySeconds: Int = 5
-    /// Tracks if user cancelled auto-skip for current intro (prevents restarting countdown)
-    private var userDeclinedIntroAutoSkip = false
     @Published var scrubTime: TimeInterval = 0
 
     // MARK: - Post-Video State
@@ -1286,6 +1294,8 @@ final class UniversalPlayerViewModel: ObservableObject {
             if !hasMarkers || !hasChapters || !hasStreamDetails {
                 await fetchMarkersIfNeeded()
             }
+
+            await fetchIntroDBMarkersIfNeeded()
 
             // Fetch season/show poster for Now Playing artwork (episodes)
             await fetchSeasonPosterIfNeeded()
@@ -3682,48 +3692,16 @@ final class UniversalPlayerViewModel: ObservableObject {
         // Don't check while scrubbing or if post-video already showing
         guard !isScrubbing, postVideoState == .hidden else { return }
 
-        // Check intro marker (show 5 seconds early)
-        if let intro = metadata.introMarker {
-            // Skip malformed markers where end time is not after start time
-            guard intro.endTimeSeconds > intro.startTimeSeconds else {
-                // Invalid marker data - skip this check
-                return
-            }
-
-            let previewStart = max(0, intro.startTimeSeconds - markerPreviewTime)
-
-            // Reset skip flag if user rewound before the marker preview window.
-            // Special case: when intro starts at 0 (previewStart is also 0), we reset if:
-            // 1. User is at the very beginning (within 1 second of start), AND
-            // 2. We've already left the marker region (activeMarker is nil)
-            // This allows re-triggering after seeking back without causing repeated skips
-            // during initial playback.
-            if hasSkippedIntro || userDeclinedIntroAutoSkip {
-                if time < previewStart {
-                    hasSkippedIntro = false
-                    userDeclinedIntroAutoSkip = false
-                    // Cancel any running countdown
-                    introSkipCountdownTimer?.invalidate()
-                    introSkipCountdownTimer = nil
-                    introSkipCountdownSeconds = 0
-                } else if previewStart == 0 && time < intro.startTimeSeconds + 1.0 && activeMarker == nil {
-                    hasSkippedIntro = false
-                    userDeclinedIntroAutoSkip = false
-                    introSkipCountdownTimer?.invalidate()
-                    introSkipCountdownTimer = nil
-                    introSkipCountdownSeconds = 0
-                }
-            }
-
-            if time >= previewStart && time < intro.endTimeSeconds {
-                handleMarkerActive(intro, isIntro: true, currentTime: time)
-                return
-            }
+        if checkIntroMarkers(at: time) {
+            return
         }
 
         // Check credits markers - can have multiple (e.g., mid-credits and post-credits)
         // Trigger post-video when FIRST credits marker starts
-        for credits in metadata.creditsMarkers {
+        let creditsMarkers = creditsMarkersForPlayback
+        let firstCreditsMarker = creditsMarkers.min { $0.startTimeSeconds < $1.startTimeSeconds }
+
+        for credits in creditsMarkers {
             guard let creditsId = credits.id else { continue }
 
             // Skip malformed markers
@@ -3746,7 +3724,7 @@ final class UniversalPlayerViewModel: ObservableObject {
             }
 
             // Reset post-video trigger if rewound before first credits marker
-            if let firstCredits = metadata.firstCreditsMarker,
+            if let firstCredits = firstCreditsMarker,
                time < max(0, firstCredits.startTimeSeconds - markerPreviewTime) {
                 if hasTriggeredPostVideo { hasTriggeredPostVideo = false }
             }
@@ -3758,7 +3736,7 @@ final class UniversalPlayerViewModel: ObservableObject {
 
                 // Trigger post-video summary when FIRST credits marker actually starts
                 // (skip button will be hidden by UI when postVideoState != .hidden)
-                if let firstCredits = metadata.firstCreditsMarker,
+                if let firstCredits = firstCreditsMarker,
                    credits.id == firstCredits.id,
                    time >= credits.startTimeSeconds && !hasTriggeredPostVideo {
                     hasTriggeredPostVideo = true
@@ -3795,7 +3773,7 @@ final class UniversalPlayerViewModel: ObservableObject {
 
         // No credits markers - trigger post-video 45 seconds before end
         // BUT require at least 85% completion to avoid triggering too early on short videos
-        if metadata.creditsMarkers.isEmpty && duration > 60 {
+        if creditsMarkers.isEmpty && duration > 60 {
             let triggerTime = duration - 45
             let minCompletionTime = duration * 0.85  // At least 85% watched
 
@@ -3819,19 +3797,117 @@ final class UniversalPlayerViewModel: ObservableObject {
         }
     }
 
-    /// Handle when playback enters an intro marker range (or preview window)
-    /// Auto-skip only triggers when actually inside the marker (at or past startTimeSeconds),
-    /// not during the 5-second preview window before the marker starts.
-    /// When auto-skip is enabled, shows a countdown to give user a chance to cancel.
-    private func handleMarkerActive(_ marker: PlexMarker, isIntro: Bool, currentTime: TimeInterval) {
-        let autoSkipIntro = UserDefaults.standard.bool(forKey: "autoSkipIntro")
+    private var creditsMarkersForPlayback: [PlexMarker] {
+        var markers = metadata.creditsMarkers
+        if let introDBOutroMarker {
+            markers.append(introDBOutroMarker)
+        }
+        return markers.sorted { lhs, rhs in
+            let lhsEnabled = creditsAutoSkipEnabled(for: lhs)
+            let rhsEnabled = creditsAutoSkipEnabled(for: rhs)
+            if lhsEnabled != rhsEnabled { return lhsEnabled && !rhsEnabled }
+            return lhs.startTimeSeconds < rhs.startTimeSeconds
+        }
+    }
+
+    /// Handle intro-like markers (intro and recap) near the beginning of playback.
+    private func checkIntroMarkers(at time: TimeInterval) -> Bool {
+        var candidates: [(marker: PlexMarker, source: IntroMarkerSource)] = []
+        if let plexIntro = metadata.introMarker {
+            candidates.append((plexIntro, .plexIntro))
+        }
+        if let introDBIntroMarker {
+            candidates.append((introDBIntroMarker, .introDBIntro))
+        }
+        if let introDBRecapMarker {
+            candidates.append((introDBRecapMarker, .introDBRecap))
+        }
+
+        let orderedCandidates = candidates.sorted { lhs, rhs in
+            let lhsEnabled = introAutoSkipEnabled(for: lhs.source)
+            let rhsEnabled = introAutoSkipEnabled(for: rhs.source)
+            if lhsEnabled != rhsEnabled { return lhsEnabled && !rhsEnabled }
+            if lhs.marker.startTimeSeconds != rhs.marker.startTimeSeconds {
+                return lhs.marker.startTimeSeconds < rhs.marker.startTimeSeconds
+            }
+            return introMarkerPriority(lhs.source) < introMarkerPriority(rhs.source)
+        }
+
+        for candidate in orderedCandidates {
+            if checkIntroMarker(candidate.marker, source: candidate.source, currentTime: time) {
+                return true
+            }
+        }
+
+        return false
+    }
+
+    private func checkIntroMarker(_ marker: PlexMarker, source: IntroMarkerSource, currentTime time: TimeInterval) -> Bool {
+        // Skip malformed markers where end time is not after start time
+        guard marker.endTimeSeconds > marker.startTimeSeconds else {
+            return false
+        }
+
+        let previewStart = max(0, marker.startTimeSeconds - markerPreviewTime)
+        let markerId = markerTrackingId(marker)
+
+        // Reset skip flag if user rewound before the marker preview window.
+        // Special case: when intro starts at 0 (previewStart is also 0), reset
+        // only once playback is back at the beginning and no marker is active.
+        if skippedIntroIds.contains(markerId) || declinedIntroSkipIds.contains(markerId) {
+            if time < previewStart {
+                resetIntroSkipState(for: marker)
+            } else if previewStart == 0 && time < marker.startTimeSeconds + 1.0 && activeMarker == nil {
+                resetIntroSkipState(for: marker)
+            }
+        }
+
+        if time >= previewStart && time < marker.endTimeSeconds {
+            handleMarkerActive(marker, isIntro: true, currentTime: time, source: source)
+            return true
+        }
+
+        return false
+    }
+
+    private func resetIntroSkipState(for marker: PlexMarker) {
+        let markerId = markerTrackingId(marker)
+        skippedIntroIds.remove(markerId)
+        declinedIntroSkipIds.remove(markerId)
+        introSkipCountdownTimer?.invalidate()
+        introSkipCountdownTimer = nil
+        introSkipCountdownSeconds = 0
+    }
+
+    private func introAutoSkipEnabled(for source: IntroMarkerSource) -> Bool {
+        switch source {
+        case .plexIntro:
+            return UserDefaults.standard.bool(forKey: "autoSkipIntro")
+        case .introDBIntro:
+            return UserDefaults.standard.bool(forKey: "autoSkipIntroFromIntroDB")
+        case .introDBRecap:
+            return UserDefaults.standard.bool(forKey: "autoSkipRecapFromIntroDB")
+        }
+    }
+
+    private func introMarkerPriority(_ source: IntroMarkerSource) -> Int {
+        switch source {
+        case .plexIntro: return 0
+        case .introDBRecap: return 1
+        case .introDBIntro: return 2
+        }
+    }
+
+    private func handleMarkerActive(_ marker: PlexMarker, isIntro: Bool, currentTime: TimeInterval, source: IntroMarkerSource) {
+        let autoSkipIntro = isIntro && introAutoSkipEnabled(for: source)
+        let markerId = markerTrackingId(marker)
 
         // Only auto-skip when actually inside the marker (not during preview window)
         // This ensures we use Plex's exact marker timing and don't cut off content
         let insideMarker = currentTime >= marker.startTimeSeconds
 
         // Check for auto-skip with countdown (only when inside actual marker range)
-        if isIntro && autoSkipIntro && !hasSkippedIntro && insideMarker && !userDeclinedIntroAutoSkip {
+        if isIntro && autoSkipIntro && !skippedIntroIds.contains(markerId) && insideMarker && !declinedIntroSkipIds.contains(markerId) {
             // Start countdown timer if not already running
             if introSkipCountdownTimer == nil && introSkipCountdownSeconds == 0 {
                 startIntroSkipCountdown(for: marker)
@@ -3845,7 +3921,7 @@ final class UniversalPlayerViewModel: ObservableObject {
         }
 
         // Show skip button if not already skipped
-        if !hasSkippedIntro && activeMarker == nil {
+        if !skippedIntroIds.contains(markerId) && activeMarker == nil {
             activeMarker = marker
             showSkipButton = true
         }
@@ -3867,7 +3943,6 @@ final class UniversalPlayerViewModel: ObservableObject {
                 if self.introSkipCountdownSeconds <= 0 {
                     timer.invalidate()
                     self.introSkipCountdownTimer = nil
-                    self.hasSkippedIntro = true
                     await self.skipMarker(marker)
                 }
             }
@@ -3881,7 +3956,9 @@ final class UniversalPlayerViewModel: ObservableObject {
         introSkipCountdownTimer?.invalidate()
         introSkipCountdownTimer = nil
         introSkipCountdownSeconds = 0
-        userDeclinedIntroAutoSkip = true  // Don't restart countdown for this intro
+        if let activeMarker, activeMarker.isIntro || activeMarker.isRecap {
+            declinedIntroSkipIds.insert(markerTrackingId(activeMarker))
+        }
     }
 
     /// Handle when playback enters a credits marker range (or preview window)
@@ -3889,7 +3966,7 @@ final class UniversalPlayerViewModel: ObservableObject {
     private func handleCreditsMarkerActive(_ marker: PlexMarker, currentTime: TimeInterval) {
         guard let creditsId = marker.id else { return }
 
-        let autoSkipCredits = UserDefaults.standard.bool(forKey: "autoSkipCredits")
+        let autoSkipCredits = creditsAutoSkipEnabled(for: marker)
 
         // Only auto-skip when actually inside the marker (not during preview window)
         let insideMarker = currentTime >= marker.startTimeSeconds
@@ -3906,6 +3983,12 @@ final class UniversalPlayerViewModel: ObservableObject {
             activeMarker = marker
             showSkipButton = true
         }
+    }
+
+    private func creditsAutoSkipEnabled(for marker: PlexMarker) -> Bool {
+        marker.isOutro
+            ? UserDefaults.standard.bool(forKey: "autoSkipCreditsFromIntroDB")
+            : UserDefaults.standard.bool(forKey: "autoSkipCredits")
     }
 
     /// Handle when playback enters a commercial marker range (or preview window)
@@ -3941,8 +4024,8 @@ final class UniversalPlayerViewModel: ObservableObject {
     /// Skip to end of a specific marker
     private func skipMarker(_ marker: PlexMarker) async {
         // Mark as skipped to prevent re-showing button if user seeks back
-        if marker.isIntro {
-            hasSkippedIntro = true
+        if marker.isIntro || marker.isRecap {
+            skippedIntroIds.insert(markerTrackingId(marker))
             // Cancel any running countdown (user clicked skip button manually)
             introSkipCountdownTimer?.invalidate()
             introSkipCountdownTimer = nil
@@ -3966,12 +4049,27 @@ final class UniversalPlayerViewModel: ObservableObject {
         guard let marker = activeMarker else { return "Skip" }
         if marker.isIntro {
             return "Skip Intro"
+        } else if marker.isRecap {
+            return "Skip Recap"
+        } else if marker.isOutro {
+            return "Skip Outro"
         } else if marker.isCredits {
             return "Skip Credits"
         } else if marker.isCommercial {
             return "Skip Ad"
         }
         return "Skip"
+    }
+
+    private func markerTrackingId(_ marker: PlexMarker) -> Int {
+        if let id = marker.id {
+            return id
+        }
+
+        let key = "\(marker.type ?? "marker"):\(marker.startTimeOffset ?? 0):\(marker.endTimeOffset ?? 0)"
+        return key.unicodeScalars.reduce(23) { partial, scalar in
+            (partial &* 31) &+ Int(scalar.value)
+        }
     }
 
     /// Fetch detailed metadata with markers if not already present
@@ -4010,9 +4108,134 @@ final class UniversalPlayerViewModel: ObservableObject {
             if metadata.summary == nil { metadata.summary = detailedMetadata.summary }
             if metadata.Genre == nil { metadata.Genre = detailedMetadata.Genre }
             if metadata.contentRating == nil { metadata.contentRating = detailedMetadata.contentRating }
+            if metadata.guid == nil { metadata.guid = detailedMetadata.guid }
+            if metadata.Guid == nil { metadata.Guid = detailedMetadata.Guid }
+            if metadata.parentGuid == nil { metadata.parentGuid = detailedMetadata.parentGuid }
+            if metadata.grandparentGuid == nil { metadata.grandparentGuid = detailedMetadata.grandparentGuid }
+            if metadata.parentIndex == nil { metadata.parentIndex = detailedMetadata.parentIndex }
+            if metadata.index == nil { metadata.index = detailedMetadata.index }
         } catch {
             print("⏭️ [Skip] Failed to fetch detailed metadata: \(error)")
         }
+    }
+
+    private func fetchIntroDBMarkersIfNeeded() async {
+        introDBIntroMarker = nil
+        introDBRecapMarker = nil
+        introDBOutroMarker = nil
+
+        let shouldLoadIntro = UserDefaults.standard.bool(forKey: "autoSkipIntroFromIntroDB")
+        let shouldLoadRecap = UserDefaults.standard.bool(forKey: "autoSkipRecapFromIntroDB")
+        let shouldLoadOutro = UserDefaults.standard.bool(forKey: "autoSkipCreditsFromIntroDB")
+
+        guard shouldLoadIntro || shouldLoadRecap || shouldLoadOutro else { return }
+        guard metadata.type == "episode" else { return }
+
+        if metadata.parentIndex == nil || metadata.index == nil || metadata.parentShowImdbId == nil {
+            await fetchFullMetadataIfNeeded()
+        }
+
+        guard let imdbId = await resolveIntroDBShowImdbId(),
+              let season = metadata.parentIndex,
+              let episode = metadata.index else {
+            print("[IntroDB] Missing show IMDb ID or episode numbers for \(metadata.title ?? "episode")")
+            return
+        }
+
+        do {
+            guard let segments = try await IntroDBService.shared.segments(
+                imdbId: imdbId,
+                season: season,
+                episode: episode
+            ) else {
+                print("[IntroDB] No segments for \(imdbId) S\(season)E\(episode)")
+                return
+            }
+
+            if shouldLoadIntro {
+                introDBIntroMarker = makeIntroDBMarker(
+                    segment: segments.intro,
+                    kind: .intro,
+                    imdbId: imdbId,
+                    season: season,
+                    episode: episode
+                )
+            }
+
+            if shouldLoadRecap {
+                introDBRecapMarker = makeIntroDBMarker(
+                    segment: segments.recap,
+                    kind: .recap,
+                    imdbId: imdbId,
+                    season: season,
+                    episode: episode
+                )
+            }
+
+            if shouldLoadOutro {
+                introDBOutroMarker = makeIntroDBMarker(
+                    segment: segments.outro,
+                    kind: .outro,
+                    imdbId: imdbId,
+                    season: season,
+                    episode: episode
+                )
+            }
+
+            print("[IntroDB] Loaded segments for \(imdbId) S\(season)E\(episode): intro=\(introDBIntroMarker != nil) recap=\(introDBRecapMarker != nil) outro=\(introDBOutroMarker != nil)")
+        } catch {
+            print("[IntroDB] Failed to load segments: \(error)")
+        }
+    }
+
+    private func makeIntroDBMarker(
+        segment: IntroDBSegment?,
+        kind: IntroDBService.SegmentKind,
+        imdbId: String,
+        season: Int,
+        episode: Int
+    ) -> PlexMarker? {
+        guard let offsets = segment?.markerOffsets else { return nil }
+
+        return PlexMarker(
+            id: introDBMarkerId(imdbId: imdbId, season: season, episode: episode, kind: kind),
+            type: kind.rawValue,
+            startTimeOffset: offsets.start,
+            endTimeOffset: offsets.end
+        )
+    }
+
+    private func resolveIntroDBShowImdbId() async -> String? {
+        if let imdbId = metadata.parentShowImdbId {
+            return imdbId
+        }
+
+        guard let showKey = metadata.grandparentRatingKey else { return nil }
+
+        do {
+            let showMetadata = try await PlexNetworkManager.shared.getMetadata(
+                serverURL: serverURL,
+                authToken: authToken,
+                ratingKey: showKey
+            )
+
+            if metadata.grandparentGuid == nil {
+                metadata.grandparentGuid = showMetadata.guid
+            }
+
+            return showMetadata.parentShowImdbId
+        } catch {
+            print("[IntroDB] Failed to fetch show IMDb ID: \(error)")
+            return nil
+        }
+    }
+
+    private func introDBMarkerId(imdbId: String, season: Int, episode: Int, kind: IntroDBService.SegmentKind) -> Int {
+        let key = "\(imdbId):\(season):\(episode):\(kind.rawValue)"
+        let hash = key.unicodeScalars.reduce(17) { partial, scalar in
+            (partial &* 31) &+ Int(scalar.value)
+        }
+        return -abs(hash)
     }
 
     // MARK: - Post-Video Handling
@@ -4090,6 +4313,18 @@ final class UniversalPlayerViewModel: ObservableObject {
             }
             if metadata.grandparentRatingKey == nil {
                 metadata.grandparentRatingKey = fullMetadata.grandparentRatingKey
+            }
+            if metadata.guid == nil {
+                metadata.guid = fullMetadata.guid
+            }
+            if metadata.Guid == nil {
+                metadata.Guid = fullMetadata.Guid
+            }
+            if metadata.parentGuid == nil {
+                metadata.parentGuid = fullMetadata.parentGuid
+            }
+            if metadata.grandparentGuid == nil {
+                metadata.grandparentGuid = fullMetadata.grandparentGuid
             }
             if metadata.parentIndex == nil {
                 metadata.parentIndex = fullMetadata.parentIndex
@@ -4339,7 +4574,8 @@ final class UniversalPlayerViewModel: ObservableObject {
         // time values (from the previous episode's position) during the async transition.
         // If hasTriggeredPostVideo were false, checkMarkers could immediately re-trigger
         // post-video using the stale time against the new episode's credits markers.
-        hasSkippedIntro = false
+        skippedIntroIds.removeAll()
+        declinedIntroSkipIds.removeAll()
         skippedCreditsIds.removeAll()
         skippedCommercialIds.removeAll()
 
@@ -4347,7 +4583,9 @@ final class UniversalPlayerViewModel: ObservableObject {
         introSkipCountdownTimer?.invalidate()
         introSkipCountdownTimer = nil
         introSkipCountdownSeconds = 0
-        userDeclinedIntroAutoSkip = false
+        introDBIntroMarker = nil
+        introDBRecapMarker = nil
+        introDBOutroMarker = nil
         nextEpisode = nil
 
         // Ensure next episode has required metadata for subsequent next-up detection

@@ -123,9 +123,19 @@ nonisolated struct PlexMarker: Codable, Identifiable, Sendable {
         type == "intro"
     }
 
+    /// Whether this is a recap marker
+    var isRecap: Bool {
+        type == "recap"
+    }
+
     /// Whether this is a credits/outro marker
     var isCredits: Bool {
-        type == "credits"
+        type == "credits" || type == "outro"
+    }
+
+    /// Whether this is an outro marker
+    var isOutro: Bool {
+        type == "outro"
     }
 
     /// Whether this is a commercial marker
@@ -429,6 +439,35 @@ nonisolated extension PlexMetadata {
         }
     }
 
+    /// Best-effort extraction of IMDb ID from the guid or Guid array.
+    var imdbId: String? {
+        if let guid, let id = PlexMetadata.extractImdbId(from: guid) {
+            return id
+        }
+
+        if let guids = Guid {
+            for g in guids {
+                if let gid = g.id, let id = PlexMetadata.extractImdbId(from: gid) {
+                    return id
+                }
+            }
+        }
+
+        return nil
+    }
+
+    /// IMDb ID for the parent show, used by IntroDB episode lookup.
+    var parentShowImdbId: String? {
+        switch type {
+        case "episode":
+            return grandparentGuid.flatMap(PlexMetadata.extractImdbId)
+        case "season":
+            return parentGuid.flatMap(PlexMetadata.extractImdbId) ?? imdbId
+        default:
+            return imdbId
+        }
+    }
+
     /// Relative path of the clearLogo image from the Plex `Image` array, if present.
     /// Returns a server-relative path that still needs the server URL + X-Plex-Token to fetch.
     var clearLogoPath: String? {
@@ -462,6 +501,18 @@ nonisolated extension PlexMetadata {
     /// Extract a TMDB ID from a Plex guid string
     nonisolated static func extractTmdbId(from guid: String) -> Int? {
         extractExternalId(from: guid, prefixes: ["tmdb://", "themoviedb://"])
+    }
+
+    /// Extract an IMDb title ID from a Plex guid string.
+    nonisolated static func extractImdbId(from guid: String) -> String? {
+        guard let range = guid.range(
+            of: #"tt\d{2,}"#,
+            options: [.regularExpression, .caseInsensitive]
+        ) else {
+            return nil
+        }
+
+        return String(guid[range]).lowercased()
     }
 
     /// Extract a numeric ID from a guid string matching any of the given prefixes

@@ -45,7 +45,7 @@ enum SettingsPage: Hashable, CaseIterable {
     case plex, iptv, libraries, cache, userProfiles
     case liveTVSourceDetail
     case addLiveTVSource, addPlexLiveTV, addDispatcharrSource, addM3USource
-    case displaySizePicker, audioLanguagePicker, subtitlesPicker, subtitleSizePicker, subtitleColorPicker, subtitlePositionPicker, autoplayCountdownPicker
+    case displaySizePicker, audioLanguagePicker, subtitlesPicker, subtitleSizePicker, subtitleColorPicker, subtitlePositionPicker, autoSkipIntroSettings, autoSkipRecapSettings, autoSkipCreditsSettings, autoplayCountdownPicker
 
     var title: String {
         switch self {
@@ -72,6 +72,9 @@ enum SettingsPage: Hashable, CaseIterable {
         case .subtitleSizePicker: return "Subtitle Size"
         case .subtitleColorPicker: return "Subtitle Color"
         case .subtitlePositionPicker: return "Subtitle Position"
+        case .autoSkipIntroSettings: return "Auto-Skip Intro"
+        case .autoSkipRecapSettings: return "Auto-Skip Recap"
+        case .autoSkipCreditsSettings: return "Auto-Skip Credits"
         case .autoplayCountdownPicker: return "Autoplay Countdown"
         }
     }
@@ -299,7 +302,10 @@ struct SettingsView: View {
     @AppStorage("liveTVAboveLibraries") private var liveTVAboveLibraries = true
     @AppStorage("classicTVMode") private var classicTVMode = false
     @AppStorage("autoSkipIntro") private var autoSkipIntro = false
+    @AppStorage("autoSkipIntroFromIntroDB") private var autoSkipIntroFromIntroDB = false
+    @AppStorage("autoSkipRecapFromIntroDB") private var autoSkipRecapFromIntroDB = false
     @AppStorage("autoSkipCredits") private var autoSkipCredits = false
+    @AppStorage("autoSkipCreditsFromIntroDB") private var autoSkipCreditsFromIntroDB = false
     @AppStorage("autoSkipAds") private var autoSkipAds = false
     @AppStorage("useApplePlayer") private var useApplePlayer = false
     @AppStorage("autoplayCountdown") private var autoplayCountdownRaw = AutoplayCountdown.fiveSeconds.rawValue
@@ -353,6 +359,28 @@ struct SettingsView: View {
         let names = subtitleLanguages.map(\.description)
         guard names.count > 2 else { return names.joined(separator: ", ") }
         return "\(names[0]), \(names[1]) +\(names.count - 2)"
+    }
+
+    private var autoSkipIntroSummary: String {
+        switch (autoSkipIntro, autoSkipIntroFromIntroDB) {
+        case (true, true): return "Plex + IntroDB"
+        case (true, false): return "Plex"
+        case (false, true): return "IntroDB"
+        case (false, false): return "Off"
+        }
+    }
+
+    private var autoSkipCreditsSummary: String {
+        switch (autoSkipCredits, autoSkipCreditsFromIntroDB) {
+        case (true, true): return "Plex + IntroDB"
+        case (true, false): return "Plex"
+        case (false, true): return "IntroDB Outro"
+        case (false, false): return "Off"
+        }
+    }
+
+    private var autoSkipRecapSummary: String {
+        autoSkipRecapFromIntroDB ? "IntroDB" : "Off"
     }
 
     private func setSubtitleLanguages(_ languages: [LanguageOption]) {
@@ -604,6 +632,12 @@ struct SettingsView: View {
             subtitleColorPickerPage
         case .subtitlePositionPicker:
             subtitlePositionPickerPage
+        case .autoSkipIntroSettings:
+            autoSkipIntroSettingsPage
+        case .autoSkipRecapSettings:
+            autoSkipRecapSettingsPage
+        case .autoSkipCreditsSettings:
+            autoSkipCreditsSettingsPage
         case .autoplayCountdownPicker:
             autoplayCountdownPickerPage
         }
@@ -766,16 +800,25 @@ struct SettingsView: View {
                 onFocusChange: { if $0 { focusState.focusedSettingId = "subtitlePosition" } }
             )
 
-            SettingsToggleRow(
+            SettingsRow(
                 title: "Auto-Skip Intro",
-                isOn: $autoSkipIntro,
-                onFocusChange: { if $0 { focusState.focusedSettingId = "autoSkipIntro" } }
+                value: autoSkipIntroSummary,
+                action: { navigate(to: .autoSkipIntroSettings) },
+                onFocusChange: { if $0 { focusState.focusedSettingId = "autoSkipIntroSettings" } }
             )
 
-            SettingsToggleRow(
+            SettingsRow(
+                title: "Auto-Skip Recap",
+                value: autoSkipRecapSummary,
+                action: { navigate(to: .autoSkipRecapSettings) },
+                onFocusChange: { if $0 { focusState.focusedSettingId = "autoSkipRecapSettings" } }
+            )
+
+            SettingsRow(
                 title: "Auto-Skip Credits",
-                isOn: $autoSkipCredits,
-                onFocusChange: { if $0 { focusState.focusedSettingId = "autoSkipCredits" } }
+                value: autoSkipCreditsSummary,
+                action: { navigate(to: .autoSkipCreditsSettings) },
+                onFocusChange: { if $0 { focusState.focusedSettingId = "autoSkipCreditsSettings" } }
             )
 
             SettingsToggleRow(
@@ -1065,6 +1108,48 @@ struct SettingsView: View {
                     }
                 }
             }
+        }
+    }
+
+    private var autoSkipIntroSettingsPage: some View {
+        Group {
+            SettingsToggleRow(
+                title: "Auto-Skip Intro from Plex",
+                isOn: $autoSkipIntro,
+                onFocusChange: { if $0 { focusState.focusedSettingId = "autoSkipIntroPlex" } }
+            )
+
+            SettingsToggleRow(
+                title: "Auto-Skip Intro from IntroDB",
+                isOn: $autoSkipIntroFromIntroDB,
+                onFocusChange: { if $0 { focusState.focusedSettingId = "autoSkipIntroIntroDB" } }
+            )
+        }
+    }
+
+    private var autoSkipCreditsSettingsPage: some View {
+        Group {
+            SettingsToggleRow(
+                title: "Auto-Skip Credits from Plex",
+                isOn: $autoSkipCredits,
+                onFocusChange: { if $0 { focusState.focusedSettingId = "autoSkipCreditsPlex" } }
+            )
+
+            SettingsToggleRow(
+                title: "Auto-Skip Outro from IntroDB",
+                isOn: $autoSkipCreditsFromIntroDB,
+                onFocusChange: { if $0 { focusState.focusedSettingId = "autoSkipCreditsIntroDB" } }
+            )
+        }
+    }
+
+    private var autoSkipRecapSettingsPage: some View {
+        Group {
+            SettingsToggleRow(
+                title: "Auto-Skip Recap from IntroDB",
+                isOn: $autoSkipRecapFromIntroDB,
+                onFocusChange: { if $0 { focusState.focusedSettingId = "autoSkipRecapIntroDB" } }
+            )
         }
     }
 
