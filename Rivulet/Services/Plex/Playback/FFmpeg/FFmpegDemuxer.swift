@@ -329,6 +329,9 @@ nonisolated final class FFmpegDemuxer: @unchecked Sendable {
     // MARK: - Read Packets
 
     func readPacket() throws -> DemuxedPacket? {
+        lock.lock()
+        defer { lock.unlock() }
+
         guard let ctx = formatContext, isOpen, let packet = reusablePacket else {
             throw FFmpegError.notOpen
         }
@@ -405,6 +408,9 @@ nonisolated final class FFmpegDemuxer: @unchecked Sendable {
     // MARK: - Seek
 
     func seek(to time: TimeInterval) throws {
+        lock.lock()
+        defer { lock.unlock() }
+
         guard let ctx = formatContext, isOpen else { throw FFmpegError.notOpen }
 
         let timestamp = Int64(time * Double(AV_TIME_BASE))
@@ -417,6 +423,9 @@ nonisolated final class FFmpegDemuxer: @unchecked Sendable {
     // MARK: - Audio Track Selection
 
     func selectAudioStream(index: Int32) throws {
+        lock.lock()
+        defer { lock.unlock() }
+
         guard let ctx = formatContext, isOpen else { throw FFmpegError.notOpen }
 
         guard index >= 0, index < ctx.pointee.nb_streams,
@@ -439,6 +448,9 @@ nonisolated final class FFmpegDemuxer: @unchecked Sendable {
     /// Use when the caller will handle audio decoding (client-side decode produces its own
     /// PCM sample buffers and doesn't need a CoreAudio format description from the demuxer).
     func selectAudioStreamForClientDecode(index: Int32) throws {
+        lock.lock()
+        defer { lock.unlock() }
+
         guard let ctx = formatContext, isOpen else { throw FFmpegError.notOpen }
 
         guard index >= 0, index < ctx.pointee.nb_streams,
@@ -454,6 +466,9 @@ nonisolated final class FFmpegDemuxer: @unchecked Sendable {
     /// Select a subtitle stream to include in readPacket() results.
     /// Pass -1 to disable subtitle reading.
     func selectSubtitleStream(index: Int32) {
+        lock.lock()
+        defer { lock.unlock() }
+
         selectedSubtitleStream = index
         if let ctx = formatContext, isOpen {
             applyStreamDiscardFlags(in: ctx, loggingPrefix: "Subtitle switch discard update")

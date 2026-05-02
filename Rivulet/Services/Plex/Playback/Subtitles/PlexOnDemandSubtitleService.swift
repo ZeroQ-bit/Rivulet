@@ -10,6 +10,26 @@ import Foundation
 actor PlexOnDemandSubtitleService {
     static let shared = PlexOnDemandSubtitleService()
 
+    func availableSubtitles(
+        serverURL: String,
+        authToken: String,
+        ratingKey: String,
+        language: String
+    ) async -> [PlexOnDemandSubtitleCandidate] {
+        let normalizedLanguage = Self.searchLanguageCode(language) ?? language
+        let candidates = await searchSubtitles(
+            serverURL: serverURL,
+            authToken: authToken,
+            ratingKey: ratingKey,
+            language: normalizedLanguage
+        )
+
+        let languageMatches = candidates.filter {
+            $0.language == normalizedLanguage && !$0.forced && !$0.hearingImpaired
+        }
+        return languageMatches.isEmpty ? candidates : languageMatches
+    }
+
     func downloadBestSubtitle(
         serverURL: String,
         authToken: String,
@@ -17,7 +37,7 @@ actor PlexOnDemandSubtitleService {
         language: String
     ) async -> PlexStream? {
         let normalizedLanguage = Self.searchLanguageCode(language) ?? language
-        let candidates = await searchSubtitles(
+        let candidates = await availableSubtitles(
             serverURL: serverURL,
             authToken: authToken,
             ratingKey: ratingKey,
@@ -29,20 +49,48 @@ actor PlexOnDemandSubtitleService {
             return nil
         }
 
+        print("🎬 [Subtitles] Plex on-demand selected best candidate ratingKey=\(ratingKey) language=\(normalizedLanguage) candidate=\(candidate.debugSummary)")
+        return await downloadSubtitleCandidate(
+            candidate,
+            serverURL: serverURL,
+            authToken: authToken,
+            ratingKey: ratingKey,
+            language: normalizedLanguage
+        )
+    }
+
+    func downloadSubtitleCandidate(
+        _ candidate: PlexOnDemandSubtitleCandidate,
+        serverURL: String,
+        authToken: String,
+        ratingKey: String,
+        language: String
+    ) async -> PlexStream? {
+        let normalizedLanguage = Self.searchLanguageCode(language) ?? candidate.language
+        guard let existingSubtitleIDs = await subtitleStreamIDs(
+            serverURL: serverURL,
+            authToken: authToken,
+            ratingKey: ratingKey
+        ) else {
+            print("🎬 [Subtitles] Plex on-demand skipped ratingKey=\(ratingKey) language=\(normalizedLanguage): could not snapshot current subtitle streams")
+            return nil
+        }
+
         do {
-            try await downloadSubtitle(
+            try await requestSubtitleDownload(
                 candidate,
                 serverURL: serverURL,
                 authToken: authToken,
                 ratingKey: ratingKey
             )
-            print("🎬 [Subtitles] Plex on-demand download requested ratingKey=\(ratingKey) language=\(normalizedLanguage) label=\(candidate.label ?? candidate.providerTitle ?? candidate.language)")
+            print("🎬 [Subtitles] Plex on-demand download requested ratingKey=\(ratingKey) language=\(normalizedLanguage) candidate=\(candidate.debugSummary)")
 
             return await pollDownloadedSubtitle(
                 serverURL: serverURL,
                 authToken: authToken,
                 ratingKey: ratingKey,
-                language: normalizedLanguage
+                language: normalizedLanguage,
+                existingStreamIDs: existingSubtitleIDs
             )
         } catch {
             print("🎬 [Subtitles] Plex on-demand download failed ratingKey=\(ratingKey) language=\(normalizedLanguage): \(error.localizedDescription)")
@@ -108,7 +156,7 @@ actor PlexOnDemandSubtitleService {
         }
     }
 
-    private func downloadSubtitle(
+    private func requestSubtitleDownload(
         _ candidate: PlexOnDemandSubtitleCandidate,
         serverURL: String,
         authToken: String,
@@ -132,11 +180,31 @@ actor PlexOnDemandSubtitleService {
         )
     }
 
+    private func subtitleStreamIDs(
+        serverURL: String,
+        authToken: String,
+        ratingKey: String
+    ) async -> Set<Int>? {
+        do {
+            let metadata = try await PlexNetworkManager.shared.getMetadata(
+                serverURL: serverURL,
+                authToken: authToken,
+                ratingKey: ratingKey
+            )
+            let subtitleStreams = metadata.Media?.first?.Part?.first?.Stream?.filter { $0.isSubtitle } ?? []
+            return Set(subtitleStreams.map(\.id))
+        } catch {
+            print("🎬 [Subtitles] Plex on-demand stream snapshot failed ratingKey=\(ratingKey): \(error.localizedDescription)")
+            return nil
+        }
+    }
+
     private func pollDownloadedSubtitle(
         serverURL: String,
         authToken: String,
         ratingKey: String,
-        language: String
+        language: String,
+        existingStreamIDs: Set<Int>
     ) async -> PlexStream? {
         for attempt in 0..<5 {
             if attempt > 0 {
@@ -152,7 +220,9 @@ actor PlexOnDemandSubtitleService {
 
                 let subtitleStreams = metadata.Media?.first?.Part?.first?.Stream?.filter { $0.isSubtitle } ?? []
                 if let match = subtitleStreams.first(where: {
-                    $0.key != nil && Self.stream($0, matchesSearchLanguage: language)
+                    !existingStreamIDs.contains($0.id) &&
+                    $0.key != nil &&
+                    Self.stream($0, matchesSearchLanguage: language)
                 }) {
                     print("🎬 [Subtitles] Plex on-demand metadata ready ratingKey=\(ratingKey) language=\(language) stream=\(match.id)")
                     return match
@@ -198,6 +268,11 @@ nonisolated struct PlexOnDemandSubtitleCandidate: Hashable, Sendable {
     let providerTitle: String?
     let score: Int
     let perfectMatch: Bool
+
+    var debugSummary: String {
+        let title = label ?? providerTitle ?? "untitled"
+        return "key=\(key) lang=\(language) score=\(score) perfect=\(perfectMatch) title=\(title)"
+    }
 }
 
 nonisolated final class PlexOnDemandSubtitleSearchXMLParser: NSObject, XMLParserDelegate {

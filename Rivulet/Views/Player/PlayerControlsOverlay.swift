@@ -128,58 +128,31 @@ struct PlayerControlsOverlay: View {
                                     .id("sub_divider")
 
                                 PlaybackSettingsRow(
-                                    title: "Size",
-                                    subtitle: subtitleAppearance.textSize.description,
-                                    isSelected: false,
-                                    isFocused: viewModel.isSettingFocused(column: 0, index: viewModel.subtitleControlStartIndex),
-                                    leadingSystemImage: "textformat.size"
-                                )
-                                .id("sub_\(viewModel.subtitleControlStartIndex)")
-
-                                PlaybackSettingsRow(
-                                    title: "Color",
-                                    subtitle: subtitleAppearance.textColor.description,
-                                    isSelected: false,
-                                    isFocused: viewModel.isSettingFocused(column: 0, index: viewModel.subtitleControlStartIndex + 1),
-                                    leadingSystemImage: "paintpalette"
-                                )
-                                .id("sub_\(viewModel.subtitleControlStartIndex + 1)")
-
-                                PlaybackSettingsRow(
-                                    title: "Position",
-                                    subtitle: subtitleAppearance.verticalPosition.description,
-                                    isSelected: false,
-                                    isFocused: viewModel.isSettingFocused(column: 0, index: viewModel.subtitleControlStartIndex + 2),
-                                    leadingSystemImage: "arrow.up.and.down"
-                                )
-                                .id("sub_\(viewModel.subtitleControlStartIndex + 2)")
-
-                                PlaybackSettingsRow(
                                     title: "Delay -0.2s",
                                     subtitle: subtitleAppearance.formattedDelay,
                                     isSelected: false,
-                                    isFocused: viewModel.isSettingFocused(column: 0, index: viewModel.subtitleControlStartIndex + 3),
+                                    isFocused: viewModel.isSettingFocused(column: 0, index: viewModel.subtitleControlStartIndex),
                                     leadingSystemImage: "minus.circle"
                                 )
-                                .id("sub_\(viewModel.subtitleControlStartIndex + 3)")
+                                .id("sub_\(viewModel.subtitleControlStartIndex)")
 
                                 PlaybackSettingsRow(
                                     title: "Delay Reset",
                                     subtitle: subtitleAppearance.formattedDelay,
                                     isSelected: false,
-                                    isFocused: viewModel.isSettingFocused(column: 0, index: viewModel.subtitleControlStartIndex + 4),
+                                    isFocused: viewModel.isSettingFocused(column: 0, index: viewModel.subtitleControlStartIndex + 1),
                                     leadingSystemImage: "arrow.counterclockwise.circle"
                                 )
-                                .id("sub_\(viewModel.subtitleControlStartIndex + 4)")
+                                .id("sub_\(viewModel.subtitleControlStartIndex + 1)")
 
                                 PlaybackSettingsRow(
                                     title: "Delay +0.2s",
                                     subtitle: subtitleAppearance.formattedDelay,
                                     isSelected: false,
-                                    isFocused: viewModel.isSettingFocused(column: 0, index: viewModel.subtitleControlStartIndex + 5),
+                                    isFocused: viewModel.isSettingFocused(column: 0, index: viewModel.subtitleControlStartIndex + 2),
                                     leadingSystemImage: "plus.circle"
                                 )
-                                .id("sub_\(viewModel.subtitleControlStartIndex + 5)")
+                                .id("sub_\(viewModel.subtitleControlStartIndex + 2)")
                             }
                             .padding(.vertical, 8)
                         }
@@ -531,7 +504,10 @@ struct PlayerControlsOverlay: View {
 
     /// Subtitle track subtitle: format/codec (e.g., "SRT", "PGS")
     private func formatSubtitleTrackSubtitle(_ track: MediaTrack) -> String {
-        track.formattedCodec
+        if viewModel.isSettingsSubtitleOption(track) {
+            return viewModel.settingsSubtitleOptionSubtitle(for: track)
+        }
+        return track.formattedCodec
     }
 
     private func formatDuration(_ seconds: TimeInterval) -> String {

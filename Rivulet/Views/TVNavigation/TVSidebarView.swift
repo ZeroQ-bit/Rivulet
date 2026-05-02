@@ -64,6 +64,12 @@ struct TVSidebarView: View {
         profileManager.selectedUser?.displayName ?? authManager.username ?? "Account"
     }
 
+    private var shouldBlockForLaunchProfilePicker: Bool {
+        guard authManager.hasCredentials else { return false }
+        return profileManager.showProfilePickerOnLaunch
+            && (!hasCheckedProfilePicker || isAwaitingProfileSelection)
+    }
+
     private var isMusicLibrarySelected: Bool {
         guard case .library(let key) = selectedTab else { return false }
         return dataStore.libraries.first(where: { $0.key == key })?.isMusicLibrary ?? false
@@ -89,7 +95,13 @@ struct TVSidebarView: View {
     }
 
     var body: some View {
-        sidebarTabView
+        ZStack {
+            sidebarTabView
+
+            if shouldBlockForLaunchProfilePicker {
+                profileLaunchGateView
+            }
+        }
         .onExitCommand { }
         .task { await Self.installSidebarFocusGuard() }
         .task { await focusRecoveryWatchdog() }
@@ -109,6 +121,11 @@ struct TVSidebarView: View {
             if !old && new && selectedTab == .settings {
                 selectedTab = .home
             }
+            if !new {
+                hasCheckedProfilePicker = false
+                isAwaitingProfileSelection = false
+                showProfilePicker = false
+            }
         }
         // Reset tab selection when live TV source mode changes
         .onChange(of: combineLiveTVSources) { _, combined in
@@ -116,7 +133,8 @@ struct TVSidebarView: View {
                 selectedTab = .liveTV(sourceId: combined ? nil : liveTVDataStore.sources.first?.id)
             }
         }
-        .task(id: authManager.hasCredentials) {
+        .task(id: authManager.selectedServerToken != nil) {
+            guard authManager.hasCredentials else { return }
             guard authManager.selectedServerToken != nil else { return }
 
             // If profile picker on launch is enabled, block content immediately
@@ -315,8 +333,8 @@ struct TVSidebarView: View {
     @ViewBuilder
     private func tabContent(for tab: SidebarTab) -> some View {
         Group {
-            if isAwaitingProfileSelection {
-                Color.clear.ignoresSafeArea()
+            if shouldBlockForLaunchProfilePicker {
+                profileLaunchGateView
             } else {
                 switch tab {
                 case .account:
@@ -348,6 +366,17 @@ struct TVSidebarView: View {
         .focusScope(contentNamespace)
         .environment(\.nestedNavigationState, nestedNavState)
         .environment(\.uiScale, uiScale)
+    }
+
+    private var profileLaunchGateView: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+
+            if profileManager.isLoadingUsers && !showProfilePicker {
+                ProgressView()
+                    .tint(.white.opacity(0.6))
+            }
+        }
     }
 
     // MARK: - Welcome View

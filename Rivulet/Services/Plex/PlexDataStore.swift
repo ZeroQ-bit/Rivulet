@@ -344,6 +344,50 @@ class PlexDataStore: ObservableObject {
 
     }
 
+    /// Called when the active Plex server changes while staying signed in.
+    /// Clears server-specific content so old libraries, hubs, and metadata do
+    /// not bleed into the newly selected server.
+    func onServerSwitched() async {
+        stopPolling()
+
+        hubsLoadTask?.cancel()
+        librariesLoadTask?.cancel()
+        libraryHubsLoadTask?.cancel()
+        prefetchTask?.cancel()
+        hubsLoadTask = nil
+        librariesLoadTask = nil
+        libraryHubsLoadTask = nil
+        prefetchTask = nil
+
+        clearHeroCache()
+        clearNextEpisodeCache()
+        clearFreshnessTimestamps()
+        fullMetadataCache.removeAll()
+
+        hubs = []
+        libraries = []
+        hasLoadedLibraries = false
+        libraryHubs.removeAll()
+        hubsVersion = UUID()
+        libraryHubsVersion = UUID()
+        isHomeContentReady = false
+        hubsError = nil
+        librariesError = nil
+        isLoadingHubs = false
+        isLoadingLibraries = false
+        isLoadingLibraryHubs = false
+        hasAttemptedConnectionRecovery = false
+        TopShelfCache.shared.clear()
+
+        await cacheManager.clearAllCache()
+
+        async let libs: () = refreshLibraries()
+        async let hubsRefresh: () = refreshHubs()
+        _ = await (libs, hubsRefresh)
+        await refreshLibraryHubs()
+        startPollingIfNeeded()
+    }
+
     // MARK: - Hubs (Home View)
 
     func loadHubsIfNeeded() async {
@@ -1110,11 +1154,15 @@ class PlexDataStore: ObservableObject {
         prefetchTask = nil
         hubs = []
         libraries = []
+        hasLoadedLibraries = false
+        libraryHubs.removeAll()
         isHomeContentReady = false
         hubsError = nil
         librariesError = nil
+        libraryHubsVersion = UUID()
         isLoadingHubs = false
         isLoadingLibraries = false
+        isLoadingLibraryHubs = false
         nextEpisodeCache.removeAll()
         heroItemsCache.removeAll()
         clearFreshnessTimestamps()

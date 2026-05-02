@@ -16,6 +16,7 @@ struct PlexHomeView: View {
     @StateObject private var authManager = PlexAuthManager.shared
     @AppStorage("showHomeHero") private var showHomeHero = true
     @AppStorage("enablePersonalizedRecommendations") private var enablePersonalizedRecommendations = false
+    @AppStorage("openDetailsDirectly") private var openDetailsDirectly = true
     @Environment(\.nestedNavigationState) private var nestedNavState
     @State private var selectedItem: PlexMetadata?
     @State private var heroItems: [PlexMetadata] = []
@@ -29,10 +30,73 @@ struct PlexHomeView: View {
     @State private var previewRestoreTarget: PreviewSourceTarget?
     @State private var capturedSourceFrames: [PreviewSourceTarget: CGRect] = [:]
     @State private var showPreviewCover = false
-    @State private var heroScrollOffset: CGFloat = 0
+    @State private var activeHeroShelfIndex = 0
+    @State private var activeHeroShelfFocusRequest = 0
+    @State private var focusedHeroShelfItem: PlexMetadata?
 
     private let recommendationService = PersonalizedRecommendationService.shared
     private let recommendationsContentType: RecommendationContentType = .moviesAndShows
+    private static let defaultRowFocusAnchor = UnitPoint(x: 0.5, y: 0.5)
+    private static let fixedHeroRowFocusAnchor = UnitPoint(x: 0.5, y: 0.58)
+
+    private var rowFocusAnchor: UnitPoint {
+        (showHomeHero && !heroItems.isEmpty) ? Self.fixedHeroRowFocusAnchor : Self.defaultRowFocusAnchor
+    }
+
+    private func homePreviewHandler(isContinueWatching: Bool = false) -> ((PreviewRequest) -> Void)? {
+        guard !isContinueWatching, !openDetailsDirectly else { return nil }
+        return { request in
+            homeLog.info("[Preview] Opening carousel: \(request.items.count) items, tapped index=\(request.selectedIndex), title=\(request.items[request.selectedIndex].title ?? "?")")
+            rowPreviewRequest = request
+            showPreviewCover = true
+        }
+    }
+
+    private func rowShelfAnchorID(for rowID: String) -> String {
+        "\(rowID):shelf"
+    }
+
+    private struct HomeShelf: Identifiable {
+        let id: String
+        let title: String
+        let items: [PlexMetadata]
+        let hubKey: String?
+        let hubIdentifier: String?
+        let isContinueWatching: Bool
+        let contextMenuSource: MediaItemContextSource
+    }
+
+    private var homeShelves: [HomeShelf] {
+        var shelves = cachedProcessedHubs.enumerated().compactMap { index, hub -> HomeShelf? in
+            guard let items = hub.Metadata, !items.isEmpty else { return nil }
+            let isContinueWatching = isContinueWatchingHub(hub)
+            return HomeShelf(
+                id: homeRowID(for: hub, index: index),
+                title: hub.title ?? "Unknown",
+                items: items,
+                hubKey: hub.key ?? hub.hubKey,
+                hubIdentifier: hub.hubIdentifier,
+                isContinueWatching: isContinueWatching,
+                contextMenuSource: isContinueWatching ? .continueWatching : .other
+            )
+        }
+
+        if enablePersonalizedRecommendations, !recommendations.isEmpty {
+            shelves.append(
+                HomeShelf(
+                    id: "home:personalizedRecommendations",
+                    title: "Personalized Recommendations",
+                    items: recommendations,
+                    hubKey: nil,
+                    hubIdentifier: nil,
+                    isContinueWatching: false,
+                    contextMenuSource: .other
+                )
+            )
+        }
+
+        return shelves
+    }
 
     // MARK: - Processed Hubs (merged Continue Watching + library-specific sections)
 
@@ -514,77 +578,101 @@ struct PlexHomeView: View {
 
     private func contentBody(screenHeight: CGFloat) -> some View {
         let heroActive = showHomeHero && !heroItems.isEmpty
-        // Leave a visible shelf peek at the bottom of the hero. The backdrop
-        // still fills the screen; this only controls where foreground hero
-        // controls give way to the first row.
-        let heroSectionHeight = screenHeight - 260
+        let heroOverlayHeight = max(500, screenHeight - 330)
 
-        let currentHeroItem: PlexMetadata? = {
+        let fallbackHeroItem: PlexMetadata? = {
             guard heroActive, !heroItems.isEmpty else { return nil }
             let clamped = max(0, min(heroCurrentIndex, heroItems.count - 1))
             return heroItems[clamped]
         }()
 
-        return ZStack(alignment: .top) {
-            // Layer 0: Fixed backdrop — fills the screen behind the scroll view.
-            // Parallax offset at 40% of scroll speed creates the Apple TV
-            // "receding hero" effect as the user scrolls down.
+        return Group {
             if heroActive {
-                HeroBackdropLayer(
-                    currentItem: currentHeroItem,
-                    serverURL: authManager.selectedServerURL ?? "",
-                    authToken: authManager.selectedServerToken ?? ""
+                fixedHeroHomeContent(
+                    heroOverlayHeight: heroOverlayHeight,
+                    fallbackHeroItem: fallbackHeroItem
                 )
-                .ignoresSafeArea()
-                .offset(y: -heroScrollOffset * 1.3 - min(72, heroScrollOffset * 0.72))
-                .allowsHitTesting(false)
+            } else {
+                scrollingHomeContent
+            }
+        }
+    }
+
+    private func fixedHeroHomeContent(
+        heroOverlayHeight: CGFloat,
+        fallbackHeroItem: PlexMetadata?
+    ) -> some View {
+        let shelves = homeShelves
+        let activeIndex = shelves.isEmpty ? 0 : min(max(activeHeroShelfIndex, 0), shelves.count - 1)
+        let activeShelfFirstItem = shelves.isEmpty ? nil : shelves[activeIndex].items.first
+        let displayHeroItem = focusedHeroShelfItem ?? activeShelfFirstItem ?? fallbackHeroItem
+
+        return ZStack(alignment: .top) {
+            HeroBackdropLayer(
+                currentItem: displayHeroItem,
+                serverURL: authManager.selectedServerURL ?? "",
+                authToken: authManager.selectedServerToken ?? "",
+                allowsBackdropMotion: false
+            )
+            .ignoresSafeArea()
+            .allowsHitTesting(false)
+
+            HeroOverlayContent(
+                items: heroItems,
+                serverURL: authManager.selectedServerURL ?? "",
+                authToken: authManager.selectedServerToken ?? "",
+                currentIndex: $heroCurrentIndex,
+                onInfo: { item in selectedItem = item },
+                onPlay: { item in playItemDirectly(item) },
+                onHeroExited: nil,
+                heroHeight: heroOverlayHeight,
+                pinContentToTop: true,
+                displayItemOverride: displayHeroItem,
+                showsButtons: false,
+                showsPagingDots: false
+            )
+            .frame(height: heroOverlayHeight)
+            .focusSection()
+            .zIndex(1)
+
+            if !authManager.isConnected {
+                connectionErrorBanner
+                    .padding(.top, 44)
+                    .zIndex(3)
             }
 
-            // Layer 1: Scrollable content — hero overlay (transparent) scrolls
-            // normally so focus management works, backdrop shows through.
-            ScrollViewReader { scrollProxy in
+            if !shelves.isEmpty {
+                VStack(alignment: .leading, spacing: 0) {
+                    Spacer(minLength: 0)
+                    activeHomeShelfView(
+                        shelf: shelves[activeIndex],
+                        activeIndex: activeIndex,
+                        shelfCount: shelves.count
+                    )
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                .padding(.bottom, 18)
+                .zIndex(4)
+            }
+        }
+        .ignoresSafeArea(.container, edges: [.top, .horizontal])
+    }
+
+    private var scrollingHomeContent: some View {
+        ScrollViewReader { scrollProxy in
             ScrollView(.vertical, showsIndicators: false) {
                 LazyVStack(alignment: .leading, spacing: 0) {
-                    // Connection error banner (when showing cached content while offline)
                     if !authManager.isConnected {
                         connectionErrorBanner
                     }
 
-                    // Hero overlay: transparent foreground (logo/buttons/dots)
-                    // that scrolls with content. The backdrop behind is fixed.
-                    if heroActive {
-                        HeroOverlayContent(
-                            items: heroItems,
-                            serverURL: authManager.selectedServerURL ?? "",
-                            authToken: authManager.selectedServerToken ?? "",
-                            currentIndex: $heroCurrentIndex,
-                            onInfo: { item in selectedItem = item },
-                            onPlay: { item in playItemDirectly(item) },
-                            onHeroFocused: {
-                                withAnimation(.smooth(duration: 0.8)) {
-                                    scrollProxy.scrollTo("homeHero", anchor: .top)
-                                }
-                            },
-                            onHeroExited: nil,
-                            heroHeight: heroSectionHeight
-                        )
-                        .frame(height: heroSectionHeight)
-                        .focusSection()
-                        .id("homeHero")
-                    }
-
-                    // Content rows (uses cached processedHubs which merges Continue Watching + On Deck)
                     VStack(alignment: .leading, spacing: 42) {
-                        // Invisible anchor so we can scroll to place Continue
-                        // Watching at roughly mid-screen (matching Apple TV).
-                        Color.clear
-                            .frame(height: 0)
-                            .id("contentRowsAnchor")
                         ForEach(Array(cachedProcessedHubs.enumerated()), id: \.element.id) { index, hub in
                             if let items = hub.Metadata, !items.isEmpty {
                                 let isContinueWatching = isContinueWatchingHub(hub)
+                                let rowID = homeRowID(for: hub, index: index)
                                 InfiniteContentRow(
-                                    rowID: homeRowID(for: hub, index: index),
+                                    rowID: rowID,
                                     title: hub.title ?? "Unknown",
                                     initialItems: items,
                                     hubKey: hub.key ?? hub.hubKey,
@@ -593,55 +681,91 @@ struct PlexHomeView: View {
                                     authToken: authManager.selectedServerToken ?? "",
                                     isContinueWatching: isContinueWatching,
                                     contextMenuSource: isContinueWatching ? .continueWatching : .other,
-                                    onItemSelected: { item in
-                                        selectedItem = item
-                                    },
-                                    onPlayItem: { item in
-                                        playItemDirectly(item)
-                                    },
-                                    onPlayFromBeginning: { item in
-                                        playItemDirectly(item, fromBeginning: true)
-                                    },
-                                    onGoToItem: { item in
-                                        selectedItem = item
-                                    },
-                                    onRefreshNeeded: {
-                                        await dataStore.refreshHubs()
-                                    },
-                                    onPreviewRequested: isContinueWatching ? nil : { request in
-                                        homeLog.info("[Preview] Opening carousel: \(request.items.count) items, tapped index=\(request.selectedIndex), title=\(request.items[request.selectedIndex].title ?? "?")")
-                                        rowPreviewRequest = request
-                                        showPreviewCover = true
-                                    },
+                                    onItemSelected: { item in selectedItem = item },
+                                    onPlayItem: { item in playItemDirectly(item) },
+                                    onPlayFromBeginning: { item in playItemDirectly(item, fromBeginning: true) },
+                                    onGoToItem: { item in selectedItem = item },
+                                    onRefreshNeeded: { await dataStore.refreshHubs() },
+                                    onPreviewRequested: homePreviewHandler(isContinueWatching: isContinueWatching),
                                     restorePreviewFocusTarget: $previewRestoreTarget,
                                     onRowFocused: {
-                                        let targetID = homeRowID(for: hub, index: index)
                                         withAnimation(.smooth(duration: 0.8)) {
-                                            scrollProxy.scrollTo(targetID, anchor: UnitPoint(x: 0.5, y: 0.5))
+                                            scrollProxy.scrollTo(rowID, anchor: rowFocusAnchor)
                                         }
                                     }
                                 )
-                                .id(homeRowID(for: hub, index: index))
+                                .id(rowID)
                             }
                         }
 
-                        // Recommendations at the end of all library hubs
                         if enablePersonalizedRecommendations {
                             recommendationsSection
                         }
                     }
-                    .padding(.top, heroActive ? -24 : 48)
+                    .padding(.top, 48)
                     .padding(.bottom, 80)
                 }
             }
-            .onScrollGeometryChange(for: CGFloat.self) { geometry in
-                geometry.contentOffset.y
-            } action: { _, offset in
-                heroScrollOffset = max(0, offset)
+            .scrollClipDisabled()
+        }
+    }
+
+    private func activeHomeShelfView(
+        shelf: HomeShelf,
+        activeIndex: Int,
+        shelfCount: Int
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            InfiniteContentRow(
+                rowID: shelf.id,
+                title: shelf.title,
+                initialItems: shelf.items,
+                hubKey: shelf.hubKey,
+                hubIdentifier: shelf.hubIdentifier,
+                serverURL: authManager.selectedServerURL ?? "",
+                authToken: authManager.selectedServerToken ?? "",
+                isContinueWatching: shelf.isContinueWatching,
+                contextMenuSource: shelf.contextMenuSource,
+                onItemSelected: { item in selectedItem = item },
+                onPlayItem: { item in playItemDirectly(item) },
+                onPlayFromBeginning: { item in playItemDirectly(item, fromBeginning: true) },
+                onGoToItem: { item in selectedItem = item },
+                onRefreshNeeded: { await dataStore.refreshHubs() },
+                onPreviewRequested: homePreviewHandler(isContinueWatching: shelf.isContinueWatching),
+                restorePreviewFocusTarget: $previewRestoreTarget,
+                focusFirstRequest: activeHeroShelfFocusRequest,
+                fixedHeightToContent: true,
+                onItemFocused: { item in
+                    focusedHeroShelfItem = item
+                },
+                onMoveUp: activeIndex > 0 ? { moveActiveHeroShelf(by: -1) } : nil,
+                onMoveDown: activeIndex < shelfCount - 1 ? { moveActiveHeroShelf(by: 1) } : nil
+            )
+            .id(shelf.id)
+
+            if activeIndex < shelfCount - 1 {
+                HStack(spacing: 10) {
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 16, weight: .semibold))
+                    Text(homeShelves[activeIndex + 1].title)
+                        .font(.system(size: 17, weight: .medium))
+                }
+                .foregroundStyle(.white.opacity(0.55))
+                .padding(.leading, ScaledDimensions.rowHorizontalPadding)
+                .padding(.top, -4)
             }
-            .scrollClipDisabled()  // Allow shadow overflow
-            .ignoresSafeArea(.container, edges: heroActive ? [.top, .horizontal] : [])
-            } // ScrollViewReader
+        }
+    }
+
+    private func moveActiveHeroShelf(by delta: Int) {
+        let shelves = homeShelves
+        guard !shelves.isEmpty else { return }
+        let nextIndex = min(max(activeHeroShelfIndex + delta, 0), shelves.count - 1)
+        guard nextIndex != activeHeroShelfIndex else { return }
+        withAnimation(.smooth(duration: 0.35)) {
+            activeHeroShelfIndex = nextIndex
+            focusedHeroShelfItem = shelves[nextIndex].items.first
+            activeHeroShelfFocusRequest += 1
         }
     }
 
@@ -759,10 +883,7 @@ struct PlexHomeView: View {
                 onRefreshNeeded: {
                     await refreshRecommendations(force: true)
                 },
-                onPreviewRequested: { request in
-                    rowPreviewRequest = request
-                    showPreviewCover = true
-                },
+                onPreviewRequested: homePreviewHandler(),
                 restorePreviewFocusTarget: $previewRestoreTarget
             )
         }
@@ -1016,7 +1137,13 @@ struct InfiniteContentRow: View {
     var onPreviewRequested: ((PreviewRequest) -> Void)?
     var restorePreviewFocusTarget: Binding<PreviewSourceTarget?> = .constant(nil)
     var onRowFocused: (() -> Void)?
+    var focusFirstRequest: Int = 0
+    var fixedHeightToContent: Bool = false
+    var onItemFocused: ((PlexMetadata) -> Void)?
+    var onMoveUp: (() -> Void)?
+    var onMoveDown: (() -> Void)?
 
+    @Environment(\.uiScale) private var scale
     @State private var items: [PlexMetadata] = []
     @State private var isLoadingMore = false
     @State private var hasReachedEnd = false
@@ -1040,6 +1167,11 @@ struct InfiniteContentRow: View {
         return "\(rowID)-\(suffix)"
     }
 
+    private func item(forFocusID focusID: String?) -> PlexMetadata? {
+        guard let focusID else { return nil }
+        return items.first { focusId(for: $0) == focusID }
+    }
+
     private let networkManager = PlexNetworkManager.shared
     private let pageSize = 24
 
@@ -1047,6 +1179,17 @@ struct InfiniteContentRow: View {
     private var isMusicRow: Bool {
         guard let firstItem = items.first ?? initialItems.first else { return false }
         return firstItem.type == "album" || firstItem.type == "artist" || firstItem.type == "track"
+    }
+
+    private var rowCardHeight: CGFloat {
+        if isContinueWatching {
+            return ScaledDimensions.continueWatchingHeight * scale
+        }
+        return (isMusicRow ? ScaledDimensions.squarePosterSize : ScaledDimensions.posterHeight) * scale
+    }
+
+    private var compactScrollHeight: CGFloat {
+        rowCardHeight + (ScaledDimensions.rowVerticalPadding * 2)
     }
 
     /// Hash that changes when items or their watch status changes
@@ -1151,6 +1294,7 @@ struct InfiniteContentRow: View {
                 .padding(.vertical, ScaledDimensions.rowVerticalPadding)  // Room for scale effect and shadow
             }
             .scrollClipDisabled()  // Allow shadow overflow
+            .frame(height: fixedHeightToContent ? compactScrollHeight : nil)
         }
         .onAppear {
             if items.isEmpty {
@@ -1158,6 +1302,11 @@ struct InfiniteContentRow: View {
                 // Check if we already have all items
                 if let size = totalSize, items.count >= size {
                     hasReachedEnd = true
+                }
+            }
+            if focusFirstRequest > 0 {
+                DispatchQueue.main.async {
+                    focusFirstItem()
                 }
             }
         }
@@ -1183,6 +1332,12 @@ struct InfiniteContentRow: View {
             if oldValue == nil && newValue != nil {
                 onRowFocused?()
             }
+            if let focusedItem = item(forFocusID: newValue) {
+                onItemFocused?(focusedItem)
+            }
+        }
+        .onChange(of: focusFirstRequest) { _, _ in
+            focusFirstItem()
         }
         .onChange(of: restorePreviewFocusTarget.wrappedValue) { _, target in
             guard let target, target.rowID == rowID else { return }
@@ -1196,7 +1351,22 @@ struct InfiniteContentRow: View {
                 restorePreviewFocusTarget.wrappedValue = nil
             }
         }
+        .onMoveCommand { direction in
+            switch direction {
+            case .up:
+                onMoveUp?()
+            case .down:
+                onMoveDown?()
+            default:
+                break
+            }
+        }
         .focusSection()
+    }
+
+    private func focusFirstItem() {
+        guard let first = items.first ?? initialItems.first else { return }
+        focusedItemId = focusId(for: first)
     }
 
     /// Skeleton placeholder card shown while loading more items
@@ -1211,14 +1381,17 @@ struct InfiniteContentRow: View {
                 RoundedRectangle(cornerRadius: 16, style: .continuous)
                     .fill(.white.opacity(0.08))
                     .frame(
-                        width: ScaledDimensions.continueWatchingWidth,
-                        height: ScaledDimensions.continueWatchingHeight
+                        width: ScaledDimensions.continueWatchingWidth * scale,
+                        height: ScaledDimensions.continueWatchingHeight * scale
                     )
             } else {
                 VStack(alignment: .leading, spacing: 12) {
                     RoundedRectangle(cornerRadius: 16, style: .continuous)
                         .fill(.white.opacity(0.08))
-                        .frame(width: 220, height: isMusicRow ? 220 : 330)
+                        .frame(
+                            width: ScaledDimensions.posterWidth * scale,
+                            height: (isMusicRow ? ScaledDimensions.squarePosterSize : ScaledDimensions.posterHeight) * scale
+                        )
 
                     VStack(alignment: .leading, spacing: 6) {
                         RoundedRectangle(cornerRadius: 4, style: .continuous)

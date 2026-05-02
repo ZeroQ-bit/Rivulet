@@ -223,6 +223,14 @@ nonisolated private final class PrerollTimelineState: @unchecked Sendable {
         )
     }
 
+    func claimStart() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard waitingForStart else { return false }
+        waitingForStart = false
+        return true
+    }
+
     func updateAudioAnchorIfEarlier(ptsSeconds: Double, time: CMTime) -> Double? {
         lock.lock()
         defer { lock.unlock() }
@@ -381,6 +389,11 @@ final class DirectPlayPipeline {
     /// pacing / DV conversion CPU spikes never block the FFmpeg packet reads
     /// (which would also stop audio packet reads and starve the audio renderer).
     private var videoEnqueueTask: Task<Void, Never>?
+    private var stopCleanupTask: Task<Void, Never>?
+    private var prerollClockWatchdogTask: Task<Void, Never>?
+    private var prerollClockWatchdogGeneration = 0
+    private var lifecycleGeneration: UInt64 = 0
+    private var readLoopGeneration: UInt64 = 0
     private var isPlaying = false
     private var playbackRate: Float = 1.0
 
@@ -727,6 +740,7 @@ final class DirectPlayPipeline {
     func pause() {
         guard isPlaying else { return }
         isPlaying = false
+        cancelPrerollClockWatchdog()
         // Arm the pause gate before pausing the renderer so the read loop
         // suspends on its next iteration instead of pumping the demuxer
         // forward while the synchronizer is frozen.
@@ -799,36 +813,97 @@ final class DirectPlayPipeline {
         cont.resume()
     }
 
+    private func cancelPrerollClockWatchdog() {
+        prerollClockWatchdogGeneration &+= 1
+        prerollClockWatchdogTask?.cancel()
+        prerollClockWatchdogTask = nil
+    }
+
+    private func armPrerollClockAdvanceWatchdog(anchorTime: CMTime, rate: Float) {
+        guard rate > 0 else { return }
+
+        prerollClockWatchdogGeneration &+= 1
+        let generation = prerollClockWatchdogGeneration
+        prerollClockWatchdogTask?.cancel()
+        prerollClockWatchdogTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            guard let self, !Task.isCancelled else { return }
+            defer {
+                if self.prerollClockWatchdogGeneration == generation {
+                    self.prerollClockWatchdogTask = nil
+                }
+            }
+
+            guard self.prerollClockWatchdogGeneration == generation else { return }
+            guard self.isPlaying, self.state == .running || self.state == .seeking else { return }
+            guard !PlaybackAudioSessionConfigurator.isAirPlayRouteActive() else { return }
+
+            let anchorSeconds = CMTimeGetSeconds(anchorTime)
+            let currentTime = self.renderer.currentTime
+            guard anchorSeconds.isFinite, currentTime.isFinite else { return }
+
+            let advancedSeconds = currentTime - anchorSeconds
+            guard advancedSeconds < 0.08 else { return }
+
+            let hostTime = CMClockGetTime(CMClockGetHostTimeClock())
+            playerDebugLog(
+                "[DirectPlay] Preroll clock watchdog: sync stuck at " +
+                "\(String(format: "%.3f", currentTime))s anchor=\(String(format: "%.3f", anchorSeconds))s " +
+                "rate=\(String(format: "%.2f", rate)); forcing host-time start"
+            )
+            self.renderer.setRate(rate, time: anchorTime, atHostTime: hostTime)
+        }
+    }
+
     func stop() {
+        lifecycleGeneration &+= 1
         isPlaying = false
         deferRunningStateChange = false
+        cancelPrerollClockWatchdog()
+
+        guard stopCleanupTask == nil else {
+            state = .idle
+            onStateChange?(.idle)
+            return
+        }
+
         audioEnqueueTask?.cancel()
-        audioEnqueueTask = nil
         videoEnqueueTask?.cancel()
-        videoEnqueueTask = nil
         readTask?.cancel()
         // Wake a suspended read loop so it can observe cancellation and
         // exit — otherwise a paused-then-stopped task would leak forever.
         isPausedFlag = false
         fireResumeGate()
+
+        let oldAudioTask = audioEnqueueTask
+        let oldVideoTask = videoEnqueueTask
+        let oldReadTask = readTask
+        audioEnqueueTask = nil
+        videoEnqueueTask = nil
         readTask = nil
-        audioEncoder?.close()
-        audioEncoder = nil
-        audioDecoder?.close()
-        audioDecoder = nil
-        subtitleDecoder?.close()
-        subtitleDecoder = nil
-        demuxer.close()
-        if let previousMaxVideoLookahead {
-            renderer.maxVideoLookahead = previousMaxVideoLookahead
-            self.previousMaxVideoLookahead = nil
-        }
+
         state = .idle
         onStateChange?(.idle)
+
+        stopCleanupTask = Task {
+            await finishCancelledTasksAndCloseResources(
+                readTask: oldReadTask,
+                audioTask: oldAudioTask,
+                videoTask: oldVideoTask
+            )
+        }
     }
 
     /// Deterministic shutdown that waits for background tasks before tearing down decoders/demuxer.
     func shutdown() async {
+        lifecycleGeneration &+= 1
+        cancelPrerollClockWatchdog()
+
+        if let stopCleanupTask {
+            await stopCleanupTask.value
+            return
+        }
+
         isPlaying = false
 
         audioEnqueueTask?.cancel()
@@ -848,10 +923,24 @@ final class DirectPlayPipeline {
         videoEnqueueTask = nil
         readTask = nil
 
-        // The read loop is responsible for finishing the video stream's
-        // continuation before exiting; awaiting the read task here ensures
-        // the video task has been signalled to drain. We then await the
-        // video task itself for full deterministic shutdown.
+        await finishCancelledTasksAndCloseResources(
+            readTask: oldReadTask,
+            audioTask: oldAudioTask,
+            videoTask: oldVideoTask
+        )
+
+        state = .idle
+        onStateChange?(.idle)
+    }
+
+    private func finishCancelledTasksAndCloseResources(
+        readTask oldReadTask: Task<Void, Never>?,
+        audioTask oldAudioTask: Task<Void, Never>?,
+        videoTask oldVideoTask: Task<Void, Never>?
+    ) async {
+        // The read loop is responsible for finishing the packet continuations
+        // before exiting. Waiting here prevents close() from freeing FFmpeg
+        // contexts while a detached task is still inside av_read_frame().
         await oldReadTask?.value
         await oldAudioTask?.value
         await oldVideoTask?.value
@@ -869,8 +958,7 @@ final class DirectPlayPipeline {
             self.previousMaxVideoLookahead = nil
         }
 
-        state = .idle
-        onStateChange?(.idle)
+        stopCleanupTask = nil
     }
 
     /// Enable embedded subtitle extraction for a specific FFmpeg stream index.
@@ -911,6 +999,8 @@ final class DirectPlayPipeline {
     // MARK: - Seek
 
     func seek(to time: TimeInterval, isPlaying: Bool, force: Bool = false) async throws {
+        guard state != .idle, stopCleanupTask == nil else { return }
+        let operationGeneration = lifecycleGeneration
         let now = CFAbsoluteTimeGetCurrent()
         let currentTime = renderer.currentTime
         let deltaFromCurrent = abs(time - currentTime)
@@ -936,6 +1026,7 @@ final class DirectPlayPipeline {
         playerDebugLog("[PlaybackHealth] EVENT=seek from=\(String(format: "%.1f", currentTime))s to=\(String(format: "%.1f", time))s")
 
         state = .seeking
+        cancelPrerollClockWatchdog()
         renderer.jitterStats.reset()
 
         // Cancel current read loop. The read loop is responsible for
@@ -958,6 +1049,10 @@ final class DirectPlayPipeline {
         await oldTask?.value
         await oldAudioTask?.value
         await oldVideoTask?.value
+        guard operationGeneration == lifecycleGeneration, stopCleanupTask == nil, state != .idle else {
+            playerDebugLog("[DirectPlay] seek aborted after stop/shutdown")
+            return
+        }
 
         // Flush renderer buffers and discard any batched/encoded audio
         renderer.flush()
@@ -984,7 +1079,7 @@ final class DirectPlayPipeline {
     }
 
     func recoverAudio(afterFlushTime flushTime: CMTime, reason: String) async throws {
-        guard state != .idle, state != .loading else { return }
+        guard state != .idle, state != .loading, stopCleanupTask == nil else { return }
 
         let now = CFAbsoluteTimeGetCurrent()
         if isAudioRecoveryInProgress {
@@ -1020,8 +1115,15 @@ final class DirectPlayPipeline {
     // MARK: - Audio Track Selection
 
     func selectAudioTrack(streamIndex: Int32) async throws {
+        guard state != .idle, stopCleanupTask == nil else { return }
+        let operationGeneration = lifecycleGeneration
         guard let track = demuxer.audioTracks.first(where: { $0.streamIndex == streamIndex }) else {
             throw FFmpegError.invalidStream
+        }
+
+        guard demuxer.selectedAudioStream != streamIndex else {
+            playerDebugLog("[DirectPlay] Audio stream \(streamIndex) already selected; skipping switch")
+            return
         }
 
         playerDebugLog("[DirectPlay] Switching audio to stream \(streamIndex) (\(track.codecName) \(track.channels)ch)")
@@ -1029,6 +1131,7 @@ final class DirectPlayPipeline {
         // Pause the sync clock so it doesn't advance while the read loop is stopped.
         // Without this, the clock drifts ahead during the restart gap, causing a
         // cascade of "late video" frames when the new loop starts.
+        cancelPrerollClockWatchdog()
         renderer.setRate(0)
 
         // Stop the read loop — it captures audioDecoder/audioFD at startup,
@@ -1051,6 +1154,10 @@ final class DirectPlayPipeline {
         await oldTask?.value
         await oldAudioTask?.value
         await oldVideoTask?.value
+        guard operationGeneration == lifecycleGeneration, stopCleanupTask == nil, state != .idle else {
+            playerDebugLog("[DirectPlay] audio switch aborted after stop/shutdown")
+            return
+        }
 
         // Flush audio, decoder, and encoder
         renderer.flush()
@@ -1124,12 +1231,22 @@ final class DirectPlayPipeline {
     // MARK: - Private: Read Loop
 
     private func startReadLoop() {
+        guard state != .idle, stopCleanupTask == nil else {
+            playerDebugLog("[DirectPlay] startReadLoop ignored — pipeline is stopping/idle")
+            return
+        }
+        guard readTask == nil else {
+            playerDebugLog("[DirectPlay] startReadLoop ignored — read loop already active")
+            return
+        }
+
         audioEnqueueTask?.cancel()
         audioEnqueueTask = nil
         videoEnqueueTask?.cancel()
         videoEnqueueTask = nil
-        readTask?.cancel()
         renderer.onAudioPrimedForPlayback = nil
+        readLoopGeneration &+= 1
+        let currentReadLoopGeneration = readLoopGeneration
 
         // Capture everything the detached task needs — avoid referencing self directly
         // since self is @MainActor and the task must run off MainActor for FFmpeg I/O.
@@ -1820,6 +1937,7 @@ final class DirectPlayPipeline {
                 }
 
                 guard (audioReady && videoReady) || timedOut else { return false }
+                guard prerollState.claimStart() else { return false }
 
                 let startedRate = await MainActor.run { () -> (Float, Double, String)? in
                     let shouldStartPlayback = (pipeline.state == .running) || pipeline.isPlaying
@@ -1838,11 +1956,15 @@ final class DirectPlayPipeline {
                     // AirPlay buffer is filled, producing a perceptible
                     // audio-behind-video offset after pause/resume.
                     renderer.setRate(rate, time: anchorTime)
+                    pipeline.armPrerollClockAdvanceWatchdog(anchorTime: anchorTime, rate: rate)
                     let reason = timedOut ? "timeout" : "audio+video_primed"
                     return (rate, anchorSeconds, reason)
                 }
 
-                guard let started = startedRate else { return false }
+                guard let started = startedRate else {
+                    prerollState.reset()
+                    return false
+                }
 
                 let (playbackRate, anchorTime, reason) = started
                 let packetTime = currentPTSSeconds ?? snapshot.maxPTSSeconds ?? anchorTime
@@ -2017,6 +2139,10 @@ final class DirectPlayPipeline {
                         break readLoop
                     }
                     let readEndWall = CFAbsoluteTimeGetCurrent()
+                    if Task.isCancelled {
+                        exitReason = .cancelled
+                        break readLoop
+                    }
                     let readMs = (readEndWall - readStartWall) * 1000
                     throughputAvReadTotalMs += readMs
                     if readMs > throughputAvReadMaxMs {
@@ -2035,22 +2161,20 @@ final class DirectPlayPipeline {
                     // (empirically ~3–5 s). Preroll bypasses the throttle so
                     // the initial buffer still fills quickly.
                     if !prerollState.isWaiting {
-                        let renderedNow = renderer.currentTime
-                        if renderedNow > 0.1 {
-                            let ahead = packet.ptsSeconds - renderedNow
-                            // Throttle at 0.8 s ahead. AVSampleBufferDisplayLayer's
-                            // effective forward acceptance window for 4K HEVC on
-                            // tvOS is ~1.0 s — frames queued further ahead get
-                            // refused until the clock catches up. Measured by
-                            // instrumenting isReadyForMoreMediaData waits: every
-                            // stall exited when the frame was ~0.9 s ahead of
-                            // the synchronizer. 0.8 s keeps the pipeline buffer
-                            // below the layer's cap with a small safety margin.
-                            let throttleThreshold: TimeInterval = 0.8
-                            if ahead > throttleThreshold {
-                                let napSeconds = min(ahead - throttleThreshold, 0.05)
-                                try? await Task.sleep(nanoseconds: UInt64(napSeconds * 1_000_000_000))
-                            }
+                        let renderedNow = max(renderer.currentTime, 0)
+                        let ahead = packet.ptsSeconds - renderedNow
+                        // Throttle at 0.8 s ahead. AVSampleBufferDisplayLayer's
+                        // effective forward acceptance window for 4K HEVC on
+                        // tvOS is ~1.0 s — frames queued further ahead get
+                        // refused until the clock catches up. Measured by
+                        // instrumenting isReadyForMoreMediaData waits: every
+                        // stall exited when the frame was ~0.9 s ahead of
+                        // the synchronizer. 0.8 s keeps the pipeline buffer
+                        // below the layer's cap with a small safety margin.
+                        let throttleThreshold: TimeInterval = 0.8
+                        if ahead.isFinite && ahead > throttleThreshold {
+                            let napSeconds = min(ahead - throttleThreshold, 0.05)
+                            try? await Task.sleep(nanoseconds: UInt64(napSeconds * 1_000_000_000))
                         }
                     }
 
@@ -2431,8 +2555,11 @@ final class DirectPlayPipeline {
 
             await MainActor.run {
                 renderer.onAudioPrimedForPlayback = nil
-                pipeline.audioEnqueueTask = nil
-                pipeline.videoEnqueueTask = nil
+                if pipeline.readLoopGeneration == currentReadLoopGeneration {
+                    pipeline.audioEnqueueTask = nil
+                    pipeline.videoEnqueueTask = nil
+                    pipeline.readTask = nil
+                }
             }
 
             // Handle exit reason
@@ -2461,7 +2588,9 @@ final class DirectPlayPipeline {
             case .pausedSeek:
                 // Signal that resume() must restart the read loop
                 await MainActor.run {
-                    pipeline.readTask = nil
+                    if pipeline.readLoopGeneration == currentReadLoopGeneration {
+                        pipeline.readTask = nil
+                    }
                 }
             case .cancelled:
                 break

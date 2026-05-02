@@ -49,6 +49,9 @@ class PlexAuthManager: ObservableObject {
     @Published var username: String?
     @Published var selectedServer: PlexDevice?
     @Published var selectedServerURL: String?
+    @Published private(set) var availableServers: [PlexDevice] = []
+    @Published private(set) var isLoadingServers = false
+    @Published private(set) var isSwitchingServer = false
 
     /// The access token to use for the selected server
     /// For shared/friend's servers, this is the server-specific accessToken
@@ -184,15 +187,16 @@ class PlexAuthManager: ObservableObject {
     /// Select a server from the list
     /// Returns true if connection was successful, false otherwise
     @discardableResult
-    func selectServer(_ server: PlexDevice) async -> Bool {
+    func selectServer(_ server: PlexDevice, reloadContent: Bool = true) async -> Bool {
         // Cancel any in-progress server selection
         serverSelectionTask?.cancel()
 
-        selectedServer = server
+        let previousServer = selectedServer
 
         // Create a tracked task for the connection test
         let task = Task { @MainActor () -> Bool in
             if let workingURL = await findBestConnection(for: server) {
+                selectedServer = server
                 selectedServerURL = workingURL
                 userDefaults.set(selectedServerURL, forKey: serverURLKey)
                 userDefaults.set(server.name, forKey: serverNameKey)
@@ -213,10 +217,13 @@ class PlexAuthManager: ObservableObject {
                 // library tabs on first build. Without this, the sidebar's
                 // conditional TabSection can latch to "empty" and not recover when
                 // libraries load asynchronously later.
-                await PlexDataStore.shared.loadLibrariesIfNeeded()
+                if reloadContent {
+                    await PlexDataStore.shared.loadLibrariesIfNeeded()
+                }
 
                 return true
             } else {
+                selectedServer = previousServer
                 isConnected = false
                 connectionError = "Could not connect to server. Check your network."
                 state = .error(message: "Could not connect to server. Check your network.")
@@ -227,6 +234,69 @@ class PlexAuthManager: ObservableObject {
 
         serverSelectionTask = task
         return await task.value
+    }
+
+    /// Refresh the account's available Plex servers without leaving settings.
+    @discardableResult
+    func refreshAvailableServers() async -> [PlexDevice] {
+        guard let token = authToken else {
+            availableServers = []
+            return []
+        }
+
+        isLoadingServers = true
+        defer { isLoadingServers = false }
+
+        do {
+            let servers = try await networkManager.getServers(authToken: token)
+            availableServers = servers
+            connectionError = nil
+            return servers
+        } catch {
+            print("🔐 PlexAuthManager: Failed to refresh servers: \(error)")
+            connectionError = "Unable to refresh Plex servers"
+            return []
+        }
+    }
+
+    /// Switch to another server on the same Plex account and reload app content.
+    @discardableResult
+    func switchServer(_ server: PlexDevice) async -> Bool {
+        guard !isSwitchingServer else { return false }
+
+        if isActiveServer(server) {
+            return true
+        }
+
+        isSwitchingServer = true
+        defer { isSwitchingServer = false }
+
+        let success = await selectServer(server, reloadContent: false)
+        guard success else { return false }
+
+        // Rebuild the selected profile's server token for this server before
+        // content reloads. If a protected profile needs a PIN, the account token
+        // remains usable and the profile settings screen can re-auth that user.
+        await PlexUserProfileManager.shared.fetchHomeUsers()
+        await PlexDataStore.shared.onServerSwitched()
+        return true
+    }
+
+    func isActiveServer(_ server: PlexDevice) -> Bool {
+        if selectedServer?.clientIdentifier == server.clientIdentifier {
+            return true
+        }
+
+        if let selectedServerURL,
+           server.connections?.contains(where: { $0.uri == selectedServerURL }) == true {
+            return true
+        }
+
+        if let savedServerName, savedServerName == server.name {
+            return true
+        }
+
+        return false
     }
 
     /// Find the best working connection for a server
@@ -513,6 +583,9 @@ class PlexAuthManager: ObservableObject {
         selectedServer = nil
         selectedServerURL = nil
         selectedServerToken = nil
+        availableServers = []
+        isLoadingServers = false
+        isSwitchingServer = false
         isConnected = true  // Reset to default
         connectionError = nil
 
@@ -575,6 +648,7 @@ class PlexAuthManager: ObservableObject {
         if selectedServerURL == nil {
             do {
                 let servers = try await networkManager.getServers(authToken: token)
+                availableServers = servers
                 if servers.count == 1 {
                     // Await server selection to ensure URL is set before returning
                     await selectServer(servers[0])
@@ -615,6 +689,7 @@ class PlexAuthManager: ObservableObject {
             // This allows cached content to still be shown
             do {
                 let servers = try await networkManager.getServers(authToken: token)
+                availableServers = servers
                 if let currentServer = servers.first(where: { server in
                     server.connections?.contains { $0.uri == currentURL } == true
                 }) ?? servers.first {
@@ -703,6 +778,7 @@ class PlexAuthManager: ObservableObject {
         // Fetch available servers
         do {
             let servers = try await networkManager.getServers(authToken: token)
+            availableServers = servers
 
             if servers.isEmpty {
                 state = .error(message: "No Plex servers found on your account")

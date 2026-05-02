@@ -73,6 +73,9 @@ enum SubtitlePreferenceManager {
     private static let languagesKey = "subtitlePreferenceLanguages"
     private static let codecKey = "subtitlePreferenceCodec"
     private static let hearingImpairedKey = "subtitlePreferenceHearingImpaired"
+    private static let sourceKey = "subtitlePreferenceSource"
+    private static let settingsSource = "settings"
+    private static let playerSource = "player"
 
     // Migration from old JSON format
     private static let migrationKey = "subtitlePreferenceMigrated"
@@ -110,20 +113,77 @@ enum SubtitlePreferenceManager {
             )
         }
         set {
-            let languageCodes = Array(newValue.preferredLanguageCodes.prefix(5))
-            UserDefaults.standard.set(newValue.enabled, forKey: enabledKey)
-            if let firstLanguage = languageCodes.first ?? newValue.languageCode {
-                UserDefaults.standard.set(firstLanguage, forKey: languageKey)
-            } else {
-                UserDefaults.standard.removeObject(forKey: languageKey)
-            }
-            UserDefaults.standard.set(languageCodes, forKey: languagesKey)
-            if let codec = newValue.codec {
-                UserDefaults.standard.set(codec, forKey: codecKey)
-            } else {
-                UserDefaults.standard.removeObject(forKey: codecKey)
-            }
-            UserDefaults.standard.set(newValue.preferHearingImpaired, forKey: hearingImpairedKey)
+            save(newValue, source: UserDefaults.standard.string(forKey: sourceKey))
+        }
+    }
+
+    static var settingsPreference: SubtitlePreference? {
+        let preference = current
+        let source = UserDefaults.standard.string(forKey: sourceKey)
+
+        if source == settingsSource {
+            return preference
+        }
+
+        guard source == nil, preference.enabled else {
+            return nil
+        }
+
+        let languageCodes = preference.preferredLanguageCodes
+        let searchCodes = languageCodes.compactMap { PlexOnDemandSubtitleService.searchLanguageCode($0) }
+        let looksLikeSettingsSelection =
+            languageCodes.count > 1 ||
+            searchCodes.contains { $0 != "en" }
+        guard looksLikeSettingsSelection else {
+            return nil
+        }
+
+        var migratedPreference = preference
+        if languageCodes.count > 1,
+           searchCodes.first == "en",
+           searchCodes.dropFirst().contains(where: { $0 != "en" }) {
+            let trimmedLanguages = Array(languageCodes.dropFirst())
+            migratedPreference.languageCodes = trimmedLanguages
+            migratedPreference.languageCode = trimmedLanguages.first
+        }
+
+        return migratedPreference
+    }
+
+    static var hasSettingsPreference: Bool {
+        settingsPreference != nil
+    }
+
+    static func saveSettingsPreference(_ preference: SubtitlePreference) {
+        save(preference, source: settingsSource)
+    }
+
+    static func savePlayerPreference(_ preference: SubtitlePreference) {
+        guard UserDefaults.standard.string(forKey: sourceKey) != settingsSource else {
+            return
+        }
+        save(preference, source: playerSource)
+    }
+
+    private static func save(_ newValue: SubtitlePreference, source: String?) {
+        let languageCodes = Array(newValue.preferredLanguageCodes.prefix(5))
+        UserDefaults.standard.set(newValue.enabled, forKey: enabledKey)
+        if let firstLanguage = languageCodes.first ?? newValue.languageCode {
+            UserDefaults.standard.set(firstLanguage, forKey: languageKey)
+        } else {
+            UserDefaults.standard.removeObject(forKey: languageKey)
+        }
+        UserDefaults.standard.set(languageCodes, forKey: languagesKey)
+        if let codec = newValue.codec {
+            UserDefaults.standard.set(codec, forKey: codecKey)
+        } else {
+            UserDefaults.standard.removeObject(forKey: codecKey)
+        }
+        UserDefaults.standard.set(newValue.preferHearingImpaired, forKey: hearingImpairedKey)
+        if let source {
+            UserDefaults.standard.set(source, forKey: sourceKey)
+        } else {
+            UserDefaults.standard.removeObject(forKey: sourceKey)
         }
     }
 
@@ -135,6 +195,7 @@ enum SubtitlePreferenceManager {
         UserDefaults.standard.object(forKey: languagesKey) != nil ||
         UserDefaults.standard.object(forKey: codecKey) != nil ||
         UserDefaults.standard.object(forKey: hearingImpairedKey) != nil ||
+        UserDefaults.standard.object(forKey: sourceKey) != nil ||
         UserDefaults.standard.object(forKey: "subtitlePreference") != nil
     }
 
@@ -148,40 +209,50 @@ enum SubtitlePreferenceManager {
         }
 
         for preferredLang in preferredLanguages {
-            let langMatches = tracks.filter { track in
-                [
-                    track.languageCode,
-                    track.language,
-                    track.name,
-                    track.extendedDisplayTitle
-                ].contains { PlexOnDemandSubtitleService.searchLanguageCode($0) == preferredLang }
+            if let match = findBestMatch(in: tracks, forSearchLanguage: preferredLang, preference: preference) {
+                return match
             }
-            guard !langMatches.isEmpty else { continue }
-
-            // Try to find exact codec match
-            if let preferredCodec = preference.codec {
-                if let exactMatch = langMatches.first(where: {
-                    $0.codec == preferredCodec && $0.isHearingImpaired == preference.preferHearingImpaired
-                }) {
-                    return exactMatch
-                }
-                // Try codec match without hearing impaired preference
-                if let codecMatch = langMatches.first(where: { $0.codec == preferredCodec }) {
-                    return codecMatch
-                }
-            }
-
-            // Fall back to first track of preferred language with matching HI preference
-            if let hiMatch = langMatches.first(where: { $0.isHearingImpaired == preference.preferHearingImpaired }) {
-                return hiMatch
-            }
-
-            // Fall back to first track of preferred language
-            return langMatches.first
         }
 
         // No tracks match preferred languages - keep subtitles off.
         return nil
+    }
+
+    static func findBestMatch(
+        in tracks: [MediaTrack],
+        forSearchLanguage searchLanguage: String,
+        preference: SubtitlePreference
+    ) -> MediaTrack? {
+        let langMatches = tracks.filter { track in
+            [
+                track.languageCode,
+                track.language,
+                track.name,
+                track.extendedDisplayTitle
+            ].contains { PlexOnDemandSubtitleService.searchLanguageCode($0) == searchLanguage }
+        }
+        guard !langMatches.isEmpty else { return nil }
+
+        // Try to find exact codec match
+        if let preferredCodec = preference.codec {
+            if let exactMatch = langMatches.first(where: {
+                $0.codec == preferredCodec && $0.isHearingImpaired == preference.preferHearingImpaired
+            }) {
+                return exactMatch
+            }
+            // Try codec match without hearing impaired preference
+            if let codecMatch = langMatches.first(where: { $0.codec == preferredCodec }) {
+                return codecMatch
+            }
+        }
+
+        // Fall back to first track of preferred language with matching HI preference
+        if let hiMatch = langMatches.first(where: { $0.isHearingImpaired == preference.preferHearingImpaired }) {
+            return hiMatch
+        }
+
+        // Fall back to first track of preferred language
+        return langMatches.first
     }
 }
 
@@ -373,8 +444,41 @@ final class UniversalPlayerViewModel: ObservableObject {
     @Published private(set) var subtitleTracks: [MediaTrack] = []
     @Published private(set) var currentAudioTrackId: Int?
     @Published private(set) var currentSubtitleTrackId: Int?
+    private static let settingsSubtitleOptionIdBase = -500_000
+    private static let settingsSubtitleOptionLimit = 5
+    private static let settingsSubtitleCandidateOptionIdBase = -600_000
+    private static let settingsSubtitleCandidateOptionIdMin = -2_000_000
+    private var onDemandSubtitleTracks: [MediaTrack] = []
+    private var onDemandSubtitleRatingKey: String?
+    private var onDemandSubtitleCandidateEntries: [OnDemandSubtitleCandidateEntry] = []
+    private var onDemandSubtitleCandidateRatingKey: String?
+    private var nextOnDemandSubtitleCandidateId = -600_000
+    private var downloadedOnDemandSubtitleCandidateKeys = Set<String>()
     private var compatibilityNoticeTimer: Timer?
     private nonisolated(unsafe) var userActivity: NSUserActivity?
+
+    private struct OnDemandSubtitleCandidateEntry: Equatable {
+        let id: Int
+        let ratingKey: String
+        let language: String
+        let rank: Int
+        let candidate: PlexOnDemandSubtitleCandidate
+        let displayName: String
+
+        var menuTrack: MediaTrack {
+            MediaTrack(
+                id: id,
+                name: displayName,
+                language: displayName,
+                languageCode: language,
+                codec: "srt",
+                isDefault: false,
+                isForced: candidate.forced,
+                isHearingImpaired: candidate.hearingImpaired,
+                extendedDisplayTitle: displayName
+            )
+        }
+    }
 
     // MARK: - Playback Settings Panel State (Column-based layout)
 
@@ -398,7 +502,45 @@ final class UniversalPlayerViewModel: ObservableObject {
     }
 
     private var subtitleControlRowCount: Int {
-        6
+        3
+    }
+
+    func isSettingsSubtitleOption(_ track: MediaTrack) -> Bool {
+        Self.isSettingsSubtitleOptionId(track.id)
+    }
+
+    func settingsSubtitleOptionSubtitle(for track: MediaTrack) -> String {
+        guard Self.isSettingsSubtitleOptionId(track.id) else {
+            return track.formattedCodec
+        }
+
+        if let entry = onDemandSubtitleCandidateEntry(id: track.id) {
+            var parts = ["Plex on-demand"]
+            if entry.candidate.score > 0 {
+                parts.append("score \(entry.candidate.score)")
+            }
+            if entry.candidate.perfectMatch {
+                parts.append("exact")
+            }
+            return parts.joined(separator: " · ")
+        }
+
+        return "Searching Plex"
+    }
+
+    private static func isSettingsSubtitleOptionId(_ id: Int) -> Bool {
+        isSettingsSubtitleLanguageOptionId(id) ||
+            isSettingsSubtitleCandidateOptionId(id)
+    }
+
+    private static func isSettingsSubtitleLanguageOptionId(_ id: Int) -> Bool {
+        id <= settingsSubtitleOptionIdBase &&
+            id > settingsSubtitleOptionIdBase - settingsSubtitleOptionLimit
+    }
+
+    private static func isSettingsSubtitleCandidateOptionId(_ id: Int) -> Bool {
+        id <= settingsSubtitleCandidateOptionIdBase &&
+            id > settingsSubtitleCandidateOptionIdMin
     }
 
     /// Check if a specific setting is focused
@@ -462,18 +604,12 @@ final class UniversalPlayerViewModel: ObservableObject {
         let settings = SubtitleAppearanceSettings.shared
         switch row {
         case 0:
-            settings.cycleTextSize()
-        case 1:
-            settings.cycleTextColor()
-        case 2:
-            settings.cycleVerticalPosition()
-        case 3:
             settings.adjustDelay(by: -0.2)
             subtitleManager.didSeek()
-        case 4:
+        case 1:
             settings.resetDelay()
             subtitleManager.didSeek()
-        case 5:
+        case 2:
             settings.adjustDelay(by: 0.2)
             subtitleManager.didSeek()
         default:
@@ -2637,6 +2773,11 @@ final class UniversalPlayerViewModel: ObservableObject {
     }
 
     func selectSubtitleTrack(id: Int?) {
+        if let id, Self.isSettingsSubtitleOptionId(id) {
+            selectSettingsSubtitleOption(id: id)
+            return
+        }
+
         // Delegate the actual pipeline switch to the auto-selection helper,
         // then persist the user's explicit choice as the saved preference so
         // future playback sessions restore it.
@@ -2645,9 +2786,9 @@ final class UniversalPlayerViewModel: ObservableObject {
         selectSubtitleTrackWithoutSaving(id: id)
 
         if let id = id, let track = subtitleTracks.first(where: { $0.id == id }) {
-            SubtitlePreferenceManager.current = SubtitlePreference(from: track)
+            SubtitlePreferenceManager.savePlayerPreference(SubtitlePreference(from: track))
         } else {
-            SubtitlePreferenceManager.current = .off
+            SubtitlePreferenceManager.savePlayerPreference(.off)
         }
     }
 
@@ -2657,6 +2798,7 @@ final class UniversalPlayerViewModel: ObservableObject {
 
         // Clear subtitles if no track selected
         guard let trackId = trackId,
+              !Self.isSettingsSubtitleOptionId(trackId),
               let track = subtitleTracks.first(where: { $0.id == trackId }) else {
             subtitleManager.clear()
             // Stop FFmpeg subtitle stream and callback for Rivulet
@@ -2673,7 +2815,7 @@ final class UniversalPlayerViewModel: ObservableObject {
         // Falls back to Plex URL for external sidecar subs if FFmpeg has no subtitle tracks.
         if let rp = rivuletPlayer, rp.activePipeline == .directPlay {
             let ffmpegSubs = rp.ffmpegSubtitleTracks
-            if !ffmpegSubs.isEmpty {
+            if track.subtitleKey == nil, !ffmpegSubs.isEmpty {
                 print("🎬 [Subtitles] Enabling inline embedded subtitle for track \(trackId) (FFmpeg has \(ffmpegSubs.count) sub tracks)")
                 subtitleManager.clear()
                 rp.onSubtitleCue = { [weak self] text, start, end in
@@ -2770,6 +2912,34 @@ final class UniversalPlayerViewModel: ObservableObject {
     private var hasAppliedAudioPreference = false
     private var isLoadingOnDemandSubtitle = false
 
+    private var realSubtitleTracks: [MediaTrack] {
+        subtitleTracks.filter { !Self.isSettingsSubtitleOptionId($0.id) }
+    }
+
+    private var autoSelectableSubtitleTracks: [MediaTrack] {
+        // External Plex URL subtitles can be on-demand attachments. Keep them
+        // visible in the menu, but do not auto-select them from Settings
+        // because Plex can attach a subtitle for the wrong title.
+        realSubtitleTracks.filter { isTrustedSettingsSubtitleTrack($0) }
+    }
+
+    private func isTrustedSettingsSubtitleTrack(_ track: MediaTrack) -> Bool {
+        track.subtitleKey == nil || onDemandSubtitleTracks.contains(where: { $0.id == track.id })
+    }
+
+    private func onDemandSubtitleCandidateEntry(id: Int) -> OnDemandSubtitleCandidateEntry? {
+        onDemandSubtitleCandidateEntries.first { $0.id == id }
+    }
+
+    private func subtitleTrack(_ track: MediaTrack, matchesSearchLanguage language: String) -> Bool {
+        [
+            track.languageCode,
+            track.language,
+            track.name,
+            track.extendedDisplayTitle
+        ].contains { PlexOnDemandSubtitleService.searchLanguageCode($0) == language }
+    }
+
     /// Pre-play track selections passed in from the item-detail picker.
     /// Override the saved-preference auto-apply on first track population
     /// — explicit user choice wins over remembered language preferences.
@@ -2777,6 +2947,12 @@ final class UniversalPlayerViewModel: ObservableObject {
     /// to the preference managers.
     private var initialAudioTrackId: Int?
     private var initialSubtitleSelection: InitialSubtitleSelection = .auto
+
+    private func metadataSubtitleTracks() -> [MediaTrack] {
+        metadata.Media?.first?.Part?.first?.Stream?
+            .filter { $0.isSubtitle }
+            .map { MediaTrack(from: $0) } ?? []
+    }
 
     private func updateTrackLists() {
         let previousSubtitleCount = subtitleTracks.count
@@ -2789,7 +2965,7 @@ final class UniversalPlayerViewModel: ObservableObject {
 
         if let streams = metadata.Media?.first?.Part?.first?.Stream {
             newAudioTracks = streams.filter { $0.isAudio }.map { MediaTrack(from: $0) }
-            newSubtitleTracks = streams.filter { $0.isSubtitle }.map { MediaTrack(from: $0) }
+            newSubtitleTracks = metadataSubtitleTracks()
             let selectedAudioId = streams.first(where: { $0.isAudio && $0.selected == true })?.id
             let selectedSubtitleId = streams.first(where: { $0.isSubtitle && $0.selected == true })?.id
             newCurrentAudioTrackId = selectedAudioId ??
@@ -2807,7 +2983,7 @@ final class UniversalPlayerViewModel: ObservableObject {
         }
 
         audioTracks = newAudioTracks
-        subtitleTracks = newSubtitleTracks
+        subtitleTracks = mergedSubtitleTracks(with: newSubtitleTracks)
 
         // Only update current track IDs on first population.
         // After tracks are populated, the user's explicit selections take precedence.
@@ -2824,11 +3000,235 @@ final class UniversalPlayerViewModel: ObservableObject {
             applyAudioPreference()
         }
 
-        // Apply saved subtitle preference when tracks are first available
-        if !hasAppliedSubtitlePreference && !subtitleTracks.isEmpty && previousSubtitleCount == 0 {
+        // Apply saved subtitle preference when tracks are first available.
+        // If the user has preferred languages, also run this for items with
+        // no local subtitle tracks so Plex on-demand lookup can attach one.
+        let shouldTryPreferredSubtitleFallback =
+            SubtitlePreferenceManager.hasSettingsPreference &&
+            (SubtitlePreferenceManager.settingsPreference?.enabled ?? false)
+        if !hasAppliedSubtitlePreference &&
+            previousSubtitleCount == 0 &&
+            (!subtitleTracks.isEmpty || shouldTryPreferredSubtitleFallback) {
             hasAppliedSubtitlePreference = true
             applySubtitlePreference()
         }
+    }
+
+    private func mergedSubtitleTracks(with metadataTracks: [MediaTrack]) -> [MediaTrack] {
+        var playableTracks = metadataTracks
+
+        guard let ratingKey = metadata.ratingKey else {
+            onDemandSubtitleTracks = []
+            onDemandSubtitleRatingKey = nil
+            onDemandSubtitleCandidateEntries = []
+            onDemandSubtitleCandidateRatingKey = nil
+            nextOnDemandSubtitleCandidateId = Self.settingsSubtitleCandidateOptionIdBase
+            downloadedOnDemandSubtitleCandidateKeys.removeAll()
+            return subtitleTracksIncludingSettingsOptions(playableTracks)
+        }
+
+        if onDemandSubtitleRatingKey == ratingKey {
+            for onDemandTrack in onDemandSubtitleTracks where !playableTracks.contains(where: { $0.id == onDemandTrack.id }) {
+                playableTracks.append(onDemandTrack)
+            }
+        } else if onDemandSubtitleRatingKey != nil {
+            onDemandSubtitleTracks = []
+            onDemandSubtitleRatingKey = nil
+        }
+
+        if onDemandSubtitleCandidateRatingKey != nil,
+           onDemandSubtitleCandidateRatingKey != ratingKey {
+            onDemandSubtitleCandidateEntries = []
+            onDemandSubtitleCandidateRatingKey = nil
+            nextOnDemandSubtitleCandidateId = Self.settingsSubtitleCandidateOptionIdBase
+            downloadedOnDemandSubtitleCandidateKeys.removeAll()
+        }
+
+        return subtitleTracksIncludingSettingsOptions(playableTracks)
+    }
+
+    private func subtitleTracksIncludingSettingsOptions(_ playableTracks: [MediaTrack]) -> [MediaTrack] {
+        guard let preference = SubtitlePreferenceManager.settingsPreference,
+              preference.enabled else {
+            return playableTracks
+        }
+
+        let preferredLanguages = preferredSettingsSubtitleLanguages(from: preference)
+        guard !preferredLanguages.isEmpty else { return playableTracks }
+
+        var orderedTracks: [MediaTrack] = []
+        var addedTrackIds = Set<Int>()
+        let trustedTracks = playableTracks.filter { isTrustedSettingsSubtitleTrack($0) }
+        let currentRatingKey = metadata.ratingKey
+
+        for (index, language) in preferredLanguages.enumerated() {
+            var addedAnyForLanguage = false
+
+            let localTracks = trustedTracks.filter { subtitleTrack($0, matchesSearchLanguage: language) }
+            for track in localTracks where addedTrackIds.insert(track.id).inserted {
+                orderedTracks.append(track)
+                addedAnyForLanguage = true
+            }
+
+            let candidateTracks = onDemandSubtitleCandidateEntries
+                .filter { entry in
+                    entry.language == language &&
+                        (currentRatingKey.map { $0 == entry.ratingKey } ?? false)
+                }
+                .filter { !downloadedOnDemandSubtitleCandidateKeys.contains($0.candidate.key) }
+                .map(\.menuTrack)
+            for track in candidateTracks where addedTrackIds.insert(track.id).inserted {
+                orderedTracks.append(track)
+                addedAnyForLanguage = true
+            }
+
+            if !addedAnyForLanguage {
+                let optionTrack = settingsSubtitleOptionTrack(language: language, priorityIndex: index)
+                if addedTrackIds.insert(optionTrack.id).inserted {
+                    orderedTracks.append(optionTrack)
+                }
+            }
+        }
+
+        for track in playableTracks where addedTrackIds.insert(track.id).inserted {
+            orderedTracks.append(track)
+        }
+
+        return orderedTracks
+    }
+
+    private func preferredSettingsSubtitleLanguages(from preference: SubtitlePreference) -> [String] {
+        var seen = Set<String>()
+        return Array(
+            preference.preferredLanguageCodes
+                .compactMap { PlexOnDemandSubtitleService.searchLanguageCode($0) }
+                .filter { seen.insert($0).inserted }
+                .prefix(Self.settingsSubtitleOptionLimit)
+        )
+    }
+
+    private func settingsSubtitleOptionTrack(language: String, priorityIndex: Int) -> MediaTrack {
+        let displayName = subtitleLanguageDisplayName(for: language)
+        return MediaTrack(
+            id: Self.settingsSubtitleOptionIdBase - priorityIndex,
+            name: displayName,
+            language: displayName,
+            languageCode: language,
+            codec: nil,
+            isDefault: false,
+            isForced: false,
+            isHearingImpaired: false,
+            extendedDisplayTitle: displayName
+        )
+    }
+
+    private func subtitleLanguageDisplayName(for language: String) -> String {
+        if let option = LanguageOption.option(languageCode: language) {
+            return option.description
+        }
+        if let localized = Locale.current.localizedString(forLanguageCode: language) {
+            return localized.capitalized
+        }
+        return language.uppercased()
+    }
+
+    private func registerOnDemandSubtitleCandidates(
+        _ candidates: [PlexOnDemandSubtitleCandidate],
+        language: String,
+        ratingKey: String
+    ) {
+        if onDemandSubtitleCandidateRatingKey != ratingKey {
+            onDemandSubtitleCandidateEntries = []
+            onDemandSubtitleCandidateRatingKey = ratingKey
+            nextOnDemandSubtitleCandidateId = Self.settingsSubtitleCandidateOptionIdBase
+            downloadedOnDemandSubtitleCandidateKeys.removeAll()
+        }
+
+        onDemandSubtitleCandidateEntries.removeAll {
+            $0.ratingKey == ratingKey && $0.language == language
+        }
+
+        for (index, candidate) in candidates.enumerated()
+            where !downloadedOnDemandSubtitleCandidateKeys.contains(candidate.key) {
+            let fallbackName = subtitleLanguageDisplayName(for: language)
+            let candidateName = candidate.label ?? candidate.providerTitle ?? fallbackName
+            let displayName = candidates.count > 1 ? "\(candidateName) #\(index + 1)" : candidateName
+            let entry = OnDemandSubtitleCandidateEntry(
+                id: nextOnDemandSubtitleCandidateId,
+                ratingKey: ratingKey,
+                language: language,
+                rank: index,
+                candidate: candidate,
+                displayName: displayName
+            )
+            nextOnDemandSubtitleCandidateId -= 1
+            onDemandSubtitleCandidateEntries.append(entry)
+        }
+
+        subtitleTracks = mergedSubtitleTracks(with: metadataSubtitleTracks())
+        print("🎬 [Subtitles] Registered \(candidates.count) on-demand subtitle candidates ratingKey=\(ratingKey) language=\(language) menuCount=\(subtitleTracks.count)")
+    }
+
+    private func availableOnDemandSubtitleCandidateEntries(languages: [String]) -> [OnDemandSubtitleCandidateEntry] {
+        guard let ratingKey = metadata.ratingKey else { return [] }
+
+        var entries: [OnDemandSubtitleCandidateEntry] = []
+        for language in languages {
+            entries.append(
+                contentsOf: onDemandSubtitleCandidateEntries.filter {
+                    $0.ratingKey == ratingKey &&
+                        $0.language == language &&
+                        !downloadedOnDemandSubtitleCandidateKeys.contains($0.candidate.key)
+                }
+            )
+        }
+        return entries
+    }
+
+    private func downloadAndRegisterOnDemandSubtitleCandidate(
+        _ entry: OnDemandSubtitleCandidateEntry,
+        ratingKey: String
+    ) async -> MediaTrack? {
+        currentSubtitleTrackId = entry.id
+
+        let downloadedStream = await PlexOnDemandSubtitleService.shared.downloadSubtitleCandidate(
+            entry.candidate,
+            serverURL: serverURL,
+            authToken: authToken,
+            ratingKey: ratingKey,
+            language: entry.language
+        )
+
+        guard (metadata.ratingKey.map { $0 == ratingKey } ?? false),
+              let downloadedStream else {
+            return nil
+        }
+
+        let downloadedTrack = MediaTrack(from: downloadedStream)
+        registerOnDemandSubtitleTrack(
+            downloadedTrack,
+            ratingKey: ratingKey,
+            candidateKey: entry.candidate.key
+        )
+        return downloadedTrack
+    }
+
+    private func registerOnDemandSubtitleTrack(
+        _ track: MediaTrack,
+        ratingKey: String,
+        candidateKey: String? = nil
+    ) {
+        onDemandSubtitleRatingKey = ratingKey
+        if let candidateKey {
+            downloadedOnDemandSubtitleCandidateKeys.insert(candidateKey)
+        }
+        if let index = onDemandSubtitleTracks.firstIndex(where: { $0.id == track.id }) {
+            onDemandSubtitleTracks[index] = track
+        } else {
+            onDemandSubtitleTracks.append(track)
+        }
+        subtitleTracks = mergedSubtitleTracks(with: metadataSubtitleTracks())
+        print("🎬 [Subtitles] Registered on-demand subtitle in player menu id=\(track.id) language=\(track.languageCode ?? track.language ?? track.name) count=\(subtitleTracks.count)")
     }
 
     enum StreamType { case audio, subtitle }
@@ -2943,7 +3343,7 @@ final class UniversalPlayerViewModel: ObservableObject {
             return
         case .track(let id):
             initialSubtitleSelection = .auto
-            if subtitleTracks.contains(where: { $0.id == id }) {
+            if realSubtitleTracks.contains(where: { $0.id == id }) {
                 selectSubtitleTrackWithoutSaving(id: id)
                 return
             }
@@ -2951,21 +3351,14 @@ final class UniversalPlayerViewModel: ObservableObject {
             break
         }
 
-        // 2. Plex's per-item explicit selection. A `selected: true`
-        //    track that's neither the default nor the forced track is
-        //    one the user picked deliberately — honor it over the
-        //    app-level language preference.
-        if let plexSelectedSubId = currentSubtitleTrackId,
-           let track = subtitleTracks.first(where: { $0.id == plexSelectedSubId }),
-           !track.isDefault, !track.isForced {
-            selectSubtitleTrackWithoutSaving(id: plexSelectedSubId)
-            return
-        }
-
-        // No explicit user preference yet: honor selected/default stream behavior.
-        if !SubtitlePreferenceManager.hasStoredPreference {
-            if currentSubtitleTrackId == nil,
-               let forcedTrack = subtitleTracks.first(where: { $0.isForced }) {
+        // No explicit settings preference yet: honor selected/default stream behavior.
+        guard let preference = SubtitlePreferenceManager.settingsPreference else {
+            if let plexSelectedSubId = currentSubtitleTrackId,
+               let track = realSubtitleTracks.first(where: { $0.id == plexSelectedSubId }),
+               !track.isDefault, !track.isForced {
+                selectSubtitleTrackWithoutSaving(id: plexSelectedSubId)
+            } else if currentSubtitleTrackId == nil,
+               let forcedTrack = realSubtitleTracks.first(where: { $0.isForced }) {
                 selectSubtitleTrackWithoutSaving(id: forcedTrack.id)
             } else if let activeSubtitleTrackId = currentSubtitleTrackId {
                 // For custom renderers, selecting can require explicit file fetch/load.
@@ -2974,76 +3367,212 @@ final class UniversalPlayerViewModel: ObservableObject {
             return
         }
 
-        let preference = SubtitlePreferenceManager.current
-
         if !preference.enabled {
             // User prefers subtitles off
             selectSubtitleTrackWithoutSaving(id: nil)
             return
         }
 
-        // Find best matching track
-        if let match = SubtitlePreferenceManager.findBestMatch(in: subtitleTracks, preference: preference) {
-            selectSubtitleTrackWithoutSaving(id: match.id)
-        } else {
-            // No matching language found locally — ask Plex to attach an on-demand subtitle.
-            loadOnDemandSubtitleFallback(preference: preference)
-        }
-    }
-
-    private func loadOnDemandSubtitleFallback(preference: SubtitlePreference) {
-        guard !isLoadingOnDemandSubtitle else { return }
-        guard let ratingKey = metadata.ratingKey else {
-            selectSubtitleTrackWithoutSaving(id: nil)
-            return
-        }
-
-        let languages = Array(
+        let preferredLanguages = Array(
             preference.preferredLanguageCodes
                 .compactMap { PlexOnDemandSubtitleService.searchLanguageCode($0) }
                 .prefix(5)
         )
-        guard !languages.isEmpty else {
+        guard !preferredLanguages.isEmpty else {
             selectSubtitleTrackWithoutSaving(id: nil)
             return
         }
 
+        let playableSubtitleTracks = autoSelectableSubtitleTracks
+        let localMatches = preferredLanguages.map { language in
+            SubtitlePreferenceManager.findBestMatch(
+                in: playableSubtitleTracks,
+                forSearchLanguage: language,
+                preference: preference
+            )
+        }
+        let localLanguageSummary = playableSubtitleTracks
+            .map { $0.languageCode ?? $0.language ?? $0.name }
+            .joined(separator: ",")
+        print("🎬 [Subtitles] Applying settings languages=\(preferredLanguages.joined(separator: ",")) trustedLocalTracks=\(localLanguageSummary.isEmpty ? "none" : localLanguageSummary)")
+
+        if let firstLocalMatch = localMatches.first.flatMap({ $0 }) {
+            print("🎬 [Subtitles] Settings priority already has local subtitle id=\(firstLocalMatch.id) language=\(firstLocalMatch.languageCode ?? firstLocalMatch.language ?? "unknown"); still loading remaining settings languages")
+        }
+
+        loadOnDemandSubtitleFallback(
+            languages: preferredLanguages,
+            preference: preference,
+            fallbackLocalMatch: nil
+        )
+    }
+
+    private func loadOnDemandSubtitleFallback(
+        languages: [String],
+        preference: SubtitlePreference,
+        fallbackLocalMatch: MediaTrack?
+    ) {
+        var seenLanguages = Set<String>()
+        let orderedLanguages = Array(
+            languages
+                .compactMap { PlexOnDemandSubtitleService.searchLanguageCode($0) }
+                .filter { seenLanguages.insert($0).inserted }
+                .prefix(Self.settingsSubtitleOptionLimit)
+        )
+
+        guard !orderedLanguages.isEmpty else {
+            selectSubtitleTrackWithoutSaving(id: fallbackLocalMatch?.id)
+            return
+        }
+
+        guard !isLoadingOnDemandSubtitle else { return }
+
+        guard let ratingKey = metadata.ratingKey else {
+            let selectedTrack = bestAvailableSettingsSubtitleTrack(
+                languages: orderedLanguages,
+                preference: preference
+            )
+            selectSubtitleTrackWithoutSaving(id: selectedTrack?.id ?? fallbackLocalMatch?.id)
+            return
+        }
+
         isLoadingOnDemandSubtitle = true
-        print("🎬 [Subtitles] Trying Plex on-demand fallback ratingKey=\(ratingKey) languages=\(languages.joined(separator: ","))")
+        print("🎬 [Subtitles] Loading settings subtitle candidates ratingKey=\(ratingKey) languages=\(orderedLanguages.joined(separator: ","))")
 
         Task { @MainActor in
-            for language in languages {
-                let downloadedStream = await PlexOnDemandSubtitleService.shared.downloadBestSubtitle(
+            var candidateCount = 0
+
+            for language in orderedLanguages {
+                let candidates = await PlexOnDemandSubtitleService.shared.availableSubtitles(
                     serverURL: serverURL,
                     authToken: authToken,
                     ratingKey: ratingKey,
                     language: language
                 )
-
-                guard let downloadedStream else { continue }
-
-                isLoadingOnDemandSubtitle = false
-
-                let downloadedTrack = MediaTrack(from: downloadedStream)
-                if !subtitleTracks.contains(where: { $0.id == downloadedTrack.id }) {
-                    subtitleTracks.append(downloadedTrack)
-                }
-                selectSubtitleTrackWithoutSaving(id: downloadedTrack.id)
-                return
+                candidateCount += candidates.count
+                registerOnDemandSubtitleCandidates(candidates, language: language, ratingKey: ratingKey)
             }
 
             isLoadingOnDemandSubtitle = false
-            selectSubtitleTrackWithoutSaving(id: nil)
+
+            for language in orderedLanguages {
+                if let selectedTrack = bestAvailableSettingsSubtitleTrack(
+                    languages: [language],
+                    preference: preference
+                ) {
+                    print("🎬 [Subtitles] Selected settings subtitle priority id=\(selectedTrack.id) language=\(selectedTrack.languageCode ?? selectedTrack.language ?? "unknown") candidates=\(candidateCount)")
+                    selectSubtitleTrackWithoutSaving(id: selectedTrack.id)
+                    return
+                }
+
+                let candidateEntries = availableOnDemandSubtitleCandidateEntries(languages: [language])
+                for entry in candidateEntries {
+                    print("🎬 [Subtitles] Auto-selecting on-demand candidate ratingKey=\(ratingKey) language=\(entry.language) candidate=\(entry.candidate.debugSummary)")
+                    if let downloadedTrack = await downloadAndRegisterOnDemandSubtitleCandidate(entry, ratingKey: ratingKey) {
+                        print("🎬 [Subtitles] Selected downloaded settings subtitle id=\(downloadedTrack.id) language=\(downloadedTrack.languageCode ?? downloadedTrack.language ?? "unknown") candidates=\(candidateCount)")
+                        selectSubtitleTrackWithoutSaving(id: downloadedTrack.id)
+                        return
+                    }
+                }
+            }
+
+            if let fallbackLocalMatch {
+                print("🎬 [Subtitles] Settings subtitles unavailable; selected fallback subtitle id=\(fallbackLocalMatch.id) language=\(fallbackLocalMatch.languageCode ?? fallbackLocalMatch.language ?? "unknown") candidates=\(candidateCount)")
+                selectSubtitleTrackWithoutSaving(id: fallbackLocalMatch.id)
+            } else {
+                print("🎬 [Subtitles] Settings subtitles unavailable ratingKey=\(ratingKey) languages=\(orderedLanguages.joined(separator: ",")) candidates=\(candidateCount)")
+                selectSubtitleTrackWithoutSaving(id: nil)
+            }
         }
+    }
+
+    private func bestAvailableSettingsSubtitleTrack(
+        languages: [String],
+        preference: SubtitlePreference
+    ) -> MediaTrack? {
+        for language in languages {
+            if let match = SubtitlePreferenceManager.findBestMatch(
+                in: autoSelectableSubtitleTracks,
+                forSearchLanguage: language,
+                preference: preference
+            ) {
+                return match
+            }
+        }
+        return nil
     }
 
     /// Select subtitle track without saving preference (for auto-selection)
     private func selectSubtitleTrackWithoutSaving(id: Int?) {
+        if let id, Self.isSettingsSubtitleOptionId(id) {
+            selectSettingsSubtitleOption(id: id)
+            return
+        }
+
         if rivuletPlayer != nil {
             rivuletPlayer?.selectSubtitleTrack(id: id)
             loadSubtitleForRivuletPlayer(trackId: id)
         }
         currentSubtitleTrackId = id
+    }
+
+    private func selectSettingsSubtitleOption(id: Int) {
+        let fallbackTrack = currentSubtitleTrackId.flatMap { currentId in
+            realSubtitleTracks.first { $0.id == currentId }
+        }
+
+        if let entry = onDemandSubtitleCandidateEntry(id: id),
+           let ratingKey = metadata.ratingKey {
+            currentSubtitleTrackId = id
+            subtitleManager.clear()
+            rivuletPlayer?.deselectEmbeddedSubtitle()
+
+            print("🎬 [Subtitles] Settings menu selected on-demand candidate ratingKey=\(ratingKey) language=\(entry.language) candidate=\(entry.candidate.debugSummary)")
+            Task { @MainActor in
+                if let downloadedTrack = await downloadAndRegisterOnDemandSubtitleCandidate(entry, ratingKey: ratingKey) {
+                    selectSubtitleTrackWithoutSaving(id: downloadedTrack.id)
+                    SubtitlePreferenceManager.savePlayerPreference(SubtitlePreference(from: downloadedTrack))
+                } else if let fallbackTrack {
+                    selectSubtitleTrackWithoutSaving(id: fallbackTrack.id)
+                } else {
+                    selectSubtitleTrackWithoutSaving(id: nil)
+                }
+            }
+            return
+        }
+
+        guard let optionTrack = subtitleTracks.first(where: { $0.id == id }),
+              let language = PlexOnDemandSubtitleService.searchLanguageCode(
+                optionTrack.languageCode ?? optionTrack.language ?? optionTrack.name
+              ) else {
+            return
+        }
+
+        currentSubtitleTrackId = id
+        subtitleManager.clear()
+        rivuletPlayer?.deselectEmbeddedSubtitle()
+
+        let preference = SubtitlePreferenceManager.settingsPreference ??
+            SubtitlePreference(
+                enabled: true,
+                languageCode: language,
+                languageCodes: [language],
+                codec: nil,
+                preferHearingImpaired: false
+            )
+
+        if let localMatch = SubtitlePreferenceManager.findBestMatch(
+            in: autoSelectableSubtitleTracks,
+            forSearchLanguage: language,
+            preference: preference
+        ) {
+            print("🎬 [Subtitles] Settings menu selected local subtitle id=\(localMatch.id) language=\(language)")
+            selectSubtitleTrackWithoutSaving(id: localMatch.id)
+            return
+        }
+
+        print("🎬 [Subtitles] Settings menu selected on-demand language=\(language)")
+        loadOnDemandSubtitleFallback(languages: [language], preference: preference, fallbackLocalMatch: fallbackTrack)
     }
 
     private func configureSubtitleClockSyncForCurrentPlayer() {

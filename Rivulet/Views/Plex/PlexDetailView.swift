@@ -854,52 +854,19 @@ struct PlexDetailView: View {
                     .frame(maxWidth: heroLogoMaxWidth, alignment: .leading)
                     .frame(height: heroLogoSlotHeight, alignment: .bottomLeading)
 
-                    // Genre + content rating row
-                    heroMetadataRow
+                    detailHeroInfoRow
 
                     // Description area (narrower than full metadata block, per Apple TV+ reference)
-                    VStack(alignment: .leading, spacing: 4) {
-                        if currentItem.type == "episode" {
-                            if let epString = currentItem.episodeString {
-                                let title = currentItem.title ?? ""
-                                let header = epString + (title.isEmpty ? "" : " · \(title)")
-                                let desc = fullMetadata?.summary ?? currentItem.summary ?? ""
-                                Text("\(header)\(desc.isEmpty ? "" : ":  \(desc)")")
-                                    .font(.caption)
-                                    .foregroundStyle(.white)
-                                    .lineLimit(3)
-                            }
-                        } else if currentItem.type == "show" || currentItem.type == "season" {
-                            if let tagline = fullMetadata?.tagline ?? currentItem.tagline {
-                                Text(tagline)
-                                    .font(.caption)
-                                    .italic()
-                                    .foregroundStyle(.white.opacity(0.9))
-                            }
-                            if let summary = fullMetadata?.summary ?? currentItem.summary, !summary.isEmpty {
-                                Text(summary)
-                                    .font(.caption)
-                                    .foregroundStyle(.white.opacity(0.85))
-                                    .lineLimit(3)
-                            }
-                        } else {
-                            if let tagline = fullMetadata?.tagline ?? currentItem.tagline {
-                                Text(tagline)
-                                    .font(.caption)
-                                    .italic()
-                                    .foregroundStyle(.white.opacity(0.9))
-                            } else if let summary = fullMetadata?.summary ?? currentItem.summary, !summary.isEmpty {
-                                Text(summary)
-                                    .font(.caption)
-                                    .foregroundStyle(.white.opacity(0.85))
-                                    .lineLimit(3)
-                            }
-                        }
+                    if let synopsis = detailHeroSynopsis {
+                        Text(synopsis)
+                            .font(.system(size: 24, weight: .medium, design: .default))
+                            .foregroundStyle(.white.opacity(0.84))
+                            .lineLimit(3)
+                            .lineSpacing(4)
+                            .multilineTextAlignment(.leading)
+                            .shadow(color: .black.opacity(0.65), radius: 10, x: 0, y: 2)
+                            .frame(maxWidth: 820, alignment: .leading)
                     }
-                    .frame(maxWidth: 560, alignment: .leading)
-
-                    // Year · Duration · Quality badges
-                    heroQualityRow
 
                     // Up Next caption
                     if let caption = upNextCaption {
@@ -1000,116 +967,161 @@ struct PlexDetailView: View {
             .shadow(color: .black.opacity(0.5), radius: 10, x: 0, y: 4)
     }
 
-    /// Genre tags + content rating badge (Apple TV+ style: "TV Show · Adventure · Sci-Fi [TV-14]")
-    private var heroMetadataRow: some View {
-        HStack(spacing: 8) {
-            // Build label parts with dot separators
-            let parts = heroMetadataParts
-            ForEach(Array(parts.enumerated()), id: \.offset) { index, part in
-                if index > 0 {
-                    Text("·")
-                }
-                Text(part)
+    private var detailHeroInfoRow: some View {
+        HStack(spacing: 13) {
+            if let matchLabel = detailHeroMatchLabel {
+                Text(matchLabel)
+                    .font(.system(size: 22, weight: .bold))
+                    .foregroundStyle(Color(red: 0.31, green: 0.86, blue: 0.42))
             }
 
-            // Content rating badge (bordered, at end)
-            if let contentRating = fullMetadata?.contentRating ?? currentItem.contentRating {
-                Text(contentRating)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 4, style: .continuous)
-                            .stroke(Color.white.opacity(0.5), lineWidth: 1)
-                    }
+            if let year = fullMetadata?.year ?? currentItem.year {
+                detailHeroPlainInfo(String(year))
+            }
+
+            if let rating = fullMetadata?.contentRating ?? currentItem.contentRating, !rating.isEmpty {
+                detailHeroContentRatingBadge(rating)
+            }
+
+            if let contentCountLabel = detailHeroContentCountLabel {
+                detailHeroPlainInfo(contentCountLabel)
+            } else if let type = detailHeroTypeLabel, detailHeroMatchLabel == nil, (fullMetadata?.year ?? currentItem.year) == nil {
+                detailHeroPlainInfo(type)
+            }
+
+            ForEach(detailHeroQualityBadges, id: \.self) { badge in
+                detailHeroQualityBadge(badge)
             }
         }
-        .font(.caption)
-        .foregroundStyle(.white.opacity(0.85))
+        .lineLimit(1)
+        .minimumScaleFactor(0.86)
+        .shadow(color: .black.opacity(0.6), radius: 8, x: 0, y: 2)
     }
 
-    private var heroMetadataParts: [String] {
-        var parts: [String] = []
-
-        // Type label: prefer library section title, fall back to content type
-        if let library = (fullMetadata ?? currentItem).librarySectionTitle {
-            parts.append(library)
-        } else if currentItem.type == "show" || currentItem.type == "episode" || currentItem.type == "season" {
-            parts.append("TV Show")
-        } else if currentItem.type == "movie" {
-            parts.append("Movie")
-        }
-
-        // Genres (up to 2 — keeps the row concise alongside the type label and rating badge)
-        let genreSource = fullMetadata ?? currentItem
-        if let genres = genreSource.Genre?.prefix(2) {
-            for genre in genres {
-                if let tag = genre.tag {
-                    parts.append(tag)
-                }
-            }
-        }
-
-        return parts
+    private var detailHeroMatchLabel: String? {
+        let rawScore = fullMetadata?.audienceRating ?? currentItem.audienceRating ?? fullMetadata?.rating ?? currentItem.rating
+        guard let rawScore, rawScore > 0 else { return nil }
+        let percent = rawScore <= 10 ? rawScore * 10 : rawScore
+        guard percent > 0, percent <= 100 else { return nil }
+        return "\(Int(percent.rounded()))% Match"
     }
 
-    /// Year, duration, quality badges row (Apple TV+ style: "2023 · 49 min [4K] [DV] [5.1]")
-    private var heroQualityRow: some View {
-        HStack(spacing: 8) {
-            // Year · Duration with dot separator
-            let year = fullMetadata?.year ?? currentItem.year
-            let duration = fullMetadata?.durationFormatted ?? currentItem.durationFormatted
-
-            if let year {
-                Text(String(year))
+    private var detailHeroContentCountLabel: String? {
+        switch currentItem.type {
+        case "show":
+            if let seasons = fullMetadata?.childCount ?? currentItem.childCount, seasons > 0 {
+                return seasons == 1 ? "1 Season" : "\(seasons) Seasons"
             }
-            if year != nil && duration != nil {
-                Text("·")
+            if let episodes = fullMetadata?.leafCount ?? currentItem.leafCount, episodes > 0 {
+                return episodes == 1 ? "1 Episode" : "\(episodes) Episodes"
             }
-            if let duration {
-                Text(duration)
+        case "season":
+            if let episodes = fullMetadata?.leafCount ?? currentItem.leafCount, episodes > 0 {
+                return episodes == 1 ? "1 Episode" : "\(episodes) Episodes"
             }
-
-            if let rating = fullMetadata?.rating ?? currentItem.rating {
-                HStack(spacing: 4) {
-                    Image(systemName: "star.fill")
-                        .foregroundStyle(.yellow)
-                    Text(String(format: "%.1f", rating))
-                }
+        case "episode":
+            if let episodeString = fullMetadata?.episodeString ?? currentItem.episodeString {
+                return episodeString
             }
-
-            // Quality badges
-            if let videoQuality = fullMetadata?.videoQualityDisplay ?? currentItem.videoQualityDisplay {
-                QualityBadge(text: videoQuality)
-            }
-            if let hdrFormat = fullMetadata?.hdrFormatDisplay ?? currentItem.hdrFormatDisplay {
-                QualityBadge(text: hdrFormat)
-            }
-            if let audioFormat = fullMetadata?.audioFormatDisplay ?? currentItem.audioFormatDisplay {
-                QualityBadge(text: audioFormat)
-            }
+        default:
+            break
         }
-        .font(.caption.bold())
-        .foregroundStyle(.white)
+        return fullMetadata?.durationFormatted ?? currentItem.durationFormatted
     }
 
-    /// Small badge for quality indicators (4K, DV, Atmos, etc.)
-    private struct QualityBadge: View {
-        let text: String
-        var body: some View {
-            Text(text)
-                .font(.caption)
-                .fontWeight(.semibold)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 3)
-                .background(
-                    RoundedRectangle(cornerRadius: 4, style: .continuous)
-                        .fill(.white.opacity(0.15))
-                )
-                .overlay {
-                    RoundedRectangle(cornerRadius: 4, style: .continuous)
-                        .stroke(.white.opacity(0.3), lineWidth: 0.5)
-                }
+    private var detailHeroTypeLabel: String? {
+        switch currentItem.type {
+        case "movie": return "Movie"
+        case "show", "season", "episode": return "TV Show"
+        case "artist": return "Artist"
+        case "album": return "Album"
+        default: return currentItem.type?.capitalized
         }
+    }
+
+    private var detailHeroQualityBadges: [String] {
+        var badges: [String] = []
+        if let quality = fullMetadata?.videoQualityDisplay ?? currentItem.videoQualityDisplay {
+            badges.append(quality)
+        }
+        if let hdr = fullMetadata?.hdrFormatDisplay ?? currentItem.hdrFormatDisplay {
+            badges.append(hdr)
+        }
+        if let audio = fullMetadata?.audioFormatDisplay ?? currentItem.audioFormatDisplay, audio != "Stereo" {
+            badges.append(audio)
+        }
+        if let brand = detailHeroAudioBrandBadge, !badges.contains(brand) {
+            badges.append(brand)
+        }
+        return Array(badges.prefix(4))
+    }
+
+    private var detailHeroAudioBrandBadge: String? {
+        let codec = (fullMetadata?.Media?.first?.audioCodec ?? currentItem.Media?.first?.audioCodec)?.lowercased()
+        guard let codec, !codec.isEmpty else {
+            return nil
+        }
+        if codec.contains("eac3") || codec.contains("ac3") || codec.contains("truehd") || codec.contains("atmos") {
+            return "DOLBY"
+        }
+        if codec.contains("dts") {
+            return "DTS"
+        }
+        return nil
+    }
+
+    private var detailHeroSynopsis: String? {
+        if currentItem.type == "episode", let episodeString = fullMetadata?.episodeString ?? currentItem.episodeString {
+            let title = fullMetadata?.title ?? currentItem.title ?? ""
+            let header = episodeString + (title.isEmpty ? "" : " · \(title)")
+            let summary = fullMetadata?.summary ?? currentItem.summary ?? ""
+            return "\(header)\(summary.isEmpty ? "" : ":  \(summary)")"
+        }
+        if let summary = fullMetadata?.summary ?? currentItem.summary, !summary.isEmpty {
+            return summary
+        }
+        if let tagline = fullMetadata?.tagline ?? currentItem.tagline, !tagline.isEmpty {
+            return tagline
+        }
+        return nil
+    }
+
+    private func detailHeroPlainInfo(_ value: String) -> some View {
+        Text(value)
+            .font(.system(size: 22, weight: .medium))
+            .foregroundStyle(.white.opacity(0.74))
+    }
+
+    private func detailHeroContentRatingBadge(_ value: String) -> some View {
+        Text(value)
+            .font(.system(size: 17, weight: .black))
+            .foregroundStyle(.white)
+            .padding(.horizontal, 19)
+            .padding(.vertical, 4)
+            .background(
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .fill(Color(red: 0.82, green: 0.03, blue: 0.03))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .stroke(.white.opacity(0.9), lineWidth: 1.7)
+            )
+    }
+
+    private func detailHeroQualityBadge(_ value: String) -> some View {
+        Text(value)
+            .font(.system(size: 17, weight: .black))
+            .foregroundStyle(.white.opacity(0.86))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .fill(.black.opacity(0.22))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .stroke(.white.opacity(0.46), lineWidth: 1.4)
+            )
     }
 
     /// Check if this is a music item (album, artist, track)

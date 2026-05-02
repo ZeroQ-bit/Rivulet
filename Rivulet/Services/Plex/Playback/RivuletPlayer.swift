@@ -723,6 +723,7 @@ final class RivuletPlayer: ObservableObject {
     }
 
     func seek(to time: TimeInterval) async {
+        let generation = pipelineGeneration
         let wasPlaying = isPlaying
         playbackStateSubject.send(.buffering)
 
@@ -736,8 +737,11 @@ final class RivuletPlayer: ObservableObject {
                 break
             }
         } catch {
+            guard generation == pipelineGeneration else { return }
             playerDebugLog("[RivuletPlayer] Seek error: \(error)")
         }
+
+        guard generation == pipelineGeneration else { return }
 
         // Ensure UI exits buffering even if pipeline doesn't emit an immediate post-seek state.
         playbackStateSubject.send(wasPlaying ? .playing : .paused)
@@ -837,6 +841,11 @@ final class RivuletPlayer: ObservableObject {
 
         let ffmpegSubs = ffmpegSubtitleTracks
         guard let plexTrack = plexSubtitleTracks.first(where: { $0.id == plexTrackId }) else { return false }
+
+        if plexTrack.subtitleKey != nil {
+            playerDebugLog("[RivuletPlayer] Plex subtitle \(plexTrackId) has an external key; using Plex URL instead of FFmpeg stream mapping")
+            return false
+        }
 
         let plexCodec = MediaTrack.normalizedSubtitleCodec(plexTrack.codec)
 

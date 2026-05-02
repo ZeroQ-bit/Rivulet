@@ -32,38 +32,84 @@ struct HeroSlideContent: View {
         }
     }
 
-    private var metaLine: String {
-        var parts: [String] = []
-        if let type = typeLabel { parts.append(type) }
-        if let firstGenre = item.Genre?.first?.tag, !firstGenre.isEmpty {
-            parts.append(firstGenre)
+    private var contentCountLabel: String? {
+        switch item.type {
+        case "show":
+            if let seasons = item.childCount, seasons > 0 {
+                return seasons == 1 ? "1 Season" : "\(seasons) Seasons"
+            }
+            if let episodes = item.leafCount, episodes > 0 {
+                return episodes == 1 ? "1 Episode" : "\(episodes) Episodes"
+            }
+        case "season":
+            if let episodes = item.leafCount, episodes > 0 {
+                return episodes == 1 ? "1 Episode" : "\(episodes) Episodes"
+            }
+        case "episode":
+            if let episodeString = item.episodeString {
+                return episodeString
+            }
+        default:
+            break
         }
-        return parts.joined(separator: " · ")
+        return item.durationFormatted
     }
 
-    private var tagline: String? {
-        if let explicit = item.tagline, !explicit.isEmpty { return explicit }
-        guard let summary = item.summary, !summary.isEmpty else { return nil }
-        // Trim to the first sentence for the Apple TV+-style one-line tagline.
-        if let endIdx = summary.firstIndex(where: { ".!?".contains($0) }) {
-            let firstSentence = summary[..<summary.index(after: endIdx)]
-            return String(firstSentence)
+    private var matchLabel: String? {
+        let rawScore = item.audienceRating ?? item.rating
+        guard let rawScore, rawScore > 0 else { return nil }
+        let percent = rawScore <= 10 ? rawScore * 10 : rawScore
+        guard percent > 0, percent <= 100 else { return nil }
+        return "\(Int(percent.rounded()))% Match"
+    }
+
+    private var audioBrandBadge: String? {
+        guard let codec = item.Media?.first?.audioCodec?.lowercased(), !codec.isEmpty else { return nil }
+        if codec.contains("eac3") || codec.contains("ac3") || codec.contains("truehd") || codec.contains("atmos") {
+            return "DOLBY"
         }
-        return summary
+        if codec.contains("dts") {
+            return "DTS"
+        }
+        return nil
+    }
+
+    private var qualityBadges: [String] {
+        var badges: [String] = []
+        if let quality = item.videoQualityDisplay {
+            badges.append(quality)
+        }
+        if let hdr = item.hdrFormatDisplay {
+            badges.append(hdr)
+        }
+        if let audio = item.audioFormatDisplay, audio != "Stereo" {
+            badges.append(audio)
+        }
+        if let brand = audioBrandBadge, !badges.contains(brand) {
+            badges.append(brand)
+        }
+        return Array(badges.prefix(4))
+    }
+
+    private var synopsis: String? {
+        if let summary = item.summary, !summary.isEmpty { return summary }
+        if let explicit = item.tagline, !explicit.isEmpty { return explicit }
+        return nil
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 18) {
             titleView
             metadataRow
-            if let tagline {
-                Text(tagline)
-                    .font(.system(size: 22, weight: .regular))
-                    .foregroundStyle(.white.opacity(0.85))
-                    .lineLimit(2)
+            if let synopsis {
+                Text(synopsis)
+                    .font(.system(size: 24, weight: .medium, design: .default))
+                    .foregroundStyle(.white.opacity(0.84))
+                    .lineLimit(3)
+                    .lineSpacing(4)
                     .multilineTextAlignment(.leading)
-                    .frame(maxWidth: 720, alignment: .leading)
-                    .padding(.top, 4)
+                    .frame(maxWidth: 820, alignment: .leading)
+                    .shadow(color: .black.opacity(0.65), radius: 10, x: 0, y: 2)
             }
         }
     }
@@ -77,7 +123,8 @@ struct HeroSlideContent: View {
                     image
                         .resizable()
                         .aspectRatio(contentMode: .fit)
-                        .frame(maxWidth: 520, maxHeight: 180, alignment: .leading)
+                        .frame(maxWidth: 560, maxHeight: 205, alignment: .leading)
+                        .shadow(color: .black.opacity(0.55), radius: 14, x: 0, y: 4)
                 case .empty:
                     fallbackTitle
                         .redacted(reason: .placeholder)
@@ -85,7 +132,7 @@ struct HeroSlideContent: View {
                     fallbackTitle
                 }
             }
-            .frame(maxHeight: 180, alignment: .leading)
+            .frame(maxHeight: 205, alignment: .leading)
         } else {
             fallbackTitle
         }
@@ -93,30 +140,78 @@ struct HeroSlideContent: View {
 
     private var fallbackTitle: some View {
         Text(item.seriesTitleForDisplay ?? item.title ?? "")
-            .font(.system(size: 72, weight: .heavy, design: .serif))
+            .font(.system(size: 74, weight: .black, design: .default))
             .foregroundStyle(.white)
             .lineLimit(2)
-            .shadow(color: .black.opacity(0.5), radius: 8, x: 0, y: 3)
+            .frame(maxWidth: 680, alignment: .leading)
+            .shadow(color: .black.opacity(0.65), radius: 12, x: 0, y: 4)
     }
 
     private var metadataRow: some View {
-        HStack(spacing: 12) {
-            if !metaLine.isEmpty {
-                Text(metaLine)
-                    .font(.system(size: 20, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.9))
+        HStack(spacing: 13) {
+            if let matchLabel {
+                Text(matchLabel)
+                    .font(.system(size: 22, weight: .bold))
+                    .foregroundStyle(Color(red: 0.31, green: 0.86, blue: 0.42))
             }
+
+            if let year = item.year {
+                heroPlainInfo(String(year))
+            }
+
             if let rating = item.contentRating, !rating.isEmpty {
-                Text(rating)
-                    .font(.system(size: 16, weight: .semibold))
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 3)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 4, style: .continuous)
-                            .stroke(Color.white.opacity(0.5), lineWidth: 1.5)
-                    )
-                    .foregroundStyle(.white.opacity(0.9))
+                contentRatingBadge(rating)
+            }
+
+            if let contentCountLabel {
+                heroPlainInfo(contentCountLabel)
+            } else if let type = typeLabel, matchLabel == nil, item.year == nil {
+                heroPlainInfo(type)
+            }
+
+            ForEach(qualityBadges, id: \.self) { badge in
+                qualityBadge(badge)
             }
         }
+        .lineLimit(1)
+        .shadow(color: .black.opacity(0.6), radius: 8, x: 0, y: 2)
+    }
+
+    private func heroPlainInfo(_ value: String) -> some View {
+        Text(value)
+            .font(.system(size: 22, weight: .medium))
+            .foregroundStyle(.white.opacity(0.74))
+    }
+
+    private func contentRatingBadge(_ value: String) -> some View {
+        Text(value)
+            .font(.system(size: 17, weight: .black))
+            .foregroundStyle(.white)
+            .padding(.horizontal, 19)
+            .padding(.vertical, 4)
+            .background(
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .fill(Color(red: 0.82, green: 0.03, blue: 0.03))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .stroke(.white.opacity(0.9), lineWidth: 1.7)
+            )
+    }
+
+    private func qualityBadge(_ value: String) -> some View {
+        Text(value)
+            .font(.system(size: 17, weight: .black))
+            .foregroundStyle(.white.opacity(0.86))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .fill(.black.opacity(0.22))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .stroke(.white.opacity(0.46), lineWidth: 1.4)
+            )
     }
 }

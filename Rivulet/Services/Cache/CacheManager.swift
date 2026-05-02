@@ -250,7 +250,8 @@ actor CacheManager {
             showsCachePrefix,
             seasonsCachePrefix,
             episodesCachePrefix,
-            recentlyAddedPrefix
+            recentlyAddedPrefix,
+            libraryHubsCachePrefix
         ]
 
         let ourFiles = [

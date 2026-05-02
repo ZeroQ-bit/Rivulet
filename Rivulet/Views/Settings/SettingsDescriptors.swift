@@ -19,7 +19,14 @@ struct SettingDescriptor {
 
 enum SettingsDescriptorStore {
     static func descriptor(for id: String) -> SettingDescriptor? {
-        descriptors[id]
+        if id.hasPrefix("plexServer_") {
+            return SettingDescriptor(
+                icon: "server.rack",
+                iconColor: .orange,
+                description: "Switch to this Plex server using the current Plex account. Rivulet reloads libraries and Home content after switching."
+            )
+        }
+        return descriptors[id]
     }
 
     private static let descriptors: [String: SettingDescriptor] = [
@@ -81,6 +88,11 @@ enum SettingsDescriptorStore {
             icon: "rectangle.stack",
             iconColor: .teal,
             description: "Shows a featured content banner at the top of each library with highlighted picks."
+        ),
+        "openDetailsDirectly": SettingDescriptor(
+            icon: "arrow.up.left.and.arrow.down.right",
+            iconColor: .green,
+            description: "Opens the full media detail page with one press from Home and Library rows. Turn off to use the preview carousel first."
         ),
         "discoveryRows": SettingDescriptor(
             icon: "square.stack.3d.up",
@@ -147,7 +159,7 @@ enum SettingsDescriptorStore {
         "useApplePlayer": SettingDescriptor(
             icon: "play.rectangle",
             iconColor: .blue,
-            description: "Uses Apple's built-in AVPlayer for all video playback. Will cause direct streams from the server, but provides that Apple-feel, and works well with HomePods."
+            description: "When off, Rivulet uses its custom player by default so subtitle styling and on-demand subtitle features can run. Turn on for Apple's built-in AVPlayer."
         ),
         "avPlayerDV": SettingDescriptor(
             icon: "sparkles.tv",
@@ -218,7 +230,12 @@ enum SettingsDescriptorStore {
         "plexServer": SettingDescriptor(
             icon: "server.rack",
             iconColor: .orange,
-            description: "Manage your Plex server connection, view server details, or sign out."
+            description: "Manage your Plex server connection, switch servers, refresh available servers, or sign out."
+        ),
+        "refreshServers": SettingDescriptor(
+            icon: "arrow.clockwise",
+            iconColor: .blue,
+            description: "Refresh the Plex servers available on your account."
         ),
         "signOut": SettingDescriptor(
             icon: "rectangle.portrait.and.arrow.right",

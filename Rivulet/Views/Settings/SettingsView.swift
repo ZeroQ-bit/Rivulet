@@ -290,6 +290,7 @@ struct SettingsView: View {
     @AppStorage("showLibraryHero") private var showLibraryHero = false
     @AppStorage("showLibraryRecommendations") private var showLibraryRecommendations = true
     @AppStorage("showLibraryRecentRows") private var showLibraryRecentRows = true
+    @AppStorage("openDetailsDirectly") private var openDetailsDirectly = true
     @AppStorage("enablePersonalizedRecommendations") private var enablePersonalizedRecommendations = false
     @AppStorage("liveTVLayout") private var liveTVLayoutRaw = LiveTVLayout.guide.rawValue
     @AppStorage("confirmExitMultiview") private var confirmExitMultiview = true
@@ -300,7 +301,7 @@ struct SettingsView: View {
     @AppStorage("autoSkipIntro") private var autoSkipIntro = false
     @AppStorage("autoSkipCredits") private var autoSkipCredits = false
     @AppStorage("autoSkipAds") private var autoSkipAds = false
-    @AppStorage("useApplePlayer") private var useApplePlayer = true
+    @AppStorage("useApplePlayer") private var useApplePlayer = false
     @AppStorage("autoplayCountdown") private var autoplayCountdownRaw = AutoplayCountdown.fiveSeconds.rawValue
     @AppStorage("displaySize") private var displaySizeRaw = DisplaySize.normal.rawValue
     @AppStorage("musicLoudnessNormalization") private var musicLoudnessNormalization = false
@@ -320,7 +321,7 @@ struct SettingsView: View {
 
     // Audio/Subtitle preference state
     @State private var audioLanguage: LanguageOption = LanguageOption(languageCode: AudioPreferenceManager.current.languageCode)
-    @State private var subtitleLanguages: [LanguageOption] = SettingsView.subtitleLanguages(from: SubtitlePreferenceManager.current)
+    @State private var subtitleLanguages: [LanguageOption] = SettingsView.subtitleLanguages(from: SubtitlePreferenceManager.settingsPreference ?? .off)
 
     private static let maxSubtitleLanguageCount = 5
 
@@ -363,15 +364,14 @@ struct SettingsView: View {
         let selectedLanguages = Array(orderedLanguages)
         subtitleLanguages = selectedLanguages
 
-        var pref = SubtitlePreferenceManager.current
-        pref.enabled = !selectedLanguages.isEmpty
-        pref.languageCodes = selectedLanguages.map(\.rawValue)
-        pref.languageCode = selectedLanguages.first?.rawValue
-        if selectedLanguages.isEmpty {
-            pref.codec = nil
-            pref.preferHearingImpaired = false
-        }
-        SubtitlePreferenceManager.current = pref
+        let pref = SubtitlePreference(
+            enabled: !selectedLanguages.isEmpty,
+            languageCode: selectedLanguages.first?.rawValue,
+            languageCodes: selectedLanguages.map(\.rawValue),
+            codec: nil,
+            preferHearingImpaired: false
+        )
+        SubtitlePreferenceManager.saveSettingsPreference(pref)
     }
 
     private func toggleSubtitleLanguage(_ language: LanguageOption) {
@@ -692,6 +692,12 @@ struct SettingsView: View {
                 title: "Library Hero",
                 isOn: $showLibraryHero,
                 onFocusChange: { if $0 { focusState.focusedSettingId = "libraryHero" } }
+            )
+
+            SettingsToggleRow(
+                title: "Open Details Directly",
+                isOn: $openDetailsDirectly,
+                onFocusChange: { if $0 { focusState.focusedSettingId = "openDetailsDirectly" } }
             )
 
             SettingsToggleRow(

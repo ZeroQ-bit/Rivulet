@@ -23,6 +23,10 @@ struct HeroOverlayContent: View {
     var onHeroFocused: (() -> Void)? = nil
     var onHeroExited: (() -> Void)? = nil
     var heroHeight: CGFloat = 880
+    var pinContentToTop: Bool = false
+    var displayItemOverride: PlexMetadata? = nil
+    var showsButtons: Bool = true
+    var showsPagingDots: Bool = true
 
     @State private var resolvedPlayTargets: [String: PlexMetadata] = [:]
     @State private var watchedOverrides: [String: Bool] = [:]
@@ -31,6 +35,8 @@ struct HeroOverlayContent: View {
     /// time to crossfade before the logo/metadata/buttons swap in.
     @State private var displayedIndex: Int = 0
     @FocusState private var focusedButton: HeroButton?
+
+    private static let pinnedHeroTopPadding: CGFloat = 112
 
     /// How long to wait after `currentIndex` changes before swapping the
     /// visible slide content. Keeps the metadata from popping in ahead of
@@ -44,12 +50,15 @@ struct HeroOverlayContent: View {
     }
 
     private var displayedItem: PlexMetadata? {
+        if let displayItemOverride {
+            return displayItemOverride
+        }
         guard !items.isEmpty else { return nil }
         let clamped = max(0, min(displayedIndex, items.count - 1))
         return items[clamped]
     }
 
-    private var canAdvance: Bool { items.count > 1 }
+    private var canAdvance: Bool { displayItemOverride == nil && items.count > 1 }
 
     private func isWatched(_ item: PlexMetadata) -> Bool {
         if let key = item.ratingKey, let override = watchedOverrides[key] {
@@ -60,42 +69,28 @@ struct HeroOverlayContent: View {
 
     var body: some View {
         ZStack(alignment: .bottom) {
-            VStack(spacing: 0) {
-                // Push everything to the bottom of the hero.
-                Spacer(minLength: 0)
+            if pinContentToTop {
+                VStack(spacing: 0) {
+                    slideControls
+                        .padding(.top, Self.pinnedHeroTopPadding)
 
-                if let item = displayedItem {
-                    VStack(alignment: .leading, spacing: 28) {
-                        HeroSlideContent(
-                            item: item,
-                            serverURL: serverURL,
-                            authToken: authToken
-                        )
-                        .id(item.ratingKey ?? "idx-\(displayedIndex)")
-                        .transition(.opacity)
-
-                        HeroButtonRow(
-                            isResolvingPlay: isResolvingPlay,
-                            isWatched: isWatched(item),
-                            canAdvance: canAdvance,
-                            focusedButton: $focusedButton,
-                            onPlay: { handlePlay(item) },
-                            onToggleWatched: { handleToggleWatched(item) },
-                            onInfo: { onInfo(item) },
-                            onNext: { advance() }
-                        )
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.leading, 96)
+                    Spacer(minLength: 0)
                 }
+            } else {
+                VStack(spacing: 0) {
+                    // Push everything to the bottom of the hero.
+                    Spacer(minLength: 0)
 
-                // Reserve bottom space for dots so logo/buttons sit above them.
-                Spacer().frame(height: 120)
+                    slideControls
+
+                    // Reserve bottom space for dots so logo/buttons sit above them.
+                    Spacer().frame(height: 120)
+                }
             }
 
             // Paging dots — pinned to the bottom of the hero independently
             // of the logo/buttons column.
-            if canAdvance {
+            if showsPagingDots && canAdvance {
                 pagingDots
                     .padding(.horizontal, 14)
                     .padding(.vertical, 8)
@@ -104,7 +99,7 @@ struct HeroOverlayContent: View {
                             .fill(Color.black.opacity(0.35))
                     )
                     .frame(maxWidth: .infinity, alignment: .center)
-                    .padding(.bottom, 24)
+                    .padding(.bottom, pinContentToTop ? 245 : 24)
             }
         }
         .frame(maxWidth: .infinity)
@@ -133,6 +128,36 @@ struct HeroOverlayContent: View {
         .onChange(of: items.map(\.ratingKey)) { _, _ in
             if currentIndex >= items.count { currentIndex = 0 }
             if displayedIndex >= items.count { displayedIndex = 0 }
+        }
+    }
+
+    @ViewBuilder
+    private var slideControls: some View {
+        if let item = displayedItem {
+            VStack(alignment: .leading, spacing: 28) {
+                HeroSlideContent(
+                    item: item,
+                    serverURL: serverURL,
+                    authToken: authToken
+                )
+                .id(item.ratingKey ?? "idx-\(displayedIndex)")
+                .transition(.opacity)
+
+                if showsButtons {
+                    HeroButtonRow(
+                        isResolvingPlay: isResolvingPlay,
+                        isWatched: isWatched(item),
+                        canAdvance: canAdvance,
+                        focusedButton: $focusedButton,
+                        onPlay: { handlePlay(item) },
+                        onToggleWatched: { handleToggleWatched(item) },
+                        onInfo: { onInfo(item) },
+                        onNext: { advance() }
+                    )
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.leading, 96)
         }
     }
 
