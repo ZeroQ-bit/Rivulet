@@ -11,13 +11,13 @@ This project has fairly *opinionated* designs and logic, with a few focal points
 
 ## Screenshots
 
-| Home | Detail |
-|------|--------|
-| ![Home](Screenshots/home.png) | ![Detail](Screenshots/detail.png) |
+| Home | Detail | Sidebar |
+|------|--------|---------|
+| ![Home](Screenshots/home.png) | ![Detail](Screenshots/detail.png) | ![Sidebar](Screenshots/sidebar.png) |
 
-| Seasons & Episodes | Sidebar |
-|--------------------|---------|
-| ![Seasons](Screenshots/seasons.png) | ![Sidebar](Screenshots/sidebar.png) |
+| Seasons & Episodes |
+|--------------------|
+| ![Seasons](Screenshots/seasons.png) |
 
 <a href="https://testflight.apple.com/join/TcCsF5As">
   <img src="https://developer.apple.com/assets/elements/icons/testflight/testflight-64x64_2x.png" alt="TestFlight" height="50">
@@ -31,6 +31,12 @@ This project has fairly *opinionated* designs and logic, with a few focal points
 ![Swift](https://img.shields.io/badge/Swift-6.0-FA7343?logo=swift&logoColor=white)
 
 ## Features
+
+### Plex Browsing
+- Full-bleed Home, Library, and Detail heroes with locked artwork positioning, logo art when available, metadata badges, cast callouts, and Apple TV-style action buttons.
+- Compact landscape Continue Watching cards and resized poster rows for better couch-distance scanning.
+- Profile-aware sidebar with Plex Home user switching, configurable library visibility, and per-profile content refresh.
+- Discover-powered trailers from the detail page. The trailer button looks up Plex Discover, resolves the provider stream, and plays it inside Rivulet without relying on local Plex extras.
 
 ### Live TV
 - Dispatcharr and generic M3U/XMLTV sources
