@@ -665,6 +665,10 @@ final class UniversalPlayerViewModel: ObservableObject {
         return metadata.year.map { String($0) }
     }
 
+    var isExternalPlaybackItem: Bool {
+        metadata.isExternalPlaybackItem
+    }
+
     // MARK: - Private State
 
     private var cancellables = Set<AnyCancellable>()
@@ -863,11 +867,12 @@ final class UniversalPlayerViewModel: ObservableObject {
         let networkManager = PlexNetworkManager.shared
 
         guard let ratingKey = metadata.ratingKey else { return }
-        let cachedDirectPlay = StreamURLCache.shared.get(ratingKey: ratingKey)
+        let cachedDirectPlay = metadata.isExternalPlaybackItem ? nil : StreamURLCache.shared.get(ratingKey: ratingKey)
 
         // Fetch full metadata if Media array is missing (needed for info overlay display)
         // This happens when starting playback from Continue Watching or other hubs with minimal metadata
-        if metadata.Media == nil || metadata.Media?.isEmpty == true {
+        if !metadata.isExternalPlaybackItem,
+           metadata.Media == nil || metadata.Media?.isEmpty == true {
             await fetchFullMetadataIfNeeded()
         }
 
@@ -888,7 +893,10 @@ final class UniversalPlayerViewModel: ObservableObject {
         switch plan.primary {
         case .avPlayerDirect(let url, let headers):
             // AVPlayer direct — use the URL from the plan
-            if let cached = cachedDirectPlay {
+            if metadata.isExternalPlaybackItem {
+                streamURL = url
+                streamHeaders = headers ?? [:]
+            } else if let cached = cachedDirectPlay {
                 streamURL = cached.url
                 streamHeaders = cached.headers
                 StreamURLCache.shared.remove(ratingKey: ratingKey)
@@ -1268,23 +1276,27 @@ final class UniversalPlayerViewModel: ObservableObject {
     }
 
     func startPlayback() async {
-        // Fetch detailed metadata if markers or chapters are missing
-        let hasMarkers = !(metadata.Marker ?? []).isEmpty
-        let hasChapters = !(metadata.Chapter ?? []).isEmpty
-        let hasStreamDetails = metadata.Media?.first?.Part?.first?.Stream?.isEmpty == false
-        if !hasMarkers || !hasChapters || !hasStreamDetails {
-            await fetchMarkersIfNeeded()
-        }
+        if metadata.isExternalPlaybackItem {
+            print("[PlayerSelect] External playback item — skipping Plex metadata enrichment")
+        } else {
+            // Fetch detailed metadata if markers or chapters are missing
+            let hasMarkers = !(metadata.Marker ?? []).isEmpty
+            let hasChapters = !(metadata.Chapter ?? []).isEmpty
+            let hasStreamDetails = metadata.Media?.first?.Part?.first?.Stream?.isEmpty == false
+            if !hasMarkers || !hasChapters || !hasStreamDetails {
+                await fetchMarkersIfNeeded()
+            }
 
-        // Fetch season/show poster for Now Playing artwork (episodes)
-        await fetchSeasonPosterIfNeeded()
+            // Fetch season/show poster for Now Playing artwork (episodes)
+            await fetchSeasonPosterIfNeeded()
+        }
 
         let useApplePlayer = UserDefaults.standard.bool(forKey: "useApplePlayer")
 
-        if !useApplePlayer {
-            await startRivuletPlayback()
-        } else {
+        if metadata.isExternalPlaybackItem || useApplePlayer {
             await startAVPlayerPlayback()
+        } else {
+            await startRivuletPlayback()
         }
     }
 
@@ -1641,7 +1653,8 @@ final class UniversalPlayerViewModel: ObservableObject {
         switch plan.primary {
         case .avPlayerDirect(let url, let headers):
             let directURL = streamURL ?? url
-            let directHeaders = streamHeaders.isEmpty ? (headers ?? rivuletDirectPlayHeaders()) : streamHeaders
+            let defaultHeaders = metadata.isExternalPlaybackItem ? [:] : rivuletDirectPlayHeaders()
+            let directHeaders = streamHeaders.isEmpty ? (headers ?? defaultHeaders) : streamHeaders
             do {
                 try loadAVPlayer(url: directURL, headers: directHeaders)
             } catch {
@@ -2621,6 +2634,7 @@ final class UniversalPlayerViewModel: ObservableObject {
     }
 
     private func loadThumbnail(for time: TimeInterval) {
+        guard !metadata.isExternalPlaybackItem else { return }
         guard let partId = metadata.Media?.first?.Part?.first?.id else {
             print("⚠️ No part ID available for thumbnails")
             return
@@ -2639,6 +2653,7 @@ final class UniversalPlayerViewModel: ObservableObject {
 
     /// Preload thumbnails when playback starts
     func preloadThumbnails() {
+        guard !metadata.isExternalPlaybackItem else { return }
         // Debug: Log metadata structure
         if let media = metadata.Media {
             //print("🖼️ [THUMB] Media count: \(media.count)")
@@ -3961,6 +3976,7 @@ final class UniversalPlayerViewModel: ObservableObject {
 
     /// Fetch detailed metadata with markers if not already present
     private func fetchMarkersIfNeeded() async {
+        guard !metadata.isExternalPlaybackItem else { return }
         guard let ratingKey = metadata.ratingKey else {
             return
         }
@@ -4054,6 +4070,7 @@ final class UniversalPlayerViewModel: ObservableObject {
 
     /// Fetch full metadata if parent keys or Media info are missing (e.g., from Continue Watching)
     private func fetchFullMetadataIfNeeded() async {
+        guard !metadata.isExternalPlaybackItem else { return }
         guard let ratingKey = metadata.ratingKey else {
             return
         }
@@ -4406,6 +4423,7 @@ final class UniversalPlayerViewModel: ObservableObject {
 
     /// Mark current content as watched (for use before transitioning to next episode)
     private func markCurrentAsWatched() async {
+        guard !metadata.isExternalPlaybackItem else { return }
         guard let ratingKey = metadata.ratingKey, !ratingKey.isEmpty else { return }
 
         // Report stopped state

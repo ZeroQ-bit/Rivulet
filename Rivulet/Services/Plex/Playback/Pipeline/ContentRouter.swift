@@ -135,6 +135,17 @@ struct ContentRouter {
         let container = context.metadata.Media?.first?.container ?? "unknown"
         var reasoning: [String] = []
 
+        if let externalRoute = buildExternalDirectRoute(context: context) {
+            reasoning.append("external_direct_url")
+            playerDebugLog("[ContentRouter] \(container) | audio=\(audioCodec) → AVPlayerDirect (external URL)")
+            return PlaybackPlan(
+                policy: context.playbackPolicy,
+                primary: externalRoute,
+                fallbacks: [],
+                reasoning: reasoning
+            )
+        }
+
         // Live TV always uses Plex HLS
         if context.isLiveTV {
             reasoning.append("live_tv_requires_hls")
@@ -308,6 +319,10 @@ struct ContentRouter {
             return nil
         }
 
+        if let absoluteURL = URL(string: part.key), absoluteURL.scheme != nil {
+            return (absoluteURL, [:])
+        }
+
         var components = URLComponents(url: context.serverURL, resolvingAgainstBaseURL: false)!
         components.path = part.key
 
@@ -319,6 +334,15 @@ struct ContentRouter {
 
         let headers = ["X-Plex-Token": context.authToken]
         return (url, headers)
+    }
+
+    private static func buildExternalDirectRoute(context: ContentRoutingContext) -> PlaybackRoute? {
+        guard let partKey = context.metadata.Media?.first?.Part?.first?.key,
+              let url = URL(string: partKey),
+              url.scheme == "http" || url.scheme == "https" else {
+            return nil
+        }
+        return .avPlayerDirect(url: url, headers: [:])
     }
 
     /// Build AVPlayer direct route — AVPlayer opens Plex URL directly.

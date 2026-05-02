@@ -377,6 +377,23 @@ nonisolated struct PlexMetadata: Codable, Identifiable, Hashable, Sendable {
 // MARK: - Computed Properties
 
 nonisolated extension PlexMetadata {
+    /// True when the media part already points at an absolute HTTP(S) asset
+    /// instead of a path on the selected Plex server.
+    var isExternalPlaybackItem: Bool {
+        guard let key = Media?.first?.Part?.first?.key,
+              let url = URL(string: key),
+              let scheme = url.scheme?.lowercased() else {
+            return false
+        }
+        return scheme == "http" || scheme == "https"
+    }
+
+    /// Synthetic trailer items resolved from Plex Discover, not local Plex media.
+    var isDiscoverTrailerPlaybackItem: Bool {
+        if ratingKey?.hasPrefix("discover-trailer-") == true { return true }
+        return isExternalPlaybackItem && summary == "Trailer"
+    }
+
     /// Best-effort extraction of TMDB ID from the guid or Guid array
     var tmdbId: Int? {
         // Try primary guid first

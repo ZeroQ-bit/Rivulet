@@ -1398,6 +1398,7 @@ struct UniversalPlayerView: View {
     private let reportingInterval: TimeInterval = 10
 
     private func reportProgress(time: TimeInterval) {
+        guard !viewModel.isExternalPlaybackItem else { return }
         // Report every 10 seconds
         guard abs(time - lastReportedTime) >= reportingInterval else { return }
         lastReportedTime = time
@@ -1413,6 +1414,7 @@ struct UniversalPlayerView: View {
     }
 
     private func reportFinalProgressAndRefresh() {
+        guard !viewModel.isExternalPlaybackItem else { return }
         Task {
             // 1. Report stopped state to Plex
             await PlexProgressReporter.shared.reportProgress(
@@ -1441,6 +1443,7 @@ struct UniversalPlayerView: View {
     }
 
     private func reportStateChange(from oldState: UniversalPlaybackState, to newState: UniversalPlaybackState) {
+        guard !viewModel.isExternalPlaybackItem else { return }
         // Only report significant state changes
         let plexState: String?
         switch newState {

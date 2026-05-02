@@ -89,6 +89,7 @@ struct PlexDetailView: View {
     @State private var isStarred = false  // For music: 5-star rating toggle
     @State private var displayedProgress: Double = 0  // For animating progress bar
     @State private var isLoadingExtras = false
+    @State private var isLoadingTrailer = false
     @State private var showTrailerPlayer = false
     @State private var trailerMetadata: PlexMetadata?  // Full metadata for trailer playback
     @State private var playFromBeginning = false  // For "Play from Beginning" button
@@ -1129,6 +1130,16 @@ struct PlexDetailView: View {
         currentItem.type == "album" || currentItem.type == "artist" || currentItem.type == "track"
     }
 
+    private var shouldShowTrailerButton: Bool {
+        guard !isMusicItem else { return false }
+        switch currentItem.type {
+        case "movie", "show", "season", "episode":
+            return true
+        default:
+            return false
+        }
+    }
+
     /// Icon for fallback poster based on item type
     private var iconForType: String {
         switch currentItem.type {
@@ -1367,16 +1378,23 @@ struct PlexDetailView: View {
             }
 
             // Trailer button — perfect circle
-            if !isMusicItem, fullMetadata?.trailer != nil {
+            if shouldShowTrailerButton {
                 Button {
                     Task { await loadAndPlayTrailer() }
                 } label: {
-                    Image(systemName: "film")
-                        .font(.system(size: 24, weight: .semibold))
-                        .frame(width: circleButtonSize, height: circleButtonSize)
+                    if isLoadingTrailer {
+                        ProgressView()
+                            .tint(.white)
+                            .frame(width: circleButtonSize, height: circleButtonSize)
+                    } else {
+                        Image(systemName: "film")
+                            .font(.system(size: 24, weight: .semibold))
+                            .frame(width: circleButtonSize, height: circleButtonSize)
+                    }
                 }
                 .buttonStyle(AppStoreActionButtonStyle(isFocused: focusedActionButton == "trailer", cornerRadius: circleButtonSize / 2, isPrimary: false))
                 .focused($focusedActionButton, equals: "trailer")
+                .disabled(isLoadingTrailer)
             }
 
             // Pre-play audio track picker — only for movies and episodes
@@ -2459,23 +2477,66 @@ struct PlexDetailView: View {
     }
 
     private func loadAndPlayTrailer() async {
-        guard let serverURL = authManager.selectedServerURL,
-              let token = authManager.selectedServerToken,
-              let trailer = fullMetadata?.trailer,
-              let ratingKey = trailer.ratingKey else { return }
+        guard !isLoadingTrailer else { return }
+        let metadata = fullMetadata ?? currentItem
+        guard let title = discoverTrailerTitle(for: metadata) else { return }
+
+        isLoadingTrailer = true
+        defer { isLoadingTrailer = false }
 
         do {
-            // Fetch full metadata for the trailer (includes Media/Part info for playback)
-            let metadata = try await networkManager.getMetadata(
-                serverURL: serverURL,
-                authToken: token,
-                ratingKey: ratingKey
+            let trailer = try await PlexTrailerPlaybackService.shared.resolveDiscoverTrailer(
+                title: title,
+                year: discoverTrailerYear(for: metadata),
+                type: discoverTrailerType(for: metadata),
+                accountToken: authManager.authToken ?? authManager.selectedServerToken
             )
-            trailerMetadata = metadata
+            trailerMetadata = trailer
             showTrailerPlayer = true
         } catch {
             print("Failed to load trailer metadata: \(error)")
         }
+    }
+
+    private func discoverTrailerTitle(for metadata: PlexMetadata) -> String? {
+        switch metadata.type ?? currentItem.type {
+        case "episode":
+            return cleanedTrailerReference(metadata.grandparentTitle)
+                ?? cleanedTrailerReference(currentItem.grandparentTitle)
+                ?? cleanedTrailerReference(metadata.parentTitle)
+                ?? cleanedTrailerReference(currentItem.parentTitle)
+                ?? cleanedTrailerReference(metadata.title)
+                ?? cleanedTrailerReference(currentItem.title)
+        case "season":
+            return cleanedTrailerReference(metadata.parentTitle)
+                ?? cleanedTrailerReference(currentItem.parentTitle)
+                ?? cleanedTrailerReference(metadata.title)
+                ?? cleanedTrailerReference(currentItem.title)
+        default:
+            return cleanedTrailerReference(metadata.title)
+                ?? cleanedTrailerReference(currentItem.title)
+        }
+    }
+
+    private func discoverTrailerYear(for metadata: PlexMetadata) -> Int? {
+        metadata.year ?? currentItem.year
+    }
+
+    private func discoverTrailerType(for metadata: PlexMetadata) -> String {
+        switch metadata.type ?? currentItem.type {
+        case "show", "season", "episode":
+            return "show"
+        default:
+            return "movie"
+        }
+    }
+
+    private func cleanedTrailerReference(_ value: String?) -> String? {
+        guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trimmed.isEmpty else {
+            return nil
+        }
+        return trimmed.replacingOccurrences(of: "&amp;", with: "&")
     }
 
     private func toggleWatched() async {
