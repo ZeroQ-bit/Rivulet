@@ -107,7 +107,22 @@ enum SettingsDescriptorStore {
         "subtitles": SettingDescriptor(
             icon: "captions.bubble",
             iconColor: .yellow,
-            description: "Sets the preferred language for subtitles. Choose Off to disable automatic subtitle selection."
+            description: "Selects up to five preferred subtitle languages in the order they should be tried."
+        ),
+        "subtitleSize": SettingDescriptor(
+            icon: "textformat.size",
+            iconColor: .orange,
+            description: "Changes the subtitle text scale used during playback."
+        ),
+        "subtitleColor": SettingDescriptor(
+            icon: "paintpalette",
+            iconColor: .yellow,
+            description: "Changes the subtitle text color used during playback."
+        ),
+        "subtitlePosition": SettingDescriptor(
+            icon: "arrow.up.and.down",
+            iconColor: .cyan,
+            description: "Moves subtitle text higher or lower on the video."
         ),
         "autoSkipIntro": SettingDescriptor(
             icon: "play.circle",
@@ -354,6 +369,9 @@ enum SettingsDescriptorStore {
         case .displaySizePicker: return ("textformat.size", .orange)
         case .audioLanguagePicker: return ("waveform", .cyan)
         case .subtitlesPicker: return ("captions.bubble", .yellow)
+        case .subtitleSizePicker: return ("textformat.size", .orange)
+        case .subtitleColorPicker: return ("paintpalette", .yellow)
+        case .subtitlePositionPicker: return ("arrow.up.and.down", .cyan)
         case .autoplayCountdownPicker: return ("forward.end.alt", .purple)
         case .liveTVSourceDetail: return ("tv.and.mediabox", .blue)
         case .addLiveTVSource: return ("plus.circle.fill", .blue)

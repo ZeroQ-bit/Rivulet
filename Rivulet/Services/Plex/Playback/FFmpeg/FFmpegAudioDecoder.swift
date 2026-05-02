@@ -37,7 +37,7 @@ import Libavutil
 import Libswresample
 
 /// Decodes TrueHD/DTS audio to interleaved PCM using libavcodec + libswresample.
-final class FFmpegAudioDecoder: @unchecked Sendable {
+nonisolated final class FFmpegAudioDecoder: @unchecked Sendable {
 
     /// Audio codecs this decoder handles.
     /// Includes both non-native codecs (DTS, TrueHD) and native codecs (AAC, AC3, etc.)
@@ -920,10 +920,10 @@ final class FFmpegAudioDecoder: @unchecked Sendable {
 // MARK: - AVERROR Constants
 
 /// AVERROR(EAGAIN) on Darwin: -(EAGAIN) = -35
-private let kAudioDecoderEAGAIN: Int32 = -35
+nonisolated private let kAudioDecoderEAGAIN: Int32 = -35
 
 /// AVERROR_EOF: FFERRTAG('E','O','F',' ')
-private let kAudioDecoderEOF: Int32 = {
+nonisolated private let kAudioDecoderEOF: Int32 = {
     let tag = Int32(bitPattern:
         (UInt32(Character("E").asciiValue!) |
         (UInt32(Character("O").asciiValue!) << 8) |
@@ -939,7 +939,7 @@ private let kAudioDecoderEOF: Int32 = {
 // =============================================================================
 
 /// Stub audio decoder when FFmpeg libraries are not linked.
-final class FFmpegAudioDecoder: @unchecked Sendable {
+nonisolated final class FFmpegAudioDecoder: @unchecked Sendable {
 
     static let supportedCodecs: Set<String> = []
     static let isAvailable = false

@@ -8,7 +8,7 @@
 import Foundation
 
 /// Represents an audio or subtitle track from any player engine
-struct MediaTrack: Identifiable, Equatable, Sendable {
+nonisolated struct MediaTrack: Identifiable, Equatable, Sendable {
     let id: Int
     let name: String
     let language: String?

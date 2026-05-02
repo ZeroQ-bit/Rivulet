@@ -166,26 +166,28 @@ final class SubtitleManager: ObservableObject {
         guard abs(time - lastUpdateTime) > updateThreshold else { return }
         lastUpdateTime = time
 
+        let adjustedTime = time - SubtitleAppearanceSettings.shared.delay
+
         // Text cues
-        let newCues = currentTrack.activeCues(at: time)
+        let newCues = currentTrack.activeCues(at: adjustedTime)
 
         // Only update if cues actually changed
         if newCues.map(\.id) != currentCues.map(\.id) {
             let previousCues = currentCues
             currentCues = newCues
             if diagnosticsEnabled {
-                logCueTransition(time: time, from: previousCues, to: newCues)
+                logCueTransition(time: adjustedTime, from: previousCues, to: newCues)
             }
         }
 
         // Bitmap cues
         if !accumulatedBitmapCues.isEmpty {
-            let activeBitmap = accumulatedBitmapCues.filter { $0.isActive(at: time) }
+            let activeBitmap = accumulatedBitmapCues.filter { $0.isActive(at: adjustedTime) }
             if activeBitmap.map(\.id) != currentBitmapCues.map(\.id) {
                 currentBitmapCues = activeBitmap
             }
             // Prune old bitmap cues that ended more than 30s ago to avoid unbounded growth
-            accumulatedBitmapCues.removeAll { $0.endTime < time - 30 }
+            accumulatedBitmapCues.removeAll { $0.endTime < adjustedTime - 30 }
         } else if !currentBitmapCues.isEmpty {
             currentBitmapCues = []
         }

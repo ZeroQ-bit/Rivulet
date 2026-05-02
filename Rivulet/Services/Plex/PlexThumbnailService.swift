@@ -125,15 +125,12 @@ final class PlexThumbnailService {
                     // Debug: Check first 5 frames and a few later ones
                     for i in [0, 1, 2, 3, 4, 10, 50, 100] {
                         if i < bifData.frames.count {
-                            let frame = bifData.frames[i]
                             // print("🖼️ Frame[\(i)]: timestamp=\(frame.timestamp)ms, size=\(frame.imageData.count) bytes")
                         }
                     }
                     return bifData
                 } else {
                     print("⚠️ Failed to parse BIF data (size: \(data.count) bytes)")
-                    // Log first few bytes to debug
-                    let prefix = data.prefix(16)
                 }
             } catch {
                 print("⚠️ Failed to load BIF (\(quality)): \(error.localizedDescription)")

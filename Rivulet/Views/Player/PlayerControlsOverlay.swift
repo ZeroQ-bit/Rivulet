@@ -6,9 +6,11 @@
 //
 
 import SwiftUI
+import UIKit
 
 struct PlayerControlsOverlay: View {
     @ObservedObject var viewModel: UniversalPlayerViewModel
+    @ObservedObject private var subtitleAppearance = SubtitleAppearanceSettings.shared
     /// When true, shows only the info panel. When false, shows only the transport bar.
     var showInfoPanel: Bool = false
 
@@ -89,7 +91,7 @@ struct PlayerControlsOverlay: View {
 
     // MARK: - Playback Settings Panel (Horizontal Bar at Top)
 
-    private let settingsPanelHeight: CGFloat = 340
+    private let settingsPanelHeight: CGFloat = 430
 
     private var infoPanel: some View {
         VStack(spacing: 0) {
@@ -118,6 +120,66 @@ struct PlayerControlsOverlay: View {
                                     )
                                     .id("sub_\(index + 1)")
                                 }
+
+                                Divider()
+                                    .background(.white.opacity(0.18))
+                                    .padding(.horizontal, 28)
+                                    .padding(.vertical, 10)
+                                    .id("sub_divider")
+
+                                PlaybackSettingsRow(
+                                    title: "Size",
+                                    subtitle: subtitleAppearance.textSize.description,
+                                    isSelected: false,
+                                    isFocused: viewModel.isSettingFocused(column: 0, index: viewModel.subtitleControlStartIndex),
+                                    leadingSystemImage: "textformat.size"
+                                )
+                                .id("sub_\(viewModel.subtitleControlStartIndex)")
+
+                                PlaybackSettingsRow(
+                                    title: "Color",
+                                    subtitle: subtitleAppearance.textColor.description,
+                                    isSelected: false,
+                                    isFocused: viewModel.isSettingFocused(column: 0, index: viewModel.subtitleControlStartIndex + 1),
+                                    leadingSystemImage: "paintpalette"
+                                )
+                                .id("sub_\(viewModel.subtitleControlStartIndex + 1)")
+
+                                PlaybackSettingsRow(
+                                    title: "Position",
+                                    subtitle: subtitleAppearance.verticalPosition.description,
+                                    isSelected: false,
+                                    isFocused: viewModel.isSettingFocused(column: 0, index: viewModel.subtitleControlStartIndex + 2),
+                                    leadingSystemImage: "arrow.up.and.down"
+                                )
+                                .id("sub_\(viewModel.subtitleControlStartIndex + 2)")
+
+                                PlaybackSettingsRow(
+                                    title: "Delay -0.2s",
+                                    subtitle: subtitleAppearance.formattedDelay,
+                                    isSelected: false,
+                                    isFocused: viewModel.isSettingFocused(column: 0, index: viewModel.subtitleControlStartIndex + 3),
+                                    leadingSystemImage: "minus.circle"
+                                )
+                                .id("sub_\(viewModel.subtitleControlStartIndex + 3)")
+
+                                PlaybackSettingsRow(
+                                    title: "Delay Reset",
+                                    subtitle: subtitleAppearance.formattedDelay,
+                                    isSelected: false,
+                                    isFocused: viewModel.isSettingFocused(column: 0, index: viewModel.subtitleControlStartIndex + 4),
+                                    leadingSystemImage: "arrow.counterclockwise.circle"
+                                )
+                                .id("sub_\(viewModel.subtitleControlStartIndex + 4)")
+
+                                PlaybackSettingsRow(
+                                    title: "Delay +0.2s",
+                                    subtitle: subtitleAppearance.formattedDelay,
+                                    isSelected: false,
+                                    isFocused: viewModel.isSettingFocused(column: 0, index: viewModel.subtitleControlStartIndex + 5),
+                                    leadingSystemImage: "plus.circle"
+                                )
+                                .id("sub_\(viewModel.subtitleControlStartIndex + 5)")
                             }
                             .padding(.vertical, 8)
                         }
@@ -521,6 +583,13 @@ private struct TransportProgressBar: View {
         return min(1, max(0, displayTime / duration))
     }
 
+    private var previewTravelWidth: CGFloat {
+        let screenWidth = UIApplication.shared.connectedScenes
+            .compactMap { ($0 as? UIWindowScene)?.screen.bounds.width }
+            .first ?? 1920
+        return screenWidth - 320
+    }
+
     /// Color for a marker type
     private func markerColor(for marker: PlexMarker) -> Color {
         if marker.isIntro {
@@ -556,7 +625,7 @@ private struct TransportProgressBar: View {
                 }
                 .frame(maxWidth: .infinity)
                 // Position horizontally based on progress
-                .offset(x: (progress - 0.5) * (UIScreen.main.bounds.width - 320))
+                .offset(x: (progress - 0.5) * previewTravelWidth)
             }
 
             // Progress track
@@ -667,11 +736,12 @@ private struct PlaybackSettingsRow: View {
     let subtitle: String
     let isSelected: Bool
     var isFocused: Bool = false
+    var leadingSystemImage: String?
 
     var body: some View {
         HStack(spacing: 14) {
             // Selection indicator (checkmark for selected items)
-            Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+            Image(systemName: leadingSystemImage ?? (isSelected ? "checkmark.circle.fill" : "circle"))
                 .font(.system(size: 22, weight: .medium))
                 .frame(width: 26)
 
@@ -692,7 +762,7 @@ private struct PlaybackSettingsRow: View {
             Spacer(minLength: 4)
 
             // Selected indicator dot (like sidebar)
-            if isSelected {
+            if isSelected && leadingSystemImage == nil {
                 Circle()
                     .fill(.white)
                     .frame(width: 6, height: 6)

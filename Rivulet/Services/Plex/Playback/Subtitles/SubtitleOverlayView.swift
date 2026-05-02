@@ -11,6 +11,7 @@ import CoreGraphics
 /// Overlay view that displays current subtitle cues
 struct SubtitleOverlayView: View {
     @ObservedObject var subtitleManager: SubtitleManager
+    @ObservedObject private var appearance = SubtitleAppearanceSettings.shared
 
     /// Vertical offset from bottom (for player controls)
     var bottomOffset: CGFloat = 100
@@ -37,11 +38,11 @@ struct SubtitleOverlayView: View {
                     if !subtitleManager.currentCues.isEmpty {
                         VStack(spacing: 4) {
                             ForEach(subtitleManager.currentCues) { cue in
-                                SubtitleTextView(text: cue.text)
+                                SubtitleTextView(text: cue.text, appearance: appearance)
                             }
                         }
                         .padding(.horizontal, 60)
-                        .padding(.bottom, bottomOffset)
+                        .padding(.bottom, appearance.verticalPosition.bottomPadding(in: geometry.size.height, controlsOffset: bottomOffset))
                     }
                 }
                 .frame(width: geometry.size.width, height: geometry.size.height)
@@ -54,24 +55,21 @@ struct SubtitleOverlayView: View {
 /// Individual subtitle text with styling
 private struct SubtitleTextView: View {
     let text: String
+    @ObservedObject var appearance: SubtitleAppearanceSettings
 
     var body: some View {
         Text(text)
-            .font(.system(size: subtitleFontSize, weight: .medium))
-            .foregroundColor(.white)
+            .font(.system(size: subtitleFontSize, weight: .semibold))
+            .foregroundColor(appearance.textColor.color)
             .multilineTextAlignment(.center)
             .lineLimit(4)
-            .padding(.horizontal, 16)
-            .padding(.vertical, 8)
-            .background(
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(Color.black.opacity(0.75))
-            )
-            .shadow(color: .black.opacity(0.5), radius: 4, x: 0, y: 2)
+            .shadow(color: .black.opacity(0.95), radius: 2, x: 0, y: 2)
+            .shadow(color: .black.opacity(0.75), radius: 6, x: 0, y: 0)
+            .shadow(color: .black.opacity(0.65), radius: 10, x: 0, y: 4)
     }
 
     private var subtitleFontSize: CGFloat {
-        return 42
+        appearance.textSize.fontSize
     }
 }
 
@@ -114,7 +112,7 @@ private struct BitmapSubtitleRectView: View {
         guard rect.imageData.count >= expectedSize else { return nil }
 
         return rect.imageData.withUnsafeBytes { rawBuf -> CGImage? in
-            guard let baseAddress = rawBuf.baseAddress else { return nil }
+            guard rawBuf.baseAddress != nil else { return nil }
 
             guard let provider = CGDataProvider(data: rect.imageData as CFData) else { return nil }
 

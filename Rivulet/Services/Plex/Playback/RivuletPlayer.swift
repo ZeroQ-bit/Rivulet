@@ -1092,7 +1092,7 @@ final class RivuletPlayer: ObservableObject {
             let session = URLSession(configuration: cfg, delegate: delegate, delegateQueue: q)
             let task = session.dataTask(with: request)
             task.resume()
-            _ = delegate.done.wait(timeout: .now() + 30)
+            _ = await waitForSemaphore(delegate.done, timeout: .now() + 30)
             session.invalidateAndCancel()
             let elapsed = max(delegate.lastByte - delegate.firstByte, 0.001)
             let mbps = Double(delegate.bytes) * 8 / 1_000_000 / elapsed
@@ -1114,12 +1114,23 @@ final class RivuletPlayer: ObservableObject {
             let session = URLSession(configuration: cfg, delegate: delegate, delegateQueue: q)
             let task = session.dataTask(with: request)
             task.resume()
-            _ = delegate.done.wait(timeout: .now() + 30)
+            _ = await waitForSemaphore(delegate.done, timeout: .now() + 30)
             session.invalidateAndCancel()
             let elapsed = max(delegate.lastByte - delegate.firstByte, 0.001)
             let mbps = Double(delegate.bytes) * 8 / 1_000_000 / elapsed
             playerDebugLog(String(format: "[URLSessionProbe/ephemeral-avs] bytes=%.2fMB elapsed=%.2fs rate=%.1fMbps",
                          Double(delegate.bytes) / 1_000_000, elapsed, mbps))
+        }
+    }
+
+    private nonisolated static func waitForSemaphore(
+        _ semaphore: DispatchSemaphore,
+        timeout: DispatchTime
+    ) async -> DispatchTimeoutResult {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .utility).async {
+                continuation.resume(returning: semaphore.wait(timeout: timeout))
+            }
         }
     }
 }

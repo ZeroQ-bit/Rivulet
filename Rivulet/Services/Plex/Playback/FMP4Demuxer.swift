@@ -13,7 +13,7 @@ import VideoToolbox
 // MARK: - Demuxed Sample
 
 /// A single demuxed sample (video frame or audio frame) ready for CMSampleBuffer creation
-struct DemuxedSample {
+nonisolated struct DemuxedSample {
     let trackID: UInt32
     let data: Data
     let pts: CMTime
@@ -26,7 +26,7 @@ struct DemuxedSample {
 // MARK: - Track Info
 
 /// Metadata about a track parsed from the init segment
-struct DemuxedTrackInfo {
+nonisolated struct DemuxedTrackInfo {
     let trackID: UInt32
     let isVideo: Bool
     let timescale: UInt32
@@ -39,7 +39,7 @@ struct DemuxedTrackInfo {
 
 /// Parses ISO BMFF (fMP4) segments to extract individual samples.
 /// Handles init segments (moov) for codec config and media segments (moof+mdat) for sample data.
-final class FMP4Demuxer {
+nonisolated final class FMP4Demuxer {
 
     // MARK: - Parsed State
 
@@ -228,7 +228,7 @@ final class FMP4Demuxer {
 
     // MARK: - Private: Box Parsing
 
-    private struct BoxInfo {
+    nonisolated private struct BoxInfo {
         let type: String
         let offset: Int        // Start of the box (including header)
         let size: Int          // Total box size
@@ -331,7 +331,7 @@ final class FMP4Demuxer {
         )
     }
 
-    private struct TkhdData {
+    nonisolated private struct TkhdData {
         let trackID: UInt32
         let width: UInt32
         let height: UInt32
@@ -940,7 +940,7 @@ final class FMP4Demuxer {
         return samples
     }
 
-    private struct TfhdInfo {
+    nonisolated private struct TfhdInfo {
         let trackID: UInt32
         let defaultSampleDuration: UInt32
         let defaultSampleSize: UInt32
@@ -1130,7 +1130,7 @@ enum DemuxerError: Error, CustomStringConvertible {
 // MARK: - Bit Reader for AAC AudioSpecificConfig parsing
 
 /// Reads individual bits from a Data buffer, MSB first.
-private class BitReader {
+nonisolated private final class BitReader {
     private let data: Data
     private var byteOffset = 0
     private var bitOffset = 0  // 0-7, within current byte
@@ -1168,7 +1168,7 @@ private class BitReader {
 
 // MARK: - Data Extensions for Binary Reading
 
-extension Data {
+nonisolated extension Data {
     func readUInt32BE(at offset: Int) -> UInt32 {
         guard offset + 4 <= count else { return 0 }
         return withUnsafeBytes { buffer in

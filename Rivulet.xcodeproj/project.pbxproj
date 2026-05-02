@@ -10,6 +10,7 @@
 		A70B443B2F05AF3200DEF5ED /* TVServices.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A70B443A2F05AF3200DEF5ED /* TVServices.framework */; };
 		A70B44422F05AF3200DEF5ED /* TopShelfExtension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = A70B44392F05AF3200DEF5ED /* TopShelfExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		A740D1192F59C56300B9820B /* AVKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A740D1182F59C56300B9820B /* AVKit.framework */; };
+		A7C0DE132F8B000000000001 /* AppIntents.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A7C0DE122F8B000000000001 /* AppIntents.framework */; };
 		A7F159552F04124A001B2177 /* Sentry in Frameworks */ = {isa = PBXBuildFile; productRef = A7F159542F04124A001B2177 /* Sentry */; };
 		B10000012F7A000100000001 /* Libavformat.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = B10000062F7A000100000001 /* Libavformat.xcframework */; };
 		B10000022F7A000100000001 /* Libavcodec.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = B10000072F7A000100000001 /* Libavcodec.xcframework */; };
@@ -55,6 +56,7 @@
 		A72E03DA2EDA297D003A73DA /* Rivulet.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Rivulet.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A740D1182F59C56300B9820B /* AVKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AVKit.framework; path = Platforms/AppleTVOS.platform/Developer/SDKs/AppleTVOS26.2.sdk/System/Library/Frameworks/AVKit.framework; sourceTree = DEVELOPER_DIR; };
 		A784830A2F062C2000F9E6D0 /* RivuletTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = RivuletTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		A7C0DE122F8B000000000001 /* AppIntents.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AppIntents.framework; path = System/Library/Frameworks/AppIntents.framework; sourceTree = SDKROOT; };
 		B10000062F7A000100000001 /* Libavformat.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = Libavformat.xcframework; path = Frameworks/Libavformat.xcframework; sourceTree = "<group>"; };
 		B10000072F7A000100000001 /* Libavcodec.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = Libavcodec.xcframework; path = Frameworks/Libavcodec.xcframework; sourceTree = "<group>"; };
 		B10000082F7A000100000001 /* Libavutil.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = Libavutil.xcframework; path = Frameworks/Libavutil.xcframework; sourceTree = "<group>"; };
@@ -108,6 +110,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				A7C0DE132F8B000000000001 /* AppIntents.framework in Frameworks */,
 				A70B443B2F05AF3200DEF5ED /* TVServices.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -160,6 +163,7 @@
 		A7F159532F04124A001B2177 /* Frameworks */ = {
 			isa = PBXGroup;
 			children = (
+				A7C0DE122F8B000000000001 /* AppIntents.framework */,
 				A740D1182F59C56300B9820B /* AVKit.framework */,
 				A70B443A2F05AF3200DEF5ED /* TVServices.framework */,
 				B10000062F7A000100000001 /* Libavformat.xcframework */,

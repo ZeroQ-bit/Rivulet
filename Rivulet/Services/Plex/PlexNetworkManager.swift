@@ -17,7 +17,7 @@ import Sentry
 
 // MARK: - Network Priority
 
-enum NetworkPriority {
+nonisolated enum NetworkPriority {
     case high      // Current playback / critical operations
     case medium    // GUI-affecting API calls
     case low       // Prefetching / background operations
@@ -25,22 +25,34 @@ enum NetworkPriority {
 
 // MARK: - Plex Network Manager
 
-class PlexNetworkManager: NSObject, @unchecked Sendable {
+nonisolated class PlexNetworkManager: NSObject, @unchecked Sendable {
     static let shared = PlexNetworkManager()
 
     // Default timeout for requests
     private let defaultTimeout: TimeInterval = 30.0
 
     // URL session with custom delegate for self-signed certs
-    private lazy var session: URLSession = {
-        let configuration = URLSessionConfiguration.default
-        configuration.timeoutIntervalForRequest = defaultTimeout
-        configuration.timeoutIntervalForResource = defaultTimeout * 2
-        return URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
-    }()
+    private let sessionDelegate: PlexNetworkSessionDelegate
+    private let session: URLSession
 
     private override init() {
+        let timeout: TimeInterval = 30.0
+        let configuration = URLSessionConfiguration.default
+        configuration.timeoutIntervalForRequest = timeout
+        configuration.timeoutIntervalForResource = timeout * 2
+        let delegate = PlexNetworkSessionDelegate()
+        self.sessionDelegate = delegate
+        self.session = URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
+
         super.init()
+    }
+
+    @MainActor
+    private func addBreadcrumb(level: SentryLevel, category: String, message: String, data: [String: Any]) {
+        let breadcrumb = Breadcrumb(level: level, category: category)
+        breadcrumb.message = message
+        breadcrumb.data = data
+        SentrySDK.addBreadcrumb(breadcrumb)
     }
 
     // MARK: - Core Request Methods
@@ -78,13 +90,15 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
 
             // Capture HTTP errors to Sentry (skip 401/403 auth errors and 5xx server errors)
             if httpResponse.statusCode != 401 && httpResponse.statusCode != 403 && !(500...599).contains(httpResponse.statusCode) {
-                SentrySDK.capture(error: error) { scope in
-                    scope.setTag(value: "plex_network", key: "component")
-                    scope.setExtra(value: url.absoluteString, key: "url")
-                    scope.setExtra(value: method, key: "method")
-                    scope.setExtra(value: httpResponse.statusCode, key: "status_code")
-                    if let responseStr = String(data: data, encoding: .utf8) {
-                        scope.setExtra(value: String(responseStr.prefix(500)), key: "response_body")
+                await MainActor.run {
+                    _ = SentrySDK.capture(error: error) { scope in
+                        scope.setTag(value: "plex_network", key: "component")
+                        scope.setExtra(value: url.absoluteString, key: "url")
+                        scope.setExtra(value: method, key: "method")
+                        scope.setExtra(value: httpResponse.statusCode, key: "status_code")
+                        if let responseStr = String(data: data, encoding: .utf8) {
+                            scope.setExtra(value: String(responseStr.prefix(500)), key: "response_body")
+                        }
                     }
                 }
             }
@@ -101,41 +115,43 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
             }
 
             // Capture JSON decode errors to Sentry
-            SentrySDK.capture(error: error) { scope in
-                scope.setTag(value: "plex_network", key: "component")
-                scope.setTag(value: "json_decode", key: "error_type")
-                scope.setExtra(value: url.absoluteString, key: "url")
-                scope.setExtra(value: String(describing: T.self), key: "expected_type")
-                scope.setExtra(value: data.count, key: "response_size")
+            await MainActor.run {
+                _ = SentrySDK.capture(error: error) { scope in
+                    scope.setTag(value: "plex_network", key: "component")
+                    scope.setTag(value: "json_decode", key: "error_type")
+                    scope.setExtra(value: url.absoluteString, key: "url")
+                    scope.setExtra(value: String(describing: T.self), key: "expected_type")
+                    scope.setExtra(value: data.count, key: "response_size")
 
-                // Try UTF-8 first, fall back to Latin1 (which never fails) to capture something
-                if let responseStr = String(data: data, encoding: .utf8) {
-                    scope.setExtra(value: String(responseStr.prefix(2000)), key: "response_body")
-                } else {
-                    // UTF-8 failed - capture what we can
-                    scope.setTag(value: "true", key: "invalid_utf8")
+                    // Try UTF-8 first, fall back to Latin1 (which never fails) to capture something
+                    if let responseStr = String(data: data, encoding: .utf8) {
+                        scope.setExtra(value: String(responseStr.prefix(2000)), key: "response_body")
+                    } else {
+                        // UTF-8 failed - capture what we can
+                        scope.setTag(value: "true", key: "invalid_utf8")
 
-                    // Latin1 encoding never fails - use it to get a lossy representation
-                    if let latin1Str = String(data: data.prefix(2000), encoding: .isoLatin1) {
-                        scope.setExtra(value: latin1Str, key: "response_body_latin1")
-                    }
+                        // Latin1 encoding never fails - use it to get a lossy representation
+                        if let latin1Str = String(data: data.prefix(2000), encoding: .isoLatin1) {
+                            scope.setExtra(value: latin1Str, key: "response_body_latin1")
+                        }
 
-                    // Try to find the error position from the underlying error
-                    let nsError = error as NSError
-                    if let underlyingError = nsError.userInfo[NSUnderlyingErrorKey] as? NSError,
-                       let errorIndex = underlyingError.userInfo["NSJSONSerializationErrorIndex"] as? Int {
-                        scope.setExtra(value: errorIndex, key: "error_byte_position")
+                        // Try to find the error position from the underlying error
+                        let nsError = error as NSError
+                        if let underlyingError = nsError.userInfo[NSUnderlyingErrorKey] as? NSError,
+                           let errorIndex = underlyingError.userInfo["NSJSONSerializationErrorIndex"] as? Int {
+                            scope.setExtra(value: errorIndex, key: "error_byte_position")
 
-                        // Capture hex dump around the error position
-                        let start = max(0, errorIndex - 50)
-                        let end = min(data.count, errorIndex + 50)
-                        let problemArea = data[start..<end]
-                        let hexDump = problemArea.map { String(format: "%02x", $0) }.joined(separator: " ")
-                        scope.setExtra(value: hexDump, key: "hex_around_error")
+                            // Capture hex dump around the error position
+                            let start = max(0, errorIndex - 50)
+                            let end = min(data.count, errorIndex + 50)
+                            let problemArea = data[start..<end]
+                            let hexDump = problemArea.map { String(format: "%02x", $0) }.joined(separator: " ")
+                            scope.setExtra(value: hexDump, key: "hex_around_error")
 
-                        // Also capture as Latin1 string for context
-                        if let contextStr = String(data: Data(problemArea), encoding: .isoLatin1) {
-                            scope.setExtra(value: contextStr, key: "context_around_error")
+                            // Also capture as Latin1 string for context
+                            if let contextStr = String(data: Data(problemArea), encoding: .isoLatin1) {
+                                scope.setExtra(value: contextStr, key: "context_around_error")
+                            }
                         }
                     }
                 }
@@ -1615,7 +1631,7 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
 
         do {
             let (_, response) = try await URLSession.shared.data(for: request)
-            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            _ = (response as? HTTPURLResponse)?.statusCode ?? 0
         } catch {
             print("[Plex] Decision request failed: \(error.localizedDescription)")
         }
@@ -1656,7 +1672,7 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
 
         do {
             let (_, response) = try await session.data(for: rangeRequest)
-            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            _ = (response as? HTTPURLResponse)?.statusCode ?? 0
         } catch {
             // Best effort only.
         }
@@ -1678,7 +1694,7 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
 
         do {
             let (_, response) = try await URLSession.shared.data(for: request)
-            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            _ = (response as? HTTPURLResponse)?.statusCode ?? 0
         } catch {
             // Best-effort — don't block on failure
             print("[Plex] Failed to stop transcode session \(sessionId): \(error.localizedDescription)")
@@ -1829,17 +1845,19 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
             let hasDVRs = !dvrs.isEmpty
 
             // Log capabilities check result (GitHub #64 - DVB diagnostics)
-            let breadcrumb = Breadcrumb(level: .info, category: "plex_livetv")
-            breadcrumb.message = "Live TV capabilities check completed"
-            breadcrumb.data = [
+            await addBreadcrumb(
+                level: .info,
+                category: "plex_livetv",
+                message: "Live TV capabilities check completed",
+                data: [
                 "allow_tuners": hasDVRs,
                 "live_tv_enabled": hasDVRs,
                 "has_dvr": hasDVRs,
                 "dvr_count": dvrs.count,
                 "dvr_types": dvrs.compactMap { $0.make ?? $0.model }.joined(separator: ", "),
                 "server_host": URL(string: serverURL)?.host ?? "unknown"
-            ]
-            SentrySDK.addBreadcrumb(breadcrumb)
+                ]
+            )
 
             return PlexLiveTVCapabilities(
                 allowTuners: hasDVRs,
@@ -1848,13 +1866,15 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
             )
         } catch {
             // Log capability check failure (GitHub #64 - DVB diagnostics)
-            let breadcrumb = Breadcrumb(level: .warning, category: "plex_livetv")
-            breadcrumb.message = "Live TV capabilities check failed"
-            breadcrumb.data = [
+            await addBreadcrumb(
+                level: .warning,
+                category: "plex_livetv",
+                message: "Live TV capabilities check failed",
+                data: [
                 "error": error.localizedDescription,
                 "server_host": URL(string: serverURL)?.host ?? "unknown"
-            ]
-            SentrySDK.addBreadcrumb(breadcrumb)
+                ]
+            )
 
             // If the endpoint fails, Live TV is not available
             return PlexLiveTVCapabilities()
@@ -1890,14 +1910,16 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
               let dvrKey = dvr.key else {
             print("🌐 PlexNetwork: No DVR or lineup found for Live TV")
             // Log missing DVR/lineup (GitHub #64 - DVB diagnostics)
-            let breadcrumb = Breadcrumb(level: .warning, category: "plex_livetv")
-            breadcrumb.message = "No DVR or lineup found for Live TV channels"
-            breadcrumb.data = [
+            await addBreadcrumb(
+                level: .warning,
+                category: "plex_livetv",
+                message: "No DVR or lineup found for Live TV channels",
+                data: [
                 "server_host": URL(string: serverURL)?.host ?? "unknown",
                 "has_dvr_array": dvrContainer.MediaContainer.Dvr != nil,
                 "dvr_count": dvrContainer.MediaContainer.Dvr?.count ?? 0
-            ]
-            SentrySDK.addBreadcrumb(breadcrumb)
+                ]
+            )
             return []
         }
 
@@ -1906,28 +1928,32 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
         let hasHDHomeRunDevice = dvr.Device?.first?.uri != nil
         if let device = dvr.Device?.first, let deviceURI = device.uri {
             // Log HDHomeRun device discovery (GitHub #64 - DVB diagnostics)
-            let hdhrBreadcrumb = Breadcrumb(level: .info, category: "plex_livetv")
-            hdhrBreadcrumb.message = "Fetching HDHomeRun stream URLs"
-            hdhrBreadcrumb.data = [
+            await addBreadcrumb(
+                level: .info,
+                category: "plex_livetv",
+                message: "Fetching HDHomeRun stream URLs",
+                data: [
                 "device_uri_host": URL(string: deviceURI)?.host ?? "unknown",
                 "dvr_make": dvr.make ?? "unknown",
                 "dvr_model": dvr.model ?? "unknown"
-            ]
-            SentrySDK.addBreadcrumb(hdhrBreadcrumb)
+                ]
+            )
 
             hdhrStreamURLs = await fetchHDHomeRunLineup(deviceURI: deviceURI)
         } else {
             // No HDHomeRun device - likely a DVB tuner (GitHub #64)
-            let dvbBreadcrumb = Breadcrumb(level: .info, category: "plex_livetv")
-            dvbBreadcrumb.message = "No HDHomeRun device found - will use Plex transcode URLs"
-            dvbBreadcrumb.data = [
+            await addBreadcrumb(
+                level: .info,
+                category: "plex_livetv",
+                message: "No HDHomeRun device found - will use Plex transcode URLs",
+                data: [
                 "dvr_make": dvr.make ?? "unknown",
                 "dvr_model": dvr.model ?? "unknown",
                 "dvr_friendly_name": dvr.friendlyName ?? "unknown",
                 "has_device_array": dvr.Device != nil,
                 "device_count": dvr.Device?.count ?? 0
-            ]
-            SentrySDK.addBreadcrumb(dvbBreadcrumb)
+                ]
+            )
         }
 
         // Extract provider path using DVR key (e.g., tv.plex.providers.epg.xmltv:28)
@@ -2024,16 +2050,18 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
         // Log channel breakdown for DVB debugging (GitHub #64)
         let channelsWithStreamURL = channels.filter { $0.streamURL != nil }.count
         let channelsNeedingTranscode = channels.count - channelsWithStreamURL
-        let summaryBreadcrumb = Breadcrumb(level: .info, category: "plex_livetv")
-        summaryBreadcrumb.message = "Live TV channel fetch completed"
-        summaryBreadcrumb.data = [
+        await addBreadcrumb(
+            level: .info,
+            category: "plex_livetv",
+            message: "Live TV channel fetch completed",
+            data: [
             "total_channels": channels.count,
             "channels_with_hdhr_url": channelsWithStreamURL,
             "channels_needing_transcode": channelsNeedingTranscode,
             "has_hdhr_device": hasHDHomeRunDevice,
             "server_host": URL(string: serverURL)?.host ?? "unknown"
-        ]
-        SentrySDK.addBreadcrumb(summaryBreadcrumb)
+            ]
+        )
 
         return channels
     }
@@ -2071,33 +2099,39 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
             }
 
             // Log HDHomeRun lineup success (GitHub #64 - DVB diagnostics)
-            let breadcrumb = Breadcrumb(level: .info, category: "plex_livetv")
-            breadcrumb.message = "HDHomeRun lineup fetched successfully"
-            breadcrumb.data = [
+            await addBreadcrumb(
+                level: .info,
+                category: "plex_livetv",
+                message: "HDHomeRun lineup fetched successfully",
+                data: [
                 "device_host": lineupURL.host ?? "unknown",
                 "total_channels": channels.count,
                 "channels_with_urls": urlMap.count
-            ]
-            SentrySDK.addBreadcrumb(breadcrumb)
+                ]
+            )
 
             return urlMap
         } catch {
             print("🌐 PlexNetwork: Failed to fetch HDHomeRun lineup: \(error)")
 
             // Log HDHomeRun lineup failure (GitHub #64 - DVB diagnostics)
-            let breadcrumb = Breadcrumb(level: .error, category: "plex_livetv")
-            breadcrumb.message = "HDHomeRun lineup fetch failed"
-            breadcrumb.data = [
+            await addBreadcrumb(
+                level: .error,
+                category: "plex_livetv",
+                message: "HDHomeRun lineup fetch failed",
+                data: [
                 "device_host": lineupURL.host ?? "unknown",
                 "error": error.localizedDescription
-            ]
-            SentrySDK.addBreadcrumb(breadcrumb)
+                ]
+            )
 
             // Capture error event for HDHomeRun failures
-            SentrySDK.capture(error: error) { scope in
-                scope.setTag(value: "plex_livetv", key: "component")
-                scope.setTag(value: "hdhr_lineup_fetch", key: "operation")
-                scope.setExtra(value: lineupURL.host ?? "unknown", key: "device_host")
+            await MainActor.run {
+                _ = SentrySDK.capture(error: error) { scope in
+                    scope.setTag(value: "plex_livetv", key: "component")
+                    scope.setTag(value: "hdhr_lineup_fetch", key: "operation")
+                    scope.setExtra(value: lineupURL.host ?? "unknown", key: "device_host")
+                }
             }
 
             return [:]
@@ -2561,9 +2595,9 @@ class PlexNetworkManager: NSObject, @unchecked Sendable {
 
 // MARK: - URLSessionDelegate (SSL Certificate Handling)
 
-extension PlexNetworkManager: URLSessionDelegate {
+nonisolated private final class PlexNetworkSessionDelegate: NSObject, URLSessionDelegate {
     /// Handle SSL certificate challenges for self-signed certificates
-    nonisolated func urlSession(
+    func urlSession(
         _ session: URLSession,
         didReceive challenge: URLAuthenticationChallenge,
         completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
@@ -2629,11 +2663,11 @@ enum PlexAPIError: LocalizedError {
 
 // MARK: - Playback Decision Models
 
-struct PlaybackDecisionContainer: Codable, Sendable {
+nonisolated struct PlaybackDecisionContainer: Codable, Sendable {
     let MediaContainer: PlaybackDecision
 }
 
-struct PlaybackDecision: Codable, Sendable {
+nonisolated struct PlaybackDecision: Codable, Sendable {
     let size: Int?
     let directPlayDecisionCode: Int?
     let directPlayDecisionText: String?

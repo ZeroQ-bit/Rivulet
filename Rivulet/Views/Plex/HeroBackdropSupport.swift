@@ -290,7 +290,7 @@ struct HeroBackdropImage<Placeholder: View>: View {
     }
 }
 
-extension PlexMetadata {
+nonisolated extension PlexMetadata {
     /// Builds a `HeroBackdropRequest` from this item's Plex artwork.
     ///
     /// For episodes/seasons, the clearLogo isn't carried on the item itself —

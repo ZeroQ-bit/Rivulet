@@ -13,7 +13,7 @@ actor M3UParser {
     // MARK: - Parsed Channel
 
     /// Represents a channel parsed from an M3U playlist
-    struct ParsedChannel: Sendable {
+    nonisolated struct ParsedChannel: Sendable {
         let tvgId: String?
         let tvgName: String?
         let tvgLogo: String?
@@ -218,7 +218,7 @@ enum M3UParseError: LocalizedError {
 
 extension M3UParser.ParsedChannel {
     /// Convert to UnifiedChannel
-    func toUnifiedChannel(sourceType: LiveTVSourceType, sourceId: String) -> UnifiedChannel {
+    nonisolated func toUnifiedChannel(sourceType: LiveTVSourceType, sourceId: String) -> UnifiedChannel {
         // Create a unique ID for this channel
         let channelId = tvgId ?? tvgName ?? name
         let id = UnifiedChannel.makeId(sourceType: sourceType, sourceId: sourceId, channelId: channelId)

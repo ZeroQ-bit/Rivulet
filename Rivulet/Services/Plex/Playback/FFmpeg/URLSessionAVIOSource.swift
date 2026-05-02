@@ -34,7 +34,7 @@ import Libavutil
 /// Feeds bytes from URLSession into an FFmpeg AVIOContext.
 /// The object is retained by the AVIOContext's opaque pointer for its
 /// lifetime; `freeAVIOContext(_:)` releases the retain.
-final class URLSessionAVIOSource: NSObject, @unchecked Sendable {
+nonisolated final class URLSessionAVIOSource: NSObject, @unchecked Sendable {
 
     // MARK: - Config
 
@@ -51,7 +51,7 @@ final class URLSessionAVIOSource: NSObject, @unchecked Sendable {
 
     // MARK: - Segment
 
-    private final class Segment {
+    nonisolated private final class Segment {
         /// Monotonic ID — matches `taskDescription` on the URLSession task
         /// so delegate callbacks can find their segment cheaply.
         let id: UInt64
@@ -592,10 +592,10 @@ final class URLSessionAVIOSource: NSObject, @unchecked Sendable {
 
 extension URLSessionAVIOSource: URLSessionDataDelegate {
 
-    func urlSession(_ session: URLSession,
-                    dataTask: URLSessionDataTask,
-                    didReceive response: URLResponse,
-                    completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+    nonisolated func urlSession(_ session: URLSession,
+                                dataTask: URLSessionDataTask,
+                                didReceive response: URLResponse,
+                                completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
         condition.lock()
         guard findSegmentForTaskLocked(dataTask) != nil else {
             condition.unlock()
@@ -617,9 +617,9 @@ extension URLSessionAVIOSource: URLSessionDataDelegate {
         completionHandler(.allow)
     }
 
-    func urlSession(_ session: URLSession,
-                    dataTask: URLSessionDataTask,
-                    didReceive data: Data) {
+    nonisolated func urlSession(_ session: URLSession,
+                                dataTask: URLSessionDataTask,
+                                didReceive data: Data) {
         condition.lock()
         guard let segment = findSegmentForTaskLocked(dataTask), !closed else {
             condition.unlock()
@@ -642,9 +642,9 @@ extension URLSessionAVIOSource: URLSessionDataDelegate {
         condition.unlock()
     }
 
-    func urlSession(_ session: URLSession,
-                    task: URLSessionTask,
-                    didCompleteWithError error: Error?) {
+    nonisolated func urlSession(_ session: URLSession,
+                                task: URLSessionTask,
+                                didCompleteWithError error: Error?) {
         condition.lock()
         guard let segment = findSegmentForTaskLocked(task) else {
             condition.unlock()
@@ -673,7 +673,7 @@ extension URLSessionAVIOSource {
     /// Allocate an AVIOContext that reads from `source`. The returned
     /// context holds a retained reference via its opaque pointer; free
     /// with `freeAVIOContext(_:)`.
-    static func makeAVIOContext(for source: URLSessionAVIOSource) -> UnsafeMutablePointer<AVIOContext>? {
+    nonisolated static func makeAVIOContext(for source: URLSessionAVIOSource) -> UnsafeMutablePointer<AVIOContext>? {
         let bufferSize = 1 * 1024 * 1024
         guard let rawBuffer = av_malloc(bufferSize) else { return nil }
         let buffer = rawBuffer.assumingMemoryBound(to: UInt8.self)
@@ -705,7 +705,7 @@ extension URLSessionAVIOSource {
         return ctx
     }
 
-    static func freeAVIOContext(_ ctx: UnsafeMutablePointer<AVIOContext>) {
+    nonisolated static func freeAVIOContext(_ ctx: UnsafeMutablePointer<AVIOContext>) {
         let opaque = ctx.pointee.opaque
         var mutableCtx: UnsafeMutablePointer<AVIOContext>? = ctx
         avio_context_free(&mutableCtx)
@@ -718,7 +718,7 @@ extension URLSessionAVIOSource {
 
 // MARK: - AVERROR / AVSEEK shims
 
-private let AVERROR_EOF_VALUE: Int32 = {
+nonisolated private let AVERROR_EOF_VALUE: Int32 = {
     let tag = Int32(bitPattern:
         (UInt32(Character("E").asciiValue!) |
         (UInt32(Character("O").asciiValue!) << 8) |
@@ -727,7 +727,7 @@ private let AVERROR_EOF_VALUE: Int32 = {
     return -tag
 }()
 
-private let AVSEEK_SIZE_VALUE: Int32 = 0x10000
-private let AVSEEK_FORCE_VALUE: Int32 = 0x20000
+nonisolated private let AVSEEK_SIZE_VALUE: Int32 = 0x10000
+nonisolated private let AVSEEK_FORCE_VALUE: Int32 = 0x20000
 
 #endif  // RIVULET_FFMPEG

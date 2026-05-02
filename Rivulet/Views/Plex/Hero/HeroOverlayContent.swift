@@ -22,6 +22,7 @@ struct HeroOverlayContent: View {
     let onPlay: (PlexMetadata) -> Void
     var onHeroFocused: (() -> Void)? = nil
     var onHeroExited: (() -> Void)? = nil
+    var heroHeight: CGFloat = 880
 
     @State private var resolvedPlayTargets: [String: PlexMetadata] = [:]
     @State private var watchedOverrides: [String: Bool] = [:]
@@ -57,14 +58,6 @@ struct HeroOverlayContent: View {
         return item.isWatched
     }
 
-    /// Must match the hero-section height computed in `PlexHomeView.contentView`
-    /// and `PlexLibraryView.contentView` (`UIScreen.main.bounds.height - 180`).
-    /// Set here explicitly so the layout doesn't depend on SwiftUI propagating
-    /// the parent's `.frame(height:)` through the ZStack — which wasn't
-    /// reaching the VStack reliably and caused the controls to overflow below
-    /// the clipped hero bounds.
-    private static let heroHeight: CGFloat = UIScreen.main.bounds.height - 200
-
     var body: some View {
         ZStack(alignment: .bottom) {
             VStack(spacing: 0) {
@@ -93,7 +86,7 @@ struct HeroOverlayContent: View {
                         )
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.leading, 120)
+                    .padding(.leading, 96)
                 }
 
                 // Reserve bottom space for dots so logo/buttons sit above them.
@@ -115,7 +108,7 @@ struct HeroOverlayContent: View {
             }
         }
         .frame(maxWidth: .infinity)
-        .frame(height: Self.heroHeight)
+        .frame(height: heroHeight)
         .onAppear {
             // Sync the displayed slide with the active index on first load.
             if displayedIndex != currentIndex {

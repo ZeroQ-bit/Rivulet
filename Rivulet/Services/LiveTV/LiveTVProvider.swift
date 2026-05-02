@@ -10,7 +10,7 @@ import Foundation
 // MARK: - Source Type
 
 /// Types of Live TV sources supported
-enum LiveTVSourceType: String, Codable, CaseIterable, Sendable {
+nonisolated enum LiveTVSourceType: String, Codable, CaseIterable, Sendable {
     case plex = "plex"
     case dispatcharr = "dispatcharr"
     case genericM3U = "m3u"
@@ -35,7 +35,7 @@ enum LiveTVSourceType: String, Codable, CaseIterable, Sendable {
 // MARK: - Unified Channel
 
 /// A unified channel representation that works across all Live TV sources
-struct UnifiedChannel: Identifiable, Hashable, Sendable {
+nonisolated struct UnifiedChannel: Identifiable, Hashable, Sendable {
     let id: String
     let sourceType: LiveTVSourceType
     let sourceId: String
@@ -83,7 +83,7 @@ struct UnifiedChannel: Identifiable, Hashable, Sendable {
 // MARK: - Unified Program (EPG)
 
 /// A unified EPG program representation
-struct UnifiedProgram: Identifiable, Hashable, Sendable {
+nonisolated struct UnifiedProgram: Identifiable, Hashable, Sendable {
     let id: String
     let channelId: String
     let title: String

@@ -8,13 +8,13 @@
 
 import Foundation
 
-enum RecommendationContentType: String, Codable {
+nonisolated enum RecommendationContentType: String, Codable {
     case movies
     case shows
     case moviesAndShows
 }
 
-private struct RecommendationResult: Codable {
+nonisolated private struct RecommendationResult: Codable {
     let generatedAt: Date
     let items: [PlexMetadata]
     let contentType: RecommendationContentType
@@ -22,7 +22,7 @@ private struct RecommendationResult: Codable {
     let serverURL: String
 }
 
-private struct FeatureProfile {
+nonisolated private struct FeatureProfile {
     var keywords: [String: Double] = [:]
     var genres: [String: Double] = [:]
     var cast: [String: Double] = [:]
@@ -54,8 +54,6 @@ actor PersonalizedRecommendationService {
 
     private let tmdbClient = TMDBClient.shared
     private let networkManager = PlexNetworkManager.shared
-    private let dataStore = PlexDataStore.shared
-    private let authManager = PlexAuthManager.shared
 
     private struct CacheKey: Hashable {
         let contentType: RecommendationContentType
@@ -91,7 +89,7 @@ actor PersonalizedRecommendationService {
         contentType: RecommendationContentType = .moviesAndShows,
         libraryKey: String? = nil
     ) async throws -> [PlexMetadata] {
-        let auth = await MainActor.run { (authManager.selectedServerURL, authManager.selectedServerToken) }
+        let auth = await currentAuth()
         guard let serverURL = auth.0 else {
             throw NSError(domain: "PlexAuth", code: 1, userInfo: [NSLocalizedDescriptionKey: "Not authenticated with Plex"])
         }
@@ -126,7 +124,7 @@ actor PersonalizedRecommendationService {
         blendWithHistory: Bool = true,
         limit: Int = 12
     ) async throws -> [PlexMetadata] {
-        let auth = await MainActor.run { (authManager.selectedServerURL, authManager.selectedServerToken) }
+        let auth = await currentAuth()
         guard let serverURL = auth.0, let token = auth.1 else {
             throw NSError(domain: "PlexAuth", code: 1, userInfo: [NSLocalizedDescriptionKey: "Not authenticated with Plex"])
         }
@@ -147,8 +145,7 @@ actor PersonalizedRecommendationService {
         }
 
         // Get library items to score
-        await dataStore.loadLibrariesIfNeeded()
-        let visibleLibraries = await MainActor.run { dataStore.visibleLibraries }
+        let visibleLibraries = await loadVisibleLibraries()
         let movieLibraries = visibleLibraries.filter { $0.type == "movie" }
 
         var libraryItems: [PlexMetadata] = []
@@ -186,16 +183,27 @@ actor PersonalizedRecommendationService {
         return Array(sorted)
     }
 
+    private func currentAuth() async -> (serverURL: String?, token: String?) {
+        await MainActor.run {
+            (PlexAuthManager.shared.selectedServerURL, PlexAuthManager.shared.selectedServerToken)
+        }
+    }
+
+    private func loadVisibleLibraries() async -> [PlexLibrary] {
+        let dataStore = await MainActor.run { PlexDataStore.shared }
+        await dataStore.loadLibrariesIfNeeded()
+        return await MainActor.run { dataStore.visibleLibraries }
+    }
+
     // MARK: - Core logic
 
     private func computeRecommendations(contentType: RecommendationContentType, libraryKey: String?, serverURL: String) async throws -> [PlexMetadata] {
-        let authToken = await MainActor.run { authManager.selectedServerToken }
+        let authToken = await MainActor.run { PlexAuthManager.shared.selectedServerToken }
         guard let token = authToken else {
             throw NSError(domain: "PlexAuth", code: 1, userInfo: [NSLocalizedDescriptionKey: "Not authenticated with Plex"])
         }
 
-        await dataStore.loadLibrariesIfNeeded()
-        let visibleLibraries = await MainActor.run { dataStore.visibleLibraries }
+        let visibleLibraries = await loadVisibleLibraries()
 
         // Determine target libraries: specific library when provided, else all visible video libraries
         let targetLibraries: [PlexLibrary] = {
@@ -418,8 +426,7 @@ actor PersonalizedRecommendationService {
 
     /// Build a feature profile from user's watch history
     private func buildWatchHistoryProfile(serverURL: String, token: String) async throws -> FeatureProfile {
-        await dataStore.loadLibrariesIfNeeded()
-        let visibleLibraries = await MainActor.run { dataStore.visibleLibraries }
+        let visibleLibraries = await loadVisibleLibraries()
         let movieLibraries = visibleLibraries.filter { $0.type == "movie" }
 
         var watchedItems: [PlexMetadata] = []

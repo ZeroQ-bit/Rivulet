@@ -14,7 +14,7 @@ private let homeLog = Logger(subsystem: "com.rivulet.app", category: "PlexHome")
 struct PlexHomeView: View {
     @StateObject private var dataStore = PlexDataStore.shared
     @StateObject private var authManager = PlexAuthManager.shared
-    @AppStorage("showHomeHero") private var showHomeHero = false
+    @AppStorage("showHomeHero") private var showHomeHero = true
     @AppStorage("enablePersonalizedRecommendations") private var enablePersonalizedRecommendations = false
     @Environment(\.nestedNavigationState) private var nestedNavState
     @State private var selectedItem: PlexMetadata?
@@ -48,8 +48,22 @@ struct PlexHomeView: View {
             result.append(hub)
         }
 
-        // 2. Add "Recently Added" hub for each library shown on Home (video and music)
-        for library in dataStore.librariesForHomeScreen {
+        // 2. Add "Recently Added" hub for each library shown on Home.
+        // Keep the user's library ordering inside each media type, but shape
+        // Home like Novio: movies, series, then music.
+        let orderedHomeLibraries = dataStore.librariesForHomeScreen
+            .enumerated()
+            .sorted { lhs, rhs in
+                let leftPriority = homeLibraryPriority(lhs.element)
+                let rightPriority = homeLibraryPriority(rhs.element)
+                if leftPriority != rightPriority {
+                    return leftPriority < rightPriority
+                }
+                return lhs.offset < rhs.offset
+            }
+            .map(\.element)
+
+        for library in orderedHomeLibraries {
             if let hubs = dataStore.libraryHubs[library.key] {
                 // Find the "Recently Added" hub for this library
                 if let recentlyAddedHub = hubs.first(where: { isRecentlyAddedHub($0) }) {
@@ -61,6 +75,15 @@ struct PlexHomeView: View {
         }
 
         return result
+    }
+
+    private func homeLibraryPriority(_ library: PlexLibrary) -> Int {
+        switch library.type {
+        case "movie": return 0
+        case "show": return 1
+        case "artist": return 2
+        default: return 3
+        }
     }
 
     /// Extract Continue Watching / On Deck items and merge into a single hub
@@ -484,12 +507,17 @@ struct PlexHomeView: View {
     // MARK: - Content View
 
     private var contentView: some View {
+        GeometryReader { geometry in
+            contentBody(screenHeight: geometry.size.height)
+        }
+    }
+
+    private func contentBody(screenHeight: CGFloat) -> some View {
         let heroActive = showHomeHero && !heroItems.isEmpty
-        let screenHeight = UIScreen.main.bounds.height
-        // Leave a modest peek for Continue Watching at the bottom of the hero
-        // at the top scroll position. The backdrop fills the full screen behind
-        // the scroll view; this height controls where the overlay content ends.
-        let heroSectionHeight = screenHeight - 200
+        // Leave a visible shelf peek at the bottom of the hero. The backdrop
+        // still fills the screen; this only controls where foreground hero
+        // controls give way to the first row.
+        let heroSectionHeight = screenHeight - 260
 
         let currentHeroItem: PlexMetadata? = {
             guard heroActive, !heroItems.isEmpty else { return nil }
@@ -537,7 +565,8 @@ struct PlexHomeView: View {
                                     scrollProxy.scrollTo("homeHero", anchor: .top)
                                 }
                             },
-                            onHeroExited: nil
+                            onHeroExited: nil,
+                            heroHeight: heroSectionHeight
                         )
                         .frame(height: heroSectionHeight)
                         .focusSection()
@@ -545,7 +574,7 @@ struct PlexHomeView: View {
                     }
 
                     // Content rows (uses cached processedHubs which merges Continue Watching + On Deck)
-                    VStack(alignment: .leading, spacing: 48) {
+                    VStack(alignment: .leading, spacing: 42) {
                         // Invisible anchor so we can scroll to place Continue
                         // Watching at roughly mid-screen (matching Apple TV).
                         Color.clear
@@ -601,7 +630,8 @@ struct PlexHomeView: View {
                             recommendationsSection
                         }
                     }
-                    .padding(.top, heroActive ? 0 : 48)
+                    .padding(.top, heroActive ? -24 : 48)
+                    .padding(.bottom, 80)
                 }
             }
             .onScrollGeometryChange(for: CGFloat.self) { geometry in

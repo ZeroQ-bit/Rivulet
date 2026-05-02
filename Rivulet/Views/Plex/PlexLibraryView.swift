@@ -420,8 +420,13 @@ struct PlexLibraryView: View {
     // MARK: - Content View
 
     private var contentView: some View {
+        GeometryReader { geometry in
+            contentBody(screenHeight: geometry.size.height)
+        }
+    }
+
+    private func contentBody(screenHeight: CGFloat) -> some View {
         let heroActive = showLibraryHero && !heroItems.isEmpty
-        let screenHeight = UIScreen.main.bounds.height
         // Same sizing as the home hero so both screens feel consistent:
         // full-width, near-full-height with a modest peek for the row below.
         let heroSectionHeight = screenHeight - 200
@@ -465,7 +470,8 @@ struct PlexLibraryView: View {
                                 withAnimation(.smooth(duration: 0.8)) {
                                     scrollProxy.scrollTo("libraryHero", anchor: .top)
                                 }
-                            }
+                            },
+                            heroHeight: heroSectionHeight
                         )
                         .frame(height: heroSectionHeight)
                         .focusSection()

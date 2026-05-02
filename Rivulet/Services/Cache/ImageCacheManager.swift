@@ -248,7 +248,7 @@ actor ImageCacheManager: NSObject {
             }
 
             // Save to disk for future use
-            await saveToDisk(data: data, key: key, url: url)
+            saveToDisk(data: data, key: key, url: url)
 
             return data
         } catch {

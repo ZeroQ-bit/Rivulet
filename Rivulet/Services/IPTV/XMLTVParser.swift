@@ -13,14 +13,14 @@ actor XMLTVParser {
     // MARK: - Parsed Types
 
     /// Represents a channel from XMLTV
-    struct ParsedXMLTVChannel: Sendable {
+    nonisolated struct ParsedXMLTVChannel: Sendable {
         let id: String
         let displayName: String
         let iconURL: String?
     }
 
     /// Represents a program from XMLTV
-    struct ParsedProgram: Sendable {
+    nonisolated struct ParsedProgram: Sendable {
         let channelId: String
         let start: Date
         let stop: Date
@@ -35,7 +35,7 @@ actor XMLTVParser {
 
     // MARK: - Parse Result
 
-    struct ParseResult: Sendable {
+    nonisolated struct ParseResult: Sendable {
         let channels: [String: ParsedXMLTVChannel]  // id -> channel
         let programs: [String: [ParsedProgram]]      // channelId -> programs
     }
@@ -117,7 +117,7 @@ actor XMLTVParser {
 
 // MARK: - XMLTV Internal Parser (XMLParserDelegate)
 
-private class XMLTVInternalParser: NSObject, XMLParserDelegate {
+nonisolated private final class XMLTVInternalParser: NSObject, XMLParserDelegate {
     private var channels: [String: XMLTVParser.ParsedXMLTVChannel] = [:]
     private var programs: [String: [XMLTVParser.ParsedProgram]] = [:]
 
@@ -326,7 +326,7 @@ enum XMLTVParseError: LocalizedError {
 
 extension XMLTVParser.ParsedProgram {
     /// Convert to UnifiedProgram
-    func toUnifiedProgram(unifiedChannelId: String) -> UnifiedProgram {
+    nonisolated func toUnifiedProgram(unifiedChannelId: String) -> UnifiedProgram {
         // Create unique ID from channel and start time
         let id = "\(unifiedChannelId):\(Int(start.timeIntervalSince1970))"
 

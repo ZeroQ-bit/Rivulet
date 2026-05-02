@@ -181,7 +181,7 @@ class PlexDataStore: ObservableObject {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            Task { @MainActor in
+            MainActor.assumeIsolated {
                 self?.isInForeground = true
                 self?.startPollingIfNeeded()
             }
@@ -192,7 +192,7 @@ class PlexDataStore: ObservableObject {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            Task { @MainActor in
+            MainActor.assumeIsolated {
                 self?.isInForeground = false
                 self?.stopPolling()
             }
@@ -204,7 +204,7 @@ class PlexDataStore: ObservableObject {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            Task { @MainActor in
+            MainActor.assumeIsolated {
                 self?.isPlaybackActive = true
                 self?.stopPolling()
             }
@@ -215,7 +215,7 @@ class PlexDataStore: ObservableObject {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            Task { @MainActor in
+            MainActor.assumeIsolated {
                 self?.isPlaybackActive = false
                 self?.startPollingIfNeeded()
             }
@@ -503,27 +503,28 @@ class PlexDataStore: ObservableObject {
 
             // Fetch remaining libraries from network in parallel
             if !librariesNeedingFetch.isEmpty {
-                await withTaskGroup(of: (String, String, [PlexHub]?).self) { group in
+                let networkManager = self.networkManager
+                await withTaskGroup(of: (String, [PlexHub]?).self) { group in
                     for library in librariesNeedingFetch {
                         let sectionId = library.key.replacingOccurrences(of: "/library/sections/", with: "")
                         group.addTask {
                             do {
-                                let hubs = try await self.networkManager.getLibraryHubs(
+                                let hubs = try await networkManager.getLibraryHubs(
                                     serverURL: serverURL,
                                     authToken: token,
                                     sectionId: sectionId,
                                     userId: userId,
                                     count: 24
                                 )
-                                return (library.key, library.title, hubs)
+                                return (library.key, hubs)
                             } catch {
                                 print("📦 PlexDataStore: ❌ Failed to load hubs for \(library.title): \(error)")
-                                return (library.key, library.title, nil)
+                                return (library.key, nil)
                             }
                         }
                     }
 
-                    for await (key, title, hubs) in group {
+                    for await (key, hubs) in group {
                         if let hubs {
                             libraryHubs[key] = hubs
                             recordFetch(for: "libraryHubs:\(key)")
@@ -536,26 +537,27 @@ class PlexDataStore: ObservableObject {
             let fetchKeys = Set(librariesNeedingFetch.map { $0.key })
             let cachedLibraries = missingLibraries.filter { !fetchKeys.contains($0.key) }
             if !cachedLibraries.isEmpty {
-                await withTaskGroup(of: (String, String, [PlexHub]?).self) { group in
+                let networkManager = self.networkManager
+                await withTaskGroup(of: (String, [PlexHub]?).self) { group in
                     for library in cachedLibraries {
                         let sectionId = library.key.replacingOccurrences(of: "/library/sections/", with: "")
                         group.addTask {
                             do {
-                                let hubs = try await self.networkManager.getLibraryHubs(
+                                let hubs = try await networkManager.getLibraryHubs(
                                     serverURL: serverURL,
                                     authToken: token,
                                     sectionId: sectionId,
                                     userId: userId,
                                     count: 24
                                 )
-                                return (library.key, library.title, hubs)
+                                return (library.key, hubs)
                             } catch {
-                                return (library.key, library.title, nil)
+                                return (library.key, nil)
                             }
                         }
                     }
 
-                    for await (key, title, hubs) in group {
+                    for await (key, hubs) in group {
                         if let hubs {
                             libraryHubs[key] = hubs
                             recordFetch(for: "libraryHubs:\(key)")

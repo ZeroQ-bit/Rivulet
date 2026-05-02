@@ -45,7 +45,7 @@ enum SettingsPage: Hashable, CaseIterable {
     case plex, iptv, libraries, cache, userProfiles
     case liveTVSourceDetail
     case addLiveTVSource, addPlexLiveTV, addDispatcharrSource, addM3USource
-    case displaySizePicker, audioLanguagePicker, subtitlesPicker, autoplayCountdownPicker
+    case displaySizePicker, audioLanguagePicker, subtitlesPicker, subtitleSizePicker, subtitleColorPicker, subtitlePositionPicker, autoplayCountdownPicker
 
     var title: String {
         switch self {
@@ -69,6 +69,9 @@ enum SettingsPage: Hashable, CaseIterable {
         case .displaySizePicker: return "Display Size"
         case .audioLanguagePicker: return "Audio Language"
         case .subtitlesPicker: return "Subtitles"
+        case .subtitleSizePicker: return "Subtitle Size"
+        case .subtitleColorPicker: return "Subtitle Color"
+        case .subtitlePositionPicker: return "Subtitle Position"
         case .autoplayCountdownPicker: return "Autoplay Countdown"
         }
     }
@@ -98,7 +101,9 @@ enum AutoplayCountdown: Int, CaseIterable, CustomStringConvertible {
 
 enum LanguageOption: String, CaseIterable, CustomStringConvertible {
     case arabic = "ara"
+    case bosnian = "bos"
     case chinese = "zho"
+    case croatian = "hrv"
     case czech = "ces"
     case danish = "dan"
     case dutch = "nld"
@@ -119,6 +124,7 @@ enum LanguageOption: String, CaseIterable, CustomStringConvertible {
     case portuguese = "por"
     case romanian = "ron"
     case russian = "rus"
+    case serbian = "srp"
     case spanish = "spa"
     case swedish = "swe"
     case thai = "tha"
@@ -129,7 +135,9 @@ enum LanguageOption: String, CaseIterable, CustomStringConvertible {
     var description: String {
         switch self {
         case .arabic: return "Arabic"
+        case .bosnian: return "Bosnian"
         case .chinese: return "Chinese"
+        case .croatian: return "Croatian"
         case .czech: return "Czech"
         case .danish: return "Danish"
         case .dutch: return "Dutch"
@@ -150,6 +158,7 @@ enum LanguageOption: String, CaseIterable, CustomStringConvertible {
         case .portuguese: return "Portuguese"
         case .romanian: return "Romanian"
         case .russian: return "Russian"
+        case .serbian: return "Serbian"
         case .spanish: return "Spanish"
         case .swedish: return "Swedish"
         case .thai: return "Thai"
@@ -161,40 +170,44 @@ enum LanguageOption: String, CaseIterable, CustomStringConvertible {
 
     /// Initialize from a language code (handles various formats)
     init(languageCode: String?) {
-        guard let code = languageCode?.lowercased() else {
-            self = .english
-            return
-        }
+        self = Self.option(languageCode: languageCode) ?? .english
+    }
+
+    static func option(languageCode: String?) -> LanguageOption? {
+        guard let code = languageCode?.lowercased() else { return nil }
         switch code {
-        case "ara", "ar", "arabic": self = .arabic
-        case "zho", "zh", "chi", "chinese": self = .chinese
-        case "ces", "cs", "cze", "czech": self = .czech
-        case "dan", "da", "danish": self = .danish
-        case "nld", "nl", "dut", "dutch": self = .dutch
-        case "eng", "en", "english": self = .english
-        case "fin", "fi", "finnish": self = .finnish
-        case "fra", "fr", "fre", "french": self = .french
-        case "deu", "de", "ger", "german": self = .german
-        case "ell", "el", "gre", "greek": self = .greek
-        case "heb", "he", "hebrew": self = .hebrew
-        case "hin", "hi", "hindi": self = .hindi
-        case "hun", "hu", "hungarian": self = .hungarian
-        case "ind", "id", "indonesian": self = .indonesian
-        case "ita", "it", "italian": self = .italian
-        case "jpn", "ja", "japanese": self = .japanese
-        case "kor", "ko", "korean": self = .korean
-        case "nor", "no", "nb", "nn", "norwegian": self = .norwegian
-        case "pol", "pl", "polish": self = .polish
-        case "por", "pt", "portuguese": self = .portuguese
-        case "ron", "ro", "rum", "romanian": self = .romanian
-        case "rus", "ru", "russian": self = .russian
-        case "spa", "es", "spanish": self = .spanish
-        case "swe", "sv", "swedish": self = .swedish
-        case "tha", "th", "thai": self = .thai
-        case "tur", "tr", "turkish": self = .turkish
-        case "ukr", "uk", "ukrainian": self = .ukrainian
-        case "vie", "vi", "vietnamese": self = .vietnamese
-        default: self = .english
+        case "ara", "ar", "arabic": return .arabic
+        case "bos", "bs", "bosnian": return .bosnian
+        case "zho", "zh", "chi", "chinese": return .chinese
+        case "hrv", "hr", "scr", "croatian": return .croatian
+        case "ces", "cs", "cze", "czech": return .czech
+        case "dan", "da", "danish": return .danish
+        case "nld", "nl", "dut", "dutch": return .dutch
+        case "eng", "en", "english": return .english
+        case "fin", "fi", "finnish": return .finnish
+        case "fra", "fr", "fre", "french": return .french
+        case "deu", "de", "ger", "german": return .german
+        case "ell", "el", "gre", "greek": return .greek
+        case "heb", "he", "hebrew": return .hebrew
+        case "hin", "hi", "hindi": return .hindi
+        case "hun", "hu", "hungarian": return .hungarian
+        case "ind", "id", "indonesian": return .indonesian
+        case "ita", "it", "italian": return .italian
+        case "jpn", "ja", "japanese": return .japanese
+        case "kor", "ko", "korean": return .korean
+        case "nor", "no", "nb", "nn", "norwegian": return .norwegian
+        case "pol", "pl", "polish": return .polish
+        case "por", "pt", "portuguese": return .portuguese
+        case "ron", "ro", "rum", "romanian": return .romanian
+        case "rus", "ru", "russian": return .russian
+        case "srp", "sr", "scc", "serbian": return .serbian
+        case "spa", "es", "spanish": return .spanish
+        case "swe", "sv", "swedish": return .swedish
+        case "tha", "th", "thai": return .thai
+        case "tur", "tr", "turkish": return .turkish
+        case "ukr", "uk", "ukrainian": return .ukrainian
+        case "vie", "vi", "vietnamese": return .vietnamese
+        default: return nil
         }
     }
 }
@@ -270,9 +283,10 @@ struct SettingsView: View {
     @State private var focusTrigger = 0
     @State private var showChangelog = false
     @State private var selectedLiveTVSource: LiveTVDataStore.LiveTVSourceInfo?
+    @ObservedObject private var subtitleAppearance = SubtitleAppearanceSettings.shared
 
     // AppStorage
-    @AppStorage("showHomeHero") private var showHomeHero = false
+    @AppStorage("showHomeHero") private var showHomeHero = true
     @AppStorage("showLibraryHero") private var showLibraryHero = false
     @AppStorage("showLibraryRecommendations") private var showLibraryRecommendations = true
     @AppStorage("showLibraryRecentRows") private var showLibraryRecentRows = true
@@ -281,7 +295,7 @@ struct SettingsView: View {
     @AppStorage("confirmExitMultiview") private var confirmExitMultiview = true
     @AppStorage("allowFourStreams") private var allowFourStreams = false
     @AppStorage("combineLiveTVSources") private var combineLiveTVSources = true
-    @AppStorage("liveTVAboveLibraries") private var liveTVAboveLibraries = false
+    @AppStorage("liveTVAboveLibraries") private var liveTVAboveLibraries = true
     @AppStorage("classicTVMode") private var classicTVMode = false
     @AppStorage("autoSkipIntro") private var autoSkipIntro = false
     @AppStorage("autoSkipCredits") private var autoSkipCredits = false
@@ -306,10 +320,20 @@ struct SettingsView: View {
 
     // Audio/Subtitle preference state
     @State private var audioLanguage: LanguageOption = LanguageOption(languageCode: AudioPreferenceManager.current.languageCode)
-    @State private var subtitleOption: SubtitleOption = SubtitleOption(
-        enabled: SubtitlePreferenceManager.current.enabled,
-        languageCode: SubtitlePreferenceManager.current.languageCode
-    )
+    @State private var subtitleLanguages: [LanguageOption] = SettingsView.subtitleLanguages(from: SubtitlePreferenceManager.current)
+
+    private static let maxSubtitleLanguageCount = 5
+
+    private static func subtitleLanguages(from preference: SubtitlePreference) -> [LanguageOption] {
+        var seen = Set<LanguageOption>()
+        return preference.preferredLanguageCodes.compactMap { code in
+            guard let option = LanguageOption.option(languageCode: code),
+                  seen.insert(option).inserted else {
+                return nil
+            }
+            return option
+        }
+    }
 
     // MARK: - Bindings
 
@@ -323,19 +347,39 @@ struct SettingsView: View {
         )
     }
 
-    private var subtitleOptionBinding: Binding<SubtitleOption> {
-        Binding(
-            get: { subtitleOption },
-            set: { newValue in
-                subtitleOption = newValue
-                var pref = SubtitlePreferenceManager.current
-                pref.enabled = newValue.isEnabled
-                if let code = newValue.languageCode {
-                    pref.languageCode = code
-                }
-                SubtitlePreferenceManager.current = pref
-            }
-        )
+    private var subtitleLanguageSummary: String {
+        guard !subtitleLanguages.isEmpty else { return "Off" }
+        let names = subtitleLanguages.map(\.description)
+        guard names.count > 2 else { return names.joined(separator: ", ") }
+        return "\(names[0]), \(names[1]) +\(names.count - 2)"
+    }
+
+    private func setSubtitleLanguages(_ languages: [LanguageOption]) {
+        var seen = Set<LanguageOption>()
+        let orderedLanguages = languages
+            .filter { seen.insert($0).inserted }
+            .prefix(Self.maxSubtitleLanguageCount)
+
+        let selectedLanguages = Array(orderedLanguages)
+        subtitleLanguages = selectedLanguages
+
+        var pref = SubtitlePreferenceManager.current
+        pref.enabled = !selectedLanguages.isEmpty
+        pref.languageCodes = selectedLanguages.map(\.rawValue)
+        pref.languageCode = selectedLanguages.first?.rawValue
+        if selectedLanguages.isEmpty {
+            pref.codec = nil
+            pref.preferHearingImpaired = false
+        }
+        SubtitlePreferenceManager.current = pref
+    }
+
+    private func toggleSubtitleLanguage(_ language: LanguageOption) {
+        if subtitleLanguages.contains(language) {
+            setSubtitleLanguages(subtitleLanguages.filter { $0 != language })
+        } else if subtitleLanguages.count < Self.maxSubtitleLanguageCount {
+            setSubtitleLanguages(subtitleLanguages + [language])
+        }
     }
 
     private var liveTVLayout: Binding<LiveTVLayout> {
@@ -554,6 +598,12 @@ struct SettingsView: View {
             audioLanguagePickerPage
         case .subtitlesPicker:
             subtitlesPickerPage
+        case .subtitleSizePicker:
+            subtitleSizePickerPage
+        case .subtitleColorPicker:
+            subtitleColorPickerPage
+        case .subtitlePositionPicker:
+            subtitlePositionPickerPage
         case .autoplayCountdownPicker:
             autoplayCountdownPickerPage
         }
@@ -684,9 +734,30 @@ struct SettingsView: View {
 
             SettingsRow(
                 title: "Subtitles",
-                value: subtitleOption.description,
+                value: subtitleLanguageSummary,
                 action: { navigate(to: .subtitlesPicker) },
                 onFocusChange: { if $0 { focusState.focusedSettingId = "subtitles" } }
+            )
+
+            SettingsRow(
+                title: "Subtitle Size",
+                value: subtitleAppearance.textSize.description,
+                action: { navigate(to: .subtitleSizePicker) },
+                onFocusChange: { if $0 { focusState.focusedSettingId = "subtitleSize" } }
+            )
+
+            SettingsRow(
+                title: "Subtitle Color",
+                value: subtitleAppearance.textColor.description,
+                action: { navigate(to: .subtitleColorPicker) },
+                onFocusChange: { if $0 { focusState.focusedSettingId = "subtitleColor" } }
+            )
+
+            SettingsRow(
+                title: "Subtitle Position",
+                value: subtitleAppearance.verticalPosition.description,
+                action: { navigate(to: .subtitlePositionPicker) },
+                onFocusChange: { if $0 { focusState.focusedSettingId = "subtitlePosition" } }
             )
 
             SettingsToggleRow(
@@ -871,16 +942,116 @@ struct SettingsView: View {
 
     private var subtitlesPickerPage: some View {
         Group {
-            ForEach(SubtitleOption.allCases, id: \.self) { option in
+            Button {
+                setSubtitleLanguages([])
+            } label: {
+                HStack {
+                    Text("Off")
+                        .font(.system(size: 32))
+                    Spacer()
+                    if subtitleLanguages.isEmpty {
+                        Image(systemName: "checkmark")
+                            .font(.system(size: 24, weight: .bold))
+                            .foregroundStyle(.blue)
+                    }
+                }
+            }
+
+            ForEach(LanguageOption.allCases, id: \.self) { option in
+                let selectedIndex = subtitleLanguages.firstIndex(of: option)
+                let isSelected = selectedIndex != nil
+                let isDisabled = !isSelected && subtitleLanguages.count >= Self.maxSubtitleLanguageCount
+
                 Button {
-                    subtitleOptionBinding.wrappedValue = option
+                    toggleSubtitleLanguage(option)
+                } label: {
+                    HStack {
+                        Text(option.description)
+                            .font(.system(size: 32))
+                            .foregroundStyle(isDisabled ? .secondary : .primary)
+                        Spacer()
+                        if let selectedIndex {
+                            Text("#\(selectedIndex + 1)")
+                                .font(.system(size: 26, weight: .semibold))
+                                .foregroundStyle(.blue)
+                            Image(systemName: "checkmark")
+                                .font(.system(size: 24, weight: .bold))
+                                .foregroundStyle(.blue)
+                        } else if isDisabled {
+                            Text("Max \(Self.maxSubtitleLanguageCount)")
+                                .font(.system(size: 24, weight: .medium))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                .disabled(isDisabled)
+            }
+        }
+    }
+
+    private var subtitleSizePickerPage: some View {
+        Group {
+            ForEach(SubtitleTextSize.allCases) { option in
+                Button {
+                    subtitleAppearance.setTextSize(option)
                     goBack()
                 } label: {
                     HStack {
                         Text(option.description)
                             .font(.system(size: 32))
                         Spacer()
-                        if subtitleOption == option {
+                        if subtitleAppearance.textSize == option {
+                            Image(systemName: "checkmark")
+                                .font(.system(size: 24, weight: .bold))
+                                .foregroundStyle(.blue)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private var subtitleColorPickerPage: some View {
+        Group {
+            ForEach(SubtitleTextColor.allCases) { option in
+                Button {
+                    subtitleAppearance.setTextColor(option)
+                    goBack()
+                } label: {
+                    HStack(spacing: 16) {
+                        Circle()
+                            .fill(option.color)
+                            .frame(width: 28, height: 28)
+                            .overlay(Circle().stroke(.white.opacity(0.35), lineWidth: 1))
+
+                        Text(option.description)
+                            .font(.system(size: 32))
+
+                        Spacer()
+
+                        if subtitleAppearance.textColor == option {
+                            Image(systemName: "checkmark")
+                                .font(.system(size: 24, weight: .bold))
+                                .foregroundStyle(.blue)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private var subtitlePositionPickerPage: some View {
+        Group {
+            ForEach(SubtitleVerticalPosition.allCases) { option in
+                Button {
+                    subtitleAppearance.setVerticalPosition(option)
+                    goBack()
+                } label: {
+                    HStack {
+                        Text(option.description)
+                            .font(.system(size: 32))
+                        Spacer()
+                        if subtitleAppearance.verticalPosition == option {
                             Image(systemName: "checkmark")
                                 .font(.system(size: 24, weight: .bold))
                                 .foregroundStyle(.blue)

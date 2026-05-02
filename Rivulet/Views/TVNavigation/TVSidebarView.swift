@@ -39,7 +39,7 @@ struct TVSidebarView: View {
     @StateObject private var deepLinkHandler = DeepLinkHandler.shared
     @StateObject private var musicQueue = MusicQueue.shared
     @AppStorage("combineLiveTVSources") private var combineLiveTVSources = true
-    @AppStorage("liveTVAboveLibraries") private var liveTVAboveLibraries = false
+    @AppStorage("liveTVAboveLibraries") private var liveTVAboveLibraries = true
     @AppStorage("displaySize") private var displaySizeRaw = DisplaySize.normal.rawValue
     @State private var selectedTab: SidebarTab = .home
     @State private var previousTab: SidebarTab = .home

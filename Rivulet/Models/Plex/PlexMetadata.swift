@@ -12,7 +12,7 @@ import Foundation
 // MARK: - Cast & Crew Models
 
 /// Actor/cast member with role information
-struct PlexRole: Codable, Identifiable, Sendable {
+nonisolated struct PlexRole: Codable, Identifiable, Sendable {
     var id: String { "\(tag ?? "unknown")-\(role ?? "unknown")-\(thumb ?? "")" }
     var tag: String?        // Actor name
     var role: String?       // Character name
@@ -20,7 +20,7 @@ struct PlexRole: Codable, Identifiable, Sendable {
 }
 
 /// Director/Writer/Producer
-struct PlexCrewMember: Codable, Identifiable, Sendable {
+nonisolated struct PlexCrewMember: Codable, Identifiable, Sendable {
     var id: String { "\(tag ?? "unknown")-\(thumb ?? "")" }
     var tag: String?
     var thumb: String?
@@ -29,14 +29,14 @@ struct PlexCrewMember: Codable, Identifiable, Sendable {
 /// Plex image entry (clearLogo, coverPoster, background, snapshot, etc.)
 /// Returned on metadata items as an `Image` array. The `url` field is a
 /// server-relative path that still needs `X-Plex-Token` to fetch.
-struct PlexImage: Codable, Hashable, Sendable {
+nonisolated struct PlexImage: Codable, Hashable, Sendable {
     var alt: String?
     var type: String?   // e.g. "clearLogo", "coverPoster", "background", "snapshot"
     var url: String?
 }
 
 /// Generic tag model (genres, collections, etc.)
-struct PlexTag: Codable, Identifiable, Hashable, Sendable {
+nonisolated struct PlexTag: Codable, Identifiable, Hashable, Sendable {
     var id: String { idString ?? tag ?? UUID().uuidString }
     var _id: Int?          // Collection/genre ID from Plex API (decoded from "id")
     var tag: String?
@@ -53,12 +53,12 @@ struct PlexTag: Codable, Identifiable, Hashable, Sendable {
 }
 
 /// External ID reference (e.g. "tmdb://12345", "tvdb://67890", "imdb://tt1234567")
-struct PlexGuid: Codable, Sendable {
+nonisolated struct PlexGuid: Codable, Sendable {
     var id: String?
 }
 
 /// Trailer/Extra content
-struct PlexExtra: Codable, Identifiable, Sendable {
+nonisolated struct PlexExtra: Codable, Identifiable, Sendable {
     var id: String { ratingKey ?? UUID().uuidString }
     var ratingKey: String?
     var key: String?
@@ -71,13 +71,13 @@ struct PlexExtra: Codable, Identifiable, Sendable {
 }
 
 /// Container for extras in Plex API response
-struct PlexExtrasContainer: Codable, Sendable {
+nonisolated struct PlexExtrasContainer: Codable, Sendable {
     var Metadata: [PlexExtra]?
 }
 
 /// Container for OnDeck (next episode to watch) in Plex API response
 /// Plex may return `Metadata` as either an array or a single dictionary.
-struct PlexOnDeck: Codable, Sendable {
+nonisolated struct PlexOnDeck: Codable, Sendable {
     var Metadata: [PlexMetadata]?
 
     enum CodingKeys: String, CodingKey {
@@ -100,7 +100,7 @@ struct PlexOnDeck: Codable, Sendable {
 // MARK: - Marker Model
 
 /// Plex media marker (intro, credits, commercial)
-struct PlexMarker: Codable, Identifiable, Sendable {
+nonisolated struct PlexMarker: Codable, Identifiable, Sendable {
     var id: Int?
     var type: String?              // "intro", "credits", "commercial"
     var startTimeOffset: Int?      // Start time in milliseconds
@@ -137,7 +137,7 @@ struct PlexMarker: Codable, Identifiable, Sendable {
 // MARK: - Main Metadata Model
 
 /// Plex media item metadata (movie, show, season, episode)
-struct PlexMetadata: Codable, Identifiable, Hashable, Sendable {
+nonisolated struct PlexMetadata: Codable, Identifiable, Hashable, Sendable {
     var id: String {
         return ratingKey ?? UUID().uuidString
     }
@@ -376,7 +376,7 @@ struct PlexMetadata: Codable, Identifiable, Hashable, Sendable {
 
 // MARK: - Computed Properties
 
-extension PlexMetadata {
+nonisolated extension PlexMetadata {
     /// Best-effort extraction of TMDB ID from the guid or Guid array
     var tmdbId: Int? {
         // Try primary guid first

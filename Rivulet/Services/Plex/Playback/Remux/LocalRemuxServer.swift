@@ -17,7 +17,7 @@ import Foundation
 import Network
 
 /// Local HTTP server that serves remuxed HLS content for AVPlayer.
-final class LocalRemuxServer {
+nonisolated final class LocalRemuxServer: @unchecked Sendable {
 
     private var listener: NWListener?
     private let queue = DispatchQueue(label: "com.rivulet.LocalRemuxServer")
@@ -430,16 +430,13 @@ final class LocalRemuxServer {
         for _ in 0..<200 {
             try? await Task.sleep(nanoseconds: 50_000_000)
 
-            cacheLock.lock()
-            if let cached = segmentCache[index] {
-                cacheLock.unlock()
+            if let cached = cachedSegment(for: index) {
                 let waitedMs = Int(Date().timeIntervalSince(waitStart) * 1000)
                 playerDebugLog("[Remux] Segment \(index) served from read-ahead cache (wait=\(waitedMs)ms)")
                 sendResponse(on: connection, contentType: "video/mp4", body: cached)
                 startReadAhead(from: index + 1)
                 return
             }
-            cacheLock.unlock()
 
             // If read-ahead finished without caching (error/cancel), generate directly
             if !inFlightSegments.contains(index) {
@@ -565,6 +562,12 @@ final class LocalRemuxServer {
         cacheLock.unlock()
     }
 
+    private func cachedSegment(for index: Int) -> Data? {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        return segmentCache[index]
+    }
+
     // MARK: - HTTP Response Helpers
 
     private func sendResponse(on connection: NWConnection, contentType: String, body: Data) {
@@ -659,7 +662,7 @@ final class LocalRemuxServer {
 
 // MARK: - NWConnection Hashable
 
-extension NWConnection: @retroactive Hashable {
+nonisolated extension NWConnection: @retroactive Hashable {
     public static func == (lhs: NWConnection, rhs: NWConnection) -> Bool {
         lhs === rhs
     }
