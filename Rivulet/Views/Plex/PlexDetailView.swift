@@ -12,6 +12,12 @@ enum PlexDetailPresentationMode: Equatable {
     case expandedDetail
 }
 
+private struct DetailMediaShelf: Identifiable {
+    let id: String
+    let title: String
+    let items: [PlexMetadata]
+}
+
 struct PlexDetailView: View {
     let item: PlexMetadata
     var presentationMode: PlexDetailPresentationMode = .expandedDetail
@@ -80,11 +86,12 @@ struct PlexDetailView: View {
     @State private var savedTrackFocus: String?  // Save focus when playing track
     @State private var isSummaryExpanded = false  // Expand summary text on focus/click
 
-    // New state for cast/crew, collections, and recommendations
+    // New state for metadata, collections, and recommendations
     @State private var fullMetadata: PlexMetadata?
     @State private var collectionItems: [PlexMetadata] = []
     @State private var collectionName: String?
     @State private var recommendedItems: [PlexMetadata] = []
+    @State private var activeDetailShelfIndex = 0
     @State private var isWatched = false
     @State private var isStarred = false  // For music: 5-star rating toggle
     @State private var displayedProgress: Double = 0  // For animating progress bar
@@ -113,9 +120,6 @@ struct PlexDetailView: View {
     @StateObject private var heroBackdrop = HeroBackdropCoordinator()
     @State private var belowFoldLoaded = false  // Flipped true after the full cascade finishes
     @State private var scrollProgress: CGFloat = 0  // 0 = at rest (peek), 1 = fully scrolled
-    @State private var belowFoldTitleOpacity: CGFloat = 0
-    @State private var scrollResetID = UUID()
-    @State private var kenBurnsOffset: CGFloat = 0
     @State private var retainedLogoURL: URL?
     @State private var hasDisplayedHeroLogoImage = false
     @State private var parentShowLogoPath: String?
@@ -129,7 +133,6 @@ struct PlexDetailView: View {
     // Unified episode list state (all seasons in one scroll)
     @State private var unifiedEpisodes: [PlexMetadata] = []
     @State private var episodeScrollTarget: String? = nil
-    @State private var scrollToTopTrigger = false
     @State private var browseActivity: NSUserActivity?
 
     private let networkManager = PlexNetworkManager.shared
@@ -168,16 +171,8 @@ struct PlexDetailView: View {
         return 140
     }
 
-    private var heroLogoMaxWidth: CGFloat {
-        (isPreviewCarousel || isExpandedPreviewFlow) ? 620 : 520
-    }
-
-    private var heroLogoSlotHeight: CGFloat {
-        (isPreviewCarousel || isExpandedPreviewFlow) ? 138 : 120
-    }
-
     private var heroActionRowTopPadding: CGFloat {
-        (isPreviewCarousel || isExpandedPreviewFlow) ? 32 : 24
+        isPreviewCarousel ? 32 : 16
     }
 
     /// Effective vignette visibility — vignette fades in before text (Apple TV+ two-phase reveal)
@@ -188,8 +183,8 @@ struct PlexDetailView: View {
     }
 
     /// Effective metadata visibility — requires both the host's staged fade
-    /// timing (`showMetadata`) AND `fullMetadata` being loaded, so genres,
-    /// cast, and summary all appear together. Because `loadFullMetadata`
+    /// timing (`showMetadata`) AND `fullMetadata` being loaded, so metadata
+    /// and summary appear together. Because `loadFullMetadata`
     /// fires immediately on appear (not gated by `previewAnimationSettled`),
     /// it typically returns before the text fade at ~750ms.
     private var effectiveMetadataVisible: Bool {
@@ -280,7 +275,6 @@ struct PlexDetailView: View {
 
     var body: some View {
         GeometryReader { geo in
-            let heroHeight = heroContentHeight(for: geo.size.height)
             let stageSize = backdropStageSize ?? geo.size
             // For preview/expanded-preview flows, keep the backdrop at a fixed
             // screen position so it doesn't drift when the card mask expands.
@@ -304,11 +298,10 @@ struct PlexDetailView: View {
             ZStack {
                 if showsBackdropLayer {
                     // Layer 1: Fixed backdrop (doesn't scroll, fills screen)
-                    // Ken Burns: subtle slow pan adds life to the static detail view
                     heroBackdropImage
                         .frame(width: stageSize.width, height: stageSize.height)
                         .offset(
-                            x: centeredStageBaseOffset.x - stageWindowOrigin.x + backgroundParallaxOffset + kenBurnsOffset,
+                            x: centeredStageBaseOffset.x - stageWindowOrigin.x + backgroundParallaxOffset,
                             y: centeredStageBaseOffset.y - stageWindowOrigin.y
                         )
                         .scaleEffect(heroBackdropScale)
@@ -366,133 +359,28 @@ struct PlexDetailView: View {
                 .ignoresSafeArea()
                 .allowsHitTesting(false)
 
-                // Layer 2: All scrollable content in one continuous flow
-                ScrollViewReader { verticalProxy in
-                ScrollView(.vertical, showsIndicators: false) {
+                // Layer 2: Fixed hero info, matching Home/Library's pinned hero surface.
+                heroMetadataOverlay
+                    .opacity(effectiveMetadataVisible ? 1 : 0)
+                    .animation(.easeOut(duration: 0.35), value: effectiveMetadataVisible)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    .zIndex(1)
+
+                // Layer 3: One active shelf pinned to the bottom, same browsing rhythm as Home.
+                if shouldShowFixedDetailShelf {
                     VStack(alignment: .leading, spacing: 0) {
-                        // Metadata pinned near bottom of visible area.
-                        // Scroll fade is applied inside heroMetadataOverlay to
-                        // the text only — action buttons stay fully opaque so
-                        // they remain in the tvOS focus hierarchy when scrolled off.
-                        heroMetadataOverlay
-                            .opacity(effectiveMetadataVisible ? 1 : 0)
-                            .animation(.easeOut(duration: 0.35), value: effectiveMetadataVisible)
-                            .frame(height: heroHeight)
-                            .id("scrollTop")
-
-                        // Below-fold page: ZStack decouples min height from content layout.
-                        // Color.clear sets the height floor; the VStack sits on top
-                        // at its natural size so no extra space leaks into children.
-                        ZStack(alignment: .topLeading) {
-                            // Invisible rect guarantees at least one screen of scroll room
-                            Color.clear.frame(height: geo.size.height)
-
-                            VStack(alignment: .leading, spacing: 0) {
-                                VStack(alignment: .leading, spacing: 32) {
-                                    // TV Show specific: Seasons and Episodes
-                                    if currentItem.type == "show" || currentItem.type == "episode" {
-                                        seasonSection
-                                    }
-
-                                    // Season specific: Episodes list (no season picker needed)
-                                    if currentItem.type == "season" {
-                                        episodeSection
-                                    }
-
-                                    // Album specific: Tracks
-                                    if currentItem.type == "album" {
-                                        trackSection
-                                    }
-
-                                    // Artist specific: Albums
-                                    if currentItem.type == "artist" {
-                                        albumSection
-                                    }
-                                }
-                                .padding(.top, belowFoldHeaderReserveHeight)
-                                .padding(.horizontal, 48)
-                                .allowsHitTesting(!isPreviewCarousel)
-
-                                // Recommended / Related Section
-                                if !recommendedItems.isEmpty {
-                                    MediaItemRow(
-                                        title: "Related",
-                                        items: recommendedItems,
-                                        serverURL: authManager.selectedServerURL ?? "",
-                                        authToken: authManager.selectedServerToken ?? "",
-                                        onItemSelected: { selectedItem in
-                                            withAnimation(.easeInOut(duration: 0.35)) {
-                                                displayedItem = selectedItem
-                                            }
-                                        }
-                                    )
-                                    .padding(.top, 32)
-                                }
-
-                                // Collection Section (for movies that are part of a collection)
-                                if !collectionItems.isEmpty, let name = collectionName {
-                                    MediaItemRow(
-                                        title: name,
-                                        items: collectionItems,
-                                        serverURL: authManager.selectedServerURL ?? "",
-                                        authToken: authManager.selectedServerToken ?? "",
-                                        onItemSelected: { selectedItem in
-                                            withAnimation(.easeInOut(duration: 0.35)) {
-                                                displayedItem = selectedItem
-                                            }
-                                        }
-                                    )
-                                    .padding(.top, 32)
-                                }
-
-                                // Cast & Crew Section
-                                if let metadata = fullMetadata,
-                                   (!metadata.cast.isEmpty || !(metadata.Director?.isEmpty ?? true)) {
-                                    CastCrewRow(
-                                        cast: metadata.cast,
-                                        directors: metadata.Director ?? [],
-                                        serverURL: authManager.selectedServerURL ?? "",
-                                        authToken: authManager.selectedServerToken ?? ""
-                                    )
-                                    .padding(.top, 32)
-                                }
-                            }
-                            .fixedSize(horizontal: false, vertical: true)
-
-                            belowFoldTitleLogo
-                                .frame(height: 110)
-                                .padding(.top, 40)
-                                .padding(.bottom, 8)
-                                .opacity(belowFoldTitleOpacity)
-                                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                        }
-                        .opacity(belowFoldLoaded ? 1 : 0)
-                        .animation(.easeOut(duration: 0.35), value: belowFoldLoaded)
+                        Spacer(minLength: 0)
+                        detailBrowseRow
                     }
-                }
-                .onScrollGeometryChange(for: CGFloat.self) { geometry in
-                    geometry.contentOffset.y
-                } action: { _, offset in
-                    // Drive scroll progress continuously from offset so the
-                    // reserve-height padding grows in lockstep with scrolling.
-                    // Episodes stay visually fixed; the logo/material fade in
-                    // proportionally without any compound animation overshoot.
-                    let reserveDistance: CGFloat = 158
-                    scrollProgress = min(1, max(0, offset / reserveDistance))
-                    belowFoldTitleOpacity = min(1, max(0, (offset - 30) / 90))
-                    if offset > 10 {
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                    .padding(.bottom, 18)
+                    .opacity(belowFoldLoaded ? 1 : 0)
+                    .animation(.easeOut(duration: 0.35), value: belowFoldLoaded)
+                    .zIndex(4)
+                    .onAppear {
                         onDetailsBecameVisible?()
                     }
                 }
-                .id(scrollResetID)
-                .scrollDisabled(isPreviewCarousel || !allowVerticalScroll)
-                .defaultScrollAnchor(.top)
-                .onChange(of: scrollToTopTrigger) { _, _ in
-                    withAnimation(.easeInOut(duration: 0.4)) {
-                        verticalProxy.scrollTo("scrollTop", anchor: .top)
-                    }
-                }
-                } // ScrollViewReader
             }
         }
         .ignoresSafeArea()
@@ -500,7 +388,7 @@ struct PlexDetailView: View {
             // Fetch full metadata immediately — not gated by
             // `previewAnimationSettled`. This is a single network call
             // with no layout churn, and it needs to land before the
-            // text fade at ~750ms so genres/cast/summary are ready
+            // text fade at ~750ms so metadata/summary are ready
             // when the hero metadata fades in.
             guard shouldLoadDetailData else {
                 syncHeroBackdrop()
@@ -521,7 +409,7 @@ struct PlexDetailView: View {
         }
         .onChange(of: shouldLoadDetailData) { _, isActive in
             // A previously-passive side card just became current. Load its
-            // fullMetadata so the hero overlay has genres/cast/summary ready.
+            // fullMetadata so the hero overlay has metadata/summary ready.
             guard isActive, fullMetadata == nil else { return }
             Task { @MainActor in
                 await loadFullMetadata()
@@ -539,25 +427,11 @@ struct PlexDetailView: View {
                 await loadDetailData()
             }
         }
-        .task(id: "kenburns-\(currentItem.ratingKey ?? "")") {
-            guard !isPreviewCarousel, !isExpandedPreviewFlow else {
-                kenBurnsOffset = 0
-                return
-            }
-            // Ken Burns: wait for view to settle, then start slow backdrop drift
-            kenBurnsOffset = 0
-            try? await Task.sleep(nanoseconds: 2_000_000_000)
-            withAnimation(.easeInOut(duration: 15).repeatForever(autoreverses: true)) {
-                kenBurnsOffset = 50
-            }
-        }
         .onChange(of: presentationMode) { _, newMode in
             if newMode == .previewCarousel {
                 displayedItem = nil
                 focusedActionButton = nil
-                // scrollProgress is scroll-driven; scrollTo resets the offset
-                // which drives scrollProgress back to 0 via onScrollGeometryChange.
-                scrollToTopTrigger.toggle()
+                scrollProgress = 0
             }
         }
         .onChange(of: heroBackdropMotionLocked) { _, locked in
@@ -603,7 +477,7 @@ struct PlexDetailView: View {
                     navigateToEpisode = nil
                     return true
                 } else if scrollProgress > 0 || focusedEpisodeId != nil {
-                    scrollToTopTrigger.toggle()
+                    scrollProgress = 0
                     focusedEpisodeId = nil
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
                         focusedActionButton = "play"
@@ -752,21 +626,30 @@ struct PlexDetailView: View {
         }
     }
 
-    private func heroContentHeight(for fullHeight: CGFloat) -> CGFloat {
-        let shelfPeek: CGFloat
-        switch currentItem.type {
-        case "show", "season", "episode":
-            // TV detail surfaces should all expose the shelf at the same shallow depth.
-            shelfPeek = 160
-        default:
-            shelfPeek = 220
-        }
-
-        return max(0, fullHeight - shelfPeek)
+    private var shouldShowFixedDetailShelf: Bool {
+        !isPreviewCarousel && belowFoldLoaded
     }
 
-    private var belowFoldHeaderReserveHeight: CGFloat {
-        158 * scrollProgress
+    private var detailBrowseTopPadding: CGFloat {
+        0
+    }
+
+    private var detailMediaBrowseTopPadding: CGFloat {
+        0
+    }
+
+    private var detailShelfHeaderOpacity: CGFloat {
+        isPreviewCarousel ? scrollProgress : 1
+    }
+
+    private func detailHeroInfoTopPadding(for height: CGFloat) -> CGFloat {
+        if isPreviewCarousel { return 0 }
+        return max(52, min(76, height * 0.07))
+    }
+
+    private func detailHeroInfoSlotHeight(for height: CGFloat) -> CGFloat {
+        if isPreviewCarousel { return 420 }
+        return max(270, min(310, height * 0.29))
     }
 
     // MARK: - Hero Components (Apple TV+ style — backdrop fixed, content scrolls over)
@@ -802,72 +685,30 @@ struct PlexDetailView: View {
         )
     }
 
-    /// Metadata overlay (title, genres, quality, buttons, cast) positioned at bottom of hero
+    /// Metadata overlay positioned at bottom of hero, sharing the Home hero info treatment.
     private var heroMetadataOverlay: some View {
         GeometryReader { metaGeo in
             VStack(alignment: .leading, spacing: 10) {
-                Spacer()
+                if isPreviewCarousel {
+                    Spacer()
+                } else {
+                    Spacer()
+                        .frame(height: detailHeroInfoTopPadding(for: metaGeo.size.height))
+                }
 
-                // Text content — fixed height so buttons/peek distance
-                // stays constant regardless of description length, logo vs title, etc.
                 VStack(alignment: .leading, spacing: 14) {
-                    // Plex clearLogo or title — fixed height so content below is always
-                    // at the same position regardless of logo aspect ratio
-                    Group {
-                        if let logoURL = effectiveHeroLogoURL {
-                            CachedAsyncImage(url: logoURL) { phase in
-                                switch phase {
-                                case .success(let image):
-                                    image
-                                        .resizable()
-                                        .aspectRatio(contentMode: .fit)
-                                        // Shadow is redundant in carousel mode — the bottom
-                                        // vignette at lines ~305-321 already hits 95% black
-                                        // opacity where the logo sits, so the drop shadow is
-                                        // invisible. Removing it during carousel avoids the
-                                        // per-frame offscreen compositing pass the shadow forces
-                                        // while `heroMetadataOverlay` opacity is animating.
-                                        .shadow(
-                                            color: .black.opacity(isPreviewCarousel ? 0 : 0.8),
-                                            radius: isPreviewCarousel ? 0 : 20,
-                                            x: 0,
-                                            y: isPreviewCarousel ? 0 : 4
-                                        )
-                                        .onAppear {
-                                            if !hasDisplayedHeroLogoImage {
-                                                hasDisplayedHeroLogoImage = true
-                                            }
-                                        }
-                                case .empty:
-                                    if hasDisplayedHeroLogoImage {
-                                        Color.clear
-                                    } else {
-                                        heroTitleText
-                                    }
-                                default:
-                                    heroTitleText
-                                }
-                            }
-                        } else {
-                            heroTitleText
-                        }
-                    }
-                    .frame(maxWidth: heroLogoMaxWidth, alignment: .leading)
-                    .frame(height: heroLogoSlotHeight, alignment: .bottomLeading)
-
-                    detailHeroInfoRow
-
-                    // Description area (narrower than full metadata block, per Apple TV+ reference)
-                    if let synopsis = detailHeroSynopsis {
-                        Text(synopsis)
-                            .font(.system(size: 24, weight: .medium, design: .default))
-                            .foregroundStyle(.white.opacity(0.84))
-                            .lineLimit(3)
-                            .lineSpacing(4)
-                            .multilineTextAlignment(.leading)
-                            .shadow(color: .black.opacity(0.65), radius: 10, x: 0, y: 2)
-                            .frame(maxWidth: 820, alignment: .leading)
-                    }
+                    HeroSlideContent(
+                        item: fullMetadata ?? currentItem,
+                        serverURL: authManager.selectedServerURL ?? "",
+                        authToken: authManager.selectedServerToken ?? "",
+                        logoURLOverride: effectiveHeroLogoURL,
+                        synopsisOverride: detailHeroSynopsis,
+                        titleMaxWidth: isPreviewCarousel ? 560 : 430,
+                        titleMaxHeight: isPreviewCarousel ? 205 : 145,
+                        fallbackTitleSize: isPreviewCarousel ? 74 : 56,
+                        synopsisLineLimit: isPreviewCarousel ? 3 : 2,
+                        verticalSpacing: isPreviewCarousel ? 18 : 12
+                    )
 
                     // Up Next caption
                     if let caption = upNextCaption {
@@ -876,11 +717,10 @@ struct PlexDetailView: View {
                             .foregroundStyle(.white.opacity(0.7))
                     }
                 }
-                .frame(height: 420, alignment: .bottomLeading)
-                .frame(maxWidth: 760, alignment: .leading)
+                .frame(height: detailHeroInfoSlotHeight(for: metaGeo.size.height), alignment: .bottomLeading)
+                .frame(maxWidth: 820, alignment: .leading)
                 .opacity(1 - scrollProgress)
 
-                // Bottom row: buttons (left) + starring (right) — full width
                 // Buttons stay fully opaque (not faded by scroll) so tvOS keeps
                 // them in the focus hierarchy for Up navigation from below-fold.
                 HStack(alignment: .bottom, spacing: 0) {
@@ -894,182 +734,22 @@ struct PlexDetailView: View {
                         }
 
                     Spacer(minLength: 40)
-
-                    // Starring (comma-separated, right-aligned)
-                    if let roles = (fullMetadata ?? currentItem).Role, !roles.isEmpty {
-                        let topCast = roles.prefix(3).compactMap { $0.tag }
-                        if !topCast.isEmpty {
-                            Text("Starring \(topCast.joined(separator: ", "))")
-                                .font(.caption)
-                                .foregroundStyle(.white.opacity(0.85))
-                                .lineLimit(3)
-                                .multilineTextAlignment(.trailing)
-                                .frame(maxWidth: 460, alignment: .trailing)
-                        }
-                    }
                 }
                 .padding(.top, heroActionRowTopPadding)
                 .focusSection()
                 .opacity(effectiveMetadataVisible ? 1 : 0)
                 .allowsHitTesting(allowActionRowInteraction)
+
+                if !isPreviewCarousel {
+                    Spacer(minLength: 0)
+                }
             }
             .padding(.horizontal, heroOverlayHorizontalInset)
             .animation(isPreviewCarousel ? nil : .easeInOut(duration: 0.3), value: currentItem.ratingKey)
         }
     }
 
-    // MARK: - Below-fold Title Logo (centered, Apple TV+ style)
-
-    private var belowFoldTitleLogo: some View {
-        Group {
-            if let logoURL = effectiveHeroLogoURL {
-                CachedAsyncImage(url: logoURL) { phase in
-                    switch phase {
-                    case .success(let image):
-                        image
-                            .resizable()
-                            .aspectRatio(contentMode: .fit)
-                            .onAppear {
-                                if !hasDisplayedHeroLogoImage {
-                                    hasDisplayedHeroLogoImage = true
-                                }
-                            }
-                    case .empty:
-                        if hasDisplayedHeroLogoImage {
-                            Color.clear
-                        } else {
-                            Text(heroBrandTitle)
-                                .font(.system(size: 42, weight: .bold))
-                                .foregroundStyle(.primary)
-                        }
-                    default:
-                        Text(heroBrandTitle)
-                            .font(.system(size: 42, weight: .bold))
-                            .foregroundStyle(.primary)
-                    }
-                }
-                .frame(maxWidth: 680, maxHeight: 126)
-            } else {
-                Text(heroBrandTitle)
-                    .font(.system(size: 42, weight: .bold))
-                    .foregroundStyle(.primary)
-                    .lineLimit(1)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .center)
-    }
-
     // MARK: - Hero Sub-components
-
-    private var heroTitleText: some View {
-        Text(heroBrandTitle)
-            .font(.system(size: 52, weight: .bold))
-            .foregroundStyle(.white)
-            .shadow(color: .black.opacity(0.5), radius: 10, x: 0, y: 4)
-    }
-
-    private var detailHeroInfoRow: some View {
-        HStack(spacing: 13) {
-            if let matchLabel = detailHeroMatchLabel {
-                Text(matchLabel)
-                    .font(.system(size: 22, weight: .bold))
-                    .foregroundStyle(Color(red: 0.31, green: 0.86, blue: 0.42))
-            }
-
-            if let year = fullMetadata?.year ?? currentItem.year {
-                detailHeroPlainInfo(String(year))
-            }
-
-            if let rating = fullMetadata?.contentRating ?? currentItem.contentRating, !rating.isEmpty {
-                detailHeroContentRatingBadge(rating)
-            }
-
-            if let contentCountLabel = detailHeroContentCountLabel {
-                detailHeroPlainInfo(contentCountLabel)
-            } else if let type = detailHeroTypeLabel, detailHeroMatchLabel == nil, (fullMetadata?.year ?? currentItem.year) == nil {
-                detailHeroPlainInfo(type)
-            }
-
-            ForEach(detailHeroQualityBadges, id: \.self) { badge in
-                detailHeroQualityBadge(badge)
-            }
-        }
-        .lineLimit(1)
-        .minimumScaleFactor(0.86)
-        .shadow(color: .black.opacity(0.6), radius: 8, x: 0, y: 2)
-    }
-
-    private var detailHeroMatchLabel: String? {
-        let rawScore = fullMetadata?.audienceRating ?? currentItem.audienceRating ?? fullMetadata?.rating ?? currentItem.rating
-        guard let rawScore, rawScore > 0 else { return nil }
-        let percent = rawScore <= 10 ? rawScore * 10 : rawScore
-        guard percent > 0, percent <= 100 else { return nil }
-        return "\(Int(percent.rounded()))% Match"
-    }
-
-    private var detailHeroContentCountLabel: String? {
-        switch currentItem.type {
-        case "show":
-            if let seasons = fullMetadata?.childCount ?? currentItem.childCount, seasons > 0 {
-                return seasons == 1 ? "1 Season" : "\(seasons) Seasons"
-            }
-            if let episodes = fullMetadata?.leafCount ?? currentItem.leafCount, episodes > 0 {
-                return episodes == 1 ? "1 Episode" : "\(episodes) Episodes"
-            }
-        case "season":
-            if let episodes = fullMetadata?.leafCount ?? currentItem.leafCount, episodes > 0 {
-                return episodes == 1 ? "1 Episode" : "\(episodes) Episodes"
-            }
-        case "episode":
-            if let episodeString = fullMetadata?.episodeString ?? currentItem.episodeString {
-                return episodeString
-            }
-        default:
-            break
-        }
-        return fullMetadata?.durationFormatted ?? currentItem.durationFormatted
-    }
-
-    private var detailHeroTypeLabel: String? {
-        switch currentItem.type {
-        case "movie": return "Movie"
-        case "show", "season", "episode": return "TV Show"
-        case "artist": return "Artist"
-        case "album": return "Album"
-        default: return currentItem.type?.capitalized
-        }
-    }
-
-    private var detailHeroQualityBadges: [String] {
-        var badges: [String] = []
-        if let quality = fullMetadata?.videoQualityDisplay ?? currentItem.videoQualityDisplay {
-            badges.append(quality)
-        }
-        if let hdr = fullMetadata?.hdrFormatDisplay ?? currentItem.hdrFormatDisplay {
-            badges.append(hdr)
-        }
-        if let audio = fullMetadata?.audioFormatDisplay ?? currentItem.audioFormatDisplay, audio != "Stereo" {
-            badges.append(audio)
-        }
-        if let brand = detailHeroAudioBrandBadge, !badges.contains(brand) {
-            badges.append(brand)
-        }
-        return Array(badges.prefix(4))
-    }
-
-    private var detailHeroAudioBrandBadge: String? {
-        let codec = (fullMetadata?.Media?.first?.audioCodec ?? currentItem.Media?.first?.audioCodec)?.lowercased()
-        guard let codec, !codec.isEmpty else {
-            return nil
-        }
-        if codec.contains("eac3") || codec.contains("ac3") || codec.contains("truehd") || codec.contains("atmos") {
-            return "DOLBY"
-        }
-        if codec.contains("dts") {
-            return "DTS"
-        }
-        return nil
-    }
 
     private var detailHeroSynopsis: String? {
         if currentItem.type == "episode", let episodeString = fullMetadata?.episodeString ?? currentItem.episodeString {
@@ -1085,44 +765,6 @@ struct PlexDetailView: View {
             return tagline
         }
         return nil
-    }
-
-    private func detailHeroPlainInfo(_ value: String) -> some View {
-        Text(value)
-            .font(.system(size: 22, weight: .medium))
-            .foregroundStyle(.white.opacity(0.74))
-    }
-
-    private func detailHeroContentRatingBadge(_ value: String) -> some View {
-        Text(value)
-            .font(.system(size: 17, weight: .black))
-            .foregroundStyle(.white)
-            .padding(.horizontal, 19)
-            .padding(.vertical, 4)
-            .background(
-                RoundedRectangle(cornerRadius: 5, style: .continuous)
-                    .fill(Color(red: 0.82, green: 0.03, blue: 0.03))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 5, style: .continuous)
-                    .stroke(.white.opacity(0.9), lineWidth: 1.7)
-            )
-    }
-
-    private func detailHeroQualityBadge(_ value: String) -> some View {
-        Text(value)
-            .font(.system(size: 17, weight: .black))
-            .foregroundStyle(.white.opacity(0.86))
-            .padding(.horizontal, 8)
-            .padding(.vertical, 3)
-            .background(
-                RoundedRectangle(cornerRadius: 5, style: .continuous)
-                    .fill(.black.opacity(0.22))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 5, style: .continuous)
-                    .stroke(.white.opacity(0.46), lineWidth: 1.4)
-            )
     }
 
     /// Check if this is a music item (album, artist, track)
@@ -1554,6 +1196,138 @@ struct PlexDetailView: View {
         }
     }
 
+    // MARK: - Detail Browse Row
+
+    /// Detail uses the same hero-plus-row browsing rhythm as Home: one active
+    /// catalog row below the hero, instead of stacking extra blocks.
+    @ViewBuilder
+    private var detailBrowseRow: some View {
+        switch currentItem.type {
+        case "show", "episode":
+            seasonSection
+                .padding(.top, detailBrowseTopPadding)
+                .padding(.horizontal, 48)
+                .allowsHitTesting(!isPreviewCarousel)
+
+        case "season":
+            episodeSection
+                .padding(.top, detailBrowseTopPadding)
+                .padding(.horizontal, 48)
+                .allowsHitTesting(!isPreviewCarousel)
+
+        case "album":
+            trackSection
+                .padding(.top, detailBrowseTopPadding)
+                .padding(.horizontal, 48)
+                .allowsHitTesting(!isPreviewCarousel)
+
+        case "artist":
+            albumSection
+                .padding(.top, detailBrowseTopPadding)
+                .padding(.horizontal, 48)
+                .allowsHitTesting(!isPreviewCarousel)
+
+        default:
+            let shelves = detailMediaShelves
+            if !shelves.isEmpty {
+                let activeIndex = min(max(activeDetailShelfIndex, 0), shelves.count - 1)
+                detailMediaShelfView(
+                    shelf: shelves[activeIndex],
+                    activeIndex: activeIndex,
+                    shelfCount: shelves.count
+                )
+            }
+        }
+    }
+
+    private var detailMediaShelves: [DetailMediaShelf] {
+        var shelves: [DetailMediaShelf] = []
+
+        func appendShelf(id: String, title: String, items: [PlexMetadata]) {
+            let filtered = uniqueDetailItems(items)
+                .filter { item in
+                    item.ratingKey != currentItem.ratingKey && item.type == currentItem.type
+                }
+            guard !filtered.isEmpty else { return }
+            guard !shelves.contains(where: { $0.id == id || $0.title == title }) else { return }
+            shelves.append(DetailMediaShelf(id: id, title: title, items: Array(filtered.prefix(12))))
+        }
+
+        appendShelf(id: "related", title: "Related", items: recommendedItems)
+        if let name = collectionName {
+            appendShelf(id: "collection-\(name)", title: name, items: collectionItems)
+        }
+
+        return shelves
+    }
+
+    private func detailMediaShelfView(
+        shelf: DetailMediaShelf,
+        activeIndex: Int,
+        shelfCount: Int
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            MediaItemRow(
+                title: shelf.title,
+                items: shelf.items,
+                serverURL: authManager.selectedServerURL ?? "",
+                authToken: authManager.selectedServerToken ?? "",
+                onItemSelected: { selectedItem in
+                    withAnimation(.easeInOut(duration: 0.35)) {
+                        displayedItem = selectedItem
+                    }
+                },
+                onMoveUp: {
+                    moveActiveDetailShelf(by: -1, activeIndex: activeIndex)
+                },
+                onMoveDown: {
+                    moveActiveDetailShelf(by: 1, activeIndex: activeIndex)
+                }
+            )
+            .id(shelf.id)
+            .padding(.top, detailMediaBrowseTopPadding)
+            .allowsHitTesting(!isPreviewCarousel)
+
+            if activeIndex < shelfCount - 1 {
+                HStack(spacing: 10) {
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 16, weight: .semibold))
+                    Text(detailMediaShelves[activeIndex + 1].title)
+                        .font(.system(size: 17, weight: .medium))
+                }
+                .foregroundStyle(.white.opacity(0.55))
+                .padding(.leading, ScaledDimensions.rowHorizontalPadding)
+                .padding(.top, -4)
+            }
+        }
+    }
+
+    private func moveActiveDetailShelf(by delta: Int, activeIndex: Int) {
+        let shelves = detailMediaShelves
+        guard !shelves.isEmpty else { return }
+
+        let nextIndex = activeIndex + delta
+        if nextIndex < 0 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                focusedActionButton = "play"
+            }
+            return
+        }
+
+        guard nextIndex < shelves.count else { return }
+        withAnimation(.easeInOut(duration: 0.25)) {
+            activeDetailShelfIndex = nextIndex
+        }
+    }
+
+    private func uniqueDetailItems(_ items: [PlexMetadata]) -> [PlexMetadata] {
+        var seen = Set<String>()
+        return items.filter { item in
+            guard let key = item.ratingKey else { return true }
+            return seen.insert(key).inserted
+        }
+    }
+
     // MARK: - Season Section (TV Shows)
 
     private var seasonSection: some View {
@@ -1572,10 +1346,9 @@ struct PlexDetailView: View {
                         }
                     }
                 )
-                .opacity(scrollProgress)
+                .opacity(detailShelfHeaderOpacity)
                 .onMoveCommand { direction in
                     if direction == .up {
-                        scrollToTopTrigger.toggle()
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
                             focusedActionButton = "play"
                         }
@@ -1643,7 +1416,6 @@ struct PlexDetailView: View {
                     .focusSection()
                     .onMoveCommand { direction in
                         guard direction == .up, seasons.count <= 1 else { return }
-                        scrollToTopTrigger.toggle()
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
                             focusedActionButton = "play"
                         }
@@ -1673,7 +1445,7 @@ struct PlexDetailView: View {
                         selectedSeason: $selectedSeason,
                         onSeasonSelected: { _ in }
                     )
-                    .opacity(scrollProgress)
+                    .opacity(detailShelfHeaderOpacity)
                 } else {
                     Text("Episodes")
                         .font(.title2)
@@ -1921,7 +1693,7 @@ struct PlexDetailView: View {
     // MARK: - Data Loading
 
     /// Hydrates everything the detail view needs beyond the hero surface
-    /// (cast, seasons, episodes, recommendations, etc.). Split out of the
+    /// (seasons, episodes, recommendations, etc.). Split out of the
     /// inline `.task` body so it can be invoked from both the initial task
     /// and the `canRunDetailCascade` onChange observer without duplicating
     /// the reset/cascade logic.
@@ -1963,10 +1735,10 @@ struct PlexDetailView: View {
         collectionItems = []
         collectionName = nil
         recommendedItems = []
+        activeDetailShelfIndex = 0
         nextUpEpisode = nil
         isSummaryExpanded = false
         scrollProgress = 0
-        belowFoldTitleOpacity = 0
         syncHeroBackdrop()
 
         // Index for Siri search

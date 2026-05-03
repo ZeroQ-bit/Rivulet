@@ -7,7 +7,7 @@
 
 import Foundation
 
-enum IntroDBError: Error, CustomStringConvertible {
+nonisolated enum IntroDBError: Error, CustomStringConvertible {
     case invalidURL
     case invalidResponse
     case httpStatus(Int)
@@ -24,7 +24,7 @@ enum IntroDBError: Error, CustomStringConvertible {
     }
 }
 
-struct IntroDBSegment: Decodable, Sendable {
+nonisolated struct IntroDBSegment: Decodable, Sendable {
     let startSec: IntroDBTimestamp?
     let endSec: IntroDBTimestamp?
     let startMs: Int?
@@ -49,7 +49,7 @@ struct IntroDBSegment: Decodable, Sendable {
     }
 }
 
-struct IntroDBSegmentsResponse: Decodable, Sendable {
+nonisolated struct IntroDBSegmentsResponse: Decodable, Sendable {
     let imdbId: String
     let season: Int
     let episode: Int
@@ -67,7 +67,7 @@ struct IntroDBSegmentsResponse: Decodable, Sendable {
     }
 }
 
-struct IntroDBTimestamp: Decodable, Sendable {
+nonisolated struct IntroDBTimestamp: Decodable, Sendable {
     let seconds: Double
 
     var milliseconds: Int {

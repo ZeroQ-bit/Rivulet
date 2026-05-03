@@ -13,8 +13,18 @@ struct HeroSlideContent: View {
     let item: PlexMetadata
     let serverURL: String
     let authToken: String
+    var logoURLOverride: URL? = nil
+    var synopsisOverride: String? = nil
+    var titleMaxWidth: CGFloat = 560
+    var titleMaxHeight: CGFloat = 205
+    var fallbackTitleSize: CGFloat = 74
+    var synopsisLineLimit: Int = 3
+    var verticalSpacing: CGFloat = 18
 
     private var logoURL: URL? {
+        if let logoURLOverride {
+            return logoURLOverride
+        }
         guard let path = item.clearLogoPath else { return nil }
         return URL(string: "\(serverURL)\(path)?X-Plex-Token=\(authToken)")
     }
@@ -92,20 +102,21 @@ struct HeroSlideContent: View {
     }
 
     private var synopsis: String? {
+        if let synopsisOverride, !synopsisOverride.isEmpty { return synopsisOverride }
         if let summary = item.summary, !summary.isEmpty { return summary }
         if let explicit = item.tagline, !explicit.isEmpty { return explicit }
         return nil
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
+        VStack(alignment: .leading, spacing: verticalSpacing) {
             titleView
             metadataRow
             if let synopsis {
                 Text(synopsis)
                     .font(.system(size: 24, weight: .medium, design: .default))
                     .foregroundStyle(.white.opacity(0.84))
-                    .lineLimit(3)
+                    .lineLimit(synopsisLineLimit)
                     .lineSpacing(4)
                     .multilineTextAlignment(.leading)
                     .frame(maxWidth: 820, alignment: .leading)
@@ -123,7 +134,7 @@ struct HeroSlideContent: View {
                     image
                         .resizable()
                         .aspectRatio(contentMode: .fit)
-                        .frame(maxWidth: 560, maxHeight: 205, alignment: .leading)
+                        .frame(maxWidth: titleMaxWidth, maxHeight: titleMaxHeight, alignment: .leading)
                         .shadow(color: .black.opacity(0.55), radius: 14, x: 0, y: 4)
                 case .empty:
                     fallbackTitle
@@ -132,7 +143,7 @@ struct HeroSlideContent: View {
                     fallbackTitle
                 }
             }
-            .frame(maxHeight: 205, alignment: .leading)
+            .frame(maxHeight: titleMaxHeight, alignment: .leading)
         } else {
             fallbackTitle
         }
@@ -140,10 +151,10 @@ struct HeroSlideContent: View {
 
     private var fallbackTitle: some View {
         Text(item.seriesTitleForDisplay ?? item.title ?? "")
-            .font(.system(size: 74, weight: .black, design: .default))
+            .font(.system(size: fallbackTitleSize, weight: .black, design: .default))
             .foregroundStyle(.white)
             .lineLimit(2)
-            .frame(maxWidth: 680, alignment: .leading)
+            .frame(maxWidth: max(680, titleMaxWidth), alignment: .leading)
             .shadow(color: .black.opacity(0.65), radius: 12, x: 0, y: 4)
     }
 

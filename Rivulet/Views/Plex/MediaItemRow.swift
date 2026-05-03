@@ -15,6 +15,23 @@ struct MediaItemRow: View {
     let authToken: String
     /// Called when an item is selected - allows parent to handle navigation/replacement
     var onItemSelected: ((PlexMetadata) -> Void)?
+    var onMoveUp: (() -> Void)?
+    var onMoveDown: (() -> Void)?
+
+    @Environment(\.uiScale) private var scale
+
+    private var isMusicRow: Bool {
+        guard let firstItem = items.first else { return false }
+        return firstItem.type == "album" || firstItem.type == "artist" || firstItem.type == "track"
+    }
+
+    private var rowCardHeight: CGFloat {
+        (isMusicRow ? ScaledDimensions.squarePosterSize : ScaledDimensions.posterHeight) * scale
+    }
+
+    private var compactScrollHeight: CGFloat {
+        rowCardHeight + (ScaledDimensions.rowVerticalPadding * 2)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -42,8 +59,19 @@ struct MediaItemRow: View {
                 .padding(.vertical, ScaledDimensions.rowVerticalPadding)
             }
             .scrollClipDisabled()
+            .frame(height: compactScrollHeight)
         }
         .focusSection()
+        .onMoveCommand { direction in
+            switch direction {
+            case .up:
+                onMoveUp?()
+            case .down:
+                onMoveDown?()
+            default:
+                break
+            }
+        }
     }
 }
 
