@@ -656,18 +656,32 @@ struct PlexDetailView: View {
 
     /// Fixed backdrop image (behind everything, doesn't scroll)
     private var heroBackdropImage: some View {
-        HeroBackdropImage(
-            url: heroBackdrop.session.displayedBackdropURL,
-            animationDuration: isPreviewCarousel ? 0.38 : 0.26
-        ) {
-            Rectangle()
-                .fill(
-                    LinearGradient(
-                        colors: [Color.blue.opacity(0.3), Color.black],
-                        startPoint: .top,
-                        endPoint: .bottom
-                    )
-                )
+        ZStack {
+            Color.black
+
+            GeometryReader { proxy in
+                let artworkWidth = min(proxy.size.width, 1280)
+                let artworkHeight = min(proxy.size.height, 720)
+
+                HeroBackdropImage(
+                    url: heroBackdrop.session.displayedBackdropURL,
+                    animationDuration: isPreviewCarousel ? 0.38 : 0.26,
+                    imageAlignment: .topTrailing
+                ) {
+                    Rectangle()
+                        .fill(
+                            LinearGradient(
+                                colors: [Color(white: 0.15), Color(white: 0.05)],
+                                startPoint: .topTrailing,
+                                endPoint: .bottomLeading
+                            )
+                        )
+                }
+                .frame(width: artworkWidth, height: artworkHeight)
+                .mask(HeroBackdropCornerFadeMask())
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                .clipped()
+            }
         }
     }
 

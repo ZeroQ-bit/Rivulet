@@ -2469,76 +2469,85 @@ nonisolated class PlexNetworkManager: NSObject, @unchecked Sendable {
     func getServerAccessToken(authToken: String, serverURL: String) async -> String? {
         do {
             let servers = try await getServers(authToken: authToken)
-
-            // Extract the machine identifier from plex.direct URL if present
-            // Format: https://IP.MACHINEID.plex.direct:PORT
-            var targetMachineId: String?
-            if serverURL.contains(".plex.direct") {
-                let components = serverURL.components(separatedBy: ".")
-                if components.count >= 3 {
-                    // The machine ID is the second-to-last component before "plex.direct"
-                    targetMachineId = components[1]
-                }
-            }
+            let targetURL = URL(string: serverURL)
+            let targetHost = targetURL?.host?.lowercased()
+            let targetPort = targetURL?.port
+            let targetMachineId = machineIdentifierFromPlexDirectHost(targetHost)
 
             // Find a server that matches
             for server in servers {
-
-                // Check if machine identifier matches
-                if let targetMachineId = targetMachineId,
-                   let serverMachineId = server.machineIdentifier,
-                   serverMachineId == targetMachineId {
-                    if let accessToken = server.accessToken {
-                        return accessToken
-                    }
-                }
-
-                // Also check by clientIdentifier (sometimes used interchangeably)
-                if let targetMachineId = targetMachineId,
-                   server.clientIdentifier == targetMachineId {
-                    if let accessToken = server.accessToken {
-                        return accessToken
-                    }
-                }
-
-                // Check connections - look for matching plex.direct URL or same host
-                for connection in server.connections ?? [] {
-                    // Direct match
-                    if serverURL == connection.uri {
-                        if let accessToken = server.accessToken {
-                            return accessToken
-                        }
-                    }
-
-                    // Check if connection URI contains the same plex.direct identifier
-                    if let targetMachineId = targetMachineId,
-                       connection.uri.contains(targetMachineId) {
-                        if let accessToken = server.accessToken {
-                            return accessToken
-                        }
-                    }
-
-                    // Partial match for same server
-                    if serverURL.contains(connection.uri) || connection.uri.contains(serverURL) {
-                        if let accessToken = server.accessToken {
-                            return accessToken
-                        }
-                    }
-                }
-
-                // If we found a server with accessToken (last resort - only 1 server in list)
-                if servers.count == 1, let accessToken = server.accessToken {
-                    return accessToken
+                if serverMatchesAccessTokenTarget(
+                    server,
+                    serverURL: serverURL,
+                    targetHost: targetHost,
+                    targetPort: targetPort,
+                    targetMachineId: targetMachineId
+                ) {
+                    return server.accessToken ?? (server.owned == true ? authToken : nil)
                 }
             }
 
-            // Fallback: return the authToken itself (works for server owners)
-            print("🌐 PlexNetwork: ⚠️ No server-specific token found, using plex.tv auth token")
-            return authToken
+            // If this account only sees one server, the user's plex.tv token is
+            // valid for owned servers even when resources omits accessToken.
+            if servers.count == 1 {
+                let server = servers[0]
+                return server.accessToken ?? (server.owned == true ? authToken : nil)
+            }
+
+            print("🌐 PlexNetwork: ⚠️ No matching server-specific token found for selected server")
+            return nil
         } catch {
             print("🌐 PlexNetwork: ❌ Failed to get server access token: \(error)")
-            return authToken
+            return nil
         }
+    }
+
+    private func serverMatchesAccessTokenTarget(
+        _ server: PlexDevice,
+        serverURL: String,
+        targetHost: String?,
+        targetPort: Int?,
+        targetMachineId: String?
+    ) -> Bool {
+        if let targetMachineId,
+           server.machineIdentifier == targetMachineId || server.clientIdentifier == targetMachineId {
+            return true
+        }
+
+        if let targetHost,
+           server.publicAddress?.lowercased() == targetHost {
+            return true
+        }
+
+        return (server.connections ?? []).contains { connection in
+            if serverURL == connection.uri {
+                return true
+            }
+
+            if let targetMachineId,
+               connection.uri.lowercased().contains(targetMachineId.lowercased()) {
+                return true
+            }
+
+            guard let targetHost,
+                  let connectionURL = URL(string: connection.uri),
+                  let connectionHost = connectionURL.host?.lowercased() else {
+                return false
+            }
+
+            let connectionPort = connectionURL.port ?? connection.port
+            return connectionHost == targetHost && (targetPort == nil || targetPort == connectionPort)
+        }
+    }
+
+    private func machineIdentifierFromPlexDirectHost(_ host: String?) -> String? {
+        guard let host = host?.lowercased(), host.hasSuffix(".plex.direct") else {
+            return nil
+        }
+
+        let parts = host.split(separator: ".").map(String.init)
+        guard parts.count >= 3 else { return nil }
+        return parts[parts.count - 3]
     }
 
     /// Switch to a home user profile (validates PIN if protected)

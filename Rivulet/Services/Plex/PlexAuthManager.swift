@@ -250,6 +250,7 @@ class PlexAuthManager: ObservableObject {
         do {
             let servers = try await networkManager.getServers(authToken: token)
             availableServers = servers
+            updateSelectedServerSnapshot(from: servers)
             connectionError = nil
             return servers
         } catch {
@@ -288,15 +289,87 @@ class PlexAuthManager: ObservableObject {
         }
 
         if let selectedServerURL,
-           server.connections?.contains(where: { $0.uri == selectedServerURL }) == true {
-            return true
-        }
-
-        if let savedServerName, savedServerName == server.name {
+           serverMatchesURL(server, selectedServerURL) {
             return true
         }
 
         return false
+    }
+
+    private func updateSelectedServerSnapshot(from servers: [PlexDevice]) {
+        guard let matchedServer = matchedSelectedServer(in: servers, currentURL: selectedServerURL) else {
+            return
+        }
+
+        selectedServer = matchedServer
+    }
+
+    private func matchedSelectedServer(in servers: [PlexDevice], currentURL: String?) -> PlexDevice? {
+        if let selectedIdentifier = selectedServer?.clientIdentifier,
+           let server = servers.first(where: { $0.clientIdentifier == selectedIdentifier }) {
+            return server
+        }
+
+        if let currentURL,
+           let server = servers.first(where: { serverMatchesURL($0, currentURL) }) {
+            return server
+        }
+
+        if let savedServerName {
+            let matches = servers.filter { $0.name == savedServerName }
+            if matches.count == 1 {
+                return matches[0]
+            }
+        }
+
+        return nil
+    }
+
+    private func serverMatchesURL(_ server: PlexDevice, _ urlString: String) -> Bool {
+        let targetURL = URL(string: urlString)
+        let targetHost = targetURL?.host?.lowercased()
+        let targetPort = targetURL?.port
+        let targetMachineId = machineIdentifierFromPlexDirectHost(targetHost)
+
+        if let targetMachineId,
+           server.machineIdentifier == targetMachineId || server.clientIdentifier == targetMachineId {
+            return true
+        }
+
+        if let targetHost,
+           server.publicAddress?.lowercased() == targetHost {
+            return true
+        }
+
+        return (server.connections ?? []).contains { connection in
+            if connection.uri == urlString {
+                return true
+            }
+
+            if let targetMachineId,
+               connection.uri.lowercased().contains(targetMachineId.lowercased()) {
+                return true
+            }
+
+            guard let targetHost,
+                  let connectionURL = URL(string: connection.uri),
+                  let connectionHost = connectionURL.host?.lowercased() else {
+                return false
+            }
+
+            let connectionPort = connectionURL.port ?? connection.port
+            return connectionHost == targetHost && (targetPort == nil || targetPort == connectionPort)
+        }
+    }
+
+    private func machineIdentifierFromPlexDirectHost(_ host: String?) -> String? {
+        guard let host = host?.lowercased(), host.hasSuffix(".plex.direct") else {
+            return nil
+        }
+
+        let parts = host.split(separator: ".").map(String.init)
+        guard parts.count >= 3 else { return nil }
+        return parts[parts.count - 3]
     }
 
     /// Find the best working connection for a server
@@ -324,15 +397,16 @@ class PlexAuthManager: ObservableObject {
         if httpsRequired, let machineId = server.machineIdentifier {
             // Find best local connection to build plex.direct URL from
             if let localConnection = sortedConnections.first(where: { $0.local && !$0.relay }) {
-                let plexDirectURI = buildPlexDirectURL(
-                    address: localConnection.address,
-                    port: localConnection.port,
+                if let plexDirectURI = buildPlexDirectURL(
+                    for: localConnection,
+                    server: server,
                     machineIdentifier: machineId
-                )
-                if await testConnection(plexDirectURI, serverToken: tokenToUse) {
-                    return plexDirectURI
-                } else {
-                    print("🔐 PlexAuthManager: ❌ plex.direct failed, will try other connections")
+                ) {
+                    if await testConnection(plexDirectURI, serverToken: tokenToUse) {
+                        return plexDirectURI
+                    } else {
+                        print("🔐 PlexAuthManager: ❌ plex.direct failed, will try other connections")
+                    }
                 }
             }
         }
@@ -349,15 +423,16 @@ class PlexAuthManager: ObservableObject {
                     // For local connections with httpsRequired, prefer plex.direct over raw HTTPS
                     // because plex.direct gives playback a valid TLS certificate
                     if connection.local, let machineId = server.machineIdentifier {
-                        let plexDirectURI = buildPlexDirectURL(
-                            address: connection.address,
-                            port: connection.port,
+                        if let plexDirectURI = buildPlexDirectURL(
+                            for: connection,
+                            server: server,
                             machineIdentifier: machineId
-                        )
-                        if await testConnection(plexDirectURI, serverToken: tokenToUse) {
-                            return plexDirectURI
-                        } else {
-                            print("🔐 PlexAuthManager: ❌ plex.direct failed: \(plexDirectURI)")
+                        ) {
+                            if await testConnection(plexDirectURI, serverToken: tokenToUse) {
+                                return plexDirectURI
+                            } else {
+                                print("🔐 PlexAuthManager: ❌ plex.direct failed: \(plexDirectURI)")
+                            }
                         }
                     }
 
@@ -369,13 +444,14 @@ class PlexAuthManager: ObservableObject {
                     if success {
                         // If we have a cert hash, prefer plex.direct for playback compatibility
                         if let hash = certHash {
-                            let plexDirectURI = buildPlexDirectURL(
-                                address: connection.address,
-                                port: connection.port,
+                            if let plexDirectURI = buildPlexDirectURL(
+                                for: connection,
+                                server: server,
                                 machineIdentifier: hash
-                            )
-                            if await testConnection(plexDirectURI, serverToken: tokenToUse) {
-                                return plexDirectURI
+                            ) {
+                                if await testConnection(plexDirectURI, serverToken: tokenToUse) {
+                                    return plexDirectURI
+                                }
                             }
                         }
                         // Fall back to raw HTTPS if plex.direct failed
@@ -386,15 +462,16 @@ class PlexAuthManager: ObservableObject {
 
                         // If we extracted a plex.direct hash from the certificate error, try that
                         if let hash = certHash {
-                            let plexDirectURI = buildPlexDirectURL(
-                                address: connection.address,
-                                port: connection.port,
+                            if let plexDirectURI = buildPlexDirectURL(
+                                for: connection,
+                                server: server,
                                 machineIdentifier: hash
-                            )
-                            if await testConnection(plexDirectURI, serverToken: tokenToUse) {
-                                return plexDirectURI
-                            } else {
-                                print("🔐 PlexAuthManager: ❌ plex.direct failed: \(plexDirectURI)")
+                            ) {
+                                if await testConnection(plexDirectURI, serverToken: tokenToUse) {
+                                    return plexDirectURI
+                                } else {
+                                    print("🔐 PlexAuthManager: ❌ plex.direct failed: \(plexDirectURI)")
+                                }
                             }
                         }
                     }
@@ -442,9 +519,30 @@ class PlexAuthManager: ObservableObject {
     /// Build a plex.direct URL for secure remote access
     /// Plex issues SSL certificates for *.plex.direct domains
     /// Format: https://<ip-with-dashes>.<machineIdentifier>.plex.direct:<port>
-    private func buildPlexDirectURL(address: String, port: Int, machineIdentifier: String) -> String {
+    private func buildPlexDirectURL(for connection: PlexConnection, server: PlexDevice, machineIdentifier: String) -> String? {
+        let candidates = [
+            connection.address,
+            URL(string: connection.uri)?.host,
+            server.publicAddress
+        ].compactMap { $0 }
+
+        guard let address = candidates.first(where: isIPv4Address) else {
+            print("🔐 PlexAuthManager: Skipping plex.direct URL for non-IP address: \(connection.address)")
+            return nil
+        }
+
         let ipWithDashes = address.replacingOccurrences(of: ".", with: "-")
-        return "https://\(ipWithDashes).\(machineIdentifier).plex.direct:\(port)"
+        return "https://\(ipWithDashes).\(machineIdentifier).plex.direct:\(connection.port)"
+    }
+
+    private func isIPv4Address(_ address: String) -> Bool {
+        let parts = address.split(separator: ".")
+        guard parts.count == 4 else { return false }
+
+        return parts.allSatisfy { part in
+            guard let value = Int(part) else { return false }
+            return (0...255).contains(value)
+        }
     }
 
     /// Check if address is a Docker/internal bridge network
@@ -649,6 +747,7 @@ class PlexAuthManager: ObservableObject {
             do {
                 let servers = try await networkManager.getServers(authToken: token)
                 availableServers = servers
+                updateSelectedServerSnapshot(from: servers)
                 if servers.count == 1 {
                     // Await server selection to ensure URL is set before returning
                     await selectServer(servers[0])
@@ -690,11 +789,13 @@ class PlexAuthManager: ObservableObject {
             do {
                 let servers = try await networkManager.getServers(authToken: token)
                 availableServers = servers
-                if let currentServer = servers.first(where: { server in
-                    server.connections?.contains { $0.uri == currentURL } == true
-                }) ?? servers.first {
+                let currentServer = matchedSelectedServer(in: servers, currentURL: currentURL)
+                    ?? (servers.count == 1 ? servers[0] : nil)
+
+                if let currentServer {
                     // Try to find a working connection on this server
                     if let workingURL = await findBestConnection(for: currentServer) {
+                        selectedServer = currentServer
                         selectedServerURL = workingURL
                         userDefaults.set(selectedServerURL, forKey: serverURLKey)
                         userDefaults.set(currentServer.name, forKey: serverNameKey)
@@ -709,7 +810,13 @@ class PlexAuthManager: ObservableObject {
                         isConnected = true
                         connectionError = nil
                         state = .authenticated
+                    } else if servers.count > 1 {
+                        state = .selectingServer(servers: servers)
+                        connectionError = "Cannot connect to saved Plex server. Select another server."
                     }
+                } else if servers.count > 1 {
+                    state = .selectingServer(servers: servers)
+                    connectionError = "Cannot match saved Plex server. Select a server."
                 }
             } catch {
                 print("🔐 PlexAuthManager: Failed to fetch servers for re-selection: \(error)")

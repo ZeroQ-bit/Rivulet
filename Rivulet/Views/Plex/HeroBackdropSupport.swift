@@ -205,6 +205,7 @@ final class HeroBackdropCoordinator: ObservableObject {
 struct HeroBackdropImage<Placeholder: View>: View {
     let url: URL?
     var animationDuration: Double = 0.22
+    var imageAlignment: Alignment = .center
     @ViewBuilder let placeholder: () -> Placeholder
 
     @State private var currentURL: URL?
@@ -236,9 +237,13 @@ struct HeroBackdropImage<Placeholder: View>: View {
     }
 
     private func imageView(_ image: UIImage) -> some View {
-        Image(uiImage: image)
-            .resizable()
-            .aspectRatio(contentMode: .fill)
+        GeometryReader { proxy in
+            Image(uiImage: image)
+                .resizable()
+                .aspectRatio(contentMode: .fill)
+                .frame(width: proxy.size.width, height: proxy.size.height, alignment: imageAlignment)
+                .clipped()
+        }
     }
 
     @MainActor
